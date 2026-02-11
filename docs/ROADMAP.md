@@ -46,7 +46,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement image pull from OCI registries (basic auth)~~
 - [x] ~~Implement image push to OCI registries~~
 - [x] ~~Implement local image storage (index database)~~
-- [ ] Implement image tagging and reference resolution
+- [x] ~~Implement image tagging and reference resolution~~
 - [ ] Create integration tests for image operations
 
 ### Storage Driver (OverlayFS)

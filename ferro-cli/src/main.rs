@@ -24,6 +24,14 @@ pub enum Commands {
         image: String,
         #[arg(long, default_value = "ebpf")]
         network_backend: String,
+        #[arg(long)]
+        memory_max: Option<u64>,
+        #[arg(long)]
+        cpu_quota: Option<u64>,
+        #[arg(long)]
+        cpu_period: Option<u64>,
+        #[arg(long)]
+        pids_max: Option<u64>,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
@@ -99,8 +107,25 @@ fn dispatch(command: Commands) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
 
     match command {
-        Commands::Run { image, cmd, network_backend } => {
-            handle_run(&runtime, &image, &cmd, &network_backend)
+        Commands::Run {
+            image,
+            cmd,
+            network_backend,
+            memory_max,
+            cpu_quota,
+            cpu_period,
+            pids_max,
+        } => {
+            handle_run(
+                &runtime,
+                &image,
+                &cmd,
+                &network_backend,
+                memory_max,
+                cpu_quota,
+                cpu_period,
+                pids_max,
+            )
         }
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
         Commands::Images => handle_images(&image_store),
@@ -128,16 +153,47 @@ fn handle_run(
     image: &str,
     cmd: &[String],
     network_backend: &str,
+    memory_max: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+    pids_max: Option<u64>,
 ) -> Result<(), String> {
     validate_network_backend(network_backend)?;
+    let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let record = runtime
-        .run(image, cmd)
+        .run(image, cmd, limits.as_ref())
         .map_err(|err| err.to_string())?;
     println!(
         "run: container_id={} pid={} network_backend={}",
         record.id, record.pid, network_backend
     );
     Ok(())
+}
+
+fn build_limits(
+    memory_max: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+    pids_max: Option<u64>,
+) -> Result<Option<ferro_core::cgroups::ResourceLimits>, String> {
+    if memory_max.is_none() && cpu_quota.is_none() && cpu_period.is_none() && pids_max.is_none() {
+        return Ok(None);
+    }
+
+    if cpu_quota.is_some() && cpu_period.is_none() {
+        return Err("run: cpu-period is required when cpu-quota is set".to_string());
+    }
+
+    let cpu_max = match (cpu_quota, cpu_period) {
+        (Some(quota), Some(period)) => Some(ferro_core::cgroups::CpuMax { quota, period }),
+        _ => None,
+    };
+
+    Ok(Some(ferro_core::cgroups::ResourceLimits {
+        memory_max,
+        cpu_max,
+        pids_max,
+    }))
 }
 
 fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
@@ -339,7 +395,7 @@ mod tests {
     use super::{
         Cli, Commands, ComposeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
-        handle_run, handle_stop, handle_kill, handle_rm, handle_restart,
+        handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits,
         validate_network_backend,
     };
     use clap::Parser;
@@ -350,10 +406,22 @@ mod tests {
     fn parses_run_command() {
         let cli = Cli::parse_from(["ferrocrate", "run", "alpine:latest", "echo", "hi"]);
         match cli.command {
-            Commands::Run { image, cmd, network_backend } => {
+            Commands::Run {
+                image,
+                cmd,
+                network_backend,
+                memory_max,
+                cpu_quota,
+                cpu_period,
+                pids_max,
+            } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);
                 assert_eq!(network_backend, "ebpf");
+                assert!(memory_max.is_none());
+                assert!(cpu_quota.is_none());
+                assert!(cpu_period.is_none());
+                assert!(pids_max.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -502,8 +570,15 @@ mod tests {
     fn run_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_run(&runtime, "", &[], "ebpf").expect_err("invalid reference");
+        let err = handle_run(&runtime, "", &[], "ebpf", None, None, None, None)
+            .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn limits_require_cpu_period() {
+        let err = build_limits(None, Some(100_000), None, None).expect_err("missing period");
+        assert!(err.contains("cpu-period"));
     }
 
     #[test]

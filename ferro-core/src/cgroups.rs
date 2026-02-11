@@ -83,6 +83,16 @@ impl CgroupV2Manager {
 
         Ok(())
     }
+
+    pub fn add_pid(&self, group_path: impl AsRef<Path>, pid: u32) -> Result<(), CgroupError> {
+        let group_path = group_path.as_ref();
+        let procs_path = group_path.join("cgroup.procs");
+        if !procs_path.exists() {
+            fs::write(&procs_path, "")?;
+        }
+        fs::write(procs_path, pid.to_string())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +135,24 @@ mod tests {
         assert_eq!(
             fs::read_to_string(group.join("pids.max")).expect("pids.max"),
             "256"
+        );
+    }
+
+    #[test]
+    fn adds_pid_to_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("seed controllers");
+        fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
+
+        let manager = CgroupV2Manager::new(root);
+        let group = manager.create_group("containers/test").expect("group created");
+
+        manager.add_pid(&group, 4242).expect("add pid");
+        assert_eq!(
+            fs::read_to_string(group.join("cgroup.procs")).expect("read cgroup.procs"),
+            "4242"
         );
     }
 

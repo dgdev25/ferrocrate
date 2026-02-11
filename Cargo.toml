@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "ferro-cri",
   "ferro-core",
   "ferro-net",
   "ferro-mind",

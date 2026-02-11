@@ -261,12 +261,7 @@ fn build_config_json(healthcheck: Option<HealthcheckSpec>) -> String {
 }
 
 fn write_blob(runtime_dir: &Path, digest: &str, bytes: &[u8]) -> Result<(), DockerfileBuildError> {
-    let blob_root = runtime_dir.join("images").join("blobs");
-    fs::create_dir_all(&blob_root)?;
-    let file_name = digest.replace(':', "_");
-    let path = blob_root.join(file_name);
-    fs::write(path, bytes)?;
-    Ok(())
+    write_cas_blob(runtime_dir, "blobs", digest, bytes)
 }
 
 fn write_config(
@@ -274,11 +269,33 @@ fn write_config(
     digest: &str,
     bytes: &[u8],
 ) -> Result<(), DockerfileBuildError> {
-    let config_root = runtime_dir.join("images").join("configs");
-    fs::create_dir_all(&config_root)?;
+    write_cas_blob(runtime_dir, "configs", digest, bytes)
+}
+
+fn write_cas_blob(
+    runtime_dir: &Path,
+    subdir: &str,
+    digest: &str,
+    bytes: &[u8],
+) -> Result<(), DockerfileBuildError> {
+    let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+    fs::create_dir_all(&cas_root)?;
+    let hash = blake3::hash(bytes).to_hex().to_string();
+    let cas_path = cas_root.join(hash);
+    if !cas_path.exists() {
+        fs::write(&cas_path, bytes)?;
+    }
+
+    let root = runtime_dir.join("images").join(subdir);
+    fs::create_dir_all(&root)?;
     let file_name = digest.replace(':', "_");
-    let path = config_root.join(file_name);
-    fs::write(path, bytes)?;
+    let path = root.join(file_name);
+    if path.exists() {
+        return Ok(());
+    }
+    if fs::hard_link(&cas_path, &path).is_err() {
+        fs::copy(&cas_path, &path)?;
+    }
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use serde::Serialize;
 use thiserror::Error;
 
 const CGROUP_CONTROLLERS: &str = "cgroup.controllers";
@@ -17,6 +18,16 @@ pub struct ResourceLimits {
 pub struct CpuMax {
     pub quota: u64,
     pub period: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct CgroupStats {
+    pub memory_current: Option<u64>,
+    pub memory_max: Option<u64>,
+    pub pids_current: Option<u64>,
+    pub cpu_usage_usec: Option<u64>,
+    pub cpu_user_usec: Option<u64>,
+    pub cpu_system_usec: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -105,11 +116,73 @@ impl CgroupV2Manager {
         fs::write(group_path.join("cgroup.freeze"), "0")?;
         Ok(())
     }
+
+    pub fn read_stats(&self, group_path: impl AsRef<Path>) -> Result<CgroupStats, CgroupError> {
+        let group_path = group_path.as_ref();
+        let memory_current = read_u64(group_path.join("memory.current"))?;
+        let memory_max = read_u64_allow_max(group_path.join("memory.max"))?;
+        let pids_current = read_u64(group_path.join("pids.current"))?;
+        let (cpu_usage_usec, cpu_user_usec, cpu_system_usec) =
+            read_cpu_stat(group_path.join("cpu.stat"))?;
+
+        Ok(CgroupStats {
+            memory_current,
+            memory_max,
+            pids_current,
+            cpu_usage_usec,
+            cpu_user_usec,
+            cpu_system_usec,
+        })
+    }
+}
+
+fn read_u64(path: PathBuf) -> Result<Option<u64>, CgroupError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = fs::read_to_string(path)?;
+    let parsed = value.trim().parse::<u64>().ok();
+    Ok(parsed)
+}
+
+fn read_u64_allow_max(path: PathBuf) -> Result<Option<u64>, CgroupError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = fs::read_to_string(path)?;
+    let trimmed = value.trim();
+    if trimmed == "max" {
+        return Ok(None);
+    }
+    Ok(trimmed.parse::<u64>().ok())
+}
+
+fn read_cpu_stat(path: PathBuf) -> Result<(Option<u64>, Option<u64>, Option<u64>), CgroupError> {
+    if !path.exists() {
+        return Ok((None, None, None));
+    }
+    let content = fs::read_to_string(path)?;
+    let mut usage = None;
+    let mut user = None;
+    let mut system = None;
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("");
+        let parsed = value.parse::<u64>().ok();
+        match key {
+            "usage_usec" => usage = parsed,
+            "user_usec" => user = parsed,
+            "system_usec" => system = parsed,
+            _ => {}
+        }
+    }
+    Ok((usage, user, system))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CgroupV2Manager, CpuMax, ResourceLimits};
+    use super::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
     use std::fs;
 
     #[test]
@@ -199,5 +272,35 @@ mod tests {
 
         let err = manager.ensure_v2_available().expect_err("should fail");
         assert!(err.to_string().contains("not a cgroups v2 hierarchy"));
+    }
+
+    #[test]
+    fn reads_stats() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let group = root.join("ferrocrate/test");
+        fs::create_dir_all(&group).expect("group dir");
+
+        fs::write(group.join("memory.current"), "123").expect("memory.current");
+        fs::write(group.join("memory.max"), "max").expect("memory.max");
+        fs::write(group.join("pids.current"), "7").expect("pids.current");
+        fs::write(
+            group.join("cpu.stat"),
+            "usage_usec 100\nuser_usec 40\nsystem_usec 60\n",
+        )
+        .expect("cpu.stat");
+
+        let manager = CgroupV2Manager::new(root);
+        let stats = manager.read_stats(&group).expect("stats");
+
+        let expected = CgroupStats {
+            memory_current: Some(123),
+            memory_max: None,
+            pids_current: Some(7),
+            cpu_usage_usec: Some(100),
+            cpu_user_usec: Some(40),
+            cpu_system_usec: Some(60),
+        };
+        assert_eq!(stats, expected);
     }
 }

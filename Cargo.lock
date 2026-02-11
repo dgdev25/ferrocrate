@@ -320,6 +320,7 @@ dependencies = [
  "clap",
  "ferro-compose",
  "ferro-core",
+ "serde",
  "serde_json",
  "tempfile",
 ]

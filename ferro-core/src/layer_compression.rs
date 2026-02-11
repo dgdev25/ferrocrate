@@ -1,6 +1,8 @@
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs::File;
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
 use thiserror::Error;
 
@@ -73,12 +75,25 @@ pub fn decompress_bytes_to_reader(
     }
 }
 
+pub fn compress_bytes_gzip(bytes: &[u8]) -> Result<Vec<u8>, LayerCompressionError> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(bytes)
+        .map_err(LayerCompressionError::Gzip)?;
+    encoder.finish().map_err(LayerCompressionError::Gzip)
+}
+
+pub fn compress_bytes_zstd(bytes: &[u8]) -> Result<Vec<u8>, LayerCompressionError> {
+    zstd::stream::encode_all(bytes, 0).map_err(LayerCompressionError::Zstd)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CompressionFormat, decompress_bytes_to_reader, detect_format};
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::{Read, Write};
+    use super::{
+        CompressionFormat, compress_bytes_gzip, compress_bytes_zstd, decompress_bytes_to_reader,
+        detect_format,
+    };
+    use std::io::Read;
 
     #[test]
     fn detects_gzip_and_zstd_magic() {
@@ -92,9 +107,7 @@ mod tests {
 
     #[test]
     fn decompresses_gzip_bytes() {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(b"hello-gzip").expect("write gzip");
-        let compressed = encoder.finish().expect("finish gzip");
+        let compressed = compress_bytes_gzip(b"hello-gzip").expect("compress gzip");
 
         let mut reader = decompress_bytes_to_reader(compressed).expect("gzip decompress");
         let mut out = String::new();
@@ -105,7 +118,7 @@ mod tests {
 
     #[test]
     fn decompresses_zstd_bytes() {
-        let compressed = zstd::stream::encode_all(&b"hello-zstd"[..], 0).expect("encode zstd");
+        let compressed = compress_bytes_zstd(b"hello-zstd").expect("compress zstd");
 
         let mut reader = decompress_bytes_to_reader(compressed).expect("zstd decompress");
         let mut out = String::new();

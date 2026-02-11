@@ -22,14 +22,37 @@ cleanup() {
 trap cleanup EXIT
 
 TMP_DIR="$(mktemp -d)"
+export FERROCRATE_RUNTIME_DIR="${TMP_DIR}/runtime"
+mkdir -p "${FERROCRATE_RUNTIME_DIR}"
 COMPOSE_FILE="${TMP_DIR}/compose.yml"
 DOCKERFILE="${TMP_DIR}/Dockerfile"
 HELLO_FILE="${TMP_DIR}/hello.txt"
-SOCKET="${TMP_DIR}/ferro.sock"
+SOCKET="${FERROCRATE_RUNTIME_DIR}/ferro.sock"
 
 # 1) Pull + run + logs + exec + stop + rm
-run "${BIN}" pull alpine:latest
-CID=$("${BIN}" run alpine:latest sh -c "echo hello; sleep 1" | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+IMAGE_CANDIDATES=(
+  "${FERROCRATE_E2E_IMAGE:-registry-1.docker.io/library/alpine:latest}"
+  "registry-1.docker.io/library/busybox:latest"
+  "registry.k8s.io/pause:3.9"
+)
+
+PULL_IMAGE=""
+set +e
+for candidate in "${IMAGE_CANDIDATES[@]}"; do
+  "${BIN}" pull "${candidate}"
+  if [[ $? -eq 0 ]]; then
+    PULL_IMAGE="${candidate}"
+    break
+  fi
+done
+set -e
+
+if [[ -z "${PULL_IMAGE}" ]]; then
+  echo "Failed to pull any test image. Set FERROCRATE_E2E_IMAGE to a reachable registry image." >&2
+  exit 1
+fi
+
+CID=$("${BIN}" run "${PULL_IMAGE}" sh -c "echo hello; sleep 1" | awk -F'container_id=' '{print $2}' | awk '{print $1}')
 if [[ -z "${CID}" ]]; then
   echo "Failed to capture container id" >&2
   exit 1
@@ -59,14 +82,14 @@ if [[ -z "${OUT}" ]]; then
 fi
 
 # 3) Compose up/down
-cat > "${COMPOSE_FILE}" <<'COMPOSE_EOF'
+cat > "${COMPOSE_FILE}" <<COMPOSE_EOF
 version: "3.8"
 services:
   api:
-    image: alpine:latest
+    image: ${PULL_IMAGE}
     command: ["sh","-c","sleep 2"]
   web:
-    image: alpine:latest
+    image: ${PULL_IMAGE}
     depends_on:
       - api
     command: ["sh","-c","echo web && sleep 2"]

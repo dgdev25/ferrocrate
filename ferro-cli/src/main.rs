@@ -508,7 +508,7 @@ fn ensure_image_present(store: &LocalImageStore, image: &str) -> Result<(), Stri
         return Ok(());
     }
     let runtime_dir = runtime_dir();
-    ferro_core::image_fetch::pull_image(&runtime_dir, &canonical)
+    ferro_core::image_fetch::pull_image_with_store(&runtime_dir, &canonical, store)
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -1028,8 +1028,12 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
 fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool) -> Result<(), String> {
     if lazy {
         let runtime_dir = runtime_dir();
-        let canonical = ferro_core::image_fetch::pull_manifest_only(&runtime_dir, image)
-            .map_err(|err| err.to_string())?;
+        let canonical = ferro_core::image_fetch::pull_manifest_only_with_store(
+            &runtime_dir,
+            image,
+            store,
+        )
+        .map_err(|err| err.to_string())?;
         println!("pull: manifest-only image={canonical}");
         return Ok(());
     }

@@ -55,7 +55,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement FUSE fallback for older kernels~~
 - [x] ~~Implement layer mounting and merging~~
 - [x] ~~Implement container rootfs preparation~~
-- [ ] Implement mount cleanup on container exit
+- [x] ~~Implement mount cleanup on container exit~~
 - [ ] Create integration tests for storage operations
 
 ### CLI Foundation (ferro-cli)

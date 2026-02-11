@@ -29,7 +29,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | CLM-03 | Pause/unpause via cgroup freezer | Partial | Pause/resume exists; freezer enforcement not verified. |
 | CLM-04 | Container exec | Done | `ferro-core` exec + CLI wired. |
 | CLM-05 | Container logs | Done | Runtime logs + CLI logs. |
-| CLM-06 | Inspect (JSON metadata) | Not Started | No inspect handler or schema output. |
+| CLM-06 | ~~Inspect (JSON metadata)~~ | Done | CLI inspect outputs JSON metadata from container store. |
 | CLM-07 | Health checks | Not Started | Not implemented. |
 | CLM-08 | Restart policies | Not Started | Requires daemon/state. |
 | CLM-09 | ~~Resource limits (mem/cpu/pids)~~ | Done | cgroups v2 limits enforced when provided via CLI. |

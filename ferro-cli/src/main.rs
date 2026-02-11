@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::image_manifest::{OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
 use ferro_core::image_store::LocalImageStore;
-use ferro_core::image_tagging::canonicalize_reference;
+use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::registry::{RegistryClient, parse_image_reference};
 use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
@@ -294,9 +294,19 @@ fn handle_pull(store: &LocalImageStore, image: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_push(_store: &LocalImageStore, image: &str) -> Result<(), String> {
+fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
-    println!("push: image={image}");
+    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
+    let record = resolve_reference(store, &canonical)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("push: image not found: {canonical}"))?;
+
+    let client = RegistryClient::new().map_err(|err| err.to_string())?;
+    let auth = resolve_registry_auth(&canonical).map_err(|err| err.to_string())?;
+    client
+        .push_manifest_raw(&canonical, &record.manifest_json, auth.as_ref())
+        .map_err(|err| err.to_string())?;
+    println!("push: image={canonical}");
     Ok(())
 }
 

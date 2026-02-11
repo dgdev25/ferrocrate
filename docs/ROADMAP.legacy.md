@@ -7,7 +7,7 @@
 
 ## Overview
 
-This roadmap breaks down the FerroCrate implementation into 8 sequential phases with clear dependencies. Use strikethrough (`~~text~~`) to mark tasks as completed.
+This roadmap breaks down the FerroCrate implementation into 6 sequential phases with clear dependencies. Use strikethrough (`~~text~~`) to mark tasks as completed.
 
 ### Phase Structure (Updated Order)
 - **Phase 1**: Foundation (Weeks 1-10) - Core runtime, image, storage
@@ -110,6 +110,66 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [x] ~~Publish initial documentation~~
 
 ---
+
+## PHASE 1: Foundation (Weeks 1-10)
+
+### Runtime Implementation (OCI Runtime Spec v1.2)
+
+- [x] ~~Set up Rust project structure with 5-crate workspace~~
+- [x] ~~Implement OCI Runtime Spec v1.2 config.json parser~~
+- [ ] Implement Linux namespace creation (pid, network, ipc, uts, mount)
+```
+
+---
+
+## Notes for External Development Teams
+
+### Getting Started
+
+1. Clone the repository: `git clone <repo>`
+2. Read `/docs/development/CONTRIBUTING.md` for development setup
+3. Review Phase 1 tasks to understand the foundation
+4. Each task should have a corresponding issue/PR in GitHub
+
+### Dependencies
+
+- **Phase 1** blocks all other phases (foundation requirement)
+- **Phase 2** can run in parallel with Phase 1 (weeks 5-10 overlap)
+- **Phase 3 & 4** can run in parallel (both depend only on Phase 1)
+- **Phase 5** depends on Phases 1-4 complete
+- **Phase 6** runs for entire project duration (weeks 21-70)
+
+### Communication
+
+- Use GitHub Issues for task status updates
+- Use GitHub Projects board for visual progress tracking
+- Weekly standup recommended for Phase 1 critical path
+- Bi-weekly standups for Phases 3-6
+
+### Quality Gates
+
+Each phase must complete with:
+- ✅ All tasks marked complete
+- ✅ All integration tests passing
+- ✅ Code review approved
+- ✅ Documentation updated
+- ✅ Security baseline met for that phase
+
+---
+
+## Version Milestones
+
+| Version | Weeks | Phases Complete | Deliverable |
+|---------|-------|-----------------|-------------|
+| v0.1.0 | 10 | 1 | Basic container runtime |
+| v0.3.0 | 18 | 1-3 | MVP with AI inference |
+| v0.5.0 | 32 | 1-5 | Kubernetes CRI ready |
+| v1.0.0 | 52-72 | 1-6 | Production ready |
+
+---
+
+**Last Updated**: February 11, 2026
+**Maintained By**: FerroCrate Development Team
 ## PHASE 2: CLI Wiring & E2E (Weeks 6-12)
 
 ### CLI Runtime Wiring
@@ -126,6 +186,7 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [x] ~~Add E2E tests for container lifecycle and cleanup~~
 
 ---
+
 ## PHASE 3: Networking (Weeks 11-20)
 
 ### eBPF Primary Backend
@@ -178,25 +239,6 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [x] ~~Implement connection tracking logs~~
 - [ ] Create networking troubleshooting guide
 
-### Phase 3 Milestone: MVP v0.3.0 (AI-Ready)
-
-**Deliverable**: Intelligent resource allocation with Tier 1 models
-
-- [ ] Merge all Phase 3 code
-- [ ] Create v0.3.0 release tag
-- [ ] Update documentation with AI features
-- [ ] Publish AI benchmarks and latency measurements
-
----
-## PHASE 4: Compose (Weeks 12-20)
-
-### Compose Execution
-
-- [ ] Implement compose config parsing and validation
-- [ ] Implement service dependency ordering
-- [ ] Implement compose up/down/ps/logs
-- [ ] Add compose integration tests
-
 ### Phase 4 Milestone: Multi-Backend Networking
 
 **Deliverable**: eBPF primary with explicit fallback to iptables/nftables
@@ -208,6 +250,17 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [ ] Network integration tests passing
 
 ---
+## PHASE 4: Compose (Weeks 12-20)
+
+### Compose Execution
+
+- [x] ~~Implement compose config parsing and validation~~
+- [ ] Implement service dependency ordering
+- [ ] Implement compose up/down/ps/logs
+- [ ] Add compose integration tests
+
+---
+
 ## PHASE 5: AI Layer (Weeks 11-18, depends on Phase 1)
 
 ### WASM Runtime Integration
@@ -252,6 +305,15 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [ ] Create metrics export (Prometheus format, optional)
 - [ ] Implement tracing for inference requests
 - [ ] Create AI debugging guide
+
+### Phase 3 Milestone: MVP v0.3.0 (AI-Ready)
+
+**Deliverable**: Intelligent resource allocation with Tier 1 models
+
+- [ ] Merge all Phase 3 code
+- [ ] Create v0.3.0 release tag
+- [ ] Update documentation with AI features
+- [ ] Publish AI benchmarks and latency measurements
 
 ---
 ## PHASE 6: Hardening & Production Readiness (Weeks 21-70, ongoing)
@@ -315,6 +377,17 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [ ] Set up binary distribution (GitHub releases)
 - [ ] Set up package repositories (apt, yum, brew if applicable)
 - [ ] Create upgrade guide
+
+### Documentation Finalization
+
+- [ ] Create comprehensive production deployment guide
+- [ ] Create high-availability deployment guide
+- [ ] Create backup and disaster recovery guide
+- [ ] Create monitoring and alerting guide
+- [ ] Create capacity planning guide
+- [ ] Update all documentation for v1.0.0
+- [ ] Create FAQ document
+- [ ] Create glossary of terms
 
 ### Testing Coverage
 
@@ -391,11 +464,11 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [ ] Create troubleshooting guide for Kubernetes
 - [ ] Document known limitations
 
-### Phase 7 Milestone: Kubernetes Ready (v0.5.0)
+### Phase 5 Milestone: Kubernetes Ready (v0.5.0)
 
 **Deliverable**: FerroCrate as working Kubernetes CRI runtime
 
-- [ ] Merge all Phase 7 code
+- [ ] Merge all Phase 5 code
 - [ ] Create v0.5.0 release tag
 - [ ] Pass CRI compliance tests
 - [ ] Successfully run realistic Kubernetes workloads
@@ -449,7 +522,7 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [ ] Create CONTRIBUTING.md with code standards
 - [ ] Implement license header check in CI
 
-### Security Hardening (Phase 8)
+### Security Hardening (Phase 2)
 
 - [ ] Run cargo-audit to check for known vulnerabilities
 - [ ] Implement CVE response process
@@ -465,7 +538,7 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 - [ ] Profile memory usage under load
 - [ ] Identify initial optimization candidates
 
-### Phase 8 Milestone: Documentation Complete
+### Phase 2 Milestone: Production-Ready Documentation
 
 **Deliverable**: Complete documentation suite for users and developers
 
@@ -479,11 +552,75 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 
 ### How to Mark Tasks as Complete
 
-Simply replace `- [ ]` with `- [x]` and use strikethrough:
+Simply replace `- [ ]` with `- [x]` or use strikethrough:
 
+**Option 1 - Checkbox:**
 ```
 - [x] ~~This task is complete~~
 ```
+
+**Option 2 - Strikethrough only:**
+```
+- [ ] ~~This task is complete~~
+```
+
+### Example Completed Phase 1:
+
+```markdown
+## PHASE 1: Foundation (Weeks 1-10)
+
+### Runtime Implementation (OCI Runtime Spec v1.2)
+
+- [x] ~~Set up Rust project structure with 5-crate workspace~~
+- [x] ~~Implement OCI Runtime Spec v1.2 config.json parser~~
+- [ ] Implement Linux namespace creation (pid, network, ipc, uts, mount)
+```
+
+---
+
+## Notes for External Development Teams
+
+### Getting Started
+
+1. Clone the repository: `git clone <repo>`
+2. Read `/docs/development/CONTRIBUTING.md` for development setup
+3. Review Phase 1 tasks to understand the foundation
+4. Each task should have a corresponding issue/PR in GitHub
+
+### Dependencies
+
+- **Phase 1** blocks all other phases (foundation requirement)
+- **Phase 2** can run in parallel with Phase 1 (weeks 5-10 overlap)
+- **Phase 3 & 4** can run in parallel (both depend only on Phase 1)
+- **Phase 5** depends on Phases 1-4 complete
+- **Phase 6** runs for entire project duration (weeks 21-70)
+
+### Communication
+
+- Use GitHub Issues for task status updates
+- Use GitHub Projects board for visual progress tracking
+- Weekly standup recommended for Phase 1 critical path
+- Bi-weekly standups for Phases 3-6
+
+### Quality Gates
+
+Each phase must complete with:
+- ✅ All tasks marked complete
+- ✅ All integration tests passing
+- ✅ Code review approved
+- ✅ Documentation updated
+- ✅ Security baseline met for that phase
+
+---
+
+## Version Milestones
+
+| Version | Weeks | Phases Complete | Deliverable |
+|---------|-------|-----------------|-------------|
+| v0.1.0 | 10 | 1 | Basic container runtime |
+| v0.3.0 | 18 | 1-3 | MVP with AI inference |
+| v0.5.0 | 32 | 1-5 | Kubernetes CRI ready |
+| v1.0.0 | 52-72 | 1-6 | Production ready |
 
 ---
 

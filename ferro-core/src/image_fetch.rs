@@ -51,7 +51,7 @@ pub fn pull_image_with_store(
     store.put_reference(
         &canonical,
         &manifest.config.digest,
-        crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        &manifest.media_type,
         &manifest_json,
     )?;
 
@@ -104,7 +104,7 @@ pub fn pull_manifest_only_with_store(
     store.put_reference(
         &canonical,
         &manifest.config.digest,
-        crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        &manifest.media_type,
         &manifest_json,
     )?;
 

@@ -1103,11 +1103,25 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
     let client = RegistryClient::new().map_err(|err| err.to_string())?;
     let auth = resolve_registry_auth(&canonical).map_err(|err| err.to_string())?;
     let runtime_dir = runtime_dir();
-    let layer_paths = ferro_core::image_fetch::resolve_layer_paths(&runtime_dir, &canonical)
+    let layer_paths = ferro_core::image_fetch::resolve_layer_paths_with_store(
+        &runtime_dir,
+        &canonical,
+        store,
+    )
         .map_err(|err| err.to_string())?;
+    let config_path = ferro_core::image_fetch::resolve_config_path_with_store(
+        &runtime_dir,
+        &canonical,
+        store,
+    )
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| format!("push: missing config blob for {canonical}"))?;
     let manifest = parse_image_manifest(&record.manifest_json)
         .map_err(|err| err.to_string())?;
 
+    client
+        .push_blob_from_file(&canonical, &manifest.config.digest, &config_path, auth.as_ref())
+        .map_err(|err| err.to_string())?;
     for (layer, path) in manifest.layers.iter().zip(layer_paths.iter()) {
         if !path.exists() {
             return Err(format!("push: missing layer blob {}", layer.digest));
@@ -1117,7 +1131,12 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
             .map_err(|err| err.to_string())?;
     }
     client
-        .push_manifest_raw(&canonical, &record.manifest_json, auth.as_ref())
+        .push_manifest_raw_with_media_type(
+            &canonical,
+            &record.manifest_json,
+            &record.manifest_media_type,
+            auth.as_ref(),
+        )
         .map_err(|err| err.to_string())?;
     println!("push: image={canonical}");
     Ok(())

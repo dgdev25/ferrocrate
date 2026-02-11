@@ -84,14 +84,14 @@
 ### 3.3 Networking
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| NET-01 | Bridge networking | Partial | Runtime can create bridge/netns/veth for rootful runs; rootless uses slirp4netns when `FERROCRATE_ROOTLESS_NETNS=1`; iptables used for published ports. |
-| NET-02 | Host networking | Partial | CLI `--network host` skips netns setup; not tested. |
-| NET-03 | None networking | Partial | CLI `--network none` creates netns with loopback only; not tested. |
+| NET-01 | ~~Bridge networking~~ | Done | Rootful bridge/netns/veth; rootless uses unshare + slirp4netns by default. |
+| NET-02 | ~~Host networking~~ | Done | `--network host` skips netns and runs on host network. |
+| NET-03 | ~~None networking~~ | Done | `--network none` isolates netns (rootful via ip netns; rootless via unshare). |
 | NET-04 | Container-to-container DNS | Partial | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers; no DNS server yet. |
 | NET-05 | Custom networks (subnets) | Partial | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME`. |
-| NET-06 | eBPF + iptables/nftables fallback | Partial | Port mapping supports iptables/nftables; eBPF path still stubbed. |
+| NET-06 | ~~eBPF + iptables/nftables fallback~~ | Done | eBPF mode falls back to iptables/nftables for port mappings. |
 | NET-07 | WireGuard overlay | Not Started | Not implemented. |
-| NET-08 | Port mapping | Partial | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
+| NET-08 | ~~Port mapping~~ | Done | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
 | NET-09 | IPv6 | Not Started | Not implemented. |
 | NET-10 | Bandwidth limiting | Not Started | Not implemented. |
 

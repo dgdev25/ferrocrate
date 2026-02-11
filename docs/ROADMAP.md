@@ -82,7 +82,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 ### Testing Infrastructure (Phase 1)
 
 - [x] ~~Set up test infrastructure with integration test harness~~
-- [ ] Create test fixture for OCI container images
+- [x] ~~Create test fixture for OCI container images~~
 - [ ] Implement container lifecycle tests (create, start, stop, remove)
 - [ ] Implement image operation tests (pull, push, tag)
 - [ ] Implement rootless isolation tests

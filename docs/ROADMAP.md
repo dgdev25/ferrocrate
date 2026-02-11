@@ -71,7 +71,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | STR-01 | ~~Named volumes~~ | Done | Volume store + CLI create/ls/rm implemented. |
 | STR-02 | ~~Bind mounts~~ | Done | CLI --bind with runtime bind mounts. |
 | STR-03 | ~~tmpfs mounts~~ | Done | CLI --tmpfs + runtime tmpfs mounts. |
-| STR-04 | Volume drivers | Not Started | Not implemented. |
+| STR-04 | ~~Volume drivers~~ | Done | Driver registry + local driver with CLI selection. |
 | STR-05 | OverlayFS default | Done | OverlayFS + FUSE fallback implemented. |
 | STR-06 | Read-only rootfs | Not Started | Not implemented. |
 | STR-07 | Volume backup/restore | Not Started | Not implemented. |

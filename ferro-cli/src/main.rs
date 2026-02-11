@@ -8,6 +8,7 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
+use std::collections::BTreeMap;
 use std::process;
 use std::path::{Path, PathBuf};
 
@@ -102,7 +103,13 @@ pub enum ComposeCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum VolumeCommands {
-    Create { name: String },
+    Create {
+        name: String,
+        #[arg(long, default_value = "local")]
+        driver: String,
+        #[arg(long = "opt")]
+        opts: Vec<String>,
+    },
     Ls,
     Rm { name: String },
 }
@@ -392,8 +399,11 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
     let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
         .map_err(|err| err.to_string())?;
     match command {
-        VolumeCommands::Create { name } => {
-            let record = store.create(&name).map_err(|err| err.to_string())?;
+        VolumeCommands::Create { name, driver, opts } => {
+            let driver_opts = parse_driver_opts(&opts)?;
+            let record = store
+                .create_with_driver(&name, &driver, driver_opts)
+                .map_err(|err| err.to_string())?;
             println!("volume create: {} {}", record.name, record.path);
         }
         VolumeCommands::Ls => {
@@ -416,6 +426,20 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+fn parse_driver_opts(opts: &[String]) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for entry in opts {
+        let mut parts = entry.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if key.is_empty() || value.is_empty() {
+            return Err("volume: opt must be key=value".to_string());
+        }
+        out.insert(key.to_string(), value.to_string());
+    }
+    Ok(out)
 }
 
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
@@ -502,7 +526,7 @@ mod tests {
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
         handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
-        parse_bind_mounts, parse_tmpfs_mounts,
+        parse_bind_mounts, parse_driver_opts, parse_tmpfs_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -649,7 +673,11 @@ mod tests {
         let create = Cli::parse_from(["ferrocrate", "volume", "create", "data"]);
         match create.command {
             Commands::Volume { command } => match command {
-                VolumeCommands::Create { name } => assert_eq!(name, "data"),
+                VolumeCommands::Create { name, driver, opts } => {
+                    assert_eq!(name, "data");
+                    assert_eq!(driver, "local");
+                    assert!(opts.is_empty());
+                }
                 _ => panic!("unexpected volume command"),
             },
             _ => panic!("unexpected command"),
@@ -676,8 +704,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime_dir = temp.path().to_path_buf();
 
-        handle_volume(&runtime_dir, VolumeCommands::Create { name: "data".to_string() })
-            .expect("create volume");
+        handle_volume(
+            &runtime_dir,
+            VolumeCommands::Create {
+                name: "data".to_string(),
+                driver: "local".to_string(),
+                opts: Vec::new(),
+            },
+        )
+        .expect("create volume");
         handle_volume(&runtime_dir, VolumeCommands::Ls).expect("ls volumes");
         handle_volume(&runtime_dir, VolumeCommands::Rm { name: "data".to_string() })
             .expect("rm volume");
@@ -736,6 +771,12 @@ mod tests {
     fn rejects_invalid_tmpfs_mount() {
         let err = parse_tmpfs_mounts(&[":size=64m".to_string()]).expect_err("invalid");
         assert!(err.contains("tmpfs"));
+    }
+
+    #[test]
+    fn rejects_invalid_volume_opt() {
+        let err = parse_driver_opts(&["invalid".to_string()]).expect_err("invalid");
+        assert!(err.contains("opt"));
     }
 
     #[test]

@@ -9,19 +9,32 @@
 
 This roadmap breaks down the FerroCrate implementation into 6 sequential phases with clear dependencies. Use strikethrough (`~~text~~`) to mark tasks as completed.
 
-### Phase Structure
+### Phase Structure (Updated Order)
 - **Phase 1**: Foundation (Weeks 1-10) - Core runtime, image, storage
-- **Phase 2**: Documentation & Polish (Weeks 5-10, parallel) - Docs, security, testing
-- **Phase 3**: AI Layer (Weeks 11-18) - WASM inference, Tier 1 models
-- **Phase 4**: Networking (Weeks 11-20, parallel) - eBPF, fallback backends
-- **Phase 5**: Kubernetes Integration (Weeks 21-32) - CRI shim, kubelet compatibility
+- **Phase 2**: CLI Wiring & E2E (Weeks 6-12) - Wire CLI to runtime, end-to-end tests
+- **Phase 3**: Networking (Weeks 11-20) - eBPF primary, fallback backends
+- **Phase 4**: Compose (Weeks 12-20) - Multi-container orchestration
+- **Phase 5**: AI Layer (Weeks 11-18) - WASM inference, Tier 1 models
 - **Phase 6**: Hardening & Production (Weeks 21-70, ongoing) - Performance, security, edge cases
+- **Phase 7**: Kubernetes Integration (Weeks 21-32) - CRI shim, kubelet compatibility
+- **Phase 8**: Documentation (Final) - Full docs after behavior stabilizes
 
-### Deliverables by Phase
-- **Week 10**: Phase 1 Complete - Basic runnable containers
-- **Week 18**: MVP Ready (v0.3.0) - Full MVP with AI and docs
+### Deliverables by Phase (Updated Order)
+- **Week 10**: Core runtime + image + storage foundations complete
+- **Week 18**: MVP Ready (v0.3.0) - Full MVP with AI and networking
 - **Week 32**: Kubernetes Ready (v0.5.0) - CRI integration complete
-- **Week 52-72**: Production Ready (v1.0.0) - Full feature set, hardened
+- **Week 52-72**: Production Ready (v1.0.0) - Full feature set, hardened, docs finalized
+
+### Preferred Development Order (Updated)
+1. Runtime core (namespaces, cgroups, rootless, lifecycle, rootfs)
+2. Storage + image plumbing (layers, registry, tagging)
+3. CLI wired to runtime + E2E tests
+4. Networking (bridge/host/none, DNS, port mapping, fallback)
+5. Compose (if needed before AI)
+6. AI layer
+7. Hardening & production readiness
+8. Kubernetes integration
+9. Documentation (last)
 
 ---
 

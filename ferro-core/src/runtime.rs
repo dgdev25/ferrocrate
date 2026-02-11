@@ -19,7 +19,7 @@ use ferro_net::bridge;
 use ferro_net::netns;
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
 use ferro_net::veth;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
@@ -240,6 +240,11 @@ impl ContainerRuntime {
         };
 
         self.store.put(&record)?;
+        if record.ip_address.is_some() {
+            if let Ok(containers) = self.store.list() {
+                let _ = update_container_hosts(&self.runtime_dir, &containers);
+            }
+        }
         let _ = log_event(
             &self.runtime_dir,
             make_event(
@@ -441,6 +446,9 @@ impl ContainerRuntime {
         let container_dir = self.runtime_dir.join("containers").join(id);
         let _ = fs::remove_dir_all(&container_dir);
         let _ = self.store.remove(id)?;
+        if let Ok(containers) = self.store.list() {
+            let _ = update_container_hosts(&self.runtime_dir, &containers);
+        }
         let _ = log_event(
             &self.runtime_dir,
             make_event("remove", Some(id), Some(&record.image), Some("removed"), None),
@@ -798,15 +806,15 @@ fn setup_network(
         }
     }
 
-    if port_mappings.is_empty() {
+    if !nix::unistd::Uid::effective().is_root() {
+        if !port_mappings.is_empty() {
+            return Err(RuntimeError::Network(
+                "port mapping requires root".to_string(),
+            ));
+        }
         return Ok((None, None));
     }
-    if !nix::unistd::Uid::effective().is_root() {
-        return Err(RuntimeError::Network(
-            "port mapping requires root".to_string(),
-        ));
-    }
-    if network_backend != "iptables" {
+    if !port_mappings.is_empty() && network_backend != "iptables" {
         return Err(RuntimeError::Network(
             "port mapping requires network-backend=iptables".to_string(),
         ));
@@ -860,16 +868,18 @@ fn setup_network(
         &["ip", "route", "add", "default", "via", "10.0.0.1"],
     ))?;
 
-    for mapping in port_mappings {
-        let map = ferro_net::portmap::PortMapping {
-            host_port: mapping.host_port,
-            container_port: mapping.container_port,
-            protocol: mapping.protocol.clone(),
-        };
-        let prerouting = build_iptables_prerouting_cmd(&map, &container_ip);
-        let forward = build_iptables_forward_cmd(&map, &container_ip);
-        run_cmd(&prerouting)?;
-        run_cmd(&forward)?;
+    if !port_mappings.is_empty() {
+        for mapping in port_mappings {
+            let map = ferro_net::portmap::PortMapping {
+                host_port: mapping.host_port,
+                container_port: mapping.container_port,
+                protocol: mapping.protocol.clone(),
+            };
+            let prerouting = build_iptables_prerouting_cmd(&map, &container_ip);
+            let forward = build_iptables_forward_cmd(&map, &container_ip);
+            run_cmd(&prerouting)?;
+            run_cmd(&forward)?;
+        }
     }
 
     Ok((Some(netns_name), Some(container_ip)))
@@ -895,6 +905,65 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
         }
     }
     Ok(())
+}
+
+fn update_container_hosts(
+    runtime_dir: &Path,
+    containers: &[ContainerRecord],
+) -> Result<(), RuntimeError> {
+    let mut entries: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for record in containers {
+        if record.status != "running" && record.status != "paused" {
+            continue;
+        }
+        let Some(ip) = record.ip_address.as_ref() else {
+            continue;
+        };
+        let names = entries.entry(ip.clone()).or_default();
+        names.insert(record.id.clone());
+        if let Some(name) = record.name.as_ref() {
+            names.insert(name.clone());
+        }
+    }
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let hosts_body = render_hosts(&entries);
+    for record in containers {
+        if record.status != "running" && record.status != "paused" {
+            continue;
+        }
+        if record.ip_address.is_none() {
+            continue;
+        }
+        let hosts_path = runtime_dir
+            .join("containers")
+            .join(&record.id)
+            .join("rootfs")
+            .join("etc")
+            .join("hosts");
+        if let Some(parent) = hosts_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&hosts_path, &hosts_body)?;
+    }
+    Ok(())
+}
+
+fn render_hosts(entries: &BTreeMap<String, BTreeSet<String>>) -> String {
+    let mut lines = Vec::new();
+    lines.push("127.0.0.1 localhost".to_string());
+    lines.push("::1 localhost ip6-localhost ip6-loopback".to_string());
+    for (ip, names) in entries {
+        if names.is_empty() {
+            continue;
+        }
+        let list = names.iter().cloned().collect::<Vec<_>>().join(" ");
+        lines.push(format!("{ip} {list}"));
+    }
+    lines.join("\n") + "\n"
 }
 
 fn replace_iptables_action(cmd: &mut Vec<String>, replacement: &str) {

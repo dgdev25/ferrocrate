@@ -75,3 +75,26 @@ fn iptables_kernel_compat_smoke() {
         .expect("failed to run iptables -t nat -S");
     assert!(status.success(), "iptables -t nat -S failed");
 }
+
+#[test]
+#[ignore]
+fn nftables_kernel_compat_smoke() {
+    let Some(actual) = kernel_version() else {
+        eprintln!("skipping: unable to parse kernel version");
+        return;
+    };
+    if !version_at_least(actual, (3, 13, 0)) {
+        eprintln!("skipping: kernel < 3.13");
+        return;
+    }
+    if !command_exists("nft") {
+        eprintln!("skipping: nft not installed");
+        return;
+    }
+
+    let status = Command::new("nft")
+        .args(["list", "ruleset"])
+        .status()
+        .expect("failed to run nft list ruleset");
+    assert!(status.success(), "nft list ruleset failed");
+}

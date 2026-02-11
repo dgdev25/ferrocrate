@@ -3,7 +3,9 @@ use crate::container_store::{
     ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
 };
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
+use crate::image_config::healthcheck_from_config;
 use crate::image_fetch::resolve_layer_paths;
+use crate::image_fetch::resolve_config_path;
 use crate::rootfs::construct_rootfs;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
@@ -132,6 +134,16 @@ impl ContainerRuntime {
             manager.apply_limits(&group, limits)?;
             manager.add_pid(&group, child_id)?;
         }
+
+        let health = if health.is_none() {
+            resolve_config_path(&self.runtime_dir, image)
+                .ok()
+                .flatten()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .and_then(|json| healthcheck_from_config(&json))
+        } else {
+            health
+        };
 
         let record = ContainerRecord {
             id: container_id.clone(),

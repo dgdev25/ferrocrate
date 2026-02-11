@@ -46,6 +46,14 @@ pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, I
         &manifest_json,
     )?;
 
+    let config_root = runtime_dir.join("images").join("configs");
+    fs::create_dir_all(&config_root)?;
+    let config_digest = manifest.config.digest.replace(':', "_");
+    let config_path = config_root.join(&config_digest);
+    if !config_path.exists() {
+        client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
+    }
+
     let blob_root = runtime_dir.join("images").join("blobs");
     fs::create_dir_all(&blob_root)?;
     let mut layer_paths = Vec::new();
@@ -84,6 +92,30 @@ pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBu
     Ok(layer_paths)
 }
 
+pub fn resolve_config_path(
+    runtime_dir: &Path,
+    image: &str,
+) -> Result<Option<PathBuf>, ImageFetchError> {
+    parse_image_reference(image)?;
+    let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    let canonical = crate::image_tagging::canonicalize_reference(image)?;
+    let record = store.resolve_reference(&canonical)?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let manifest = parse_image_manifest(&record.manifest_json)?;
+    let config_digest = manifest.config.digest.replace(':', "_");
+    let config_path = runtime_dir
+        .join("images")
+        .join("configs")
+        .join(config_digest);
+    if config_path.exists() {
+        Ok(Some(config_path))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::pull_image;
@@ -100,6 +132,10 @@ mod tests {
         server.expect(
             Expectation::matching(request::method_path("GET", "/v2/library/alpine/manifests/latest"))
                 .respond_with(status_code(200).body(manifest_json)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                .respond_with(status_code(200).body("{\"config\":{}}")),
         );
         server.expect(
             Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))

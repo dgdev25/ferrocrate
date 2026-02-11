@@ -1,4 +1,5 @@
-use crate::dockerfile_build::{build_from_dockerfile, BuildResult, DockerfileBuildError};
+use crate::dockerfile_build::{build_from_dockerfile_with_compression, BuildResult, DockerfileBuildError};
+use crate::layer_compression::CompressionFormat;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -33,6 +34,7 @@ struct BuildSpec {
 pub fn build_from_ferrofile(
     ferrofile_path: &Path,
     runtime_dir: &Path,
+    compression: CompressionFormat,
 ) -> Result<BuildResult, FerrofileBuildError> {
     if !ferrofile_path.exists() {
         return Err(FerrofileBuildError::Missing(
@@ -60,12 +62,14 @@ pub fn build_from_ferrofile(
         .unwrap_or_else(|| context_dir.join("Dockerfile"));
 
     let tag = build.tag.as_deref();
-    build_from_dockerfile(&dockerfile_path, tag, runtime_dir).map_err(Into::into)
+    build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::build_from_ferrofile;
+    use crate::layer_compression::CompressionFormat;
     use std::fs;
 
     #[test]
@@ -82,7 +86,11 @@ tag = "local/ferrofile:latest"
         fs::write(temp.path().join("hello.txt"), "hi").expect("write");
 
         let runtime_dir = temp.path().join("runtime");
-        let result = build_from_ferrofile(&temp.path().join("ferrofile.toml"), &runtime_dir)
+        let result = build_from_ferrofile(
+            &temp.path().join("ferrofile.toml"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+        )
             .expect("build");
         assert_eq!(result.reference, "registry-1.docker.io/local/ferrofile:latest");
     }

@@ -71,7 +71,7 @@
 | IMG-01 | Pull images from OCI registries | Partial | Docker config auth + credential helpers; not tested across registries. |
 | IMG-02 | Push images to OCI registries | Partial | Docker config auth + credential helpers; not tested across registries. |
 | IMG-03 | Content-addressable store (Blake3) | Partial | Blake3 CAS for blobs; file-level layer dedup not implemented. |
-| IMG-04 | Zstd compression for layers | Partial | Added gzip/zstd compression helpers; build pipeline not wired. |
+| IMG-04 | Zstd compression for layers | Partial | `build --compress zstd` emits zstd layers; other pipelines not wired. |
 | IMG-05 | Lazy image pulling | Partial | `pull --lazy` stores manifest/config; missing blobs fetched on demand. |
 | IMG-06 | Dockerfile build | Partial | Minimal FROM scratch + COPY + HEALTHCHECK build; no multi-stage or base images. |
 | IMG-07 | ferrofile.toml build | Partial | Minimal [build] spec (context/dockerfile/tag) wired to Dockerfile build. |

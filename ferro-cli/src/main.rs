@@ -3,6 +3,7 @@ use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
+use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{RegistryClient, parse_image_reference};
 use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
@@ -76,6 +77,8 @@ pub enum Commands {
         ferrofile: Option<String>,
         #[arg(short, long)]
         tag: Option<String>,
+        #[arg(long, default_value = "gzip", value_parser = validate_compression)]
+        compress: String,
     },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -245,7 +248,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
             dockerfile,
             ferrofile,
             tag,
-        } => handle_build(dockerfile.as_deref(), ferrofile.as_deref(), tag.as_deref()),
+            compress,
+        } => handle_build(
+            dockerfile.as_deref(),
+            ferrofile.as_deref(),
+            tag.as_deref(),
+            compress.as_str(),
+        ),
         Commands::Images { format } => handle_images(&image_store, &format),
         Commands::Rmi { image } => handle_rmi(&image_store, &image),
         Commands::ImagePrune => handle_image_prune(&image_store),
@@ -416,12 +425,15 @@ fn handle_build(
     dockerfile: Option<&str>,
     ferrofile: Option<&str>,
     tag: Option<&str>,
+    compression: &str,
 ) -> Result<(), String> {
     let runtime_dir = runtime_dir();
+    let compression = parse_compression(compression)?;
     if let Some(ferrofile_path) = ferrofile {
         let result = ferro_core::ferrofile_build::build_from_ferrofile(
             Path::new(ferrofile_path),
             &runtime_dir,
+            compression,
         )
         .map_err(|err| err.to_string())?;
         println!(
@@ -435,10 +447,11 @@ fn handle_build(
     let tag = tag.unwrap_or("local/build:latest");
     parse_image_reference(tag).map_err(|err| err.to_string())?;
 
-    let result = ferro_core::dockerfile_build::build_from_dockerfile(
+    let result = ferro_core::dockerfile_build::build_from_dockerfile_with_compression(
         Path::new(dockerfile),
         Some(tag),
         &runtime_dir,
+        compression,
     )
     .map_err(|err| err.to_string())?;
 
@@ -460,6 +473,21 @@ fn validate_output_format(value: &str) -> Result<String, String> {
     match value {
         "text" | "json" => Ok(value.to_string()),
         _ => Err("format must be one of: text, json".to_string()),
+    }
+}
+
+fn validate_compression(value: &str) -> Result<String, String> {
+    match value {
+        "gzip" | "zstd" => Ok(value.to_string()),
+        _ => Err("compress must be one of: gzip, zstd".to_string()),
+    }
+}
+
+fn parse_compression(value: &str) -> Result<CompressionFormat, String> {
+    match value {
+        "gzip" => Ok(CompressionFormat::Gzip),
+        "zstd" => Ok(CompressionFormat::Zstd),
+        _ => Err("compress must be one of: gzip, zstd".to_string()),
     }
 }
 
@@ -991,10 +1019,12 @@ mod tests {
                 dockerfile,
                 ferrofile,
                 tag,
+                compress,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
                 assert_eq!(tag.expect("tag"), "acme/app:dev");
+                assert_eq!(compress, "gzip");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1374,13 +1404,14 @@ mod tests {
 
     #[test]
     fn build_handler_requires_dockerfile_path() {
-        let err = handle_build(None, None, None).expect_err("dockerfile required");
+        let err = handle_build(None, None, None, "gzip").expect_err("dockerfile required");
         assert!(err.contains("dockerfile path is required"));
     }
 
     #[test]
     fn build_handler_rejects_invalid_tag() {
-        let err = handle_build(Some("./Dockerfile"), None, Some("")).expect_err("invalid tag");
+        let err = handle_build(Some("./Dockerfile"), None, Some(""), "gzip")
+            .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
     }
 

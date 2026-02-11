@@ -69,7 +69,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement `ferrocrate exec <container> <cmd>` command~~
 - [x] ~~Implement `ferrocrate pull <image>` command~~
 - [x] ~~Implement `ferrocrate push <image>` command~~
-- [ ] Create CLI integration tests
+- [x] ~~Create CLI integration tests~~
 
 ### Security Baseline (Phase 1)
 

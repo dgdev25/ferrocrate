@@ -43,7 +43,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | IMG-03 | Content-addressable store (Blake3) | Partial | Blake3 CAS for blobs; file-level layer dedup not implemented. |
 | IMG-04 | Zstd compression for layers | Partial | Added gzip/zstd compression helpers; build pipeline not wired. |
 | IMG-05 | Lazy image pulling | Partial | `pull --lazy` stores manifest/config; missing blobs fetched on demand. |
-| IMG-06 | Dockerfile build | Not Started | CLI stub only. |
+| IMG-06 | Dockerfile build | Partial | Minimal FROM scratch + COPY + HEALTHCHECK build; no multi-stage or base images. |
 | IMG-07 | ferrofile.toml build | Not Started | Not implemented. |
 | IMG-08 | Multi-stage builds | Not Started | Not implemented. |
 | IMG-09 | Build cache | Not Started | Not implemented. |

@@ -392,12 +392,21 @@ fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
         return Err("build: dockerfile path is required".to_string());
     }
 
-    let tag_display = tag.unwrap_or("<none>");
-    if let Some(tag) = tag {
-        parse_image_reference(tag).map_err(|err| err.to_string())?;
-    }
+    let tag = tag.unwrap_or("local/build:latest");
+    parse_image_reference(tag).map_err(|err| err.to_string())?;
 
-    println!("build: dockerfile={dockerfile} tag={tag_display}");
+    let runtime_dir = runtime_dir();
+    let result = ferro_core::dockerfile_build::build_from_dockerfile(
+        Path::new(dockerfile),
+        Some(tag),
+        &runtime_dir,
+    )
+    .map_err(|err| err.to_string())?;
+
+    println!(
+        "build: dockerfile={} tag={} layer_digest={} config_digest={}",
+        dockerfile, result.reference, result.layer_digest, result.config_digest
+    );
     Ok(())
 }
 

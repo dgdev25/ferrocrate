@@ -26,6 +26,8 @@ pub struct Cli {
 pub enum Commands {
     Run {
         image: String,
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long, default_value = "ebpf")]
         network_backend: String,
         #[arg(long = "bind")]
@@ -46,6 +48,12 @@ pub enum Commands {
         labels: Vec<String>,
         #[arg(long = "annotation")]
         annotations: Vec<String>,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        workdir: Option<String>,
+        #[arg(long)]
+        entrypoint: Option<String>,
         #[arg(long = "cap-add")]
         cap_add: Vec<String>,
         #[arg(long = "health-cmd")]
@@ -207,6 +215,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             annotations,
             cap_add,
             profile,
+            user,
+            workdir,
+            entrypoint,
+            name,
             health_cmd,
             health_interval,
             health_timeout,
@@ -232,6 +244,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &labels,
                 &annotations,
                 &cap_add,
+                entrypoint.as_deref(),
+                workdir.as_deref(),
+                user.as_deref(),
+                name.as_deref(),
                 health_cmd.as_deref(),
                 health_interval,
                 health_timeout,
@@ -294,6 +310,10 @@ fn handle_run(
     labels: &[String],
     annotations: &[String],
     cap_add: &[String],
+    entrypoint: Option<&str>,
+    workdir: Option<&str>,
+    user: Option<&str>,
+    name: Option<&str>,
     health_cmd: Option<&str>,
     health_interval: Option<u64>,
     health_timeout: Option<u64>,
@@ -322,10 +342,18 @@ fn handle_run(
         health_start_period,
     )?;
     let restart_policy = parse_restart_policy(restart_policy)?;
+    let effective_cmd = if let Some(entry) = entrypoint {
+        let mut out = parse_entrypoint(entry)?;
+        out.extend_from_slice(cmd);
+        out
+    } else {
+        cmd.to_vec()
+    };
+
     let record = runtime
         .run(
             image,
-            cmd,
+            &effective_cmd,
             &env,
             &labels,
             &annotations,
@@ -337,6 +365,9 @@ fn handle_run(
             &tmpfs,
             read_only_rootfs,
             no_new_privs,
+            workdir,
+            user,
+            name,
         )
         .map_err(|err| err.to_string())?;
     println!(
@@ -476,6 +507,14 @@ fn validate_output_format(value: &str) -> Result<String, String> {
     }
 }
 
+fn parse_entrypoint(value: &str) -> Result<Vec<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("run: entrypoint must not be empty".to_string());
+    }
+    Ok(trimmed.split_whitespace().map(|s| s.to_string()).collect())
+}
+
 fn validate_compression(value: &str) -> Result<String, String> {
     match value {
         "gzip" | "zstd" => Ok(value.to_string()),
@@ -546,11 +585,13 @@ fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), Str
         return Ok(());
     }
     for record in records {
+        let name = record.name.clone().unwrap_or_else(|| "-".to_string());
         println!(
-            "{} {} {}",
+            "{} {} {} {}",
             record.id.bold(),
             record.image.cyan(),
-            color_status(&record.status)
+            color_status(&record.status),
+            name
         );
     }
     Ok(())
@@ -560,10 +601,11 @@ fn handle_logs(runtime: &ContainerRuntime, container: &str, format: &str) -> Res
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
     }
-    let logs = runtime.logs(container).map_err(|err| err.to_string())?;
+    let resolved = resolve_container_id(runtime, container)?;
+    let logs = runtime.logs(&resolved).map_err(|err| err.to_string())?;
     if format == "json" {
         let output = serde_json::json!({
-            "container": container,
+            "container": resolved,
             "logs": logs,
         });
         let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
@@ -578,17 +620,19 @@ fn handle_inspect(runtime: &ContainerRuntime, container: &str, format: &str) -> 
     if container.trim().is_empty() {
         return Err("inspect: container is required".to_string());
     }
-    let record = runtime.inspect(container).map_err(|err| err.to_string())?;
+    let resolved = resolve_container_id(runtime, container)?;
+    let record = runtime.inspect(&resolved).map_err(|err| err.to_string())?;
     if format == "json" {
         let json = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
         println!("{json}");
     } else {
         println!(
-            "id={} image={} status={} pid={}",
+            "id={} image={} status={} pid={} name={}",
             record.id.bold(),
             record.image.cyan(),
             color_status(&record.status),
-            record.pid
+            record.pid,
+            record.name.clone().unwrap_or_else(|| "-".to_string()),
         );
     }
     Ok(())
@@ -604,10 +648,11 @@ fn handle_stats(runtime: &ContainerRuntime, container: &str, format: &str) -> Re
     if container.trim().is_empty() {
         return Err("stats: container is required".to_string());
     }
-    let stats = runtime.stats(container).map_err(|err| err.to_string())?;
+    let resolved = resolve_container_id(runtime, container)?;
+    let stats = runtime.stats(&resolved).map_err(|err| err.to_string())?;
     if format == "json" {
         let output = StatsOutput {
-            container: container.to_string(),
+            container: resolved.clone(),
             stats,
         };
         let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
@@ -615,7 +660,7 @@ fn handle_stats(runtime: &ContainerRuntime, container: &str, format: &str) -> Re
     } else {
         println!(
             "container={} mem_current={} mem_max={} pids_current={} cpu_usage_usec={} cpu_user_usec={} cpu_system_usec={}",
-            container,
+            resolved,
             stats.memory_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
             stats.memory_max.map(|v| v.to_string()).unwrap_or_else(|| "max".to_string()),
             stats.pids_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
@@ -631,8 +676,9 @@ fn handle_pause(runtime: &ContainerRuntime, container: &str) -> Result<(), Strin
     if container.trim().is_empty() {
         return Err("pause: container is required".to_string());
     }
-    runtime.pause(container).map_err(|err| err.to_string())?;
-    println!("pause: {container}");
+    let resolved = resolve_container_id(runtime, container)?;
+    runtime.pause(&resolved).map_err(|err| err.to_string())?;
+    println!("pause: {resolved}");
     Ok(())
 }
 
@@ -640,8 +686,9 @@ fn handle_unpause(runtime: &ContainerRuntime, container: &str) -> Result<(), Str
     if container.trim().is_empty() {
         return Err("unpause: container is required".to_string());
     }
-    runtime.resume(container).map_err(|err| err.to_string())?;
-    println!("unpause: {container}");
+    let resolved = resolve_container_id(runtime, container)?;
+    runtime.resume(&resolved).map_err(|err| err.to_string())?;
+    println!("unpause: {resolved}");
     Ok(())
 }
 
@@ -649,10 +696,11 @@ fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Res
     if container.trim().is_empty() {
         return Err("stop: container is required".to_string());
     }
+    let resolved = resolve_container_id(runtime, container)?;
     runtime
-        .stop(container, std::time::Duration::from_secs(timeout))
+        .stop(&resolved, std::time::Duration::from_secs(timeout))
         .map_err(|err| err.to_string())?;
-    println!("stop: {container}");
+    println!("stop: {resolved}");
     Ok(())
 }
 
@@ -660,8 +708,9 @@ fn handle_kill(runtime: &ContainerRuntime, container: &str) -> Result<(), String
     if container.trim().is_empty() {
         return Err("kill: container is required".to_string());
     }
-    runtime.kill(container).map_err(|err| err.to_string())?;
-    println!("kill: {container}");
+    let resolved = resolve_container_id(runtime, container)?;
+    runtime.kill(&resolved).map_err(|err| err.to_string())?;
+    println!("kill: {resolved}");
     Ok(())
 }
 
@@ -669,8 +718,9 @@ fn handle_rm(runtime: &ContainerRuntime, container: &str) -> Result<(), String> 
     if container.trim().is_empty() {
         return Err("rm: container is required".to_string());
     }
-    runtime.remove(container).map_err(|err| err.to_string())?;
-    println!("rm: {container}");
+    let resolved = resolve_container_id(runtime, container)?;
+    runtime.remove(&resolved).map_err(|err| err.to_string())?;
+    println!("rm: {resolved}");
     Ok(())
 }
 
@@ -678,10 +728,11 @@ fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> 
     if container.trim().is_empty() {
         return Err("restart: container is required".to_string());
     }
+    let resolved = resolve_container_id(runtime, container)?;
     runtime
-        .restart(container, std::time::Duration::from_secs(timeout))
+        .restart(&resolved, std::time::Duration::from_secs(timeout))
         .map_err(|err| err.to_string())?;
-    println!("restart: {container}");
+    println!("restart: {resolved}");
     Ok(())
 }
 
@@ -852,7 +903,8 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
     if cmd.is_empty() {
         return Err("exec: command is required".to_string());
     }
-    let result = runtime.exec(container, cmd).map_err(|err| err.to_string())?;
+    let resolved = resolve_container_id(runtime, container)?;
+    let result = runtime.exec(&resolved, cmd).map_err(|err| err.to_string())?;
     if !result.stdout.is_empty() {
         print!("{}", result.stdout);
     }
@@ -860,6 +912,23 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
         eprint!("{}", result.stderr);
     }
     Ok(())
+}
+
+fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<String, String> {
+    if runtime.inspect(container).is_ok() {
+        return Ok(container.to_string());
+    }
+    let records = runtime.list().map_err(|err| err.to_string())?;
+    let mut matches = records
+        .into_iter()
+        .filter(|record| record.name.as_deref() == Some(container))
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(format!("container not found: {container}")),
+        1 => Ok(matches.remove(0)),
+        _ => Err(format!("container name is not unique: {container}")),
+    }
 }
 
 fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool) -> Result<(), String> {
@@ -962,6 +1031,9 @@ mod tests {
                 env,
                 labels,
                 annotations,
+                user,
+                workdir,
+                entrypoint,
                 health_cmd,
                 health_interval,
                 health_timeout,
@@ -973,6 +1045,7 @@ mod tests {
                 cpu_period,
                 pids_max,
                 cap_add,
+                name,
                 profile,
             } => {
                 assert_eq!(image, "alpine:latest");
@@ -986,6 +1059,10 @@ mod tests {
                 assert!(env.is_empty());
                 assert!(labels.is_empty());
                 assert!(annotations.is_empty());
+                assert!(user.is_none());
+                assert!(workdir.is_none());
+                assert!(entrypoint.is_none());
+                assert!(name.is_none());
                 assert!(cap_add.is_empty());
                 assert!(health_cmd.is_none());
                 assert!(health_interval.is_none());
@@ -1310,6 +1387,10 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
+            None,
+            None,
+            None,
             None,
             None,
             None,

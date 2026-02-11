@@ -15,3 +15,4 @@ pub mod rootless;
 pub mod rootfs_prep;
 pub mod rootfs;
 pub mod runtime_config;
+pub mod seccomp;

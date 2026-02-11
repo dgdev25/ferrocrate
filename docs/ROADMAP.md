@@ -150,7 +150,7 @@
 ### 3.8 CLI and Developer Experience
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| CLI-01 | Docker-compatible CLI syntax | Partial | Core commands exist; behavior not Docker-equivalent. |
+| CLI-01 | Docker-compatible CLI syntax | Partial | Core commands exist; `ps` alias + `-e/-l` flags added; behavior still not Docker-equivalent. |
 | CLI-02 | Docker socket compatibility | Not Started | Not implemented. |
 | CLI-03 | Shell completion | Not Started | Not implemented. |
 | CLI-04 | ~~Colored, human-friendly output~~ | Done | Colored status + image refs for text output. |

@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ferrocrate.io/schemas/decisions.json",
+  "title": "FerroCrate Architecture Decision Registry",
+  "version": "1.0.0",
+  "lastUpdated": "2026-02-11",
+  "decisions": [
+    {
+      "id": "ADR-001",
+      "title": "Use Rust as Primary Language",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "implementation",
+      "impact": "high",
+      "summary": "Rust selected for memory safety without GC, zero-cost abstractions, and predictable latency",
+      "requirements": ["PERF-01", "PERF-03", "PERF-07", "REL-05"],
+      "consequences": {
+        "positive": ["Memory safety", "No GC pauses", "Small binaries", "Fearless concurrency"],
+        "negative": ["Learning curve", "Slower compilation", "Some ecosystem gaps"]
+      },
+      "alternatives": ["Go", "C/C++", "Zig"],
+      "filePath": "ADR-001-use-rust-as-primary-language.md"
+    },
+    {
+      "id": "ADR-002",
+      "title": "cgroups v2 Only",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "platform",
+      "impact": "high",
+      "summary": "Support cgroups v2 only; no v1 support for simplified resource management",
+      "requirements": ["CLM-09", "SEC-01", "COMPAT-07"],
+      "consequences": {
+        "positive": ["Unified hierarchy", "Better rootless support", "PSI monitoring"],
+        "negative": ["No legacy distro support", "Migration required"]
+      },
+      "alternatives": ["Both v1 and v2", "v1 only"],
+      "kernelVersion": "5.10+",
+      "filePath": "ADR-002-cgroups-v2-only.md"
+    },
+    {
+      "id": "ADR-003",
+      "title": "Rootless Containers by Default",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "security",
+      "impact": "high",
+      "summary": "Containers run rootless by default using user namespaces; rootful mode optional",
+      "requirements": ["SEC-01", "SEC-04", "SEC-06"],
+      "consequences": {
+        "positive": ["Container escape != root", "Multi-tenancy", "No setuid binary"],
+        "negative": ["Network performance penalty", "Port <1024 limitation", "Storage complexity"]
+      },
+      "alternatives": ["Rootful by default", "Rootless optional"],
+      "kernelVersion": "5.11+ (rootless OverlayFS)",
+      "filePath": "ADR-003-rootless-containers-by-default.md"
+    },
+    {
+      "id": "ADR-004",
+      "title": "eBPF for Networking",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "networking",
+      "impact": "high",
+      "summary": "eBPF for all container networking; no iptables rules to avoid firewall conflicts",
+      "requirements": ["NET-06", "NET-08", "NET-10"],
+      "consequences": {
+        "positive": ["No firewall conflicts", "O(1) lookups", "Full observability"],
+        "negative": ["Kernel 5.10+ required", "May need rootful mode for eBPF on older kernels"]
+      },
+      "alternatives": ["iptables", "nftables", "Cilium"],
+      "kernelVersion": "5.10+",
+      "filePath": "ADR-004-ebpf-for-networking.md"
+    },
+    {
+      "id": "ADR-005",
+      "title": "Blake3 for Content Hashing",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "storage",
+      "impact": "medium",
+      "summary": "Blake3 for internal content-addressable storage; SHA-256 for OCI digests",
+      "requirements": ["IMG-03", "PERF-02"],
+      "consequences": {
+        "positive": ["10x faster hashing", "Parallel processing", "Faster deduplication"],
+        "negative": ["Dual hashing required", "Storage overhead for two hashes"]
+      },
+      "alternatives": ["SHA-256 only", "xxHash", "SHA-512"],
+      "filePath": "ADR-005-blake3-for-content-hashing.md"
+    },
+    {
+      "id": "ADR-006",
+      "title": "Zstd Compression",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "storage",
+      "impact": "medium",
+      "summary": "Zstd (level 3) as default compression for image layers; gzip supported for compatibility",
+      "requirements": ["IMG-04", "PERF-02"],
+      "consequences": {
+        "positive": ["2-4x faster decompression", "Multi-threading", "Better compression ratio"],
+        "negative": ["Some legacy registries may not support", "OCI v1.1 feature"]
+      },
+      "alternatives": ["gzip only", "lz4", "xz"],
+      "filePath": "ADR-006-zstd-compression.md"
+    },
+    {
+      "id": "ADR-007",
+      "title": "WASM for AI Inference",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "ai",
+      "impact": "high",
+      "summary": "WASM (ruv-FANN) for sub-1ms inference; cloud/local LLM for complex analysis only",
+      "requirements": ["AI-01", "AI-04", "AI-10", "PERF-08"],
+      "consequences": {
+        "positive": ["<1ms latency", "Zero external dependencies", "Free operation", "Offline capable"],
+        "negative": ["Limited model complexity", "Pre-training required"]
+      },
+      "alternatives": ["Cloud API only", "Local LLM only", "ONNX Runtime"],
+      "filePath": "ADR-007-wasm-for-ai-inference.md"
+    },
+    {
+      "id": "ADR-008",
+      "title": "OCI Compliance",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "standards",
+      "impact": "high",
+      "summary": "Full compliance with OCI Image Spec v1.1, Runtime Spec v1.2, Distribution Spec v1.1",
+      "requirements": ["COMPAT-01", "COMPAT-02", "COMPAT-03", "CLM-01"],
+      "consequences": {
+        "positive": ["Portability", "Interoperability", "No vendor lock-in", "Kubernetes ready"],
+        "negative": ["No optimization shortcuts", "Some legacy edge cases"]
+      },
+      "alternatives": ["Docker format only", "OCI + proprietary extensions"],
+      "filePath": "ADR-008-oci-compliance.md"
+    },
+    {
+      "id": "ADR-009",
+      "title": "No Daemon Mode Default",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "architecture",
+      "impact": "high",
+      "summary": "Daemonless by default for zero idle memory; optional daemon for API/socket compatibility",
+      "requirements": ["PERF-03", "PERF-04", "PERF-05", "REL-01", "CLI-02"],
+      "consequences": {
+        "positive": ["Zero idle memory", "No attack surface when idle", "Crash resilience"],
+        "negative": ["No event streaming by default", "No socket API without daemon"]
+      },
+      "alternatives": ["Always daemon", "Daemonless only", "Hybrid on-demand"],
+      "filePath": "ADR-009-no-daemon-mode-default.md"
+    },
+    {
+      "id": "ADR-010",
+      "title": "OverlayFS as Storage Driver",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "storage",
+      "impact": "high",
+      "summary": "OverlayFS as sole storage driver; no pluggable storage driver system",
+      "requirements": ["STR-05", "STR-06", "IMG-03"],
+      "consequences": {
+        "positive": ["Code simplicity", "Excellent performance", "Mature and reliable"],
+        "negative": ["No btrfs/ZFS features", "Rootless requires kernel 5.11+"]
+      },
+      "alternatives": ["Multiple drivers", "Btrfs primary", "Device Mapper"],
+      "kernelVersion": "3.18+, 5.11+ for rootless",
+      "filePath": "ADR-010-overlayfs-as-storage-driver.md"
+    },
+    {
+      "id": "ADR-011",
+      "title": "claude-flow as Subprocess",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "ai",
+      "impact": "medium",
+      "summary": "claude-flow consumed as TypeScript subprocess via MCP protocol; not compiled into binary",
+      "requirements": ["AI-05", "AI-08", "AI-10"],
+      "consequences": {
+        "positive": ["Upstream alignment", "No rewrite debt", "Community contributions"],
+        "negative": ["Node.js dependency for full AI", "~50ms subprocess startup"]
+      },
+      "alternatives": ["Rust rewrite", "FFI binding", "HTTP API"],
+      "relatedPRDQuestion": "Q9",
+      "filePath": "ADR-011-claude-flow-as-subprocess.md"
+    },
+    {
+      "id": "ADR-012",
+      "title": "Docker Socket Compatibility",
+      "status": "accepted",
+      "date": "2026-02-11",
+      "category": "compatibility",
+      "impact": "high",
+      "summary": "Docker API emulation layer for 95% endpoint coverage; documented 5% gaps",
+      "requirements": ["CLI-02", "COMPAT-04"],
+      "consequences": {
+        "positive": ["Tool compatibility", "Migration ease", "CI/CD ready"],
+        "negative": ["Implementation effort", "Perpetual maintenance"]
+      },
+      "alternatives": ["Separate socket", "Full API including Swarm", "Translation proxy"],
+      "apiVersion": "v1.45+",
+      "coveragePercent": 95,
+      "filePath": "ADR-012-docker-socket-compatibility.md"
+    }
+  ],
+  "categories": [
+    {"id": "implementation", "name": "Implementation", "description": "Programming language and build decisions"},
+    {"id": "platform", "name": "Platform", "description": "Operating system and kernel requirements"},
+    {"id": "security", "name": "Security", "description": "Security architecture decisions"},
+    {"id": "networking", "name": "Networking", "description": "Network stack decisions"},
+    {"id": "storage", "name": "Storage", "description": "Image and volume storage decisions"},
+    {"id": "ai", "name": "AI/Intelligence", "description": "AI and ML inference decisions"},
+    {"id": "standards", "name": "Standards", "description": "Standards compliance decisions"},
+    {"id": "architecture", "name": "Architecture", "description": "System architecture decisions"},
+    {"id": "compatibility", "name": "Compatibility", "description": "Backward compatibility decisions"}
+  ],
+  "kernelRequirements": {
+    "minimum": "5.10",
+    "recommended": "5.15",
+    "features": {
+      "cgroupsV2": {"min": "4.5", "recommended": "5.10"},
+      "eBPF": {"min": "4.18", "recommended": "5.10"},
+      "rootlessOverlayFS": {"min": "5.11", "recommended": "5.15"},
+      "userNamespaces": {"min": "3.8", "recommended": "4.3"}
+    }
+  },
+  "dependencies": {
+    "required": [
+      {"name": "Rust", "version": "1.75+", "purpose": "Primary language"},
+      {"name": "Linux kernel", "version": "5.10+", "purpose": "OS platform"},
+      {"name": "cgroups v2", "version": "any", "purpose": "Resource management"},
+      {"name": "OverlayFS", "version": "kernel", "purpose": "Storage driver"},
+      {"name": "Wasmtime", "version": "19.0+", "purpose": "WASM runtime for AI"}
+    ],
+    "optional": [
+      {"name": "Node.js", "version": "18+", "purpose": "claude-flow (advanced AI)"},
+      {"name": "eBPF", "version": "kernel 5.10+", "purpose": "Networking (iptables fallback available)"}
+    ]
+  }
+}

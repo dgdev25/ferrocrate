@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FerroCrate Bounded Contexts",
+  "version": "1.0.0",
+  "description": "Domain-Driven Design bounded contexts for the FerroCrate container runtime, mapped to Rust module structure",
+  "contexts": {
+    "ContainerRuntime": {
+      "module_path": "ferro_exec",
+      "description": "Core container lifecycle management - process isolation, namespaces, cgroups, and container execution",
+      "responsibility": "Manage container lifecycle: create, start, stop, kill, pause, exec operations",
+      "rust_representation": {
+        "crate": "ferro-exec",
+        "primary_traits": ["ContainerRuntime", "ProcessIsolator", "CgroupManager"],
+        "ownership_model": "Owns Container processes; borrowing for inspection"
+      },
+      "ubiquitous_language": [
+        "Container", "ContainerId", "ProcessId", "Namespace", "Cgroup",
+        "ExitCode", "Signal", "Checkpoint", "Restore", "ExecSession"
+      ],
+      "invariants": [
+        "Container state transitions must be atomic",
+        "No zombie containers - all processes must be reaped",
+        "Resource limits are enforced before process spawn"
+      ],
+      "dependencies": ["Storage (for rootfs)", "Security (for seccomp/capabilities)"]
+    },
+    "ImageManagement": {
+      "module_path": "ferro_store",
+      "description": "OCI image handling - pull, push, store, build, and layer management",
+      "responsibility": "Manage OCI images: pull from registries, store with deduplication, build from Dockerfile",
+      "rust_representation": {
+        "crate": "ferro-store",
+        "primary_traits": ["ImageRegistry", "LayerStore", "ImageBuilder"],
+        "ownership_model": "Owns image layers; Arc for shared manifest references"
+      },
+      "ubiquitous_language": [
+        "Image", "ImageId", "Manifest", "Config", "Layer", "LayerHash",
+        "Registry", "Repository", "Tag", "Digest", "Blob", "BuildContext"
+      ],
+      "invariants": [
+        "Content-addressable storage - Blake3 hash verification on every read",
+        "Atomic image operations - no partial pulls visible to consumers",
+        "Layer deduplication is transparent to callers"
+      ],
+      "dependencies": ["Storage (for layer persistence)", "Networking (for registry pulls)"]
+    },
+    "Networking": {
+      "module_path": "ferro_net",
+      "description": "Container networking - bridge, host, overlay networks with eBPF-based packet handling",
+      "responsibility": "Manage container networks: create networks, assign IPs, configure port mapping, DNS",
+      "rust_representation": {
+        "crate": "ferro-net",
+        "primary_traits": ["NetworkManager", "PortMapper", "DNSResolver"],
+        "ownership_model": "Owns network namespaces; borrows container references for attachment"
+      },
+      "ubiquitous_language": [
+        "Network", "NetworkId", "Endpoint", "IPAddress", "Subnet", "Gateway",
+        "PortMapping", "Bridge", "Overlay", "DNSEntry", "NetworkNamespace"
+      ],
+      "invariants": [
+        "IP allocation is collision-free within a network",
+        "Port mappings are exclusive - no double-binding",
+        "Network isolation is enforced at kernel level"
+      ],
+      "dependencies": ["ContainerRuntime (for namespace association)"]
+    },
+    "BuildSystem": {
+      "module_path": "ferro_build",
+      "description": "Image build system - Dockerfile parsing, multi-stage builds, build cache optimization",
+      "responsibility": "Build OCI images from Dockerfiles: parse, execute steps, layer caching, multi-stage builds",
+      "rust_representation": {
+        "crate": "ferro-build",
+        "primary_traits": ["DockerfileParser", "BuildExecutor", "BuildCache"],
+        "ownership_model": "Owns build context; borrows from ferro-store for layer persistence"
+      },
+      "ubiquitous_language": [
+        "Dockerfile", "Instruction", "Stage", "Context", "Layer", "Cache",
+        "BuildArg", "Target", "BaseImage", "Artifact", "BuildContext"
+      ],
+      "invariants": [
+        "Build steps are deterministic - same inputs produce same layers",
+        "Cache keys incorporate base layer hash",
+        "Multi-stage builds only copy required artifacts"
+      ],
+      "dependencies": ["ImageManagement (layer storage)", "ContainerRuntime (build step execution)"]
+    },
+    "ManagementLayer": {
+      "module_path": "ferro_mgr",
+      "description": "Optional management daemon - Docker API compatibility, long-running container monitoring",
+      "responsibility": "Provide daemon mode: API server, container state tracking, event streaming",
+      "rust_representation": {
+        "crate": "ferro-mgr",
+        "primary_traits": ["ApiServer", "StateManager", "EventStreamer"],
+        "ownership_model": "Manages state; serves HTTP API via axum"
+      },
+      "ubiquitous_language": [
+        "ApiServer", "Socket", "Endpoint", "State", "Event", "Stream",
+        "Daemon", "Client", "Request", "Response", "Subscription"
+      ],
+      "invariants": [
+        "API is optional - daemonless mode is default",
+        "State persistence survives daemon restart",
+        "Event streaming is ordered by timestamp"
+      ],
+      "dependencies": ["ContainerRuntime (state tracking)", "ImageManagement (image metadata)"]
+    },
+    "IntelligenceLayer": {
+      "module_path": "ferro_mind",
+      "description": "AI-powered container intelligence - resource prediction, anomaly detection, automated remediation",
+      "responsibility": "Provide intelligent container management: predict resources, detect anomalies, suggest remediation",
+      "rust_representation": {
+        "crate": "ferro-mind",
+        "primary_traits": ["ResourcePredictor", "AnomalyDetector", "RemediationEngine"],
+        "ownership_model": "Reads metrics via borrowing; owns prediction models"
+      },
+      "ubiquitous_language": [
+        "Prediction", "Anomaly", "Remediation", "Pattern", "Decision",
+        "Confidence", "Explanation", "Model", "Inference", "CostTier"
+      ],
+      "invariants": [
+        "AI decisions are advisory - never block critical operations",
+        "All AI decisions are explainable with logged reasoning",
+        "Graceful degradation - system works without AI layer"
+      ],
+      "dependencies": ["ContainerRuntime (metrics), ImageManagement (build optimization)"],
+      "cost_tiers": {
+        "tier_0_wasm": {
+          "latency": "1-5ms",
+          "cost": "free",
+          "use_cases": ["Resource prediction", "Simple anomaly detection"]
+        },
+        "tier_1_local_llm": {
+          "latency": "10-100ms",
+          "cost": "compute",
+          "use_cases": ["Complex pattern analysis", "Build optimization"]
+        },
+        "tier_2_cloud_api": {
+          "latency": "1-5s",
+          "cost": "per-call",
+          "use_cases": ["Natural language queries", "Multi-agent debugging"]
+        }
+      }
+    },
+    "ComposeOrchestration": {
+      "module_path": "ferro_compose",
+      "description": "Multi-container orchestration - docker-compose compatibility, service dependencies, scaling",
+      "responsibility": "Orchestrate multi-service applications: parse compose files, manage dependencies, scale services",
+      "rust_representation": {
+        "crate": "ferro-compose",
+        "primary_traits": ["ComposeParser", "ServiceOrchestrator", "DependencyResolver"],
+        "ownership_model": "Owns ComposeProject; borrows container references for coordination"
+      },
+      "ubiquitous_language": [
+        "Project", "Service", "Dependency", "Replica", "NetworkAlias",
+        "HealthCheck", "DependencyCondition", "Profile", "Environment"
+      ],
+      "invariants": [
+        "Dependency order is respected - depends_on with conditions",
+        "Service scaling maintains consistent naming",
+        "Environment variable substitution is deterministic"
+      ],
+      "dependencies": ["ContainerRuntime", "ImageManagement", "Networking", "Storage"]
+    }
+  },
+  "context_relationships": {
+    "ContainerRuntime_ImageManagement": {
+      "type": "customer/supplier",
+      "description": "Runtime consumes images from ImageManagement",
+      "integration": "ImageManifest passed by value, Layers borrowed for mount"
+    },
+    "ContainerRuntime_Storage": {
+      "type": "customer/supplier",
+      "description": "Runtime requests rootfs from Storage",
+      "integration": "MountRequest -> MountPoint trait object"
+    },
+    "ContainerRuntime_Security": {
+      "type": "partnership",
+      "description": "Runtime and Security collaborate on container creation",
+      "integration": "SecurityContext built by Security, consumed by Runtime"
+    },
+    "ContainerRuntime_Networking": {
+      "type": "customer/supplier",
+      "description": "Runtime requests network endpoints from Networking",
+      "integration": "NetworkAttachment passed to container spawn"
+    },
+    "ImageManagement_Storage": {
+      "type": "customer/supplier",
+      "description": "ImageManagement stores layers via Storage",
+      "integration": "LayerBlob -> StorageDriver trait"
+    },
+    "IntelligenceLayer_All": {
+      "type": "open_host_service",
+      "description": "Intelligence observes all contexts but doesn't control them",
+      "integration": "Read-only metrics channels, advisory events"
+    },
+    "ComposeOrchestration_All": {
+      "type": "customer",
+      "description": "Compose coordinates all other contexts",
+      "integration": "High-level commands translated to context operations"
+    }
+  },
+  "rust_architecture_mapping": {
+    "crate_structure": {
+      "ferro-exec": "ContainerRuntime context",
+      "ferro-store": "ImageManagement context (includes layer storage)",
+      "ferro-build": "BuildSystem context",
+      "ferro-net": "Networking context",
+      "ferro-mind": "IntelligenceLayer context",
+      "ferro-compose": "ComposeOrchestration context",
+      "ferro-mgr": "ManagementLayer context (optional daemon)",
+      "ferro-cli": "Application layer - orchestrates all contexts"
+    },
+    "trait_based_abstraction": {
+      "description": "DDD interfaces map to Rust traits for polymorphism",
+      "example": "ContainerRepository trait implemented by InMemoryContainerRepo, PersistentContainerRepo"
+    },
+    "ownership_and_lifetimes": {
+      "description": "Ownership model enforces aggregate boundaries",
+      "rules": [
+        "Aggregates own their entities (Container owns Process)",
+        "Value objects are Copy or Clone (ContainerId, ImageDigest)",
+        "References between aggregates use IDs, not direct references",
+        "Lifetimes encode temporal relationships (Container<'runtime>)"
+      ]
+    },
+    "error_handling": {
+      "description": "Domain errors as enums with thiserror",
+      "example": "ContainerError::NotFound(ContainerId), ImageError::LayerMissing(LayerHash)"
+    }
+  }
+}

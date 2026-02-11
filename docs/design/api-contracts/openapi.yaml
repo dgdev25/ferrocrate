@@ -1,0 +1,539 @@
+openapi: 3.0.3
+info:
+  title: FerroCrate API
+  description: |
+    AI-Native Container Runtime API compatible with Docker API v1.45+.
+    FerroCrate provides full OCI compliance with AI-powered intelligence.
+  version: 1.0.0
+  contact:
+    name: FerroCrate Team
+    url: https://github.com/ruvnet/ferrocrate
+
+servers:
+  - url: unix:///var/run/ferrocrate.sock
+    description: Unix socket (default)
+  - url: http://localhost:3001
+    description: HTTP endpoint
+
+tags:
+  - name: containers
+    description: Container lifecycle operations
+  - name: images
+    description: Image management operations
+  - name: networks
+    description: Network management
+  - name: volumes
+    description: Volume management
+  - name: system
+    description: System information and events
+
+paths:
+  # ==================== CONTAINERS ====================
+  /containers/json:
+    get:
+      tags: [containers]
+      summary: List containers
+      operationId: listContainers
+      parameters:
+        - name: all
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: filters
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of containers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContainerSummary'
+
+  /containers/create:
+    post:
+      tags: [containers]
+      summary: Create a container
+      operationId: createContainer
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContainerConfig'
+      responses:
+        '201':
+          description: Container created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerCreateResponse'
+
+  /containers/{id}/start:
+    post:
+      tags: [containers]
+      summary: Start a container
+      operationId: startContainer
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+      responses:
+        '204':
+          description: Container started
+        '304':
+          description: Container already started
+        '404':
+          description: Container not found
+
+  /containers/{id}/stop:
+    post:
+      tags: [containers]
+      summary: Stop a container
+      operationId: stopContainer
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+        - name: t
+          in: query
+          description: Seconds to wait before killing
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '204':
+          description: Container stopped
+
+  /containers/{id}/restart:
+    post:
+      tags: [containers]
+      summary: Restart a container
+      operationId: restartContainer
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+      responses:
+        '204':
+          description: Container restarted
+
+  /containers/{id}/kill:
+    post:
+      tags: [containers]
+      summary: Kill a container
+      operationId: killContainer
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+        - name: signal
+          in: query
+          schema:
+            type: string
+            default: SIGKILL
+      responses:
+        '204':
+          description: Container killed
+
+  /containers/{id}:
+    delete:
+      tags: [containers]
+      summary: Remove a container
+      operationId: removeContainer
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+        - name: force
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: v
+          in: query
+          description: Remove volumes
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '204':
+          description: Container removed
+
+  /containers/{id}/logs:
+    get:
+      tags: [containers]
+      summary: Get container logs
+      operationId: getContainerLogs
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+        - name: follow
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: stdout
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: stderr
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: tail
+          in: query
+          schema:
+            type: string
+            default: "all"
+      responses:
+        '200':
+          description: Container logs
+          content:
+            application/vnd.docker.raw-stream:
+              schema:
+                type: string
+
+  /containers/{id}/exec:
+    post:
+      tags: [containers]
+      summary: Create exec instance
+      operationId: createExec
+      parameters:
+        - $ref: '#/components/parameters/containerId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecConfig'
+      responses:
+        '201':
+          description: Exec instance created
+
+  # ==================== IMAGES ====================
+  /images/json:
+    get:
+      tags: [images]
+      summary: List images
+      operationId: listImages
+      responses:
+        '200':
+          description: List of images
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ImageSummary'
+
+  /images/create:
+    post:
+      tags: [images]
+      summary: Pull an image
+      operationId: pullImage
+      parameters:
+        - name: fromImage
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: tag
+          in: query
+          schema:
+            type: string
+            default: latest
+      responses:
+        '200':
+          description: Image pulled
+
+  /build:
+    post:
+      tags: [images]
+      summary: Build an image
+      operationId: buildImage
+      parameters:
+        - name: dockerfile
+          in: query
+          schema:
+            type: string
+            default: Dockerfile
+        - name: t
+          in: query
+          description: Image tag
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/x-tar:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Build successful
+
+  # ==================== NETWORKS ====================
+  /networks:
+    get:
+      tags: [networks]
+      summary: List networks
+      operationId: listNetworks
+      responses:
+        '200':
+          description: List of networks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Network'
+
+  /networks/create:
+    post:
+      tags: [networks]
+      summary: Create a network
+      operationId: createNetwork
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkConfig'
+      responses:
+        '201':
+          description: Network created
+
+  # ==================== VOLUMES ====================
+  /volumes:
+    get:
+      tags: [volumes]
+      summary: List volumes
+      operationId: listVolumes
+      responses:
+        '200':
+          description: List of volumes
+
+  # ==================== SYSTEM ====================
+  /info:
+    get:
+      tags: [system]
+      summary: Get system information
+      operationId: systemInfo
+      responses:
+        '200':
+          description: System info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemInfo'
+
+  /version:
+    get:
+      tags: [system]
+      summary: Get version
+      operationId: getVersion
+      responses:
+        '200':
+          description: Version info
+
+  /events:
+    get:
+      tags: [system]
+      summary: Stream events
+      operationId: streamEvents
+      responses:
+        '200':
+          description: Event stream
+          content:
+            application/json:
+              schema:
+                type: object
+
+components:
+  parameters:
+    containerId:
+      name: id
+      in: path
+      required: true
+      description: Container ID or name
+      schema:
+        type: string
+
+  schemas:
+    ContainerSummary:
+      type: object
+      properties:
+        Id:
+          type: string
+        Names:
+          type: array
+          items:
+            type: string
+        Image:
+          type: string
+        State:
+          type: string
+          enum: [created, running, paused, restarting, removing, exited, dead]
+        Status:
+          type: string
+        Ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/Port'
+        Created:
+          type: integer
+        Labels:
+          type: object
+
+    ContainerConfig:
+      type: object
+      properties:
+        Image:
+          type: string
+        Cmd:
+          type: array
+          items:
+            type: string
+        Env:
+          type: array
+          items:
+            type: string
+        WorkingDir:
+          type: string
+        ExposedPorts:
+          type: object
+        HostConfig:
+          $ref: '#/components/schemas/HostConfig'
+
+    HostConfig:
+      type: object
+      properties:
+        Binds:
+          type: array
+          items:
+            type: string
+        PortBindings:
+          type: object
+        NetworkMode:
+          type: string
+        Privileged:
+          type: boolean
+        ReadonlyRootfs:
+          type: boolean
+        SecurityOpt:
+          type: array
+          items:
+            type: string
+        Resources:
+          $ref: '#/components/schemas/Resources'
+
+    Resources:
+      type: object
+      properties:
+        Memory:
+          type: integer
+          description: Memory limit in bytes
+        CpuShares:
+          type: integer
+        PidsLimit:
+          type: integer
+
+    ContainerCreateResponse:
+      type: object
+      properties:
+        Id:
+          type: string
+        Warnings:
+          type: array
+          items:
+            type: string
+
+    ExecConfig:
+      type: object
+      properties:
+        Cmd:
+          type: array
+          items:
+            type: string
+        AttachStdout:
+          type: boolean
+        AttachStderr:
+          type: boolean
+
+    ImageSummary:
+      type: object
+      properties:
+        Id:
+          type: string
+        RepoTags:
+          type: array
+          items:
+            type: string
+        Size:
+          type: integer
+        Created:
+          type: integer
+
+    Network:
+      type: object
+      properties:
+        Name:
+          type: string
+        Id:
+          type: string
+        Driver:
+          type: string
+        Scope:
+          type: string
+        IPAM:
+          type: object
+
+    NetworkConfig:
+      type: object
+      properties:
+        Name:
+          type: string
+        Driver:
+          type: string
+          enum: [bridge, host, none, overlay]
+          default: bridge
+
+    Port:
+      type: object
+      properties:
+        IP:
+          type: string
+        PrivatePort:
+          type: integer
+        PublicPort:
+          type: integer
+        Type:
+          type: string
+          enum: [tcp, udp]
+
+    SystemInfo:
+      type: object
+      properties:
+        Containers:
+          type: integer
+        Images:
+          type: integer
+        KernelVersion:
+          type: string
+        OperatingSystem:
+          type: string
+        Architecture:
+          type: string
+        MemTotal:
+          type: integer
+        CpuCfsPeriod:
+          type: boolean
+        CpuCfsQuota:
+          type: boolean
+        FerroCrateVersion:
+          type: string
+        AiFeaturesEnabled:
+          type: boolean

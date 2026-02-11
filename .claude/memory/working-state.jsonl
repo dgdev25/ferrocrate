@@ -1,0 +1,209 @@
+{"ts":1770820084880,"type":"command","cmd":"DIRNAME=$(dirname \"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md\"); if [ \"$(basename \"$DIRNAME\")\" = \"prd\" ]; then PARENT=$(dirname \"$DIRNAME\"); if [ \"$(basename \"$PARENT\")\" = \"docs\""}
+{"ts":1770820084973,"type":"command","cmd":"mkdir -p ~/.claude/commands/prd2build && node ~/.claude/commands/prd2build/scripts/copy-config.js ~/.claude/commands/prd2build/prd2build.config.json \"/media/lyle/datadisk/dev/ferrocrate/prd2build.conf"}
+{"ts":1770820117738,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/{specification,ddd,adr,sparc,implementation/{milestones,epics,tasks},testing,design/mockups/assets/{icons,images}}"}
+{"ts":1770820123125,"type":"command","cmd":"npx --yes @claude-flow/cli@latest init --no-color 2>/dev/null && npx --yes @claude-flow/cli@latest memory init --force --no-color 2>/dev/null || true"}
+{"ts":1770820134259,"type":"command","cmd":"npx @claude-flow/cli@3.0.0-alpha.170 memory store --namespace ferrocrate --key working_dir --value \"/media/lyle/datadisk/dev/ferrocrate\" 2>/dev/null || true"}
+{"ts":1770820241588,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/adr"}
+{"ts":1770820243477,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/"}
+{"ts":1770820253070,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/sparc"}
+{"ts":1770820254536,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/ddd"}
+{"ts":1770820255904,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/specification"}
+{"ts":1770820264251,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases"}
+{"ts":1770820359475,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-001-use-rust-as-primary-language.md","tool":"Write"}
+{"ts":1770820359505,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-002-cgroups-v2-only.md","tool":"Write"}
+{"ts":1770820440322,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-003-rootless-containers-by-default.md","tool":"Write"}
+{"ts":1770820440354,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-004-ebpf-for-networking.md","tool":"Write"}
+{"ts":1770820440383,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-005-blake3-for-content-hashing.md","tool":"Write"}
+{"ts":1770820457796,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Write"}
+{"ts":1770820491984,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-006-zstd-compression.md","tool":"Write"}
+{"ts":1770820492015,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Write"}
+{"ts":1770820492045,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-008-oci-compliance.md","tool":"Write"}
+{"ts":1770820532610,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/test-strategy.md","tool":"Write"}
+{"ts":1770820532650,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/container-lifecycle.md","tool":"Write"}
+{"ts":1770820556944,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/domain-model.json","tool":"Write"}
+{"ts":1770820556983,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/aggregates.md","tool":"Write"}
+{"ts":1770820581726,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-009-no-daemon-mode-default.md","tool":"Write"}
+{"ts":1770820581760,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-010-overlayfs-as-storage-driver.md","tool":"Write"}
+{"ts":1770820581794,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-011-claude-flow-as-subprocess.md","tool":"Write"}
+{"ts":1770820643083,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-012-docker-socket-compatibility.md","tool":"Write"}
+{"ts":1770820643113,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/INDEX.md","tool":"Write"}
+{"ts":1770820643142,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/decisions.json","tool":"Write"}
+{"ts":1770820655243,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/adr/"}
+{"ts":1770820712726,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/image-operations.md","tool":"Write"}
+{"ts":1770820712756,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/networking.md","tool":"Write"}
+{"ts":1770820713851,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/specification.md","tool":"Write"}
+{"ts":1770820713888,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/pseudocode.md","tool":"Write"}
+{"ts":1770820720419,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/value-objects.md","tool":"Write"}
+{"ts":1770820720458,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/domain-events.md","tool":"Write"}
+{"ts":1770820787817,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/security.md","tool":"Write"}
+{"ts":1770820787850,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/performance.md","tool":"Write"}
+{"ts":1770820821168,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/repositories.md","tool":"Write"}
+{"ts":1770820823439,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Write"}
+{"ts":1770820896411,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/services.md","tool":"Write"}
+{"ts":1770820906991,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/refinement.md","tool":"Write"}
+{"ts":1770820999683,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/context-map.md","tool":"Write"}
+{"ts":1770821002406,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/coverage-targets.md","tool":"Write"}
+{"ts":1770821002452,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/oci-compliance-tests.md","tool":"Write"}
+{"ts":1770821002488,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/testing/benchmark-definitions.md","tool":"Write"}
+{"ts":1770821012100,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/testing/"}
+{"ts":1770821020731,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/"}
+{"ts":1770821059773,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/completion.md","tool":"Write"}
+{"ts":1770821059806,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/INDEX.md","tool":"Write"}
+{"ts":1770821074912,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/sparc/ && echo \"---\" && wc -l /media/lyle/datadisk/dev/ferrocrate/docs/sparc/*.md"}
+{"ts":1770821182578,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/schemas.md","tool":"Write"}
+{"ts":1770821182611,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/README.md","tool":"Write"}
+{"ts":1770821193047,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/ddd/"}
+{"ts":1770821276791,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts"}
+{"ts":1770821277642,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/specification"}
+{"ts":1770821284628,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/design/mockups"}
+{"ts":1770821292931,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones /media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics"}
+{"ts":1770821441964,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/project.json","tool":"Write"}
+{"ts":1770821467135,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Write"}
+{"ts":1770821467168,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Write"}
+{"ts":1770821528645,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/requirements.json","tool":"Write"}
+{"ts":1770821628149,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M0-foundation.md","tool":"Write"}
+{"ts":1770821640596,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/design/mockups/mockup-cli-output.html","tool":"Write"}
+{"ts":1770821645278,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/user-stories.md","tool":"Write"}
+{"ts":1770821702555,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M1-data-access.md","tool":"Write"}
+{"ts":1770821721685,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/use-cases.md","tool":"Write"}
+{"ts":1770821809209,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/design/mockups/mockup-tui-dashboard.html","tool":"Write"}
+{"ts":1770821809243,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/design/mockups/mockup-ai-diagnostics.html","tool":"Write"}
+{"ts":1770821815688,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M2-api-layer.md","tool":"Write"}
+{"ts":1770821815724,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M3-integration.md","tool":"Write"}
+{"ts":1770821827879,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/design/mockups/ && wc -c /media/lyle/datadisk/dev/ferrocrate/docs/design/mockups/*.html"}
+{"ts":1770821846307,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/actors.md","tool":"Write"}
+{"ts":1770821934178,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/security-model.md","tool":"Write"}
+{"ts":1770822101514,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-01-runtime-core.md","tool":"Write"}
+{"ts":1770822101552,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-02-performance.md","tool":"Write"}
+{"ts":1770822101582,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-03-intelligence.md","tool":"Write"}
+{"ts":1770822101616,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-04-migration.md","tool":"Write"}
+{"ts":1770822101646,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-05-orchestration.md","tool":"Write"}
+{"ts":1770822114960,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/implementation/"}
+{"ts":1770822114963,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/"}
+{"ts":1770822114965,"type":"command","cmd":"wc -l /media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md /media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json"}
+{"ts":1770822114967,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/"}
+{"ts":1770822138196,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/specification/api-contracts.md","tool":"Write"}
+{"ts":1770822148983,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/specification/ && wc -l /media/lyle/datadisk/dev/ferrocrate/docs/specification/*"}
+{"ts":1770822309654,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs -type f \\( -name \"*.md\" -o -name \"*.json\" -o -name \"*.html\" \\) | wc -l"}
+{"ts":1770822309673,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/specification/ /media/lyle/datadisk/dev/ferrocrate/docs/ddd/ /media/lyle/datadisk/dev/ferrocrate/docs/adr/ 2>/dev/null | head -50"}
+{"ts":1770822358608,"type":"command","cmd":"mkdir -p /media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts"}
+{"ts":1770822358644,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts/openapi.yaml","tool":"Write"}
+{"ts":1770822429599,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts/docker-socket-compat.md","tool":"Write"}
+{"ts":1770822429642,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts/cli-interface.md","tool":"Write"}
+{"ts":1770822464215,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs -type f -name \"*.md\" -o -name \"*.json\" -o -name \"*.yaml\" -o -name \"*.yml\" -o -name \"*.html\" 2>/dev/null | sort"}
+{"ts":1770822464220,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/specification -type f 2>/dev/null | wc -l"}
+{"ts":1770822464224,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/adr -type f 2>/dev/null | wc -l"}
+{"ts":1770822464229,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/ddd -type f 2>/dev/null | wc -l"}
+{"ts":1770822464233,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/sparc -type f 2>/dev/null | wc -l"}
+{"ts":1770822464240,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/design/mockups -type f 2>/dev/null | wc -l"}
+{"ts":1770822464242,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/testing -type f 2>/dev/null | wc -l"}
+{"ts":1770822464242,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts -type f 2>/dev/null | wc -l"}
+{"ts":1770822464243,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs/implementation -type f 2>/dev/null | wc -l"}
+{"ts":1770822475367,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs -name \"INDEX.md\" 2>/dev/null"}
+{"ts":1770822477177,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate/docs -type f \\( -name \"*.md\" -o -name \"*.json\" -o -name \"*.yaml\" -o -name \"*.yml\" -o -name \"*.html\" \\) -exec wc -l {} \\; 2>/dev/null | sort -n"}
+{"ts":1770822477240,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/ddd/ 2>/dev/null"}
+{"ts":1770822477243,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/testing/ 2>/dev/null"}
+{"ts":1770822477244,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/implementation/ 2>/dev/null"}
+{"ts":1770822477244,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/specification/ 2>/dev/null"}
+{"ts":1770822494852,"type":"command","cmd":"python3 -c \"import json; json.load(open('/media/lyle/datadisk/dev/ferrocrate/docs/specification/project.json'))\" && echo \"project.json: VALID\" || echo \"project.json: INVALID\""}
+{"ts":1770822496546,"type":"command","cmd":"python3 -c \"import json; json.load(open('/media/lyle/datadisk/dev/ferrocrate/docs/specification/requirements.json'))\" && echo \"requirements.json: VALID\" || echo \"requirements.json: INVALID\""}
+{"ts":1770822498237,"type":"command","cmd":"python3 -c \"import json; json.load(open('/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json'))\" && echo \"bounded-contexts.json: VALID\" || echo \"bounded-contexts.json: INVALID\""}
+{"ts":1770822500049,"type":"command","cmd":"python3 -c \"import json; json.load(open('/media/lyle/datadisk/dev/ferrocrate/docs/ddd/domain-model.json'))\" && echo \"domain-model.json: VALID\" || echo \"domain-model.json: INVALID\""}
+{"ts":1770822501237,"type":"command","cmd":"python3 -c \"import json; json.load(open('/media/lyle/datadisk/dev/ferrocrate/docs/adr/decisions.json'))\" && echo \"decisions.json: VALID\" || echo \"decisions.json: INVALID\""}
+{"ts":1770822502710,"type":"command","cmd":"python3 -c \"import json; json.load(open('/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json'))\" && echo \"tasks.json: VALID\" || echo \"tasks.json: INVALID\""}
+{"ts":1770822506187,"type":"command","cmd":"python3 -c \"import yaml; yaml.safe_load(open('/media/lyle/datadisk/dev/ferrocrate/docs/design/api-contracts/openapi.yaml'))\" && echo \"openapi.yaml: VALID\" || echo \"openapi.yaml: INVALID\""}
+{"ts":1770822506240,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks/ 2>/dev/null"}
+{"ts":1770822515470,"type":"command","cmd":"ls -la /media/lyle/datadisk/dev/ferrocrate/docs/testing/test-cases/ 2>/dev/null"}
+{"ts":1770822584844,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/.verification-report.md","tool":"Write"}
+{"ts":1770822613790,"type":"command","cmd":"npx @claude-flow/cli@3.0.0-alpha.170 memory store --namespace ferrocrate --key \"docs_complete\" --value \"true\" 2>/dev/null || true"}
+{"ts":1770822615951,"type":"command","cmd":"echo \"=== FerroCrate Documentation Summary ===\" && echo \"\" && find /media/lyle/datadisk/dev/ferrocrate/docs -type f \\( -name \"*.md\" -o -name \"*.json\" -o -name \"*.html\" -o -name \"*.yaml\" \\) -exec wc -l"}
+{"ts":1770823267755,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Edit"}
+{"ts":1770823267788,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Edit"}
+{"ts":1770823267821,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Edit"}
+{"ts":1770823284797,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Edit"}
+{"ts":1770823321241,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770823321279,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770823341415,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/completion.md","tool":"Edit"}
+{"ts":1770823347070,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770823347110,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770823347161,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770823351194,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770823358921,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/completion.md","tool":"Edit"}
+{"ts":1770823508929,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770823508967,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770823509006,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770823509038,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770823566676,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770823566735,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-02-performance.md","tool":"Edit"}
+{"ts":1770823566775,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-02-performance.md","tool":"Edit"}
+{"ts":1770823566813,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-02-performance.md","tool":"Edit"}
+{"ts":1770823582293,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-01-runtime-core.md","tool":"Edit"}
+{"ts":1770823582328,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-02-performance.md","tool":"Edit"}
+{"ts":1770823582381,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-03-intelligence.md","tool":"Edit"}
+{"ts":1770823582437,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-04-migration.md","tool":"Edit"}
+{"ts":1770823582489,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/epics/EPIC-05-orchestration.md","tool":"Edit"}
+{"ts":1770823601264,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M1-data-access.md","tool":"Edit"}
+{"ts":1770823601308,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M2-api-layer.md","tool":"Edit"}
+{"ts":1770823601374,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M3-integration.md","tool":"Edit"}
+{"ts":1770823601436,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M2-api-layer.md","tool":"Edit"}
+{"ts":1770823677009,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/milestones/M0-foundation.md","tool":"Edit"}
+{"ts":1770823710050,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823710097,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823710140,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823710190,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823710234,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823717793,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823717844,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823717883,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823717930,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823724845,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/tasks.json","tool":"Edit"}
+{"ts":1770823724878,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/.verification-report.md","tool":"Edit"}
+{"ts":1770823748367,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/INDEX.md","tool":"Edit"}
+{"ts":1770823766932,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770824429501,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ai-consensus-report.md","tool":"Write"}
+{"ts":1770824933082,"type":"command","cmd":"find /media/lyle/datadisk/dev/ferrocrate -type f | head -100"}
+{"ts":1770825436890,"type":"command","cmd":"ls -1 /media/lyle/datadisk/repos/rUv/"}
+{"ts":1770825461061,"type":"command","cmd":"find /media/lyle/datadisk/repos/rUv -maxdepth 2 -type d -name \".*\" -prune -o -type d -print | head -20"}
+{"ts":1770825463754,"type":"command","cmd":"ls -la /media/lyle/datadisk/repos/rUv | grep -E \"claude-flow|ruvector|ruv-FANN|daa|agentic-flow|optimizer|QuDAG|tract|hnswlib|SAFLA|sublinear-time-solver|faiss|rayon\""}
+{"ts":1770825483055,"type":"command","cmd":"ls -1 /media/lyle/datadisk/repos/rUv/*/Cargo.toml 2>/dev/null | head -15"}
+{"ts":1770825485432,"type":"command","cmd":"find /media/lyle/datadisk/repos/rUv -maxdepth 2 -name \"package.json\" | head -10"}
+{"ts":1770825491125,"type":"command","cmd":"\nfor repo in ruv-FANN agentic-flow sublinear-time-solver SAFLA faiss; do\n  echo \"=== $repo ===\"\n  if [ -f \"/media/lyle/datadisk/repos/rUv/$repo/Cargo.toml\" ]; then echo \"  Rust (Cargo.toml)\"; fi\n  if "}
+{"ts":1770825494236,"type":"command","cmd":"\nls /media/lyle/datadisk/repos/rUv/faiss/ | head -20\n"}
+{"ts":1770826647657,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770826650312,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770826651368,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ddd/bounded-contexts.json","tool":"Edit"}
+{"ts":1770826652413,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/INDEX.md","tool":"Edit"}
+{"ts":1770826653381,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/INDEX.md","tool":"Edit"}
+{"ts":1770826654418,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/INDEX.md","tool":"Edit"}
+{"ts":1770826831949,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-004-ebpf-for-networking.md","tool":"Edit"}
+{"ts":1770826836713,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-004-ebpf-for-networking.md","tool":"Edit"}
+{"ts":1770826837454,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Edit"}
+{"ts":1770826839971,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Edit"}
+{"ts":1770826841798,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Edit"}
+{"ts":1770826847317,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Edit"}
+{"ts":1770826849164,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Edit"}
+{"ts":1770826854927,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-007-wasm-for-ai-inference.md","tool":"Edit"}
+{"ts":1770826855697,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-012-docker-socket-compatibility.md","tool":"Edit"}
+{"ts":1770826862430,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-012-docker-socket-compatibility.md","tool":"Edit"}
+{"ts":1770826867333,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-012-docker-socket-compatibility.md","tool":"Edit"}
+{"ts":1770826868804,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Edit"}
+{"ts":1770826869386,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/sparc/architecture.md","tool":"Edit"}
+{"ts":1770826870832,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md","tool":"Edit"}
+{"ts":1770826871594,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md","tool":"Edit"}
+{"ts":1770826872727,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md","tool":"Edit"}
+{"ts":1770826873803,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md","tool":"Edit"}
+{"ts":1770826874598,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md","tool":"Edit"}
+{"ts":1770826875513,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md","tool":"Edit"}
+{"ts":1770826881416,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770826881878,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770826882842,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/implementation/INDEX.md","tool":"Edit"}
+{"ts":1770826962236,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-013-networking-fallback-strategy.md","tool":"Write"}
+{"ts":1770826978662,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-014-crate-consolidation.md","tool":"Write"}
+{"ts":1770826998750,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-015-timeline-revision-and-mvp-scope.md","tool":"Write"}
+{"ts":1770827000653,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-008-oci-compliance.md","tool":"Edit"}
+{"ts":1770827000899,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-008-oci-compliance.md","tool":"Edit"}
+{"ts":1770827004436,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/ADR-008-oci-compliance.md","tool":"Edit"}
+{"ts":1770827009920,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/INDEX.md","tool":"Edit"}
+{"ts":1770827011391,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/INDEX.md","tool":"Edit"}
+{"ts":1770827017138,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/adr/INDEX.md","tool":"Edit"}
+{"ts":1770827184957,"type":"file_edit","file":"/media/lyle/datadisk/dev/ferrocrate/docs/ROADMAP.md","tool":"Write"}

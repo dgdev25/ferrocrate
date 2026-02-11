@@ -1,0 +1,729 @@
+{
+  "requirements": {
+    "metadata": {
+      "version": "1.0.0",
+      "last_updated": "2026-02-11",
+      "total_requirements": 67,
+      "priority_breakdown": {
+        "P0": 42,
+        "P1": 19,
+        "P2": 6
+      }
+    },
+    "container_lifecycle_management": {
+      "prefix": "CLM",
+      "requirements": [
+        {
+          "id": "CLM-01",
+          "title": "Run OCI-compliant container images",
+          "priority": "P0",
+          "description": "Execute container images that comply with OCI Image Specification v1.1 from any OCI-compliant registry",
+          "acceptance_criteria": "All images from Docker Hub, GHCR, ECR, GCR run without modification",
+          "technical_notes": "Must implement OCI Runtime Spec v1.2 for container execution. Use runc-compatible hooks.",
+          "verification": "Integration tests with images from 5+ registries"
+        },
+        {
+          "id": "CLM-02",
+          "title": "Container lifecycle operations",
+          "priority": "P0",
+          "description": "Support create, start, stop, restart, kill, remove operations on containers",
+          "acceptance_criteria": "CLI commands complete within 2x of runc performance",
+          "technical_notes": "Use cgroups v2 freezer for stop. Signal handling via pidfd.",
+          "verification": "Benchmarks vs runc for each operation"
+        },
+        {
+          "id": "CLM-03",
+          "title": "Container pause/unpause",
+          "priority": "P1",
+          "description": "Suspend and resume container processes using cgroup freezer",
+          "acceptance_criteria": "Processes suspended/resumed without termination",
+          "technical_notes": "cgroups v2 cgroup.freeze interface. Requires CAP_SYS_PTRACE for user ns.",
+          "verification": "State preservation tests across pause/resume cycles"
+        },
+        {
+          "id": "CLM-04",
+          "title": "Container exec",
+          "priority": "P0",
+          "description": "Execute commands inside running containers",
+          "acceptance_criteria": "Interactive and detached modes supported",
+          "technical_notes": "Use nsenter via setns() syscall. Allocate pty for interactive mode.",
+          "verification": "Interactive terminal tests, detached execution tests"
+        },
+        {
+          "id": "CLM-05",
+          "title": "Container logs",
+          "priority": "P0",
+          "description": "Stream and retrieve container stdout/stderr output",
+          "acceptance_criteria": "Real-time streaming and historical log access",
+          "technical_notes": "Log driver abstraction. Default to json-file driver. Support journald.",
+          "verification": "Log integrity tests, streaming latency tests"
+        },
+        {
+          "id": "CLM-06",
+          "title": "Container inspect",
+          "priority": "P0",
+          "description": "Retrieve detailed container metadata in JSON format",
+          "acceptance_criteria": "Docker-compatible JSON schema for tooling interoperability",
+          "technical_notes": "Schema must match Docker API v1.45 inspect response structure.",
+          "verification": "JSON schema validation against Docker schema"
+        },
+        {
+          "id": "CLM-07",
+          "title": "Health checks",
+          "priority": "P0",
+          "description": "Execute container health check commands at configurable intervals",
+          "acceptance_criteria": "Dockerfile HEALTHCHECK directive supported",
+          "technical_notes": "Parse HEALTHCHECK from image config. Support --health-cmd override.",
+          "verification": "Health state transition tests, timeout handling"
+        },
+        {
+          "id": "CLM-08",
+          "title": "Restart policies",
+          "priority": "P0",
+          "description": "Automatic container restart based on policy",
+          "acceptance_criteria": "Behavior matches Docker restart policy semantics (no, on-failure, always, unless-stopped)",
+          "technical_notes": "Implemented in ferro-mgr daemon. Persist restart state across daemon restarts.",
+          "verification": "Restart behavior tests for each policy type"
+        },
+        {
+          "id": "CLM-09",
+          "title": "Resource limits",
+          "priority": "P0",
+          "description": "Enforce memory, CPU, and PID limits on containers",
+          "acceptance_criteria": "cgroups v2 unified hierarchy enforcement",
+          "technical_notes": "Use cgroups v2 controllers: memory.max, cpu.max, pids.max. Support both absolute and relative limits.",
+          "verification": "OOM kill tests, CPU throttling tests, PID limit enforcement"
+        },
+        {
+          "id": "CLM-10",
+          "title": "Environment and labels",
+          "priority": "P0",
+          "description": "Pass environment variables, labels, and annotations to containers",
+          "acceptance_criteria": "Full Docker -e, --label, and OCI annotation support",
+          "technical_notes": "Environment via container process env. Labels stored in container state DB.",
+          "verification": "Environment injection tests, label query tests"
+        }
+      ]
+    },
+    "image_management": {
+      "prefix": "IMG",
+      "requirements": [
+        {
+          "id": "IMG-01",
+          "title": "Pull images from OCI registries",
+          "priority": "P0",
+          "description": "Download container images from OCI-compliant registries",
+          "acceptance_criteria": "Docker Hub, GHCR, ECR, GCR, Harbor, Quay.io tested",
+          "technical_notes": "Implement OCI Distribution Spec v1.1. Support bearer token and basic auth.",
+          "verification": "Pull tests from each supported registry"
+        },
+        {
+          "id": "IMG-02",
+          "title": "Push images to OCI registries",
+          "priority": "P0",
+          "description": "Upload container images to OCI-compliant registries",
+          "acceptance_criteria": "Authentication via docker config.json and credential helpers",
+          "technical_notes": "Chunked upload for large layers. Resume interrupted pushes.",
+          "verification": "Push/pull roundtrip tests"
+        },
+        {
+          "id": "IMG-03",
+          "title": "Content-addressable store",
+          "priority": "P0",
+          "description": "Store image layers with Blake3 content hashing for deduplication",
+          "acceptance_criteria": "File-level deduplication across layers; 40%+ storage reduction vs Docker",
+          "technical_notes": "Blake3 for speed (10GB/s). Store by content hash. Reference counting for GC.",
+          "verification": "Storage efficiency benchmarks against Docker"
+        },
+        {
+          "id": "IMG-04",
+          "title": "Zstd compression",
+          "priority": "P1",
+          "description": "Use Zstandard compression for image layers",
+          "acceptance_criteria": "2x+ compression speed vs gzip at comparable ratios",
+          "technical_notes": "zstd level 3 default. Support gzip for compatibility.",
+          "verification": "Compression benchmarks, decompression latency tests"
+        },
+        {
+          "id": "IMG-05",
+          "title": "Lazy image pulling",
+          "priority": "P1",
+          "description": "Start containers before full image download with on-demand file fetch",
+          "acceptance_criteria": "Container starts before full image download; manifest-only initial fetch",
+          "technical_notes": "FUSE filesystem for lazy loading. Track fetched ranges. Background full pull.",
+          "verification": "Startup time comparison: lazy vs full pull"
+        },
+        {
+          "id": "IMG-06",
+          "title": "Dockerfile build",
+          "priority": "P0",
+          "description": "Build container images from Dockerfile",
+          "acceptance_criteria": "95%+ Dockerfile directive compatibility (documented exceptions only)",
+          "technical_notes": "Support: FROM, RUN, CMD, LABEL, MAINTAINER, EXPOSE, ENV, ADD, COPY, ENTRYPOINT, VOLUME, USER, WORKDIR, ARG, ONBUILD, STOPSIGNAL, HEALTHCHECK, SHELL",
+          "verification": "Build comparison tests against Docker BuildKit"
+        },
+        {
+          "id": "IMG-07",
+          "title": "ferrofile.toml build",
+          "priority": "P1",
+          "description": "Build images from declarative TOML specification",
+          "acceptance_criteria": "Declarative build specification with static analysis capability",
+          "technical_notes": "TOML schema with type checking. Support import from Dockerfile.",
+          "verification": "Schema validation, conversion tests from Dockerfile"
+        },
+        {
+          "id": "IMG-08",
+          "title": "Multi-stage builds",
+          "priority": "P0",
+          "description": "Support multi-stage Dockerfile builds",
+          "acceptance_criteria": "COPY --from= and named stages supported",
+          "technical_notes": "Track stage dependencies. Enable selective stage rebuilding.",
+          "verification": "Multi-stage build tests with complex stage graphs"
+        },
+        {
+          "id": "IMG-09",
+          "title": "Build cache",
+          "priority": "P1",
+          "description": "File-level build cache for incremental builds",
+          "acceptance_criteria": "Single file change invalidates only that file, not entire COPY layer",
+          "technical_notes": "Blake3 hash per file. Cache metadata in SQLite. TTL-based eviction.",
+          "verification": "Incremental build benchmarks"
+        },
+        {
+          "id": "IMG-10",
+          "title": "Image management operations",
+          "priority": "P0",
+          "description": "Tag, list, remove, and prune images",
+          "acceptance_criteria": "Standard image management operations",
+          "technical_notes": "Reference counting. Safe deletion with running container check.",
+          "verification": "CRUD operation tests, prune efficiency tests"
+        },
+        {
+          "id": "IMG-11",
+          "title": "CVE scanning",
+          "priority": "P2",
+          "description": "Scan images for known vulnerabilities",
+          "acceptance_criteria": "Integration with vulnerability databases (NVD, OSV)",
+          "technical_notes": "Background sync of vulnerability DB. Offline scanning mode.",
+          "verification": "Detection rate tests against known vulnerable images"
+        },
+        {
+          "id": "IMG-12",
+          "title": "Vector-indexed deduplication",
+          "priority": "P2",
+          "description": "Use vector embeddings to identify similar (not identical) content",
+          "acceptance_criteria": "ruvector embeddings identify similar content for dedup",
+          "technical_notes": "Optional feature. Compute embeddings for file content. Similarity threshold configurable.",
+          "verification": "Deduplication rate tests on similar image sets"
+        }
+      ]
+    },
+    "networking": {
+      "prefix": "NET",
+      "requirements": [
+        {
+          "id": "NET-01",
+          "title": "Bridge networking",
+          "priority": "P0",
+          "description": "Default network mode with virtual bridge and port mapping",
+          "acceptance_criteria": "Containers communicate via virtual bridge; port mapping to host",
+          "technical_notes": "Create ferro0 bridge. veth pairs per container. NAT via eBPF or iptables.",
+          "verification": "Container-to-container communication tests, port mapping tests"
+        },
+        {
+          "id": "NET-02",
+          "title": "Host networking",
+          "priority": "P0",
+          "description": "Container shares host network namespace",
+          "acceptance_criteria": "Container shares host network namespace",
+          "technical_notes": "Skip network namespace creation. Direct host network access.",
+          "verification": "Network isolation tests, host network access tests"
+        },
+        {
+          "id": "NET-03",
+          "title": "None networking",
+          "priority": "P0",
+          "description": "Container has only loopback interface",
+          "acceptance_criteria": "Container has loopback only",
+          "technical_notes": "Create network namespace with only lo. No external connectivity.",
+          "verification": "Network isolation tests"
+        },
+        {
+          "id": "NET-04",
+          "title": "Container DNS",
+          "priority": "P0",
+          "description": "Container-to-container DNS resolution within a network",
+          "acceptance_criteria": "Containers resolve each other by name within a network",
+          "technical_notes": "Embedded DNS server. Container name -> IP mapping. Forward external DNS.",
+          "verification": "DNS resolution tests across container pairs"
+        },
+        {
+          "id": "NET-05",
+          "title": "Custom networks",
+          "priority": "P0",
+          "description": "Create and manage named networks with configurable subnets",
+          "acceptance_criteria": "Named networks with configurable subnets",
+          "technical_notes": "Network driver abstraction. Bridge driver default. Store network config in SQLite.",
+          "verification": "Network creation, deletion, isolation tests"
+        },
+        {
+          "id": "NET-06",
+          "title": "eBPF packet forwarding",
+          "priority": "P1",
+          "description": "Replace iptables with eBPF for packet forwarding",
+          "acceptance_criteria": "No iptables rules created; no conflicts with host firewall",
+          "technical_notes": "Use aya crate for eBPF. Fallback to iptables on kernel <5.10.",
+          "verification": "iptables rule verification, packet flow tests"
+        },
+        {
+          "id": "NET-07",
+          "title": "WireGuard overlay",
+          "priority": "P2",
+          "description": "Encrypted cross-host container networking",
+          "acceptance_criteria": "Cross-host container communication with transparent encryption",
+          "technical_notes": "WireGuard kernel module integration. Key management via ferro-mgr.",
+          "verification": "Cross-host communication tests, encryption verification"
+        },
+        {
+          "id": "NET-08",
+          "title": "Port mapping",
+          "priority": "P0",
+          "description": "Forward host ports to container ports",
+          "acceptance_criteria": "TCP and UDP port forwarding",
+          "technical_notes": "NAT rules via eBPF or iptables. Support port range mapping.",
+          "verification": "TCP and UDP port forwarding tests"
+        },
+        {
+          "id": "NET-09",
+          "title": "IPv6 support",
+          "priority": "P1",
+          "description": "Dual-stack IPv4/IPv6 networking",
+          "acceptance_criteria": "Dual-stack networking for containers",
+          "technical_notes": "Enable IPv6 on bridge. SLAAC or DHCPv6 for container addresses.",
+          "verification": "IPv6 connectivity tests, dual-stack tests"
+        },
+        {
+          "id": "NET-10",
+          "title": "Bandwidth limiting",
+          "priority": "P2",
+          "description": "Per-container network rate limiting",
+          "acceptance_criteria": "Per-container egress/ingress rate limiting via eBPF",
+          "technical_notes": "Token bucket in eBPF. Enforce at network interface level.",
+          "verification": "Bandwidth limit enforcement tests"
+        }
+      ]
+    },
+    "storage": {
+      "prefix": "STR",
+      "requirements": [
+        {
+          "id": "STR-01",
+          "title": "Named volumes",
+          "priority": "P0",
+          "description": "Persistent storage that survives container lifecycle",
+          "acceptance_criteria": "Persistent storage across container lifecycle",
+          "technical_notes": "Volume management in SQLite. Support local and NFS backends.",
+          "verification": "Volume persistence tests across container removal"
+        },
+        {
+          "id": "STR-02",
+          "title": "Bind mounts",
+          "priority": "P0",
+          "description": "Mount host directories into containers",
+          "acceptance_criteria": "Host directory mounted into container",
+          "technical_notes": "Resolve symlinks. Handle permission mapping in user namespaces.",
+          "verification": "Bind mount tests with various permissions"
+        },
+        {
+          "id": "STR-03",
+          "title": "tmpfs mounts",
+          "priority": "P0",
+          "description": "In-memory filesystem mounts",
+          "acceptance_criteria": "In-memory filesystem for sensitive or ephemeral data",
+          "technical_notes": "Mount with size limit. Support exec/noexec options.",
+          "verification": "tmpfs tests with size limits"
+        },
+        {
+          "id": "STR-04",
+          "title": "Volume drivers",
+          "priority": "P2",
+          "description": "Plugin system for external storage backends",
+          "acceptance_criteria": "Extensible storage backend support",
+          "technical_notes": "Plugin interface via gRPC. Example drivers: Ceph, S3, NFS.",
+          "verification": "Plugin interface tests"
+        },
+        {
+          "id": "STR-05",
+          "title": "OverlayFS storage driver",
+          "priority": "P0",
+          "description": "Default copy-on-write filesystem",
+          "acceptance_criteria": "Efficient copy-on-write layer management",
+          "technical_notes": "Multiple lower layers. Metacopy for metadata efficiency.",
+          "verification": "OverlayFS correctness tests, performance tests"
+        },
+        {
+          "id": "STR-06",
+          "title": "Read-only rootfs",
+          "priority": "P0",
+          "description": "Immutable container filesystem",
+          "acceptance_criteria": "Immutable container filesystem with writable overlay",
+          "technical_notes": "Mount root as read-only. Writable overlay on /var, /tmp, etc.",
+          "verification": "Write rejection tests to rootfs"
+        },
+        {
+          "id": "STR-07",
+          "title": "Volume backup/restore",
+          "priority": "P2",
+          "description": "Export and import volume data",
+          "acceptance_criteria": "CLI commands for volume data export/import",
+          "technical_notes": "Tar archive format. Incremental backup support.",
+          "verification": "Backup/restore integrity tests"
+        }
+      ]
+    },
+    "security": {
+      "prefix": "SEC",
+      "requirements": [
+        {
+          "id": "SEC-01",
+          "title": "Rootless by default",
+          "priority": "P0",
+          "description": "Run containers without root privileges",
+          "acceptance_criteria": "User namespace isolation without root privileges",
+          "technical_notes": "Map container root to unprivileged host user. /etc/subuid, /etc/subgid for ID mapping.",
+          "verification": "Rootless execution tests, privilege escalation tests"
+        },
+        {
+          "id": "SEC-02",
+          "title": "Seccomp profiles",
+          "priority": "P0",
+          "description": "Syscall filtering with default and custom profiles",
+          "acceptance_criteria": "Default profile blocks dangerous syscalls; custom profiles loadable",
+          "technical_notes": "Default profile based on Docker's. JSON format. libseccomp bindings.",
+          "verification": "Syscall blocking tests, custom profile loading tests"
+        },
+        {
+          "id": "SEC-03",
+          "title": "AppArmor/SELinux",
+          "priority": "P1",
+          "description": "Mandatory Access Control integration",
+          "acceptance_criteria": "MAC enforcement for container processes",
+          "technical_notes": "Generate per-container profiles. Support existing profiles.",
+          "verification": "MAC enforcement tests"
+        },
+        {
+          "id": "SEC-04",
+          "title": "Capability dropping",
+          "priority": "P0",
+          "description": "Drop all Linux capabilities by default",
+          "acceptance_criteria": "Only explicitly granted capabilities available to container",
+          "technical_notes": "Use caps crate. Drop all, add requested. Validate capability strings.",
+          "verification": "Capability enumeration tests"
+        },
+        {
+          "id": "SEC-05",
+          "title": "Read-only rootfs production default",
+          "priority": "P1",
+          "description": "Immutable filesystem in production mode",
+          "acceptance_criteria": "Configurable via flag; default differs for dev vs prod profiles",
+          "technical_notes": "Profile-based defaults. --profile=dev|prod|secure.",
+          "verification": "Profile application tests"
+        },
+        {
+          "id": "SEC-06",
+          "title": "No-new-privileges",
+          "priority": "P0",
+          "description": "Prevent privilege escalation via setuid/setgid",
+          "acceptance_criteria": "Processes cannot gain privileges via setuid/setgid",
+          "technical_notes": "Set PR_SET_NO_NEW_PRIVS via prctl. Always enabled.",
+          "verification": "Privilege escalation tests"
+        },
+        {
+          "id": "SEC-07",
+          "title": "Image signature verification",
+          "priority": "P1",
+          "description": "Verify Cosign/Sigstore signatures before running",
+          "acceptance_criteria": "Cosign/Sigstore signature verification before run",
+          "technical_notes": "Fetch signatures from OCI registry. Verify against public key or Fulcio.",
+          "verification": "Signature verification tests"
+        },
+        {
+          "id": "SEC-08",
+          "title": "eBPF security monitoring",
+          "priority": "P2",
+          "description": "Real-time syscall auditing and anomaly detection",
+          "acceptance_criteria": "Real-time syscall auditing and anomaly detection",
+          "technical_notes": "Tracepoint eBPF programs. Feed events to ferro-mind for analysis.",
+          "verification": "Audit log tests, anomaly detection tests"
+        },
+        {
+          "id": "SEC-09",
+          "title": "Encrypted container communication",
+          "priority": "P2",
+          "description": "Quantum-resistant encryption for container-to-container traffic",
+          "acceptance_criteria": "QuDAG-based quantum-resistant encryption option",
+          "technical_notes": "Optional feature. Integration with QuDAG library.",
+          "verification": "Encryption tests, key exchange tests"
+        },
+        {
+          "id": "SEC-10",
+          "title": "Audit logging",
+          "priority": "P1",
+          "description": "Structured logging for compliance requirements",
+          "acceptance_criteria": "Structured JSON logs for compliance requirements",
+          "technical_notes": "Log all container operations. Include user, timestamp, action, resource.",
+          "verification": "Audit log completeness tests"
+        }
+      ]
+    },
+    "compose": {
+      "prefix": "CMP",
+      "requirements": [
+        {
+          "id": "CMP-01",
+          "title": "docker-compose.yml compatibility",
+          "priority": "P0",
+          "description": "Parse and execute docker-compose version 3.x files",
+          "acceptance_criteria": "Version 3.x compose files parsed and executed",
+          "technical_notes": "Support services, networks, volumes, configs, secrets top-level keys.",
+          "verification": "Compose file parsing tests, execution tests"
+        },
+        {
+          "id": "CMP-02",
+          "title": "Native compose subcommand",
+          "priority": "P0",
+          "description": "Built-in compose support without external tool",
+          "acceptance_criteria": "No separate tool installation required",
+          "technical_notes": "ferrocrate compose up/down/ps/logs/... commands.",
+          "verification": "End-to-end compose workflow tests"
+        },
+        {
+          "id": "CMP-03",
+          "title": "Service dependency ordering",
+          "priority": "P0",
+          "description": "Start services in dependency order with health conditions",
+          "acceptance_criteria": "depends_on with condition support",
+          "technical_notes": "Topological sort for start order. Wait for health checks.",
+          "verification": "Dependency order tests"
+        },
+        {
+          "id": "CMP-04",
+          "title": "Service scaling",
+          "priority": "P1",
+          "description": "Scale service replicas dynamically",
+          "acceptance_criteria": "ferrocrate compose up --scale web=3",
+          "technical_notes": "Track replicas in state DB. Generate unique container names.",
+          "verification": "Scale up/down tests"
+        },
+        {
+          "id": "CMP-05",
+          "title": "Environment file support",
+          "priority": "P0",
+          "description": "Variable substitution from .env files",
+          "acceptance_criteria": "Variable substitution in compose files",
+          "technical_notes": "Parse .env file. Support ${VAR:-default} syntax.",
+          "verification": "Variable substitution tests"
+        },
+        {
+          "id": "CMP-06",
+          "title": "Profile support",
+          "priority": "P1",
+          "description": "Selective service activation via profiles",
+          "acceptance_criteria": "Named profiles to enable/disable services",
+          "technical_notes": "Filter services by profile. Default profile for untagged services.",
+          "verification": "Profile activation tests"
+        },
+        {
+          "id": "CMP-07",
+          "title": "Watch mode",
+          "priority": "P2",
+          "description": "Automatic rebuild on source file changes",
+          "acceptance_criteria": "Automatic container rebuild on source file changes",
+          "technical_notes": "inotify for file watching. Debounce rapid changes.",
+          "verification": "Watch mode trigger tests"
+        }
+      ]
+    },
+    "ai_intelligence": {
+      "prefix": "AI",
+      "requirements": [
+        {
+          "id": "AI-01",
+          "title": "WASM neural inference",
+          "priority": "P1",
+          "description": "Sub-millisecond resource prediction via WASM neural networks",
+          "acceptance_criteria": "Sub-1ms prediction latency; zero external API calls",
+          "technical_notes": "ruv-FANN compiled to WASM. wasmtime runtime. No network calls.",
+          "verification": "Latency benchmarks, offline operation tests"
+        },
+        {
+          "id": "AI-02",
+          "title": "Predictive resource allocation",
+          "priority": "P1",
+          "description": "Pre-allocate resources based on learned patterns",
+          "acceptance_criteria": "Memory/CPU pre-allocation based on learned usage patterns",
+          "technical_notes": "Train on container metrics. Predict next-hour resource needs.",
+          "verification": "Prediction accuracy tests"
+        },
+        {
+          "id": "AI-03",
+          "title": "Intelligent restart",
+          "priority": "P1",
+          "description": "Diagnose before restarting failed containers",
+          "acceptance_criteria": "Diagnostic analysis before restart; configuration adjustment if pattern detected",
+          "technical_notes": "Analyze exit code, logs, metrics. Recommend config changes.",
+          "verification": "Restart decision tests"
+        },
+        {
+          "id": "AI-04",
+          "title": "Cost-tiered AI routing",
+          "priority": "P1",
+          "description": "Route AI requests to optimal backend based on complexity",
+          "acceptance_criteria": "WASM (free) -> local LLM (cheap) -> Claude API (complex) decision hierarchy",
+          "technical_notes": "Complexity scoring. Threshold-based routing.",
+          "verification": "Routing decision tests"
+        },
+        {
+          "id": "AI-05",
+          "title": "claude-flow agent orchestration",
+          "priority": "P2",
+          "description": "Multi-agent swarm for complex debugging",
+          "acceptance_criteria": "Multi-agent swarm for complex debugging and remediation",
+          "technical_notes": "MCP protocol integration. Lazy-load Node.js subprocess.",
+          "verification": "Agent orchestration tests"
+        },
+        {
+          "id": "AI-06",
+          "title": "Anomaly detection",
+          "priority": "P1",
+          "description": "Flag resource usage anomalies with recommendations",
+          "acceptance_criteria": "Resource usage anomalies flagged with severity and recommendation",
+          "technical_notes": "Statistical anomaly detection. Severity scoring.",
+          "verification": "Anomaly detection accuracy tests"
+        },
+        {
+          "id": "AI-07",
+          "title": "Build cache optimization",
+          "priority": "P2",
+          "description": "Vector similarity for improved cache hits",
+          "acceptance_criteria": "Learned similarity for cache hit improvement beyond exact hash matching",
+          "technical_notes": "ruvector embeddings for file content. Similarity threshold.",
+          "verification": "Cache hit rate benchmarks"
+        },
+        {
+          "id": "AI-08",
+          "title": "Natural language queries",
+          "priority": "P2",
+          "description": "Ask questions about container state in natural language",
+          "acceptance_criteria": "\"ferrocrate ask 'why did my web server crash?'\" with claude-flow analysis",
+          "technical_notes": "Route to Claude API via claude-flow. Context from logs, metrics, state.",
+          "verification": "Query response quality tests"
+        },
+        {
+          "id": "AI-09",
+          "title": "Self-learning",
+          "priority": "P2",
+          "description": "Learn from operational patterns over time",
+          "acceptance_criteria": "ruvector stores and retrieves operational patterns; improves over time",
+          "technical_notes": "Pattern storage in ruvector. Retrieval for similar situations.",
+          "verification": "Learning improvement tests"
+        },
+        {
+          "id": "AI-10",
+          "title": "AI opt-out",
+          "priority": "P0",
+          "description": "Disable all AI features with single flag",
+          "acceptance_criteria": "All AI features disable via single flag; runtime operates identically to static runtime",
+          "technical_notes": "--no-ai flag. Compile-time feature flag for minimal binary.",
+          "verification": "AI-disabled operation tests"
+        },
+        {
+          "id": "AI-11",
+          "title": "AI explainability",
+          "priority": "P1",
+          "description": "Log reasoning for every AI action",
+          "acceptance_criteria": "Every AI action logged with reasoning; \"ferrocrate explain <decision-id>\" command",
+          "technical_notes": "Decision log with full context. Queryable by decision ID.",
+          "verification": "Explain command tests"
+        },
+        {
+          "id": "AI-12",
+          "title": "GPU/VRAM scheduling",
+          "priority": "P2",
+          "description": "Intelligent GPU resource allocation for AI workloads",
+          "acceptance_criteria": "Detect NVIDIA/AMD GPUs; intelligent VRAM allocation for LLM containers",
+          "technical_notes": "Query GPU info via NVML/ROCm. Track VRAM allocation per container.",
+          "verification": "GPU detection tests, VRAM allocation tests"
+        }
+      ]
+    },
+    "cli": {
+      "prefix": "CLI",
+      "requirements": [
+        {
+          "id": "CLI-01",
+          "title": "Docker-compatible CLI",
+          "priority": "P0",
+          "description": "Match Docker CLI syntax for common commands",
+          "acceptance_criteria": "ferrocrate run, build, pull, push, ps, logs, exec match Docker behavior",
+          "technical_notes": "Use clap for argument parsing. Mirror Docker flag names.",
+          "verification": "CLI compatibility tests against Docker"
+        },
+        {
+          "id": "CLI-02",
+          "title": "Docker socket compatibility",
+          "priority": "P1",
+          "description": "Emulate Docker API for tool compatibility",
+          "acceptance_criteria": "Emulate /var/run/docker.sock for tools expecting Docker API",
+          "technical_notes": "Unix socket server implementing Docker API v1.45+.",
+          "verification": "Tool compatibility tests (VS Code, Testcontainers)"
+        },
+        {
+          "id": "CLI-03",
+          "title": "Shell completion",
+          "priority": "P0",
+          "description": "Generate shell completion scripts",
+          "acceptance_criteria": "Tab completion for commands, images, container names",
+          "technical_notes": "clap complete subcommand. Generate for bash, zsh, fish.",
+          "verification": "Completion script generation tests"
+        },
+        {
+          "id": "CLI-04",
+          "title": "Human-friendly output",
+          "priority": "P0",
+          "description": "Colored output with progress indicators",
+          "acceptance_criteria": "Progress bars for pulls; table formatting for ps/images",
+          "technical_notes": "Use indicatif for progress. Use comfy-table for tables.",
+          "verification": "Output formatting tests"
+        },
+        {
+          "id": "CLI-05",
+          "title": "JSON output mode",
+          "priority": "P0",
+          "description": "Machine-parseable JSON output",
+          "acceptance_criteria": "Machine-parseable output for scripting",
+          "technical_notes": "--format json flag. Structured output for all commands.",
+          "verification": "JSON schema validation tests"
+        },
+        {
+          "id": "CLI-06",
+          "title": "Migration tool",
+          "priority": "P1",
+          "description": "Scan Docker and generate equivalent ferrocrate config",
+          "acceptance_criteria": "Scan Docker installation; generate ferrocrate-equivalent configuration",
+          "technical_notes": "Read Docker configs, volumes, networks. Generate migration report.",
+          "verification": "Migration completeness tests"
+        },
+        {
+          "id": "CLI-07",
+          "title": "Interactive TUI",
+          "priority": "P2",
+          "description": "Terminal UI for container management",
+          "acceptance_criteria": "Terminal UI for browsing containers, logs, resources",
+          "technical_notes": "Use ratatui for TUI. Real-time updates via tokio.",
+          "verification": "TUI functionality tests"
+        }
+      ]
+    }
+  }
+}

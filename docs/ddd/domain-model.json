@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FerroCrate Domain Model",
+  "version": "1.0.0",
+  "description": "Core domain entities, relationships, and invariants for FerroCrate container runtime",
+  "entities": {
+    "Container": {
+      "context": "ContainerRuntime",
+      "aggregate_root": true,
+      "rust_type": "struct Container",
+      "identity": {
+        "type": "ContainerId",
+        "generation": "UUID v4 or user-specified name"
+      },
+      "attributes": [
+        {"name": "id", "type": "ContainerId", "description": "Unique container identifier"},
+        {"name": "name", "type": "Option<ContainerName>", "description": "Human-readable name"},
+        {"name": "image_id", "type": "ImageId", "description": "Reference to image aggregate"},
+        {"name": "status", "type": "ContainerStatus", "description": "Current lifecycle state"},
+        {"name": "pid", "type": "Option<Pid>", "description": "Host process ID when running"},
+        {"name": "exit_code", "type": "Option<ExitCode>", "description": "Exit code when stopped"},
+        {"name": "created_at", "type": "Timestamp", "description": "Creation timestamp"},
+        {"name": "started_at", "type": "Option<Timestamp>", "description": "Start timestamp"},
+        {"name": "finished_at", "type": "Option<Timestamp>", "description": "Completion timestamp"}
+      ],
+      "owned_entities": [
+        "MountSet",
+        "PortMappings",
+        "EnvironmentVariables",
+        "Labels",
+        "HealthStatus"
+      ],
+      "invariants": [
+        "Container cannot transition from Stopped to Paused",
+        "ExitCode is only set when status is Exited",
+        "PID is only set when status is Running",
+        "Container cannot be killed if already stopped"
+      ]
+    },
+    "Image": {
+      "context": "ImageManagement",
+      "aggregate_root": true,
+      "rust_type": "struct Image",
+      "identity": {
+        "type": "ImageId",
+        "generation": "SHA-256 digest of manifest"
+      },
+      "attributes": [
+        {"name": "id", "type": "ImageId", "description": "Content-addressable image digest"},
+        {"name": "manifest", "type": "ImageManifest", "description": "OCI manifest"},
+        {"name": "config", "type": "ImageConfig", "description": "OCI config blob"},
+        {"name": "layers", "type": "Vec<LayerHash>", "description": "Ordered layer references"},
+        {"name": "tags", "type": "HashSet<ImageTag>", "description": "Assigned tags"},
+        {"name": "size", "type": "Bytes", "description": "Total uncompressed size"},
+        {"name": "created_at", "type": "Timestamp", "description": "Pull/build timestamp"}
+      ],
+      "invariants": [
+        "ImageId must match SHA-256 of manifest",
+        "Layer order must match manifest",
+        "Tags are unique per repository"
+      ]
+    },
+    "Volume": {
+      "context": "Storage",
+      "aggregate_root": true,
+      "rust_type": "struct Volume",
+      "identity": {
+        "type": "VolumeId",
+        "generation": "UUID v4 or user-specified name"
+      },
+      "attributes": [
+        {"name": "id", "type": "VolumeId", "description": "Unique volume identifier"},
+        {"name": "name", "type": "VolumeName", "description": "Human-readable name"},
+        {"name": "driver", "type": "VolumeDriver", "description": "Storage driver type"},
+        {"name": "mountpoint", "type": "PathBuf", "description": "Host path"},
+        {"name": "labels", "type": "HashMap<String, String>", "description": "Metadata labels"},
+        {"name": "options", "type": "VolumeOptions", "description": "Driver-specific options"},
+        {"name": "usage_bytes", "type": "Option<Bytes>", "description": "Current usage"}
+      ],
+      "invariants": [
+        "Volume persists beyond container lifecycle",
+        "Volume cannot be deleted while mounted",
+        "Driver must support requested options"
+      ]
+    },
+    "Network": {
+      "context": "Networking",
+      "aggregate_root": true,
+      "rust_type": "struct Network",
+      "identity": {
+        "type": "NetworkId",
+        "generation": "UUID v4 or user-specified name"
+      },
+      "attributes": [
+        {"name": "id", "type": "NetworkId", "description": "Unique network identifier"},
+        {"name": "name", "type": "NetworkName", "description": "Human-readable name"},
+        {"name": "driver", "type": "NetworkDriver", "description": "bridge/host/overlay/none"},
+        {"name": "subnet", "type": "IpCidr", "description": "IP address range"},
+        {"name": "gateway", "type": "IpAddress", "description": "Gateway IP"},
+        {"name": "endpoints", "type": "Vec<EndpointId>", "description": "Attached container endpoints"},
+        {"name": "labels", "type": "HashMap<String, String>", "description": "Metadata labels"}
+      ],
+      "invariants": [
+        "IP allocations within subnet are unique",
+        "Default bridge network cannot be deleted",
+        "Container can only be connected to a network once"
+      ]
+    },
+    "Pod": {
+      "context": "ComposeOrchestration",
+      "aggregate_root": true,
+      "rust_type": "struct Pod",
+      "identity": {
+        "type": "PodId",
+        "generation": "UUID v4 or project-service identifier"
+      },
+      "attributes": [
+        {"name": "id", "type": "PodId", "description": "Unique pod identifier"},
+        {"name": "name", "type": "PodName", "description": "Service name from compose"},
+        {"name": "project", "type": "ProjectName", "description": "Compose project"},
+        {"name": "containers", "type": "Vec<ContainerId>", "description": "Container replicas"},
+        {"name": "replicas", "type": "ReplicaCount", "description": "Desired replica count"},
+        {"name": "status", "type": "PodStatus", "description": "Aggregated health"}
+      ],
+      "invariants": [
+        "Replica count matches desired state",
+        "All containers share same image config",
+        "Pod deletion cascades to all containers"
+      ]
+    },
+    "Build": {
+      "context": "ImageManagement",
+      "aggregate_root": true,
+      "rust_type": "struct Build",
+      "identity": {
+        "type": "BuildId",
+        "generation": "UUID v4"
+      },
+      "attributes": [
+        {"name": "id", "type": "BuildId", "description": "Build session identifier"},
+        {"name": "context", "type": "BuildContext", "description": "Source directory"},
+        {"name": "dockerfile", "type": "DockerfilePath", "description": "Build instructions"},
+        {"name": "stages", "type": "Vec<BuildStage>", "description": "Multi-stage builds"},
+        {"name": "cache_hits", "type": "Vec<LayerHash>", "description": "Reused layers"},
+        {"name": "status", "type": "BuildStatus", "description": "Building/Completed/Failed"}
+      ],
+      "invariants": [
+        "Build is atomic - failure produces no partial image",
+        "Cache invalidation is file-granular",
+        "Stage dependencies must be resolvable"
+      ]
+    }
+  },
+  "value_objects": {
+    "ContainerId": {
+      "rust_type": "struct ContainerId(Uuid)",
+      "traits": ["Copy", "Clone", "Debug", "Display", "Hash", "Eq", "Serialize"],
+      "validation": "Valid UUID v4 or valid name format"
+    },
+    "ImageDigest": {
+      "rust_type": "struct ImageDigest(String)",
+      "traits": ["Clone", "Debug", "Display", "Hash", "Eq", "Serialize"],
+      "validation": "sha256:[64 hex chars]",
+      "note": "Content-addressable, immutable"
+    },
+    "LayerHash": {
+      "rust_type": "struct LayerHash(Blake3Hash)",
+      "traits": ["Copy", "Clone", "Debug", "Display", "Hash", "Eq", "Serialize"],
+      "validation": "64 hex chars (Blake3)",
+      "note": "Used for content-addressable storage"
+    },
+    "PortMapping": {
+      "rust_type": "struct PortMapping { host: SocketAddr, container: Port, protocol: Protocol }",
+      "traits": ["Clone", "Debug", "Eq", "Hash"],
+      "validation": "Valid port range 1-65535"
+    },
+    "ResourceLimits": {
+      "rust_type": "struct ResourceLimits { memory: Option<Bytes>, cpu_quota: Option<CpuQuota>, pids: Option<PidLimit> }",
+      "traits": ["Clone", "Debug", "Default"],
+      "validation": "Memory > 0, CPU quota > 0"
+    },
+    "SecurityContext": {
+      "rust_type": "struct SecurityContext { user: Option<UserId>, capabilities: Capabilities, seccomp: Option<SeccompProfile>, no_new_privileges: bool }",
+      "traits": ["Clone", "Debug"],
+      "validation": "Capability names are valid Linux caps"
+    },
+    "ContainerStatus": {
+      "rust_type": "enum ContainerStatus { Created, Running, Paused, Stopped(ExitCode), Exited(ExitCode), Dead }",
+      "traits": ["Copy", "Clone", "Debug", "Display", "Serialize"],
+      "transitions": {
+        "Created": ["Running", "Stopped"],
+        "Running": ["Paused", "Exited", "Dead"],
+        "Paused": ["Running", "Exited"],
+        "Stopped": ["Running"],
+        "Exited": [],
+        "Dead": []
+      }
+    },
+    "ExitCode": {
+      "rust_type": "struct ExitCode(i32)",
+      "traits": ["Copy", "Clone", "Debug", "Eq"],
+      "semantics": "0 = success, 1-255 = error, 137 = OOM killed"
+    },
+    "Pid": {
+      "rust_type": "struct Pid(i32)",
+      "traits": ["Copy", "Clone", "Debug", "Display", "Eq"],
+      "validation": "Positive integer"
+    },
+    "Timestamp": {
+      "rust_type": "DateTime<Utc> or Instant",
+      "traits": ["Copy", "Clone", "Debug", "Serialize"],
+      "note": "Use chrono for serialization, std::time for performance-critical"
+    }
+  },
+  "relationships": {
+    "Container_Image": {
+      "type": "reference",
+      "cardinality": "N:1",
+      "implementation": "Container.image_id: ImageId (not Arc<Image>)",
+      "rationale": "Avoids lifetime complexity; image lookup is cheap"
+    },
+    "Container_Volume": {
+      "type": "aggregation",
+      "cardinality": "N:M",
+      "implementation": "Container.mounts: Vec<Mount>, Mount.volume_id: Option<VolumeId>",
+      "rationale": "Container has mounts; mounts reference volumes"
+    },
+    "Container_Network": {
+      "type": "aggregation",
+      "cardinality": "N:M",
+      "implementation": "Endpoint connects Container and Network",
+      "rationale": "Many-to-many through Endpoint entity"
+    },
+    "Image_Layer": {
+      "type": "composition",
+      "cardinality": "1:N",
+      "implementation": "Image.layers: Vec<LayerHash>, layers stored separately",
+      "rationale": "Layers shared across images via content-addressing"
+    },
+    "Pod_Container": {
+      "type": "composition",
+      "cardinality": "1:N",
+      "implementation": "Pod.containers: Vec<ContainerId>",
+      "rationale": "Pod owns containers; deletion cascades"
+    },
+    "Build_Image": {
+      "type": "produces",
+      "cardinality": "1:1",
+      "implementation": "Build produces single Image on success",
+      "rationale": "Build result is an Image aggregate"
+    }
+  },
+  "domain_rules": {
+    "container_lifecycle": {
+      "rule": "Containers follow strict state machine",
+      "enforcement": "Type state pattern or runtime validation",
+      "rust_pattern": "impl Container { fn start(self) -> Result<RunningContainer, ContainerError> }"
+    },
+    "resource_quotas": {
+      "rule": "Sum of container resources cannot exceed host capacity",
+      "enforcement": "Validation before container creation",
+      "rust_pattern": "fn validate_limits(limits: &ResourceLimits, available: &Resources) -> Result<(), QuotaError>"
+    },
+    "image_immutability": {
+      "rule": "Images are immutable after creation",
+      "enforcement": "No mutable methods on Image struct",
+      "rust_pattern": "Image has no &mut self methods"
+    },
+    "volume_persistence": {
+      "rule": "Volume data outlives containers",
+      "enforcement": "Volume deletion requires explicit action",
+      "rust_pattern": "Volume::delete() returns error if in use"
+    },
+    "ai_advisory_only": {
+      "rule": "AI decisions never block critical path",
+      "enforcement": "AI returns Result<Recommendation, Error> - caller ignores if needed",
+      "rust_pattern": "async fn predict(&self) -> Option<Recommendation> // None is valid"
+    }
+  },
+  "rust_patterns": {
+    "type_state_for_lifecycle": {
+      "description": "Use type state pattern for compile-time lifecycle enforcement",
+      "example": "Container<Created> -> Container<Running> -> Container<Stopped>",
+      "note": "Optional - runtime state machine simpler for dynamic cases"
+    },
+    "newtype_pattern": {
+      "description": "All IDs and domain primitives are newtypes",
+      "benefits": ["Type safety", "Domain expressiveness", "Prevent primitive obsession"],
+      "examples": ["ContainerId(Uuid)", "ImageDigest(String)", "Bytes(u64)"]
+    },
+    "builder_pattern": {
+      "description": "Complex entity creation uses builders",
+      "examples": ["ContainerSpec::builder().image(..).cmd(..).build()?"],
+      "validation": "Builder::build() returns Result, enforcing invariants"
+    },
+    "trait_objects_for_extensibility": {
+      "description": "Storage drivers, network drivers as trait objects",
+      "examples": ["Box<dyn StorageDriver>", "Box<dyn NetworkDriver>"],
+      "rationale": "Plugin architecture without generic explosion"
+    }
+  }
+}

@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FerroCrate TUI Dashboard Mockup</title>
+    <style>
+        :root {
+            --bg-primary: #1a1b26;
+            --bg-secondary: #16171f;
+            --bg-tertiary: #13141a;
+            --bg-highlight: #292e42;
+            --text-primary: #a9b1d6;
+            --text-secondary: #787c99;
+            --text-muted: #565f89;
+            --accent-blue: #7aa2f7;
+            --accent-green: #9ece6a;
+            --accent-yellow: #e0af68;
+            --accent-red: #f7768e;
+            --accent-purple: #bb9af7;
+            --accent-cyan: #7dcfff;
+            --accent-orange: #ff9e64;
+            --border-color: #3b3f5c;
+            --border-active: #565f89;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+            padding: 1.5rem;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: var(--accent-blue);
+            font-size: 1.5rem;
+            text-align: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .tui-frame {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        /* Header Bar */
+        .tui-header {
+            background-color: var(--bg-tertiary);
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .tui-header-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .tui-logo {
+            color: var(--accent-blue);
+            font-weight: 700;
+            font-size: 0.95rem;
+            letter-spacing: 0.05em;
+        }
+
+        .tui-status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.2rem 0.5rem;
+            background-color: rgba(158, 206, 106, 0.15);
+            border-radius: 3px;
+            font-size: 0.75rem;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--accent-green);
+            animation: pulse-dot 2s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .tui-header-right {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .header-stat {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .header-stat-value {
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+
+        /* Main Content Grid */
+        .tui-main {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            grid-template-rows: auto 1fr auto;
+            gap: 1px;
+            background-color: var(--border-color);
+        }
+
+        .tui-panel {
+            background-color: var(--bg-secondary);
+            padding: 0.75rem;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 0.5rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+
+        .panel-title {
+            color: var(--accent-purple);
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .panel-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .panel-action {
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            padding: 0.15rem 0.4rem;
+            border: 1px solid var(--bg-tertiary);
+            border-radius: 3px;
+            cursor: pointer;
+        }
+
+        .panel-action:hover {
+            border-color: var(--border-active);
+            color: var(--text-primary);
+        }
+
+        /* Container List Panel */
+        .container-list {
+            grid-column: 1 / 2;
+            grid-row: 1 / 3;
+        }
+
+        .container-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+
+        .container-table th {
+            text-align: left;
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.4rem 0.5rem;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+
+        .container-table td {
+            padding: 0.5rem;
+            border-bottom: 1px solid var(--bg-tertiary);
+            vertical-align: middle;
+        }
+
+        .container-row {
+            cursor: pointer;
+        }
+
+        .container-row:hover {
+            background-color: var(--bg-highlight);
+        }
+
+        .container-row.selected {
+            background-color: rgba(122, 162, 247, 0.1);
+            border-left: 2px solid var(--accent-blue);
+        }
+
+        .container-name {
+            color: var(--accent-cyan);
+            font-weight: 500;
+        }
+
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+
+        .status-badge {
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.7rem;
+            font-weight: 500;
+        }
+
+        .status-badge.running {
+            background-color: rgba(158, 206, 106, 0.15);
+            color: var(--accent-green);
+        }
+
+        .status-badge.paused {
+            background-color: rgba(224, 175, 104, 0.15);
+            color: var(--accent-yellow);
+        }
+
+        .status-badge.exited {
+            background-color: rgba(247, 118, 158, 0.15);
+            color: var(--accent-red);
+        }
+
+        .status-badge.healthy {
+            background-color: rgba(158, 206, 106, 0.1);
+            color: var(--accent-green);
+            font-size: 0.65rem;
+        }
+
+        /* Resource Bars */
+        .resource-bar-cell {
+            min-width: 100px;
+        }
+
+        .resource-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .resource-track {
+            flex: 1;
+            height: 4px;
+            background-color: var(--bg-tertiary);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .resource-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.3s ease;
+        }
+
+        .resource-fill.low { background-color: var(--accent-green); }
+        .resource-fill.medium { background-color: var(--accent-yellow); }
+        .resource-fill.high { background-color: var(--accent-orange); }
+        .resource-fill.critical { background-color: var(--accent-red); }
+
+        .resource-value {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            min-width: 35px;
+            text-align: right;
+        }
+
+        /* Right Side Panels */
+        .resource-panel {
+            grid-column: 2 / 3;
+            grid-row: 1 / 2;
+        }
+
+        .resource-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+        }
+
+        .resource-card {
+            background-color: var(--bg-tertiary);
+            border-radius: 4px;
+            padding: 0.6rem;
+        }
+
+        .resource-card-title {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.4rem;
+        }
+
+        .resource-card-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--accent-cyan);
+        }
+
+        .resource-card-unit {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-left: 0.2rem;
+        }
+
+        .resource-large-bar {
+            margin-top: 0.5rem;
+        }
+
+        .large-track {
+            height: 6px;
+            background-color: var(--bg-secondary);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .large-fill {
+            height: 100%;
+            border-radius: 3px;
+        }
+
+        /* Log Panel */
+        .log-panel {
+            grid-column: 2 / 3;
+            grid-row: 2 / 3;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .log-content {
+            flex: 1;
+            background-color: var(--bg-tertiary);
+            border-radius: 4px;
+            padding: 0.5rem;
+            overflow-y: auto;
+            font-size: 0.75rem;
+            max-height: 200px;
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 0.5rem;
+            padding: 0.2rem 0;
+            line-height: 1.4;
+        }
+
+        .log-time {
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        .log-level {
+            flex-shrink: 0;
+            font-size: 0.65rem;
+            padding: 0 0.25rem;
+            border-radius: 2px;
+            font-weight: 600;
+        }
+
+        .log-level.info { background-color: rgba(122, 162, 247, 0.15); color: var(--accent-blue); }
+        .log-level.warn { background-color: rgba(224, 175, 104, 0.15); color: var(--accent-yellow); }
+        .log-level.error { background-color: rgba(247, 118, 158, 0.15); color: var(--accent-red); }
+        .log-level.debug { background-color: rgba(86, 95, 137, 0.15); color: var(--text-muted); }
+
+        .log-msg {
+            color: var(--text-secondary);
+        }
+
+        /* Footer / Keyboard Hints */
+        .tui-footer {
+            background-color: var(--bg-tertiary);
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .key-hints {
+            display: flex;
+            gap: 1.25rem;
+            font-size: 0.75rem;
+        }
+
+        .key-hint {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            color: var(--text-secondary);
+        }
+
+        .key {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 20px;
+            padding: 0.15rem 0.35rem;
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            font-size: 0.65rem;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .tui-footer-right {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .tui-main {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto auto auto;
+            }
+
+            .container-list {
+                grid-column: 1;
+                grid-row: 1 / 2;
+            }
+
+            .resource-panel {
+                grid-column: 1;
+                grid-row: 2 / 3;
+            }
+
+            .log-panel {
+                grid-column: 1;
+                grid-row: 3 / 4;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                padding: 0.5rem;
+            }
+
+            .resource-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .key-hints {
+                flex-wrap: wrap;
+                gap: 0.75rem;
+            }
+        }
+
+        /* Scrollbar styling */
+        .log-content::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-content::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+
+        .log-content::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+
+        .log-content::-webkit-scrollbar-thumb:hover {
+            background: var(--border-active);
+        }
+
+        /* Animation for live data */
+        .live-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            color: var(--accent-green);
+            font-size: 0.7rem;
+        }
+
+        .live-dot {
+            width: 5px;
+            height: 5px;
+            background-color: var(--accent-green);
+            border-radius: 50%;
+            animation: blink 1.5s infinite;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.2; }
+        }
+
+        /* Design specification section */
+        .spec-section {
+            margin-top: 2.5rem;
+            padding: 1.5rem;
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+        }
+
+        .spec-section h2 {
+            color: var(--accent-purple);
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .spec-section h3 {
+            color: var(--accent-cyan);
+            font-size: 0.9rem;
+            margin: 1rem 0 0.5rem;
+        }
+
+        .spec-section p, .spec-section li {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            line-height: 1.6;
+        }
+
+        .spec-section ul {
+            margin-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .spec-section li {
+            margin: 0.35rem 0;
+        }
+
+        .spec-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .spec-card {
+            background-color: var(--bg-tertiary);
+            border-radius: 4px;
+            padding: 1rem;
+        }
+
+        .spec-card h4 {
+            color: var(--accent-blue);
+            font-size: 0.85rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .spec-card table {
+            width: 100%;
+            font-size: 0.8rem;
+        }
+
+        .spec-card td {
+            padding: 0.3rem 0;
+            border-bottom: 1px solid var(--bg-secondary);
+        }
+
+        .spec-card td:first-child {
+            color: var(--text-muted);
+        }
+
+        .spec-card td:last-child {
+            color: var(--accent-cyan);
+            text-align: right;
+        }
+
+        .keyboard-diagram {
+            display: inline-flex;
+            gap: 0.25rem;
+            flex-wrap: wrap;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>+=============================================================================+</h1>
+    <h1>|               FERROCRATE TUI DASHBOARD - CLI-07 SPECIFICATION               |</h1>
+    <h1>+=============================================================================+</h1>
+
+    <!-- TUI Dashboard Mockup -->
+    <div class="tui-frame">
+        <!-- Header Bar -->
+        <div class="tui-header">
+            <div class="tui-header-left">
+                <span class="tui-logo">FERROCRATE</span>
+                <div class="tui-status-badge">
+                    <span class="status-dot"></span>
+                    <span>Daemon Active</span>
+                </div>
+                <div class="live-indicator">
+                    <span class="live-dot"></span>
+                    <span>LIVE</span>
+                </div>
+            </div>
+            <div class="tui-header-right">
+                <div class="header-stat">
+                    <span>Containers:</span>
+                    <span class="header-stat-value">8</span>
+                </div>
+                <div class="header-stat">
+                    <span>Images:</span>
+                    <span class="header-stat-value">24</span>
+                </div>
+                <div class="header-stat">
+                    <span>Uptime:</span>
+                    <span class="header-stat-value">4h 23m</span>
+                </div>
+                <div class="header-stat">
+                    <span>RAM:</span>
+                    <span class="header-stat-value">2.1 GB</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="tui-main">
+            <!-- Container List Panel -->
+            <div class="tui-panel container-list">
+                <div class="panel-header">
+                    <span class="panel-title">Containers</span>
+                    <div class="panel-actions">
+                        <span class="panel-action">[a] All</span>
+                        <span class="panel-action">[r] Running</span>
+                        <span class="panel-action">[s] Stopped</span>
+                    </div>
+                </div>
+
+                <table class="container-table">
+                    <thead>
+                        <tr>
+                            <th>NAME</th>
+                            <th>IMAGE</th>
+                            <th>STATUS</th>
+                            <th>CPU</th>
+                            <th>MEM</th>
+                            <th>PORTS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="container-row selected">
+                            <td><span class="container-name">web-server</span></td>
+                            <td>nginx:latest</td>
+                            <td>
+                                <span class="status-indicator">
+                                    <span class="status-badge running">Running</span>
+                                    <span class="status-badge healthy">healthy</span>
+                                </span>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill low" style="width: 2%;"></div>
+                                    </div>
+                                    <span class="resource-value">0.2%</span>
+                                </div>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill low" style="width: 5%;"></div>
+                                    </div>
+                                    <span class="resource-value">8 MB</span>
+                                </div>
+                            </td>
+                            <td>8080:80</td>
+                        </tr>
+                        <tr class="container-row">
+                            <td><span class="container-name">db-primary</span></td>
+                            <td>postgres:15</td>
+                            <td>
+                                <span class="status-indicator">
+                                    <span class="status-badge running">Running</span>
+                                    <span class="status-badge healthy">healthy</span>
+                                </span>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill medium" style="width: 15%;"></div>
+                                    </div>
+                                    <span class="resource-value">1.5%</span>
+                                </div>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill medium" style="width: 45%;"></div>
+                                    </div>
+                                    <span class="resource-value">184 MB</span>
+                                </div>
+                            </td>
+                            <td>5432</td>
+                        </tr>
+                        <tr class="container-row">
+                            <td><span class="container-name">cache-server</span></td>
+                            <td>redis:7-alpine</td>
+                            <td>
+                                <span class="status-indicator">
+                                    <span class="status-badge paused">Paused</span>
+                                </span>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill" style="width: 0%;"></div>
+                                    </div>
+                                    <span class="resource-value">0%</span>
+                                </div>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill low" style="width: 3%;"></div>
+                                    </div>
+                                    <span class="resource-value">4 MB</span>
+                                </div>
+                            </td>
+                            <td>6379</td>
+                        </tr>
+                        <tr class="container-row">
+                            <td><span class="container-name">api-gateway</span></td>
+                            <td>node:20-alpine</td>
+                            <td>
+                                <span class="status-indicator">
+                                    <span class="status-badge running">Running</span>
+                                </span>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill low" style="width: 8%;"></div>
+                                    </div>
+                                    <span class="resource-value">0.8%</span>
+                                </div>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill low" style="width: 12%;"></div>
+                                    </div>
+                                    <span class="resource-value">48 MB</span>
+                                </div>
+                            </td>
+                            <td>3000</td>
+                        </tr>
+                        <tr class="container-row">
+                            <td><span class="container-name">ml-inference</span></td>
+                            <td>pytorch:2.1-cuda</td>
+                            <td>
+                                <span class="status-indicator">
+                                    <span class="status-badge running">Running</span>
+                                </span>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill high" style="width: 78%;"></div>
+                                    </div>
+                                    <span class="resource-value">7.8%</span>
+                                </div>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill critical" style="width: 92%;"></div>
+                                    </div>
+                                    <span class="resource-value">1.8 GB</span>
+                                </div>
+                            </td>
+                            <td>8000</td>
+                        </tr>
+                        <tr class="container-row">
+                            <td><span class="container-name">backup-worker</span></td>
+                            <td>alpine:3.19</td>
+                            <td>
+                                <span class="status-indicator">
+                                    <span class="status-badge exited">Exited</span>
+                                </span>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill" style="width: 0%;"></div>
+                                    </div>
+                                    <span class="resource-value">-</span>
+                                </div>
+                            </td>
+                            <td class="resource-bar-cell">
+                                <div class="resource-bar">
+                                    <div class="resource-track">
+                                        <div class="resource-fill" style="width: 0%;"></div>
+                                    </div>
+                                    <span class="resource-value">-</span>
+                                </div>
+                            </td>
+                            <td>-</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Resource Panel -->
+            <div class="tui-panel resource-panel">
+                <div class="panel-header">
+                    <span class="panel-title">System Resources</span>
+                </div>
+                <div class="resource-grid">
+                    <div class="resource-card">
+                        <div class="resource-card-title">CPU Usage</div>
+                        <div class="resource-card-value">12.4<span class="resource-card-unit">%</span></div>
+                        <div class="resource-large-bar">
+                            <div class="large-track">
+                                <div class="large-fill" style="width: 12.4%; background-color: var(--accent-green);"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="resource-card">
+                        <div class="resource-card-title">Memory</div>
+                        <div class="resource-card-value">2.1<span class="resource-card-unit">GB</span></div>
+                        <div class="resource-large-bar">
+                            <div class="large-track">
+                                <div class="large-fill" style="width: 26%; background-color: var(--accent-green);"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="resource-card">
+                        <div class="resource-card-title">Disk I/O</div>
+                        <div class="resource-card-value">45<span class="resource-card-unit">MB/s</span></div>
+                        <div class="resource-large-bar">
+                            <div class="large-track">
+                                <div class="large-fill" style="width: 22%; background-color: var(--accent-cyan);"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="resource-card">
+                        <div class="resource-card-title">Network</div>
+                        <div class="resource-card-value">128<span class="resource-card-unit">KB/s</span></div>
+                        <div class="resource-large-bar">
+                            <div class="large-track">
+                                <div class="large-fill" style="width: 8%; background-color: var(--accent-cyan);"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Log Panel -->
+            <div class="tui-panel log-panel">
+                <div class="panel-header">
+                    <span class="panel-title">Logs: web-server</span>
+                    <div class="panel-actions">
+                        <span class="panel-action">[f] Follow</span>
+                        <span class="panel-action">[c] Clear</span>
+                    </div>
+                </div>
+                <div class="log-content">
+                    <div class="log-entry">
+                        <span class="log-time">14:32:01</span>
+                        <span class="log-level info">INFO</span>
+                        <span class="log-msg">Starting nginx server on port 80...</span>
+                    </div>
+                    <div class="log-entry">
+                        <span class="log-time">14:32:01</span>
+                        <span class="log-level info">INFO</span>
+                        <span class="log-msg">Configuration loaded from /etc/nginx/nginx.conf</span>
+                    </div>
+                    <div class="log-entry">
+                        <span class="log-time">14:32:01</span>
+                        <span class="log-level debug">DEBUG</span>
+                        <span class="log-msg">Worker processes: 4</span>
+                    </div>
+                    <div class="log-entry">
+                        <span class="log-time">14:33:15</span>
+                        <span class="log-level info">INFO</span>
+                        <span class="log-msg">GET / HTTP/1.1 200 615 "-" "curl/7.88.1"</span>
+                    </div>
+                    <div class="log-entry">
+                        <span class="log-time">14:35:42</span>
+                        <span class="log-level warn">WARN</span>
+                        <span class="log-msg">Slow request: 2.3s for /api/data</span>
+                    </div>
+                    <div class="log-entry">
+                        <span class="log-time">14:36:01</span>
+                        <span class="log-level info">INFO</span>
+                        <span class="log-msg">Health check passed</span>
+                    </div>
+                    <div class="log-entry">
+                        <span class="log-time">14:36:31</span>
+                        <span class="log-level info">INFO</span>
+                        <span class="log-msg">Health check passed</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="tui-footer">
+            <div class="key-hints">
+                <div class="key-hint">
+                    <span class="key">j</span><span class="key">k</span>
+                    <span>Navigate</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">Enter</span>
+                    <span>Inspect</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">l</span>
+                    <span>Logs</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">s</span>
+                    <span>Stop</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">r</span>
+                    <span>Restart</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">d</span>
+                    <span>Delete</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">?</span>
+                    <span>Help</span>
+                </div>
+                <div class="key-hint">
+                    <span class="key">q</span>
+                    <span>Quit</span>
+                </div>
+            </div>
+            <div class="tui-footer-right">
+                <span>web-server</span> | <span>fc7a2b8c3d1e</span> | <span>Up 4h 23m</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Design Specification -->
+    <div class="spec-section">
+        <h2>TUI Dashboard Design Specification</h2>
+        <p>
+            The FerroCrate TUI (Terminal User Interface) provides an interactive, keyboard-driven
+            dashboard for container management. This design follows CLI-07 requirements with
+            accessibility and terminal aesthetics as core principles.
+        </p>
+
+        <div class="spec-grid">
+            <!-- Layout -->
+            <div class="spec-card">
+                <h4>Layout Specifications</h4>
+                <table>
+                    <tr>
+                        <td>Min Terminal Width</td>
+                        <td>120 cols</td>
+                    </tr>
+                    <tr>
+                        <td>Min Terminal Height</td>
+                        <td>35 rows</td>
+                    </tr>
+                    <tr>
+                        <td>Optimal Width</td>
+                        <td>160+ cols</td>
+                    </tr>
+                    <tr>
+                        <td>Optimal Height</td>
+                        <td>50+ rows</td>
+                    </tr>
+                    <tr>
+                        <td>Refresh Rate</td>
+                        <td>1 second</td>
+                    </tr>
+                </table>
+            </div>
+
+            <!-- Typography -->
+            <div class="spec-card">
+                <h4>Typography</h4>
+                <table>
+                    <tr>
+                        <td>Primary Font</td>
+                        <td>JetBrains Mono</td>
+                    </tr>
+                    <tr>
+                        <td>Fallback Font</td>
+                        <td>Fira Code</td>
+                    </tr>
+                    <tr>
+                        <td>Base Size</td>
+                        <td>14px (scalable)</td>
+                    </tr>
+                    <tr>
+                        <td>Line Height</td>
+                        <td>1.5</td>
+                    </tr>
+                    <tr>
+                        <td>Tab Width</td>
+                        <td>4 spaces</td>
+                    </tr>
+                </table>
+            </div>
+
+            <!-- Color -->
+            <div class="spec-card">
+                <h4>Color Tokens</h4>
+                <table>
+                    <tr>
+                        <td>--bg-primary</td>
+                        <td>#1a1b26</td>
+                    </tr>
+                    <tr>
+                        <td>--text-primary</td>
+                        <td>#a9b1d6</td>
+                    </tr>
+                    <tr>
+                        <td>--accent-blue</td>
+                        <td>#7aa2f7</td>
+                    </tr>
+                    <tr>
+                        <td>--accent-green</td>
+                        <td>#9ece6a</td>
+                    </tr>
+                    <tr>
+                        <td>--accent-red</td>
+                        <td>#f7768e</td>
+                    </tr>
+                </table>
+            </div>
+
+            <!-- Accessibility -->
+            <div class="spec-card">
+                <h4>Accessibility (WCAG 2.1 AA)</h4>
+                <table>
+                    <tr>
+                        <td>Contrast Ratio</td>
+                        <td>&gt; 4.5:1</td>
+                    </tr>
+                    <tr>
+                        <td>Focus Indicator</td>
+                        <td>Visible border</td>
+                    </tr>
+                    <tr>
+                        <td>Keyboard Nav</td>
+                        <td>100% coverage</td>
+                    </tr>
+                    <tr>
+                        <td>Screen Reader</td>
+                        <td>ARIA labels</td>
+                    </tr>
+                    <tr>
+                        <td>Color + Symbol</td>
+                        <td>Required</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <h3>Keyboard Navigation</h3>
+        <p>Complete keyboard navigation is mandatory for the TUI dashboard.</p>
+
+        <table class="container-table" style="margin-top: 1rem;">
+            <thead>
+                <tr>
+                    <th>KEY</th>
+                    <th>ACTION</th>
+                    <th>CONTEXT</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><span class="key">j</span> / <span class="key">Down</span></td>
+                    <td>Move selection down</td>
+                    <td>Container list</td>
+                </tr>
+                <tr>
+                    <td><span class="key">k</span> / <span class="key">Up</span></td>
+                    <td>Move selection up</td>
+                    <td>Container list</td>
+                </tr>
+                <tr>
+                    <td><span class="key">Enter</span></td>
+                    <td>Inspect container details</td>
+                    <td>Container selected</td>
+                </tr>
+                <tr>
+                    <td><span class="key">l</span></td>
+                    <td>View container logs</td>
+                    <td>Container selected</td>
+                </tr>
+                <tr>
+                    <td><span class="key">s</span></td>
+                    <td>Stop container</td>
+                    <td>Running container</td>
+                </tr>
+                <tr>
+                    <td><span class="key">S</span> (Shift+s)</td>
+                    <td>Start container</td>
+                    <td>Stopped container</td>
+                </tr>
+                <tr>
+                    <td><span class="key">r</span></td>
+                    <td>Restart container</td>
+                    <td>Running container</td>
+                </tr>
+                <tr>
+                    <td><span class="key">p</span></td>
+                    <td>Pause/Unpause container</td>
+                    <td>Any container</td>
+                </tr>
+                <tr>
+                    <td><span class="key">d</span></td>
+                    <td>Delete container (with confirmation)</td>
+                    <td>Stopped container</td>
+                </tr>
+                <tr>
+                    <td><span class="key">e</span></td>
+                    <td>Exec into container</td>
+                    <td>Running container</td>
+                </tr>
+                <tr>
+                    <td><span class="key">a</span></td>
+                    <td>Show all containers</td>
+                    <td>Filter toggle</td>
+                </tr>
+                <tr>
+                    <td><span class="key">R</span></td>
+                    <td>Show running only</td>
+                    <td>Filter toggle</td>
+                </tr>
+                <tr>
+                    <td><span class="key">/</span></td>
+                    <td>Search containers</td>
+                    <td>Global</td>
+                </tr>
+                <tr>
+                    <td><span class="key">?</span></td>
+                    <td>Show help overlay</td>
+                    <td>Global</td>
+                </tr>
+                <tr>
+                    <td><span class="key">q</span></td>
+                    <td>Quit TUI</td>
+                    <td>Global</td>
+                </tr>
+                <tr>
+                    <td><span class="key">Esc</span></td>
+                    <td>Close modal / Cancel</td>
+                    <td>Modal open</td>
+                </tr>
+                <tr>
+                    <td><span class="key">Tab</span></td>
+                    <td>Switch panel focus</td>
+                    <td>Global</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Responsive Behavior</h3>
+        <p>The TUI adapts to terminal size changes:</p>
+        <ul>
+            <li><strong>Full Width (&gt;140 cols):</strong> Side-by-side layout with container list, resource panel, and log panel</li>
+            <li><strong>Medium Width (100-140 cols):</strong> Compact resource cards, truncated container names</li>
+            <li><strong>Narrow Width (&lt;100 cols):</strong> Stacked layout, hide optional columns (ports, resource bars)</li>
+            <li><strong>Minimum Size Alert:</strong> Display warning if terminal is below minimum size with resize instructions</li>
+        </ul>
+
+        <h3>Terminal Size Warning</h3>
+        <p>When terminal is below minimum size:</p>
+
+        <div class="tui-frame" style="max-width: 500px; margin-top: 1rem;">
+            <div class="tui-panel" style="text-align: center; padding: 2rem;">
+                <div style="color: var(--accent-yellow); font-size: 1.1rem; margin-bottom: 1rem;">
+                    [!] Terminal Too Small
+                </div>
+                <div style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
+                    Current: 95x30 | Required: 120x35
+                </div>
+                <div style="color: var(--text-muted); font-size: 0.8rem;">
+                    Please resize your terminal window or use non-TUI mode:
+                    <br><br>
+                    <code style="color: var(--accent-cyan);">ferrocrate ps --no-tui</code>
+                </div>
+            </div>
+        </div>
+
+        <h3>Screen Reader Support</h3>
+        <p>For accessibility, the TUI provides screen reader announcements:</p>
+        <ul>
+            <li>Container list updates announced as "Container list updated, X containers"</li>
+            <li>Selection changes announced with container name and status</li>
+            <li>Resource usage alerts announced with severity level</li>
+            <li>All status indicators have text alternatives (not just color)</li>
+        </ul>
+    </div>
+
+    <footer style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border-color); text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+        <p>FerroCrate TUI Dashboard Design Specification v1.0</p>
+        <p style="margin-top: 0.5rem;">CLI-07 Requirement | WCAG 2.1 AA Compliant | Generated: 2026-02-11</p>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,492 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": "2026-02-11",
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Implement ferro-exec crate skeleton",
+      "description": "Create the core ferro-exec crate with module structure for namespaces, cgroups, and process management. Include error types and base traits.",
+      "priority": "P0",
+      "milestone": "Phase 1",
+      "epic": "EPIC-01",
+      "effort": "3 days",
+      "storyPoints": 5,
+      "dependsOn": [],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Cargo.toml created with all dependencies",
+        "Module structure: src/{lib.rs, namespace.rs, cgroup.rs, process.rs, error.rs}",
+        "cargo build succeeds",
+        "cargo test passes with placeholder tests"
+      ],
+      "relatedRequirements": ["CLM-01", "CLM-02", "COMPAT-07"],
+      "relatedADRs": ["ADR-001", "ADR-002"]
+    },
+    {
+      "id": "TASK-002",
+      "title": "Implement Linux namespace management",
+      "description": "Create, enter, and manage Linux namespaces (pid, net, mnt, ipc, uts, user) for container isolation. Support namespace cloning and setns operations.",
+      "priority": "P0",
+      "milestone": "Phase 1",
+      "epic": "EPIC-01",
+      "effort": "5 days",
+      "storyPoints": 8,
+      "dependsOn": ["TASK-001"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Unit tests for each namespace type",
+        "Integration test: create isolated process",
+        "Benchmark: namespace creation <1ms",
+        "Document unsafe block safety rationale"
+      ],
+      "relatedRequirements": ["CLM-01", "CLM-02", "SEC-01"],
+      "relatedADRs": ["ADR-001", "ADR-003"]
+    },
+    {
+      "id": "TASK-003",
+      "title": "Implement cgroups v2 resource management",
+      "description": "Implement unified cgroups v2 hierarchy for CPU, memory, IO, and PIDs limiting. Support cgroup creation, delegation, and cleanup.",
+      "priority": "P0",
+      "milestone": "Phase 1",
+      "epic": "EPIC-01",
+      "effort": "5 days",
+      "storyPoints": 8,
+      "dependsOn": ["TASK-001"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "CPU limit enforcement verified with stress test",
+        "Memory limit triggers OOM kill at threshold",
+        "PIDs limit prevents fork bombs",
+        "cgroup cleanup on container removal"
+      ],
+      "relatedRequirements": ["CLM-09", "SEC-01", "COMPAT-07"],
+      "relatedADRs": ["ADR-002"]
+    },
+    {
+      "id": "TASK-004",
+      "title": "Implement rootless container support",
+      "description": "Implement user namespace mapping with subordinate UID/GID ranges. Configure unprivileged cgroup delegation via systemd user session.",
+      "priority": "P0",
+      "milestone": "Phase 1",
+      "epic": "EPIC-01",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-002", "TASK-003"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Container runs as non-root user",
+        "UID mapping: container 0 -> host 100000",
+        "cgroup delegation works without root",
+        "Security: no privilege escalation possible"
+      ],
+      "relatedRequirements": ["SEC-01", "SEC-04", "SEC-06"],
+      "relatedADRs": ["ADR-003"]
+    },
+    {
+      "id": "TASK-005",
+      "title": "Implement OCI Runtime Spec compliance",
+      "description": "Parse OCI config.json and create containers according to Runtime Spec v1.2. Support process, root, linux, and hooks sections.",
+      "priority": "P0",
+      "milestone": "Phase 1",
+      "epic": "EPIC-01",
+      "effort": "5 days",
+      "storyPoints": 8,
+      "dependsOn": ["TASK-002", "TASK-003", "TASK-004"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "OCI runtime-validator passes",
+        "runc-generated bundles execute correctly",
+        "All OCI hooks supported",
+        "Spec-compliant error messages"
+      ],
+      "relatedRequirements": ["CLM-01", "COMPAT-02"],
+      "relatedADRs": ["ADR-008"]
+    },
+    {
+      "id": "TASK-006",
+      "title": "Implement container lifecycle operations",
+      "description": "Implement create, start, stop, kill, delete container operations. Handle process signals and graceful shutdown with timeout.",
+      "priority": "P0",
+      "milestone": "Phase 1",
+      "epic": "EPIC-01",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-005"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Container create/start <100ms cold",
+        "Graceful stop with SIGTERM timeout",
+        "Force kill with SIGKILL",
+        "State persistence across CLI invocations"
+      ],
+      "relatedRequirements": ["CLM-02", "CLM-03", "CLM-08"],
+      "relatedADRs": ["ADR-009"]
+    },
+    {
+      "id": "TASK-007",
+      "title": "Implement ferro-store crate skeleton",
+      "description": "Create the image and storage management crate with content-addressable store interface, layer management, and blob storage.",
+      "priority": "P0",
+      "milestone": "Phase 2",
+      "epic": "EPIC-02",
+      "effort": "3 days",
+      "storyPoints": 5,
+      "dependsOn": ["TASK-001"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Cargo.toml with oci-client, blake3, zstd deps",
+        "Module structure: src/{lib.rs, store.rs, layer.rs, blob.rs}",
+        "Trait definitions for Store, Layer, Blob",
+        "cargo test passes"
+      ],
+      "relatedRequirements": ["IMG-03", "IMG-10"],
+      "relatedADRs": ["ADR-005", "ADR-006"]
+    },
+    {
+      "id": "TASK-008",
+      "title": "Implement Blake3 content-addressable storage",
+      "description": "Implement content-addressable blob storage using Blake3 for fast deduplication. Store files keyed by hash with SHA-256 mapping for OCI compatibility.",
+      "priority": "P0",
+      "milestone": "Phase 2",
+      "epic": "EPIC-02",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-007"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Blake3 hash computation >5GB/s",
+        "File-level deduplication across layers",
+        "SHA-256 computed for OCI digest",
+        "40%+ storage reduction vs Docker"
+      ],
+      "relatedRequirements": ["IMG-03", "PERF-02"],
+      "relatedADRs": ["ADR-005"]
+    },
+    {
+      "id": "TASK-009",
+      "title": "Implement OCI registry client",
+      "description": "Implement OCI Distribution Spec v1.1 client for pull/push operations. Support Docker Hub, GHCR, ECR, GCR with authentication.",
+      "priority": "P0",
+      "milestone": "Phase 2",
+      "epic": "EPIC-02",
+      "effort": "5 days",
+      "storyPoints": 8,
+      "dependsOn": ["TASK-007", "TASK-008"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Pull from Docker Hub succeeds",
+        "Pull from GHCR with auth succeeds",
+        "Push to local registry succeeds",
+        ">500 MB/s pull throughput on 1Gbps"
+      ],
+      "relatedRequirements": ["IMG-01", "IMG-02", "COMPAT-03"],
+      "relatedADRs": ["ADR-008"]
+    },
+    {
+      "id": "TASK-010",
+      "title": "Implement OverlayFS storage driver",
+      "description": "Implement OverlayFS layer stacking for container rootfs. Support multiple lower layers, whiteout handling, and rootless operation (kernel 5.11+).",
+      "priority": "P0",
+      "milestone": "Phase 2",
+      "epic": "EPIC-02",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-007"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Overlay mount succeeds with multiple layers",
+        "Whiteout files correctly hide lower content",
+        "Read-only rootfs mode supported",
+        "Rootless overlay works (5.11+)"
+      ],
+      "relatedRequirements": ["STR-05", "STR-06", "IMG-03"],
+      "relatedADRs": ["ADR-010"]
+    },
+    {
+      "id": "TASK-011",
+      "title": "Implement image build from Dockerfile",
+      "description": "Parse Dockerfile and execute build steps. Support 95%+ directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, etc.) with layer caching.",
+      "priority": "P0",
+      "milestone": "Phase 2",
+      "epic": "EPIC-02",
+      "effort": "6 days",
+      "storyPoints": 10,
+      "dependsOn": ["TASK-008", "TASK-009", "TASK-010"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Parse all standard Dockerfile directives",
+        "Build multi-stage Dockerfiles",
+        "Layer cache invalidation correct",
+        "Build within 15% of BuildKit performance"
+      ],
+      "relatedRequirements": ["IMG-06", "IMG-08", "IMG-09", "COMPAT-06"],
+      "relatedADRs": ["ADR-008"]
+    },
+    {
+      "id": "TASK-012",
+      "title": "Implement ferro-net crate skeleton",
+      "description": "Create the networking crate with eBPF program loading, network namespace management, and DNS resolution interfaces.",
+      "priority": "P0",
+      "milestone": "Phase 4",
+      "epic": "EPIC-05",
+      "effort": "3 days",
+      "storyPoints": 5,
+      "dependsOn": ["TASK-002"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Cargo.toml with aya, smol deps",
+        "eBPF program skeleton",
+        "Network namespace utilities",
+        "cargo test passes"
+      ],
+      "relatedRequirements": ["NET-01", "NET-06"],
+      "relatedADRs": ["ADR-004"]
+    },
+    {
+      "id": "TASK-013",
+      "title": "Implement eBPF bridge networking",
+      "description": "Replace iptables with eBPF programs for container networking. Implement bridge mode with container-to-container communication.",
+      "priority": "P0",
+      "milestone": "Phase 4",
+      "epic": "EPIC-05",
+      "effort": "6 days",
+      "storyPoints": 10,
+      "dependsOn": ["TASK-012"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "No iptables rules created",
+        "Container-to-container connectivity",
+        "O(1) packet forwarding",
+        "No conflicts with host firewall"
+      ],
+      "relatedRequirements": ["NET-01", "NET-06"],
+      "relatedADRs": ["ADR-004"]
+    },
+    {
+      "id": "TASK-014",
+      "title": "Implement port forwarding and DNS",
+      "description": "Implement eBPF-based port forwarding (host:container) and embedded DNS server for container name resolution.",
+      "priority": "P0",
+      "milestone": "Phase 4",
+      "epic": "EPIC-05",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-013"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Port mapping works for TCP and UDP",
+        "Container DNS resolves container names",
+        "Host networking mode supported",
+        "None networking mode supported"
+      ],
+      "relatedRequirements": ["NET-02", "NET-03", "NET-04", "NET-08"],
+      "relatedADRs": ["ADR-004"]
+    },
+    {
+      "id": "TASK-015",
+      "title": "Implement Docker API compatibility layer",
+      "description": "Implement HTTP API server with Docker v1.45+ endpoint compatibility. Cover containers, images, networks, volumes, and system endpoints.",
+      "priority": "P0",
+      "milestone": "Phase 6",
+      "epic": "EPIC-04",
+      "effort": "6 days",
+      "storyPoints": 10,
+      "dependsOn": ["TASK-006", "TASK-011", "TASK-014"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "95% endpoint coverage",
+        "VS Code Dev Containers works",
+        "Testcontainers works",
+        "Document unsupported endpoints"
+      ],
+      "relatedRequirements": ["CLI-02", "COMPAT-04"],
+      "relatedADRs": ["ADR-012"]
+    },
+    {
+      "id": "TASK-016",
+      "title": "Implement ferro-mind crate skeleton",
+      "description": "Create the AI intelligence crate with WASM runtime integration, inference engine interface, and pattern storage.",
+      "priority": "P1",
+      "milestone": "Phase 5",
+      "epic": "EPIC-03",
+      "effort": "3 days",
+      "storyPoints": 5,
+      "dependsOn": [],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Cargo.toml with wasmtime dep",
+        "WASM module loading works",
+        "Inference trait defined",
+        "cargo test passes"
+      ],
+      "relatedRequirements": ["AI-01", "AI-10"],
+      "relatedADRs": ["ADR-007"]
+    },
+    {
+      "id": "TASK-017",
+      "title": "Implement WASM resource prediction",
+      "description": "Implement WASM neural network for predicting container memory and CPU needs based on historical patterns. Sub-1ms inference.",
+      "priority": "P1",
+      "milestone": "Phase 5",
+      "epic": "EPIC-03",
+      "effort": "5 days",
+      "storyPoints": 8,
+      "dependsOn": ["TASK-016"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Inference latency <1ms",
+        "Prediction accuracy >80%",
+        "No external API calls",
+        "Offline operation verified"
+      ],
+      "relatedRequirements": ["AI-01", "AI-02", "PERF-08"],
+      "relatedADRs": ["ADR-007"]
+    },
+    {
+      "id": "TASK-018",
+      "title": "Implement anomaly detection",
+      "description": "Implement real-time container anomaly detection for resource usage, network connections, and syscall patterns. Alert with severity and recommendations.",
+      "priority": "P1",
+      "milestone": "Phase 5",
+      "epic": "EPIC-03",
+      "effort": "5 days",
+      "storyPoints": 8,
+      "dependsOn": ["TASK-016", "TASK-017"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Anomalies detected within 5 seconds",
+        "Severity classification accurate",
+        "Recommendations actionable",
+        "eBPF-based syscall monitoring"
+      ],
+      "relatedRequirements": ["AI-06", "SEC-08"],
+      "relatedADRs": ["ADR-007", "ADR-004"]
+    },
+    {
+      "id": "TASK-019",
+      "title": "Implement intelligent container restart",
+      "description": "Implement diagnostic analysis before container restart. Adjust configuration if pattern detected (OOM, resource exhaustion).",
+      "priority": "P1",
+      "milestone": "Phase 5",
+      "epic": "EPIC-03",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-017", "TASK-018"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Diagnosis before restart",
+        "Auto-adjust resource limits",
+        "Explain restart decision",
+        "Fall back to simple restart if diagnosis fails"
+      ],
+      "relatedRequirements": ["AI-03", "CLM-08"],
+      "relatedADRs": ["ADR-007"]
+    },
+    {
+      "id": "TASK-020",
+      "title": "Implement claude-flow integration",
+      "description": "Integrate claude-flow via MCP subprocess for complex multi-agent diagnostics and natural language queries. Lazy load Node.js.",
+      "priority": "P2",
+      "milestone": "Phase 5",
+      "epic": "EPIC-03",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-016"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Node.js spawned on demand only",
+        "MCP protocol over stdio works",
+        "Natural language queries answered",
+        "Graceful degradation without Node.js"
+      ],
+      "relatedRequirements": ["AI-05", "AI-08", "AI-10"],
+      "relatedADRs": ["ADR-011"]
+    },
+    {
+      "id": "TASK-021",
+      "title": "Implement ferro-compose crate",
+      "description": "Implement docker-compose.yml v3.x parser and executor. Support service dependencies, environment files, profiles, and scaling.",
+      "priority": "P0",
+      "milestone": "Phase 3",
+      "epic": "EPIC-05",
+      "effort": "6 days",
+      "storyPoints": 10,
+      "dependsOn": ["TASK-006", "TASK-011", "TASK-014"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Parse docker-compose.yml v3.x",
+        "depends_on with condition support",
+        "Environment file substitution",
+        "ferrocrate compose up/down works"
+      ],
+      "relatedRequirements": ["CMP-01", "CMP-02", "CMP-03", "CMP-05"],
+      "relatedADRs": ["ADR-008"]
+    },
+    {
+      "id": "TASK-022",
+      "title": "Implement Docker migration tool",
+      "description": "Implement ferrocrate migrate command to scan Docker installation, analyze containers/images, and generate FerroCrate configuration.",
+      "priority": "P1",
+      "milestone": "Phase 6",
+      "epic": "EPIC-04",
+      "effort": "4 days",
+      "storyPoints": 6,
+      "dependsOn": ["TASK-015"],
+      "assignee": null,
+      "status": "not_started",
+      "verification": [
+        "Scan Docker containers and images",
+        "Generate ferrocrate-equivalent config",
+        "Validate migration plan",
+        "Migration report with warnings"
+      ],
+      "relatedRequirements": ["CLI-06"],
+      "relatedADRs": ["ADR-012"]
+    }
+  ],
+  "metadata": {
+    "totalTasks": 22,
+    "totalStoryPoints": 152,
+    "priorityBreakdown": {
+      "P0": 15,
+      "P1": 6,
+      "P2": 1
+    },
+    "milestoneBreakdown": {
+      "Phase 1": 6,
+      "Phase 2": 5,
+      "Phase 3": 1,
+      "Phase 4": 3,
+      "Phase 5": 5,
+      "Phase 6": 2
+    },
+    "epicBreakdown": {
+      "EPIC-01": 6,
+      "EPIC-02": 5,
+      "EPIC-03": 5,
+      "EPIC-04": 2,
+      "EPIC-05": 4
+    }
+  }
+}

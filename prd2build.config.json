@@ -1,0 +1,163 @@
+{
+  "$schema": "prd2build configuration",
+  "$comment": "Static but configurable settings for the prd2build pipeline. CLI flags override these values.",
+
+  "maxAgents": 5,
+  "maxWorkersPerMilestone": 4,
+  "maxRetries": 3,
+
+  "buildMonitor": {
+    "intervalSeconds": 60,
+    "maxChecks": 120,
+    "timeoutMs": 7500000
+  },
+
+  "mockups": {
+    "min": 3,
+    "max": 25,
+    "createImages": false,
+    "imageProvider": "comfyui",
+    "imageModel": "flux",
+    "imageSize": "1024x1024",
+    "imageFormat": "webp"
+  },
+
+  "mockupFormula": {
+    "base": 3,
+    "rolesMultiplier": 2,
+    "featuresCap": 5,
+    "screensCap": 5
+  },
+
+  "securityAudit": {
+    "pollIntervalSeconds": 30,
+    "maxPollAttempts": 60
+  },
+
+  "qualityBars": {
+    "specFiles": 8,
+    "dddFiles": 11,
+    "adrFiles": 27,
+    "sparcFiles": 6,
+    "testingFiles": 4,
+    "tasks": 20,
+    "milestones": 4,
+    "userStories": 15,
+    "apiEndpoints": 10,
+    "securityModelLines": 50,
+    "boundedContexts": 3,
+    "aggregates": 5,
+    "valueObjects": 10,
+    "domainEvents": 6,
+    "repositories": 5,
+    "services": 4,
+    "indexLines": 400,
+    "indexSections": 100
+  },
+
+  "qualityBarsMinimal": {
+    "specFiles": 5,
+    "dddFiles": 3,
+    "adrFiles": 4,
+    "tasks": 3,
+    "milestones": 1,
+    "userStories": 5,
+    "boundedContexts": 2,
+    "aggregates": 2,
+    "mockups": 2,
+    "indexLines": 50
+  },
+
+  "verification": {
+    "specMinFiles": 8,
+    "specMinFilesMinimal": 3,
+    "mockupMinFiles": 5,
+    "mockupMinFilesMinimal": 2,
+    "mockupMinSizeBytes": 4096
+  },
+
+  "qualityGate": {
+    "maxRetryCycles": 5,
+    "noProgressThreshold": 2
+  },
+
+  "qualityTiers": {
+    "enabled": true,
+    "minimumTier": "platinum",
+    "thresholds": {
+      "platinum": 75,
+      "gold": 60,
+      "silver": 40,
+      "bronze": 20
+    },
+    "weights": {
+      "structure": 30,
+      "content": 50,
+      "crossRef": 20
+    },
+    "contentBoostCap": 40,
+    "stubBulletMaxChars": 20,
+    "rejectAction": "regenerate",
+    "evidenceBlocks": true
+  },
+
+  "reviewerTimeoutMinutes": 10,
+
+  "swarm": {
+    "minReviewWorkers": 3,
+    "minAuditWorkers": 3
+  },
+
+  "featureMode": {
+    "baseDocsPath": "docs/base",
+    "featuresPath": "docs/features",
+    "reuseBaseDocs": true
+  },
+
+  "ports": {
+    "backend": 3001,
+    "frontend": 3000,
+    "database": 5432,
+    "redis": 6379,
+    "maildev": 1080,
+    "adminer": 8080
+  },
+
+  "templates": {
+    "adr": "docs/templates/adr-template.txt",
+    "ddd": "docs/templates/ddd-template.txt",
+    "requirements": "docs/templates/requirements.txt",
+    "userStories": "docs/templates/user-stories.txt",
+    "tasks": "docs/templates/task.txt",
+    "epic": "docs/templates/epic.txt",
+    "milestone": "docs/templates/milestone.txt",
+    "testStrategy": "docs/templates/test-strategy.txt",
+    "testCase": "docs/templates/test-case.txt",
+    "nfr": "docs/templates/non-functional.txt",
+    "architectureOverview": "docs/templates/architecture-overview.txt",
+    "architectureDecisions": "docs/templates/architecture-decisions.txt",
+    "traceabilityMatrix": "docs/templates/traceability-matrix.txt",
+    "qualityGateReport": "docs/templates/quality-gate-report.txt",
+    "aggregates": "docs/templates/aggregates.txt",
+    "boundedContexts": "docs/templates/bounded-contexts.txt",
+    "contextMap": "docs/templates/context-map.txt",
+    "domainEvents": "docs/templates/domain-events.txt",
+    "componentSchema": "docs/templates/component-schema.txt"
+  },
+
+  "dependencies": {
+    "comfyui": {
+      "required": false,
+      "requiredWhen": "createImages",
+      "mcpServer": "comfyui",
+      "setupCommand": "claude mcp add comfyui -- npx -y @anthropic/claude-comfyui-mcp",
+      "docs": "https://github.com/nikolaibibo/claude-comfyui-mcp",
+      "models": {
+        "flux": {
+          "checkpoint": "flux1-dev-fp8.safetensors",
+          "schnell": "flux1-schnell.safetensors"
+        }
+      }
+    }
+  }
+}

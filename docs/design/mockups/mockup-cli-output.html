@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FerroCrate CLI Output Mockups</title>
+    <style>
+        :root {
+            --bg-primary: #1a1b26;
+            --bg-secondary: #16171f;
+            --bg-tertiary: #13141a;
+            --text-primary: #a9b1d6;
+            --text-secondary: #787c99;
+            --text-muted: #565f89;
+            --accent-blue: #7aa2f7;
+            --accent-green: #9ece6a;
+            --accent-yellow: #e0af68;
+            --accent-red: #f7768e;
+            --accent-purple: #bb9af7;
+            --accent-cyan: #7dcfff;
+            --accent-orange: #ff9e64;
+            --border-color: #3b3f5c;
+            --highlight-bg: #292e42;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1, h2, h3 {
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        h1 {
+            color: var(--accent-blue);
+            font-size: 1.75rem;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 0.5rem;
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            color: var(--accent-cyan);
+            font-size: 1.25rem;
+            margin-top: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .section-intro {
+            color: var(--text-secondary);
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+        }
+
+        .terminal {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .terminal-header {
+            background-color: var(--bg-tertiary);
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .terminal-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .terminal-dot.red { background-color: #f7768e; }
+        .terminal-dot.yellow { background-color: #e0af68; }
+        .terminal-dot.green { background-color: #9ece6a; }
+
+        .terminal-title {
+            margin-left: 0.5rem;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .terminal-body {
+            padding: 1.25rem;
+            font-size: 0.875rem;
+            overflow-x: auto;
+        }
+
+        .prompt {
+            color: var(--accent-green);
+            font-weight: 600;
+        }
+
+        .command {
+            color: var(--text-primary);
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 18px;
+            background-color: var(--accent-blue);
+            animation: blink 1s infinite;
+            vertical-align: text-bottom;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
+        /* Output styling */
+        .output-line {
+            margin: 0.25rem 0;
+        }
+
+        .info { color: var(--accent-blue); }
+        .success { color: var(--accent-green); }
+        .warning { color: var(--accent-yellow); }
+        .error { color: var(--accent-red); }
+        .debug { color: var(--text-muted); }
+        .label { color: var(--accent-purple); }
+        .value { color: var(--accent-cyan); }
+        .timestamp { color: var(--text-muted); }
+        .highlight { background-color: var(--highlight-bg); padding: 0 0.25rem; border-radius: 3px; }
+
+        /* Table styling */
+        .output-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+
+        .output-table th {
+            text-align: left;
+            color: var(--accent-purple);
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .output-table td {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--bg-tertiary);
+            vertical-align: middle;
+        }
+
+        .output-table tr:hover {
+            background-color: var(--highlight-bg);
+        }
+
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .status-running { background-color: var(--accent-green); }
+        .status-stopped { background-color: var(--accent-red); }
+        .status-paused { background-color: var(--accent-yellow); }
+        .status-healthy { background-color: var(--accent-green); }
+        .status-unhealthy { background-color: var(--accent-red); }
+
+        /* Progress bar */
+        .progress-container {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin: 0.5rem 0;
+        }
+
+        .progress-bar {
+            flex: 1;
+            height: 8px;
+            background-color: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            min-width: 80px;
+            text-align: right;
+        }
+
+        /* Log levels */
+        .log-entry {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            padding: 0.35rem 0;
+            font-size: 0.85rem;
+        }
+
+        .log-level {
+            min-width: 60px;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .log-level.info { background-color: rgba(122, 162, 247, 0.2); color: var(--accent-blue); }
+        .log-level.warn { background-color: rgba(224, 175, 104, 0.2); color: var(--accent-yellow); }
+        .log-level.error { background-color: rgba(247, 118, 158, 0.2); color: var(--accent-red); }
+        .log-level.debug { background-color: rgba(86, 95, 137, 0.2); color: var(--text-muted); }
+        .log-level.trace { background-color: rgba(86, 95, 137, 0.1); color: var(--text-muted); }
+
+        .log-timestamp {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            min-width: 90px;
+        }
+
+        .log-source {
+            color: var(--accent-purple);
+            min-width: 100px;
+        }
+
+        .log-message {
+            flex: 1;
+        }
+
+        /* ASCII borders */
+        .ascii-box {
+            border: 1px solid var(--border-color);
+            padding: 1rem;
+            margin: 1rem 0;
+            position: relative;
+        }
+
+        .ascii-box-title {
+            position: absolute;
+            top: -0.6rem;
+            left: 1rem;
+            background-color: var(--bg-secondary);
+            padding: 0 0.5rem;
+            color: var(--accent-cyan);
+            font-size: 0.8rem;
+        }
+
+        /* Resource bars */
+        .resource-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin: 0.35rem 0;
+        }
+
+        .resource-label {
+            min-width: 50px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+        }
+
+        .resource-track {
+            flex: 1;
+            height: 6px;
+            background-color: var(--bg-tertiary);
+            border-radius: 3px;
+            overflow: hidden;
+            max-width: 120px;
+        }
+
+        .resource-value {
+            height: 100%;
+            border-radius: 3px;
+        }
+
+        .resource-value.low { background-color: var(--accent-green); }
+        .resource-value.medium { background-color: var(--accent-yellow); }
+        .resource-value.high { background-color: var(--accent-orange); }
+        .resource-value.critical { background-color: var(--accent-red); }
+
+        .resource-percent {
+            min-width: 45px;
+            text-align: right;
+            font-size: 0.8rem;
+        }
+
+        /* Animation classes */
+        .streaming {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--bg-tertiary);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Design notes */
+        .design-notes {
+            background-color: var(--bg-tertiary);
+            border-left: 3px solid var(--accent-purple);
+            padding: 1rem 1.25rem;
+            margin-top: 1rem;
+            font-size: 0.85rem;
+        }
+
+        .design-notes h4 {
+            color: var(--accent-purple);
+            margin-bottom: 0.5rem;
+        }
+
+        .design-notes ul {
+            margin-left: 1.25rem;
+            color: var(--text-secondary);
+        }
+
+        .design-notes li {
+            margin: 0.35rem 0;
+        }
+
+        /* Color palette reference */
+        .color-palette {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .color-swatch {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .color-box {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        .color-info {
+            font-size: 0.8rem;
+        }
+
+        .color-hex {
+            color: var(--text-secondary);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            body {
+                padding: 1rem;
+            }
+
+            .output-table {
+                font-size: 0.75rem;
+            }
+
+            .log-entry {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>+============================================================================+</h1>
+    <h1>|                  FERROCRATE CLI OUTPUT DESIGN SPECIFICATION               |</h1>
+    <h1>+============================================================================+</h1>
+
+    <p class="section-intro">
+        This document defines the visual design language for FerroCrate command-line output.
+        All outputs follow a consistent terminal aesthetic optimized for developer readability
+        and accessibility compliance (WCAG 2.1 AA).
+    </p>
+
+    <!-- Color Palette Section -->
+    <h2>1. COLOR PALETTE & DESIGN TOKENS</h2>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">design-tokens</span>
+        </div>
+        <div class="terminal-body">
+            <div class="color-palette">
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #1a1b26;"></div>
+                    <div class="color-info">
+                        <div>Background</div>
+                        <div class="color-hex">#1a1b26</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #a9b1d6;"></div>
+                    <div class="color-info">
+                        <div>Text Primary</div>
+                        <div class="color-hex">#a9b1d6</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #7aa2f7;"></div>
+                    <div class="color-info">
+                        <div>Accent Blue</div>
+                        <div class="color-hex">#7aa2f7</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #9ece6a;"></div>
+                    <div class="color-info">
+                        <div>Success Green</div>
+                        <div class="color-hex">#9ece6a</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #e0af68;"></div>
+                    <div class="color-info">
+                        <div>Warning Yellow</div>
+                        <div class="color-hex">#e0af68</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #f7768e;"></div>
+                    <div class="color-info">
+                        <div>Error Red</div>
+                        <div class="color-hex">#f7768e</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #bb9af7;"></div>
+                    <div class="color-info">
+                        <div>Label Purple</div>
+                        <div class="color-hex">#bb9af7</div>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="color-box" style="background-color: #7dcfff;"></div>
+                    <div class="color-info">
+                        <div>Value Cyan</div>
+                        <div class="color-hex">#7dcfff</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ferrocrate run Command -->
+    <h2>2. FERROCRATE RUN COMMAND OUTPUT</h2>
+    <p class="section-intro">
+        The <code>ferrocrate run</code> command creates and starts a container. Output includes
+        image pull progress, container creation status, and runtime information.
+    </p>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate run -d -p 8080:80 --name web-server nginx:latest</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate run -d -p 8080:80 --name web-server nginx:latest</span></div>
+
+            <div class="output-line" style="margin-top: 1rem;">
+                <span class="info">[INFO]</span> Resolving image <span class="value">nginx:latest</span>...
+            </div>
+
+            <!-- Pull progress -->
+            <div class="ascii-box">
+                <span class="ascii-box-title">IMAGE PULL</span>
+                <div class="output-line"><span class="label">Manifest:</span> <span class="value">docker.io/library/nginx:latest</span></div>
+                <div class="output-line"><span class="label">Digest:</span> <span class="value">sha256:a4848b</span><span class="text-muted">...truncated</span></div>
+
+                <div style="margin-top: 0.75rem;">
+                    <div class="progress-container">
+                        <span class="label" style="min-width: 80px;">layer 1/5</span>
+                        <div class="progress-bar"><div class="progress-fill" style="width: 100%;"></div></div>
+                        <span class="progress-text">12.4 MB / 12.4 MB</span>
+                        <span class="success">DONE</span>
+                    </div>
+                    <div class="progress-container">
+                        <span class="label" style="min-width: 80px;">layer 2/5</span>
+                        <div class="progress-bar"><div class="progress-fill" style="width: 100%;"></div></div>
+                        <span class="progress-text">8.2 MB / 8.2 MB</span>
+                        <span class="success">DONE</span>
+                    </div>
+                    <div class="progress-container">
+                        <span class="label" style="min-width: 80px;">layer 3/5</span>
+                        <div class="progress-bar"><div class="progress-fill" style="width: 67%;"></div></div>
+                        <span class="progress-text">4.1 MB / 6.1 MB</span>
+                        <span class="spinner"></span>
+                    </div>
+                    <div class="progress-container">
+                        <span class="label" style="min-width: 80px;">layer 4/5</span>
+                        <div class="progress-bar"><div class="progress-fill" style="width: 0%;"></div></div>
+                        <span class="progress-text">0 B / 2.8 MB</span>
+                        <span class="text-muted">PENDING</span>
+                    </div>
+                    <div class="progress-container">
+                        <span class="label" style="min-width: 80px;">layer 5/5</span>
+                        <div class="progress-bar"><div class="progress-fill" style="width: 0%;"></div></div>
+                        <span class="progress-text">0 B / 1.2 MB</span>
+                        <span class="text-muted">PENDING</span>
+                    </div>
+                </div>
+
+                <div class="output-line" style="margin-top: 0.75rem;">
+                    <span class="label">Total:</span> <span class="value">24.7 MB / 30.5 MB</span>
+                    <span class="text-muted">(81%)</span>
+                    <span class="info">- 4.2 MB/s</span>
+                </div>
+            </div>
+
+            <div class="output-line">
+                <span class="success">[SUCCESS]</span> Image pulled in <span class="value">7.2s</span>
+            </div>
+
+            <div class="output-line" style="margin-top: 0.75rem;">
+                <span class="info">[INFO]</span> Creating container <span class="value">web-server</span>...
+            </div>
+
+            <div class="ascii-box">
+                <span class="ascii-box-title">CONTAINER CONFIG</span>
+                <div class="output-line"><span class="label">ID:</span>        <span class="value">fc7a2b8c3d1e</span></div>
+                <div class="output-line"><span class="label">Name:</span>      <span class="value">web-server</span></div>
+                <div class="output-line"><span class="label">Image:</span>     <span class="value">nginx:latest</span></div>
+                <div class="output-line"><span class="label">Ports:</span>     <span class="value">0.0.0.0:8080 -> 80/tcp</span></div>
+                <div class="output-line"><span class="label">Runtime:</span>   <span class="value">runc</span> <span class="text-muted">(rootless)</span></div>
+                <div class="output-line">
+                    <span class="label">Status:</span>    <span class="status-indicator"><span class="status-dot status-running"></span><span class="success">Running</span></span>
+                </div>
+            </div>
+
+            <div class="output-line" style="margin-top: 0.75rem;">
+                <span class="success">[SUCCESS]</span> Container started in <span class="value">48ms</span>
+            </div>
+
+            <div class="output-line" style="margin-top: 1rem;">
+                <span class="value">fc7a2b8c3d1e</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="design-notes">
+        <h4>Design Notes - ferrocrate run</h4>
+        <ul>
+            <li><strong>Progress bars:</strong> Show layer-by-layer pull progress with transfer rates</li>
+            <li><strong>ASCII boxes:</strong> Group related information with clear visual boundaries</li>
+            <li><strong>Timing information:</strong> Display elapsed time for performance transparency</li>
+            <li><strong>Container ID:</strong> Output short ID (12 chars) on last line for scripting capture</li>
+            <li><strong>Rootless indicator:</strong> Always show security context for awareness</li>
+        </ul>
+    </div>
+
+    <!-- ferrocrate ps Command -->
+    <h2>3. FERROCRATE PS TABLE OUTPUT</h2>
+    <p class="section-intro">
+        The <code>ferrocrate ps</code> command lists running containers in a formatted table.
+        Supports multiple output formats including table, JSON, and custom Go templates.
+    </p>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate ps</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate ps</span></div>
+
+            <table class="output-table" style="margin-top: 1rem;">
+                <thead>
+                    <tr>
+                        <th>CONTAINER ID</th>
+                        <th>IMAGE</th>
+                        <th>COMMAND</th>
+                        <th>CREATED</th>
+                        <th>STATUS</th>
+                        <th>PORTS</th>
+                        <th>NAMES</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="value">fc7a2b8c3d1e</span></td>
+                        <td>nginx:latest</td>
+                        <td class="text-muted">"/docker-entrypoint..."</td>
+                        <td>2 minutes ago</td>
+                        <td>
+                            <span class="status-indicator">
+                                <span class="status-dot status-running"></span>
+                                <span class="success">Up 2 min</span>
+                            </span>
+                        </td>
+                        <td><span class="value">0.0.0.0:8080-&gt;80/tcp</span></td>
+                        <td>web-server</td>
+                    </tr>
+                    <tr>
+                        <td><span class="value">fc9e4f2a1b8c</span></td>
+                        <td>postgres:15</td>
+                        <td class="text-muted">"postgres -c config..."</td>
+                        <td>15 minutes ago</td>
+                        <td>
+                            <span class="status-indicator">
+                                <span class="status-dot status-running"></span>
+                                <span class="success">Up 15 min (healthy)</span>
+                            </span>
+                        </td>
+                        <td><span class="value">5432/tcp</span></td>
+                        <td>db-primary</td>
+                    </tr>
+                    <tr>
+                        <td><span class="value">fc3d5e7a9c2f</span></td>
+                        <td>redis:7-alpine</td>
+                        <td class="text-muted">"redis-server --appe..."</td>
+                        <td>1 hour ago</td>
+                        <td>
+                            <span class="status-indicator">
+                                <span class="status-dot status-paused"></span>
+                                <span class="warning">Paused</span>
+                            </span>
+                        </td>
+                        <td><span class="value">6379/tcp</span></td>
+                        <td>cache-server</td>
+                    </tr>
+                    <tr>
+                        <td><span class="value">fc1a2b3c4d5e</span></td>
+                        <td>ml-inference:latest</td>
+                        <td class="text-muted">"python inference.py"</td>
+                        <td>3 hours ago</td>
+                        <td>
+                            <span class="status-indicator">
+                                <span class="status-dot status-unhealthy"></span>
+                                <span class="error">Exited (137) 5m ago</span>
+                            </span>
+                        </td>
+                        <td><span class="text-muted">-</span></td>
+                        <td>ml-worker-1</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="output-line" style="margin-top: 0.5rem; color: var(--text-muted);">
+                4 containers total: 2 running, 1 paused, 1 exited
+            </div>
+        </div>
+    </div>
+
+    <!-- ferrocrate ps --format wide -->
+    <h3>Extended Format (--format wide)</h3>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate ps --format wide</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate ps --format wide</span></div>
+
+            <table class="output-table" style="margin-top: 1rem; font-size: 0.8rem;">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>IMAGE</th>
+                        <th>COMMAND</th>
+                        <th>CREATED</th>
+                        <th>STATUS</th>
+                        <th>PORTS</th>
+                        <th>NAMES</th>
+                        <th>CPU %</th>
+                        <th>MEM</th>
+                        <th>NET I/O</th>
+                        <th>BLOCK I/O</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="value">fc7a2b8c</span></td>
+                        <td>nginx:latest</td>
+                        <td class="text-muted">"/docker-entrypoint..."</td>
+                        <td>2m</td>
+                        <td><span class="success">Up</span></td>
+                        <td><span class="value">8080-&gt;80</span></td>
+                        <td>web-server</td>
+                        <td>
+                            <div class="resource-bar">
+                                <div class="resource-track"><div class="resource-value low" style="width: 2%;"></div></div>
+                                <span class="resource-percent">0.24%</span>
+                            </div>
+                        </td>
+                        <td>8.2 MiB</td>
+                        <td>1.2 kB / 856 B</td>
+                        <td>0 B / 0 B</td>
+                    </tr>
+                    <tr>
+                        <td><span class="value">fc9e4f2a</span></td>
+                        <td>postgres:15</td>
+                        <td class="text-muted">"postgres -c config..."</td>
+                        <td>15m</td>
+                        <td><span class="success">Up (healthy)</span></td>
+                        <td><span class="value">5432</span></td>
+                        <td>db-primary</td>
+                        <td>
+                            <div class="resource-bar">
+                                <div class="resource-track"><div class="resource-value medium" style="width: 15%;"></div></div>
+                                <span class="resource-percent">1.52%</span>
+                            </div>
+                        </td>
+                        <td>45.8 MiB</td>
+                        <td>245 kB / 89 kB</td>
+                        <td>1.2 MB / 4.5 MB</td>
+                    </tr>
+                    <tr>
+                        <td><span class="value">fc3d5e7a</span></td>
+                        <td>redis:7-alpine</td>
+                        <td class="text-muted">"redis-server..."</td>
+                        <td>1h</td>
+                        <td><span class="warning">Paused</span></td>
+                        <td><span class="value">6379</span></td>
+                        <td>cache-server</td>
+                        <td>
+                            <div class="resource-bar">
+                                <div class="resource-track"><div class="resource-value low" style="width: 0%;"></div></div>
+                                <span class="resource-percent">0.00%</span>
+                            </div>
+                        </td>
+                        <td>2.1 MiB</td>
+                        <td>0 B / 0 B</td>
+                        <td>0 B / 0 B</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="design-notes">
+        <h4>Design Notes - ferrocrate ps</h4>
+        <ul>
+            <li><strong>Color-coded status:</strong> Green for running, yellow for paused, red for exited/unhealthy</li>
+            <li><strong>Inline resource bars:</strong> Visual CPU usage in wide format</li>
+            <li><strong>Truncation:</strong> Long commands truncated with ellipsis, full on hover/inspect</li>
+            <li><strong>Summary footer:</strong> Total count with status breakdown</li>
+            <li><strong>Accessibility:</strong> Status indicated by both color and text symbol</li>
+        </ul>
+    </div>
+
+    <!-- ferrocrate logs Command -->
+    <h2>4. FERROCRATE LOGS STREAMING OUTPUT</h2>
+    <p class="section-intro">
+        The <code>ferrocrate logs</code> command streams container logs with configurable
+        log level filtering, timestamps, and color coding for different sources.
+    </p>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate logs -f --tail 20 web-server</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate logs -f --tail 20 web-server</span></div>
+
+            <div style="margin-top: 1rem;" class="streaming">
+                <div class="log-entry">
+                    <span class="log-timestamp">14:32:01.241</span>
+                    <span class="log-level info">INFO</span>
+                    <span class="log-source">[nginx]</span>
+                    <span class="log-message">Starting nginx server on port 80...</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:32:01.258</span>
+                    <span class="log-level info">INFO</span>
+                    <span class="log-source">[nginx]</span>
+                    <span class="log-message">Configuration loaded from /etc/nginx/nginx.conf</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:32:01.312</span>
+                    <span class="log-level debug">DEBUG</span>
+                    <span class="log-source">[ferrocrate]</span>
+                    <span class="log-message">Health check registered: interval=30s, timeout=5s</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:32:01.445</span>
+                    <span class="log-level info">INFO</span>
+                    <span class="log-source">[nginx]</span>
+                    <span class="log-message">Listening on 0.0.0.0:80</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:32:15.892</span>
+                    <span class="log-level debug">DEBUG</span>
+                    <span class="log-source">[access]</span>
+                    <span class="log-message">GET / HTTP/1.1 200 615 "-" "curl/7.88.1" 0.001s</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:32:45.123</span>
+                    <span class="log-level warn">WARN</span>
+                    <span class="log-source">[nginx]</span>
+                    <span class="log-message">upstream server temporarily disabled while connecting to upstream</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:33:01.456</span>
+                    <span class="log-level error">ERROR</span>
+                    <span class="log-source">[nginx]</span>
+                    <span class="log-message">connect() failed (111: Connection refused) while connecting to upstream</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:33:01.512</span>
+                    <span class="log-level info">INFO</span>
+                    <span class="log-source">[ferrocrate]</span>
+                    <span class="log-message">AI Analysis: Connection refused to upstream. Recommend checking backend container status.</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:33:02.001</span>
+                    <span class="log-level trace">TRACE</span>
+                    <span class="log-source">[ferrocrate]</span>
+                    <span class="log-message">Resource prediction: memory_trend=stable, cpu_trend=low_usage</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">14:33:15<span class="cursor"></span></span>
+                    <span class="log-level info">INFO</span>
+                    <span class="log-source">[access]</span>
+                    <span class="log-message">GET /health HTTP/1.1 200 15 "-" "health-check/1.0" 0.000s</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Level Legend -->
+    <h3>Log Level Color Scheme</h3>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">log-level-reference</span>
+        </div>
+        <div class="terminal-body">
+            <table class="output-table">
+                <thead>
+                    <tr>
+                        <th>LEVEL</th>
+                        <th>COLOR</th>
+                        <th>USAGE</th>
+                        <th>EXAMPLE</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="log-level trace">TRACE</span></td>
+                        <td><span class="text-muted">Muted Gray</span></td>
+                        <td>Very detailed diagnostic info</td>
+                        <td>Variable dumps, internal state</td>
+                    </tr>
+                    <tr>
+                        <td><span class="log-level debug">DEBUG</span></td>
+                        <td><span class="text-muted">Gray</span></td>
+                        <td>Detailed diagnostic info</td>
+                        <td>Function entry/exit, decisions</td>
+                    </tr>
+                    <tr>
+                        <td><span class="log-level info">INFO</span></td>
+                        <td><span class="info">Blue</span></td>
+                        <td>General operational messages</td>
+                        <td>Server started, request logged</td>
+                    </tr>
+                    <tr>
+                        <td><span class="log-level warn">WARN</span></td>
+                        <td><span class="warning">Yellow</span></td>
+                        <td>Warning conditions</td>
+                        <td>Deprecated API, retry attempt</td>
+                    </tr>
+                    <tr>
+                        <td><span class="log-level error">ERROR</span></td>
+                        <td><span class="error">Red</span></td>
+                        <td>Error conditions</td>
+                        <td>Connection failed, parse error</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="design-notes">
+        <h4>Design Notes - ferrocrate logs</h4>
+        <ul>
+            <li><strong>Structured format:</strong> Timestamp + Level + Source + Message for consistent parsing</li>
+            <li><strong>Color coding:</strong> Instant visual identification of log severity</li>
+            <li><strong>AI annotations:</strong> FerroCrate can inject AI analysis into log stream</li>
+            <li><strong>Follow mode:</strong> Cursor animation indicates live streaming</li>
+            <li><strong>Filtering:</strong> --level flag to filter by severity (warn,error only)</li>
+            <li><strong>Accessibility:</strong> Log level badges provide non-color indication</li>
+        </ul>
+    </div>
+
+    <!-- Error Output -->
+    <h2>5. ERROR OUTPUT DESIGN</h2>
+    <p class="section-intro">
+        Error messages follow a consistent structure with actionable guidance
+        and suggested remediation steps.
+    </p>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate run nonexistent-image:latest</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate run nonexistent-image:latest</span></div>
+
+            <div class="ascii-box" style="border-color: var(--accent-red); margin-top: 1rem;">
+                <span class="ascii-box-title" style="color: var(--accent-red);">ERROR</span>
+                <div class="output-line"><span class="error">Failed to pull image: nonexistent-image:latest</span></div>
+
+                <div style="margin-top: 0.75rem;">
+                    <div class="output-line"><span class="label">Code:</span>    <span class="value">IMAGE_NOT_FOUND</span></div>
+                    <div class="output-line"><span class="label">Source:</span>  <span class="value">docker.io/library/nonexistent-image:latest</span></div>
+                    <div class="output-line"><span class="label">Reason:</span>  The requested image does not exist in the registry</div>
+                </div>
+
+                <div style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem;">
+                    <div class="output-line"><span class="accent-cyan">Suggestions:</span></div>
+                    <div class="output-line" style="margin-left: 1rem; margin-top: 0.25rem;">1. Check the image name for typos</div>
+                    <div class="output-line" style="margin-left: 1rem;">2. Verify the image exists: <span class="value">ferrocrate search nonexistent-image</span></div>
+                    <div class="output-line" style="margin-left: 1rem;">3. Try a different tag: <span class="value">ferrocrate run nonexistent-image:stable</span></div>
+                </div>
+            </div>
+
+            <div class="output-line" style="margin-top: 0.5rem;">
+                <span class="text-muted">For more help, run: </span><span class="value">ferrocrate help run</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="design-notes">
+        <h4>Design Notes - Error Output</h4>
+        <ul>
+            <li><strong>Structured errors:</strong> Error code, source, reason for debugging</li>
+            <li><strong>Actionable suggestions:</strong> Numbered list of remediation steps</li>
+            <li><strong>Help reference:</strong> Link to relevant documentation</li>
+            <li><strong>Visual distinction:</strong> Red border on error box for immediate recognition</li>
+            <li><strong>Exit codes:</strong> Consistent exit codes for scripting (documented separately)</li>
+        </ul>
+    </div>
+
+    <!-- AI Decision Output -->
+    <h2>6. AI DECISION OUTPUT</h2>
+    <p class="section-intro">
+        When AI features make decisions, output includes explainability information
+        accessible via <code>ferrocrate explain</code> command.
+    </p>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate explain ai-decision-2026-0211-001</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate explain ai-decision-2026-0211-001</span></div>
+
+            <div class="ascii-box" style="margin-top: 1rem;">
+                <span class="ascii-box-title">AI DECISION EXPLANATION</span>
+
+                <div class="output-line" style="margin-bottom: 0.5rem;">
+                    <span class="label">Decision ID:</span>     <span class="value">ai-decision-2026-0211-001</span>
+                </div>
+                <div class="output-line" style="margin-bottom: 0.5rem;">
+                    <span class="label">Timestamp:</span>      <span class="value">2026-02-11 14:33:01 UTC</span>
+                </div>
+                <div class="output-line" style="margin-bottom: 0.5rem;">
+                    <span class="label">Action:</span>         <span class="value">MEMORY_LIMIT_ADJUSTMENT</span>
+                </div>
+                <div class="output-line" style="margin-bottom: 0.5rem;">
+                    <span class="label">Target:</span>         <span class="value">container:db-primary (fc9e4f2a1b8c)</span>
+                </div>
+                <div class="output-line" style="margin-bottom: 0.5rem;">
+                    <span class="label">Confidence:</span>     <span class="accent-cyan">87%</span>
+                </div>
+
+                <div style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem;">
+                    <div class="output-line"><span class="accent-purple">REASONING:</span></div>
+                    <div class="output-line" style="margin-top: 0.5rem; color: var(--text-secondary); padding-left: 1rem;">
+                        Observed memory usage pattern over 72-hour window showed consistent
+                        peak usage of 1.2GB during batch processing (02:00-04:00 UTC).
+                        Current limit of 512MB caused 3 OOM events. Recommendation to
+                        increase to 2GB with burst allowance of 4GB.
+                    </div>
+                </div>
+
+                <div style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem;">
+                    <div class="output-line"><span class="accent-purple">INPUT DATA:</span></div>
+                    <div class="output-line" style="margin-top: 0.5rem; font-size: 0.8rem;">
+                        <span class="text-muted">memory_samples:</span> 2,847 data points over 72h
+                    </div>
+                    <div class="output-line" style="font-size: 0.8rem;">
+                        <span class="text-muted">oom_events:</span> 3 (all during batch window)
+                    </div>
+                    <div class="output-line" style="font-size: 0.8rem;">
+                        <span class="text-muted">avg_usage:</span> 312 MB | <span class="text-muted">peak_usage:</span> 1.24 GB
+                    </div>
+                </div>
+
+                <div style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem;">
+                    <div class="output-line"><span class="success">ACTION TAKEN:</span></div>
+                    <div class="output-line" style="margin-top: 0.5rem; padding-left: 1rem;">
+                        Memory limit increased from <span class="warning">512 MB</span> to <span class="success">2 GB</span>
+                    </div>
+                    <div class="output-line" style="padding-left: 1rem;">
+                        Burst limit set to <span class="value">4 GB</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="output-line" style="margin-top: 0.5rem;">
+                <span class="text-muted">To undo this decision: </span><span class="value">ferrocrate undo ai-decision-2026-0211-001</span>
+            </div>
+            <div class="output-line">
+                <span class="text-muted">To disable AI adjustments: </span><span class="value">ferrocrate config set ai.auto_adjust=false</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="design-notes">
+        <h4>Design Notes - AI Explainability</h4>
+        <ul>
+            <li><strong>Full transparency:</strong> Every AI decision has unique ID and full explanation</li>
+            <li><strong>Confidence score:</strong> Shows AI certainty level for the decision</li>
+            <li><strong>Input data summary:</strong> Shows what data informed the decision</li>
+            <li><strong>Undo capability:</strong> Every decision can be reverted</li>
+            <li><strong>Opt-out path:</strong> Clear instructions to disable AI features</li>
+        </ul>
+    </div>
+
+    <!-- JSON Output Format -->
+    <h2>7. JSON OUTPUT FORMAT (--format json)</h2>
+    <p class="section-intro">
+        Machine-parseable output for scripting and integration with other tools.
+    </p>
+
+    <div class="terminal">
+        <div class="terminal-header">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">ferrocrate ps --format json</span>
+        </div>
+        <div class="terminal-body">
+            <div class="output-line"><span class="prompt">$</span> <span class="command">ferrocrate ps --format json</span></div>
+
+            <pre style="margin-top: 1rem; color: var(--text-primary); font-size: 0.8rem; overflow-x: auto;">
+{
+  <span class="label">"containers"</span>: [
+    {
+      <span class="label">"id"</span>: <span class="value">"fc7a2b8c3d1e"</span>,
+      <span class="label">"name"</span>: <span class="value">"web-server"</span>,
+      <span class="label">"image"</span>: <span class="value">"nginx:latest"</span>,
+      <span class="label">"status"</span>: <span class="value">"running"</span>,
+      <span class="label">"created"</span>: <span class="value">"2026-02-11T14:30:01Z"</span>,
+      <span class="label">"ports"</span>: [
+        { <span class="label">"host"</span>: <span class="value">8080</span>, <span class="label">"container"</span>: <span class="value">80</span>, <span class="label">"protocol"</span>: <span class="value">"tcp"</span> }
+      ],
+      <span class="label">"labels"</span>: {
+        <span class="label">"app"</span>: <span class="value">"web"</span>,
+        <span class="label">"environment"</span>: <span class="value">"production"</span>
+      },
+      <span class="label">"resources"</span>: {
+        <span class="label">"cpu_percent"</span>: <span class="value">0.24</span>,
+        <span class="label">"memory_mb"</span>: <span class="value">8.2</span>,
+        <span class="label">"network_rx_kb"</span>: <span class="value">1.2</span>,
+        <span class="label">"network_tx_kb"</span>: <span class="value">0.856</span>
+      }
+    }
+  ],
+  <span class="label">"metadata"</span>: {
+    <span class="label">"total"</span>: <span class="value">1</span>,
+    <span class="label">"running"</span>: <span class="value">1</span>,
+    <span class="label">"paused"</span>: <span class="value">0</span>,
+    <span class="label">"exited"</span>: <span class="value">0</span>
+  }
+}</pre>
+        </div>
+    </div>
+
+    <footer style="margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color); text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+        <p>FerroCrate CLI Output Design Specification v1.0</p>
+        <p style="margin-top: 0.5rem;">Generated: 2026-02-11 | WCAG 2.1 AA Compliant</p>
+    </footer>
+</body>
+</html>

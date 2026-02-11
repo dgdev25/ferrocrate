@@ -225,7 +225,8 @@ impl ContainerRuntime {
         let rootless = !nix::unistd::Uid::effective().is_root();
         let (netns_name, container_ip) =
             setup_network(&container_id, port_mappings, network_mode, network_backend)?;
-        let use_slirp = rootless && network_mode == "bridge" && rootless_netns_enabled();
+        let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
+        let use_slirp = unshare_netns && network_mode == "bridge";
 
         let child_id = spawn_process_with_logs(
             &command,
@@ -242,7 +243,7 @@ impl ContainerRuntime {
             resolved_workdir.as_deref(),
             resolved_user.as_deref(),
             netns_name.as_deref(),
-            use_slirp,
+            unshare_netns,
         )?;
 
         if use_slirp {
@@ -861,9 +862,7 @@ fn setup_network(
                 ));
             }
             if !nix::unistd::Uid::effective().is_root() {
-                return Err(RuntimeError::Network(
-                    "network none requires root".to_string(),
-                ));
+                return Ok((None, None));
             }
             let netns_name = format!("ferro-{container_id}");
             run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
@@ -886,9 +885,14 @@ fn setup_network(
         }
         return Ok((None, None));
     }
+    let effective_backend = if network_backend == "ebpf" {
+        "iptables"
+    } else {
+        network_backend
+    };
     if !port_mappings.is_empty()
-        && network_backend != "iptables"
-        && network_backend != "nftables"
+        && effective_backend != "iptables"
+        && effective_backend != "nftables"
     {
         return Err(RuntimeError::Network(
             "port mapping requires network-backend=iptables or nftables".to_string(),
@@ -956,7 +960,7 @@ fn setup_network(
     ))?;
 
     if !port_mappings.is_empty() {
-        if network_backend == "nftables" {
+        if effective_backend == "nftables" {
             ensure_nftables_chains()?;
         }
         for mapping in port_mappings {
@@ -965,7 +969,7 @@ fn setup_network(
                 container_port: mapping.container_port,
                 protocol: mapping.protocol.clone(),
             };
-            if network_backend == "nftables" {
+            if effective_backend == "nftables" {
                 let prerouting = build_nft_prerouting_cmd(&map, &container_ip);
                 let forward = build_nft_forward_cmd(&map, &container_ip);
                 run_cmd(&prerouting)?;
@@ -1035,7 +1039,7 @@ fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
 fn rootless_netns_enabled() -> bool {
     std::env::var("FERROCRATE_ROOTLESS_NETNS")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn ensure_nftables_chains() -> Result<(), RuntimeError> {

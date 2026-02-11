@@ -1,4 +1,4 @@
-use crate::container_exec::exec_in_container;
+use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
     ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
 };
@@ -700,7 +700,11 @@ fn run_health_checks(store: sled::Db, id: String, pid: u32, config: HealthConfig
 
     let mut failures = 0_u32;
     loop {
-        let result = exec_in_container(pid, &config.cmd);
+        let result = if config.timeout_secs > 0 {
+            exec_in_container_with_timeout(pid, &config.cmd, Duration::from_secs(config.timeout_secs))
+        } else {
+            exec_in_container(pid, &config.cmd)
+        };
         let now = now_unix();
         match result {
             Ok(exec) if exec.exit_code == 0 => {

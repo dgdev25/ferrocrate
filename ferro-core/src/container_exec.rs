@@ -1,4 +1,6 @@
-use std::process::Command;
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,15 @@ pub fn exec_in_container(target_pid: u32, command: &[String]) -> Result<ExecResu
     execute_command("nsenter", &args)
 }
 
+pub fn exec_in_container_with_timeout(
+    target_pid: u32,
+    command: &[String],
+    timeout: Duration,
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args(target_pid, command)?;
+    execute_command_with_timeout("nsenter", &args, timeout)
+}
+
 fn execute_command(binary: &str, args: &[String]) -> Result<ExecResult, ContainerExecError> {
     let output = Command::new(binary).args(args).output()?;
     Ok(ExecResult {
@@ -42,9 +53,58 @@ fn execute_command(binary: &str, args: &[String]) -> Result<ExecResult, Containe
     })
 }
 
+fn execute_command_with_timeout(
+    binary: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<ExecResult, ContainerExecError> {
+    let mut child = spawn_command(binary, args)?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return collect_output(child, status.code().unwrap_or(-1));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(ExecResult {
+                exit_code: 124,
+                stdout: String::new(),
+                stderr: "command timed out".to_string(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn spawn_command(binary: &str, args: &[String]) -> Result<Child, ContainerExecError> {
+    Ok(Command::new(binary)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?)
+}
+
+fn collect_output(mut child: Child, exit_code: i32) -> Result<ExecResult, ContainerExecError> {
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_end(&mut stdout)?;
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut err) = child.stderr.take() {
+        err.read_to_end(&mut stderr)?;
+    }
+    Ok(ExecResult {
+        exit_code,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_nsenter_args, execute_command};
+    use super::{build_nsenter_args, execute_command, execute_command_with_timeout};
+    use std::time::Duration;
 
     #[test]
     fn builds_nsenter_args_for_exec() {
@@ -76,5 +136,14 @@ mod tests {
         let result = execute_command("sh", &args).expect("command should run");
         assert_eq!(result.exit_code, 7);
         assert!(result.stdout.contains("exec-ok"));
+    }
+
+    #[test]
+    fn times_out_long_running_command() {
+        let args = vec!["-c".to_string(), "sleep 0.2".to_string()];
+        let result = execute_command_with_timeout("sh", &args, Duration::from_millis(50))
+            .expect("command should run");
+        assert_eq!(result.exit_code, 124);
+        assert!(result.stderr.contains("timed out"));
     }
 }

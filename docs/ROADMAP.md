@@ -60,7 +60,7 @@
 | CLM-04 | ~~Container exec~~ | Done | `ferro-core` exec + CLI wired. |
 | CLM-05 | ~~Container logs~~ | Done | Runtime logs + CLI logs. |
 | CLM-06 | ~~Inspect (JSON metadata)~~ | Done | CLI inspect outputs JSON metadata from container store. |
-| CLM-07 | Health checks | Partial | CLI health checks + image config HEALTHCHECK support; timeout enforcement not wired. |
+| CLM-07 | ~~Health checks~~ | Done | CLI health checks + image config HEALTHCHECK support with timeout enforcement. |
 | CLM-08 | ~~Restart policies~~ | Done | CLI --restart with supervisor loop (no/on-failure/always/unless-stopped). |
 | CLM-09 | ~~Resource limits (mem/cpu/pids)~~ | Done | cgroups v2 limits enforced when provided via CLI. |
 | CLM-10 | ~~Env vars, labels, annotations~~ | Done | CLI flags for env/label/annotation stored in container metadata. |

@@ -31,8 +31,12 @@ pub enum Commands {
         tmpfs_mounts: Vec<String>,
         #[arg(long = "read-only")]
         read_only_rootfs: bool,
+        #[arg(long = "read-write")]
+        read_write_rootfs: bool,
         #[arg(long = "no-new-privileges")]
         no_new_privs: bool,
+        #[arg(long, default_value = "dev")]
+        profile: String,
         #[arg(long = "env")]
         env: Vec<String>,
         #[arg(long = "label")]
@@ -171,11 +175,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
             bind_mounts,
             tmpfs_mounts,
             read_only_rootfs,
+            read_write_rootfs,
             no_new_privs,
             env,
             labels,
             annotations,
             cap_add,
+            profile,
             health_cmd,
             health_interval,
             health_timeout,
@@ -195,7 +201,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &network_backend,
                 &bind_mounts,
                 &tmpfs_mounts,
-                read_only_rootfs,
+                effective_readonly(&profile, read_only_rootfs, read_write_rootfs)?,
                 no_new_privs,
                 &env,
                 &labels,
@@ -636,6 +642,23 @@ fn build_health_config(
     }))
 }
 
+fn effective_readonly(profile: &str, read_only: bool, read_write: bool) -> Result<bool, String> {
+    if read_only && read_write {
+        return Err("run: cannot set both --read-only and --read-write".to_string());
+    }
+    if read_only {
+        return Ok(true);
+    }
+    if read_write {
+        return Ok(false);
+    }
+    match profile {
+        "prod" => Ok(true),
+        "dev" => Ok(false),
+        _ => Err("run: profile must be dev|prod".to_string()),
+    }
+}
+
 fn parse_restart_policy(policy: &str) -> Result<ferro_core::container_store::RestartPolicy, String> {
     match policy {
         "no" => Ok(ferro_core::container_store::RestartPolicy::No),
@@ -751,8 +774,9 @@ mod tests {
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pause, handle_pull,
         handle_push, handle_rmi, handle_run, handle_stop, handle_kill, handle_rm, handle_restart,
         handle_unpause, build_limits, handle_volume,
-        build_health_config, parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_restart_policy, parse_tmpfs_mounts,
+        build_health_config, effective_readonly, parse_bind_mounts, parse_capabilities,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy,
+        parse_tmpfs_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -770,6 +794,7 @@ mod tests {
                 bind_mounts,
                 tmpfs_mounts,
                 read_only_rootfs,
+                read_write_rootfs,
                 no_new_privs,
                 env,
                 labels,
@@ -785,6 +810,7 @@ mod tests {
                 cpu_period,
                 pids_max,
                 cap_add,
+                profile,
             } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);
@@ -792,6 +818,7 @@ mod tests {
                 assert!(bind_mounts.is_empty());
                 assert!(tmpfs_mounts.is_empty());
                 assert!(!read_only_rootfs);
+                assert!(!read_write_rootfs);
                 assert!(!no_new_privs);
                 assert!(env.is_empty());
                 assert!(labels.is_empty());
@@ -803,6 +830,7 @@ mod tests {
                 assert!(health_retries.is_none());
                 assert!(health_start_period.is_none());
                 assert_eq!(restart_policy, "no");
+                assert_eq!(profile, "dev");
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -1161,6 +1189,18 @@ mod tests {
     fn rejects_invalid_capability() {
         let err = parse_capabilities(&["notacap".to_string()]).expect_err("invalid");
         assert!(err.contains("unknown capability"));
+    }
+
+    #[test]
+    fn rejects_conflicting_readonly_flags() {
+        let err = effective_readonly("dev", true, true).expect_err("conflict");
+        assert!(err.contains("read-only"));
+    }
+
+    #[test]
+    fn rejects_invalid_profile() {
+        let err = effective_readonly("staging", false, false).expect_err("invalid profile");
+        assert!(err.contains("profile"));
     }
 
     #[test]

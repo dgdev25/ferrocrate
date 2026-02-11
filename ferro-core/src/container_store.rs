@@ -19,6 +19,8 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub annotations: HashMap<String, String>,
     #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
     pub health: Option<HealthConfig>,
     #[serde(default = "default_health_status")]
     pub health_status: String,
@@ -161,6 +163,7 @@ mod tests {
             env: vec!["HELLO=world".to_string()],
             labels: [("tier".to_string(), "test".to_string())].into_iter().collect(),
             annotations: [("owner".to_string(), "cli".to_string())].into_iter().collect(),
+            capabilities: vec!["CAP_NET_BIND_SERVICE".to_string()],
             health: None,
             health_status: "none".to_string(),
             health_failures: 0,
@@ -192,6 +195,7 @@ mod tests {
             env: Vec::new(),
             labels: HashMap::new(),
             annotations: HashMap::new(),
+            capabilities: Vec::new(),
             health: None,
             health_status: "none".to_string(),
             health_failures: 0,

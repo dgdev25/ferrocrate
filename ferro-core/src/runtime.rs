@@ -3,6 +3,7 @@ use crate::container_store::{
     ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
 };
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
+use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::image_config::healthcheck_from_config;
 use crate::image_fetch::resolve_layer_paths;
 use crate::image_fetch::resolve_config_path;
@@ -77,6 +78,7 @@ impl ContainerRuntime {
         annotations: &HashMap<String, String>,
         health: Option<HealthConfig>,
         restart_policy: RestartPolicy,
+        capabilities: &[caps::Capability],
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
@@ -126,6 +128,7 @@ impl ContainerRuntime {
             Some(rootfs_dir.clone()),
             no_new_privs,
             restart_policy.clone(),
+            capabilities.to_vec(),
         )?;
 
         if let Some(limits) = limits {
@@ -153,6 +156,7 @@ impl ContainerRuntime {
             env: env.to_vec(),
             labels: labels.clone(),
             annotations: annotations.clone(),
+            capabilities: capabilities.iter().map(|cap| cap.to_string()).collect(),
             health: health.clone(),
             health_status: if health.is_some() { "starting".to_string() } else { "none".to_string() },
             health_failures: 0,
@@ -281,6 +285,7 @@ impl ContainerRuntime {
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
             record.restart_policy.clone(),
+            parse_capabilities(&record.capabilities),
         )?;
 
         record.pid = child_id;
@@ -343,8 +348,15 @@ fn spawn_process_with_logs(
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
     restart_policy: RestartPolicy,
+    capabilities: Vec<caps::Capability>,
 ) -> Result<u32, RuntimeError> {
-    let command = build_command(cmd, env, rootfs_dir.as_deref(), no_new_privs)?;
+    let command = build_command(
+        cmd,
+        env,
+        rootfs_dir.as_deref(),
+        no_new_privs,
+        &capabilities,
+    )?;
     let (child_id, child, join_handles) = spawn_child_with_logs(
         command,
         stdout_path,
@@ -358,6 +370,7 @@ fn spawn_process_with_logs(
     let stderr_path = stderr_path.to_path_buf();
     let rootfs_dir = rootfs_dir.clone();
     let no_new_privs = no_new_privs;
+    let caps_for_restart = capabilities.clone();
     thread::spawn(move || {
         supervise_child(
             child,
@@ -372,6 +385,7 @@ fn spawn_process_with_logs(
             rootfs_dir,
             no_new_privs,
             restart_policy,
+            caps_for_restart,
         );
     });
 
@@ -383,6 +397,7 @@ fn build_command(
     env: &[String],
     rootfs_dir: Option<&Path>,
     no_new_privs: bool,
+    capabilities: &[caps::Capability],
 ) -> Result<Command, RuntimeError> {
     let mut command = if let Some(rootfs) = rootfs_dir {
         if nix::unistd::Uid::effective().is_root() {
@@ -422,6 +437,22 @@ fn build_command(
                 Ok(())
             });
         }
+    }
+
+    let caps = capabilities.to_vec();
+    unsafe {
+        command.pre_exec(move || {
+            if nix::unistd::Uid::effective().is_root() {
+                if caps.is_empty() {
+                    drop_all_capabilities()
+                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                } else {
+                    set_capabilities(&caps)
+                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                }
+            }
+            Ok(())
+        });
     }
 
     Ok(command)
@@ -464,6 +495,7 @@ fn supervise_child(
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
     restart_policy: RestartPolicy,
+    capabilities: Vec<caps::Capability>,
 ) {
     loop {
         let status = child.wait();
@@ -484,7 +516,13 @@ fn supervise_child(
         }
 
         thread::sleep(Duration::from_secs(1));
-        let command = match build_command(&cmd, &env, rootfs_dir.as_deref(), no_new_privs) {
+        let command = match build_command(
+            &cmd,
+            &env,
+            rootfs_dir.as_deref(),
+            no_new_privs,
+            &capabilities,
+        ) {
             Ok(cmd) => cmd,
             Err(_) => break,
         };
@@ -497,6 +535,21 @@ fn supervise_child(
         child = new_child;
         join_handles = new_handles;
     }
+}
+
+fn parse_capabilities(entries: &[String]) -> Vec<caps::Capability> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            let normalized = if trimmed.starts_with("CAP_") {
+                trimmed.to_string()
+            } else {
+                format!("CAP_{}", trimmed)
+            };
+            normalized.parse::<caps::Capability>().ok()
+        })
+        .collect()
 }
 
 fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool {
@@ -638,6 +691,7 @@ mod tests {
             &HashMap::new(),
             None,
             RestartPolicy::No,
+            &[],
             None,
             &[],
             &[],
@@ -669,6 +723,7 @@ mod tests {
             &HashMap::new(),
             None,
             RestartPolicy::No,
+            &[],
             None,
             &[],
             &[],
@@ -708,6 +763,7 @@ mod tests {
             &HashMap::new(),
             None,
             RestartPolicy::No,
+            &[],
             None,
             &[],
             &[],
@@ -741,6 +797,7 @@ mod tests {
             &HashMap::new(),
             None,
             RestartPolicy::No,
+            &[],
             None,
             &[],
             &[],
@@ -790,6 +847,7 @@ mod tests {
             &HashMap::new(),
             None,
             RestartPolicy::No,
+            &[],
             Some(&limits),
             &[],
             &[],
@@ -838,15 +896,16 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.1".to_string()],
                 &[],
-                &HashMap::new(),
-                &HashMap::new(),
-                None,
-                RestartPolicy::No,
-                None,
-                &[],
-                &[],
-                false,
-                false,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            RestartPolicy::No,
+            &[],
+            None,
+            &[],
+            &[],
+            false,
+            false,
             )
             .expect("run");
 

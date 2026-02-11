@@ -2,7 +2,7 @@ use crate::container_exec::exec_in_container;
 use crate::container_store::{
     ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
 };
-use crate::cgroups::{CgroupV2Manager, ResourceLimits};
+use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::image_config::healthcheck_from_config;
 use crate::image_fetch::resolve_layer_paths;
@@ -235,6 +235,16 @@ impl ContainerRuntime {
         self.store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))
+    }
+
+    pub fn stats(&self, id: &str) -> Result<CgroupStats, RuntimeError> {
+        let _record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let manager = CgroupV2Manager::new(&self.cgroup_root);
+        let group_path = self.cgroup_root.join("ferrocrate").join(id);
+        Ok(manager.read_stats(group_path)?)
     }
 
     pub fn pause(&self, id: &str) -> Result<(), RuntimeError> {

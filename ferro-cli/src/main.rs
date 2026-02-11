@@ -8,6 +8,7 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::process;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,9 @@ pub enum Commands {
     },
     Containers,
     Logs {
+        container: String,
+    },
+    Stats {
         container: String,
     },
     Inspect {
@@ -235,6 +239,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Containers => handle_containers(&runtime),
         Commands::Logs { container } => handle_logs(&runtime, &container),
         Commands::Inspect { container } => handle_inspect(&runtime, &container),
+        Commands::Stats { container } => handle_stats(&runtime, &container),
         Commands::Pause { container } => handle_pause(&runtime, &container),
         Commands::Unpause { container } => handle_unpause(&runtime, &container),
         Commands::Stop { container, timeout } => {
@@ -498,6 +503,26 @@ fn handle_inspect(runtime: &ContainerRuntime, container: &str) -> Result<(), Str
     }
     let record = runtime.inspect(container).map_err(|err| err.to_string())?;
     let json = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
+    println!("{json}");
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct StatsOutput {
+    container: String,
+    stats: ferro_core::cgroups::CgroupStats,
+}
+
+fn handle_stats(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("stats: container is required".to_string());
+    }
+    let stats = runtime.stats(container).map_err(|err| err.to_string())?;
+    let output = StatsOutput {
+        container: container.to_string(),
+        stats,
+    };
+    let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
     println!("{json}");
     Ok(())
 }
@@ -810,7 +835,7 @@ mod tests {
     use super::{
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pause, handle_pull,
-        handle_push, handle_rmi, handle_run, handle_stop, handle_kill, handle_rm, handle_restart,
+        handle_push, handle_rmi, handle_run, handle_stats, handle_stop, handle_kill, handle_rm, handle_restart,
         handle_unpause, build_limits, handle_volume,
         build_health_config, effective_readonly, parse_bind_mounts, parse_capabilities,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy,
@@ -1312,6 +1337,14 @@ mod tests {
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let err = handle_inspect(&runtime, "").expect_err("container required");
         assert!(err.contains("inspect: container is required"));
+    }
+
+    #[test]
+    fn stats_handler_requires_container() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let err = handle_stats(&runtime, "").expect_err("container required");
+        assert!(err.contains("stats: container is required"));
     }
 
     #[test]

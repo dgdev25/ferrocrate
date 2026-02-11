@@ -4,6 +4,7 @@ pub mod image_manifest;
 pub mod image_store;
 pub mod image_tagging;
 pub mod layer_compression;
+pub mod layer_mount;
 pub mod linux_namespaces;
 pub mod overlayfs;
 pub mod process_lifecycle;

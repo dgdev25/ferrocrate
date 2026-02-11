@@ -53,7 +53,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 
 - [x] ~~Implement OverlayFS mount for rootless containers (kernel 5.11+)~~
 - [x] ~~Implement FUSE fallback for older kernels~~
-- [ ] Implement layer mounting and merging
+- [x] ~~Implement layer mounting and merging~~
 - [ ] Implement container rootfs preparation
 - [ ] Implement mount cleanup on container exit
 - [ ] Create integration tests for storage operations

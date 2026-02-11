@@ -93,6 +93,18 @@ impl CgroupV2Manager {
         fs::write(procs_path, pid.to_string())?;
         Ok(())
     }
+
+    pub fn freeze(&self, group_path: impl AsRef<Path>) -> Result<(), CgroupError> {
+        let group_path = group_path.as_ref();
+        fs::write(group_path.join("cgroup.freeze"), "1")?;
+        Ok(())
+    }
+
+    pub fn thaw(&self, group_path: impl AsRef<Path>) -> Result<(), CgroupError> {
+        let group_path = group_path.as_ref();
+        fs::write(group_path.join("cgroup.freeze"), "0")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +165,30 @@ mod tests {
         assert_eq!(
             fs::read_to_string(group.join("cgroup.procs")).expect("read cgroup.procs"),
             "4242"
+        );
+    }
+
+    #[test]
+    fn freezes_and_thaws_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("seed controllers");
+        fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
+
+        let manager = CgroupV2Manager::new(root);
+        let group = manager.create_group("containers/test").expect("group created");
+
+        manager.freeze(&group).expect("freeze");
+        assert_eq!(
+            fs::read_to_string(group.join("cgroup.freeze")).expect("read freeze"),
+            "1"
+        );
+
+        manager.thaw(&group).expect("thaw");
+        assert_eq!(
+            fs::read_to_string(group.join("cgroup.freeze")).expect("read freeze"),
+            "0"
         );
     }
 

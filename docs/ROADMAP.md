@@ -26,7 +26,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 |---|---|---|---|
 | CLM-01 | Run OCI-compliant container images | Partial | Run pulls manifest + layers, constructs rootfs; chroot only when root. |
 | CLM-02 | ~~Create/start/stop/restart/kill/remove~~ | Done | Restart/kill/remove implemented and wired in CLI. |
-| CLM-03 | Pause/unpause via cgroup freezer | Partial | Pause/resume exists; freezer enforcement not verified. |
+| CLM-03 | ~~Pause/unpause via cgroup freezer~~ | Done | CLI pause/unpause uses cgroup.freeze via cgroups v2. |
 | CLM-04 | Container exec | Done | `ferro-core` exec + CLI wired. |
 | CLM-05 | Container logs | Done | Runtime logs + CLI logs. |
 | CLM-06 | ~~Inspect (JSON metadata)~~ | Done | CLI inspect outputs JSON metadata from container store. |

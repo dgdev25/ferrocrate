@@ -83,6 +83,12 @@ pub enum Commands {
     Inspect {
         container: String,
     },
+    Pause {
+        container: String,
+    },
+    Unpause {
+        container: String,
+    },
     Stop {
         container: String,
         #[arg(long, default_value = "10")]
@@ -211,6 +217,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Containers => handle_containers(&runtime),
         Commands::Logs { container } => handle_logs(&runtime, &container),
         Commands::Inspect { container } => handle_inspect(&runtime, &container),
+        Commands::Pause { container } => handle_pause(&runtime, &container),
+        Commands::Unpause { container } => handle_unpause(&runtime, &container),
         Commands::Stop { container, timeout } => {
             handle_stop(&runtime, &container, timeout)
         }
@@ -447,6 +455,24 @@ fn handle_inspect(runtime: &ContainerRuntime, container: &str) -> Result<(), Str
     let record = runtime.inspect(container).map_err(|err| err.to_string())?;
     let json = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
     println!("{json}");
+    Ok(())
+}
+
+fn handle_pause(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("pause: container is required".to_string());
+    }
+    runtime.pause(container).map_err(|err| err.to_string())?;
+    println!("pause: {container}");
+    Ok(())
+}
+
+fn handle_unpause(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("unpause: container is required".to_string());
+    }
+    runtime.resume(container).map_err(|err| err.to_string())?;
+    println!("unpause: {container}");
     Ok(())
 }
 
@@ -695,8 +721,9 @@ fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), St
 mod tests {
     use super::{
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
-        handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pull, handle_push, handle_rmi,
-        handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
+        handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pause, handle_pull,
+        handle_push, handle_rmi, handle_run, handle_stop, handle_kill, handle_rm, handle_restart,
+        handle_unpause, build_limits, handle_volume,
         build_health_config, parse_bind_mounts, parse_driver_opts, parse_env_entries, parse_key_values,
         parse_restart_policy, parse_tmpfs_mounts,
         validate_network_backend,
@@ -837,6 +864,24 @@ mod tests {
         let cli = Cli::parse_from(["ferrocrate", "kill", "abc123"]);
         match cli.command {
             Commands::Kill { container } => assert_eq!(container, "abc123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pause_command() {
+        let cli = Cli::parse_from(["ferrocrate", "pause", "abc123"]);
+        match cli.command {
+            Commands::Pause { container } => assert_eq!(container, "abc123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_unpause_command() {
+        let cli = Cli::parse_from(["ferrocrate", "unpause", "abc123"]);
+        match cli.command {
+            Commands::Unpause { container } => assert_eq!(container, "abc123"),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -983,6 +1028,12 @@ mod tests {
 
         let err = handle_kill(&runtime, "").expect_err("kill requires container");
         assert!(err.contains("kill: container is required"));
+
+        let err = handle_pause(&runtime, "").expect_err("pause requires container");
+        assert!(err.contains("pause: container is required"));
+
+        let err = handle_unpause(&runtime, "").expect_err("unpause requires container");
+        assert!(err.contains("unpause: container is required"));
 
         let err = handle_rm(&runtime, "").expect_err("rm requires container");
         assert!(err.contains("rm: container is required"));

@@ -199,6 +199,32 @@ impl ContainerRuntime {
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))
     }
 
+    pub fn pause(&self, id: &str) -> Result<(), RuntimeError> {
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let manager = CgroupV2Manager::new(&self.cgroup_root);
+        let group = manager.create_group(&format!("ferrocrate/{id}"))?;
+        manager.add_pid(&group, record.pid)?;
+        manager.freeze(&group)?;
+        self.store.update_status(id, "paused")?;
+        Ok(())
+    }
+
+    pub fn resume(&self, id: &str) -> Result<(), RuntimeError> {
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let manager = CgroupV2Manager::new(&self.cgroup_root);
+        let group = manager.create_group(&format!("ferrocrate/{id}"))?;
+        manager.add_pid(&group, record.pid)?;
+        manager.thaw(&group)?;
+        self.store.update_status(id, "running")?;
+        Ok(())
+    }
+
     pub fn stop(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
         let record = self
             .store
@@ -727,12 +753,13 @@ mod tests {
     fn run_applies_cgroup_limits_when_set() {
         let _guard = CGROUP_ENV_LOCK.lock().expect("lock env");
         let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
+        let root = temp.path().join("cgroup");
+        std::fs::create_dir_all(&root).expect("cgroup root");
 
         std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
         std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
 
-        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", root); }
+        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root); }
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
 
@@ -776,6 +803,48 @@ mod tests {
             std::fs::read_to_string(group.join("cgroup.procs")).expect("cgroup.procs"),
             record.pid.to_string()
         );
+
+        unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
+    }
+
+    #[test]
+    fn pause_and_resume_updates_status() {
+        let _guard = CGROUP_ENV_LOCK.lock().expect("lock env");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("cgroup");
+        std::fs::create_dir_all(&root).expect("cgroup root");
+
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
+
+        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root); }
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
+
+        let record = runtime
+            .run(
+                "alpine:latest",
+                &["sh".to_string(), "-c".to_string(), "sleep 0.1".to_string()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                None,
+                &[],
+                &[],
+                false,
+                false,
+            )
+            .expect("run");
+
+        runtime.pause(&record.id).expect("pause");
+        let paused = runtime.inspect(&record.id).expect("inspect");
+        assert_eq!(paused.status, "paused");
+
+        runtime.resume(&record.id).expect("resume");
+        let resumed = runtime.inspect(&record.id).expect("inspect");
+        assert_eq!(resumed.status, "running");
 
         unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
     }

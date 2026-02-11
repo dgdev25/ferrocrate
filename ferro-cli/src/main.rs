@@ -2,6 +2,9 @@ use clap::{Parser, Subcommand};
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::registry::parse_image_reference;
 use ferro_core::runtime::ContainerRuntime;
+use ferro_compose::compose::{
+    ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
+};
 use std::process;
 use std::path::PathBuf;
 
@@ -42,6 +45,20 @@ pub enum Commands {
     Push {
         image: String,
     },
+    Compose {
+        #[arg(short, long)]
+        file: Option<String>,
+        #[command(subcommand)]
+        command: ComposeCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ComposeCommands {
+    Up,
+    Down,
+    Ps,
+    Logs,
 }
 
 fn main() {
@@ -69,6 +86,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image } => handle_pull(&image),
         Commands::Push { image } => handle_push(&image),
+        Commands::Compose { file, command } => handle_compose(file.as_deref(), command),
     }
 }
 
@@ -177,11 +195,35 @@ fn handle_push(image: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), String> {
+    let path = find_compose_file(file).map_err(|err| err.to_string())?;
+    let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
+    match command {
+        ComposeCommands::Up => {
+            let order = compose_up(&project).map_err(|err| err.to_string())?;
+            println!("compose up: {:?}", order);
+        }
+        ComposeCommands::Down => {
+            let order = compose_down(&project).map_err(|err| err.to_string())?;
+            println!("compose down: {:?}", order);
+        }
+        ComposeCommands::Ps => {
+            let services = compose_ps(&project).map_err(|err| err.to_string())?;
+            println!("compose ps: {:?}", services);
+        }
+        ComposeCommands::Logs => {
+            let services = compose_logs(&project).map_err(|err| err.to_string())?;
+            println!("compose logs: {:?}", services);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, dispatch, handle_build, handle_containers, handle_exec, handle_images,
-        handle_logs, handle_pull, handle_push, handle_run, validate_network_backend,
+        Cli, Commands, ComposeCommands, dispatch, handle_build, handle_containers, handle_exec,
+        handle_images, handle_logs, handle_pull, handle_push, handle_run, validate_network_backend,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
@@ -214,6 +256,18 @@ mod tests {
             Commands::Build { dockerfile, tag } => {
                 assert_eq!(dockerfile, "./Dockerfile");
                 assert_eq!(tag.expect("tag"), "acme/app:dev");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compose_command() {
+        let cli = Cli::parse_from(["ferrocrate", "compose", "up"]);
+        match cli.command {
+            Commands::Compose { file, command } => {
+                assert!(file.is_none());
+                assert!(matches!(command, ComposeCommands::Up));
             }
             other => panic!("unexpected command: {other:?}"),
         }

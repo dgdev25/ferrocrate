@@ -194,7 +194,7 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 
 - [x] ~~Implement compose config parsing and validation~~
 - [x] ~~Implement service dependency ordering~~
-- [ ] Implement compose up/down/ps/logs
+- [x] ~~Implement compose up/down/ps/logs~~
 - [ ] Add compose integration tests
 
 ### Phase 4 Milestone: Multi-Backend Networking

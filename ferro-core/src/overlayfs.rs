@@ -2,6 +2,7 @@ use nix::errno::Errno;
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,16 @@ pub enum OverlayFsError {
     Mount(#[from] nix::Error),
     #[error("overlayfs mount denied. rootless overlayfs needs kernel 5.11+ or FUSE fallback")]
     RootlessKernelUnsupported,
+    #[error("fuse-overlayfs binary not found in PATH")]
+    FuseOverlayBinaryMissing,
+    #[error("fuse-overlayfs mount failed with status {status}: {stderr}")]
+    FuseOverlayFailed { status: i32, stderr: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayBackend {
+    KernelOverlayFs,
+    FuseOverlayFs,
 }
 
 pub struct OverlayFsManager;
@@ -55,6 +66,46 @@ impl OverlayFsManager {
         umount2(merged_dir, MntFlags::MNT_DETACH)?;
         Ok(())
     }
+
+    /// Mount rootfs and automatically fallback to fuse-overlayfs when kernel overlayfs is unavailable.
+    pub fn mount_with_fallback(config: &OverlayMountConfig) -> Result<OverlayBackend, OverlayFsError> {
+        match Self::mount_rootless(config) {
+            Ok(()) => Ok(OverlayBackend::KernelOverlayFs),
+            Err(OverlayFsError::RootlessKernelUnsupported) => {
+                Self::mount_with_fuse_overlayfs(config)?;
+                Ok(OverlayBackend::FuseOverlayFs)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn mount_with_fuse_overlayfs(config: &OverlayMountConfig) -> Result<(), OverlayFsError> {
+        validate_config(config)?;
+        fs::create_dir_all(&config.upperdir)?;
+        fs::create_dir_all(&config.workdir)?;
+        fs::create_dir_all(&config.merged_dir)?;
+
+        let args = build_fuse_overlayfs_args(config);
+        let output = Command::new("fuse-overlayfs")
+            .args(args)
+            .output()
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    OverlayFsError::FuseOverlayBinaryMissing
+                } else {
+                    OverlayFsError::Io(err)
+                }
+            })?;
+
+        if !output.status.success() {
+            return Err(OverlayFsError::FuseOverlayFailed {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 pub fn build_mount_options(config: &OverlayMountConfig) -> String {
@@ -71,6 +122,14 @@ pub fn build_mount_options(config: &OverlayMountConfig) -> String {
         config.upperdir.display(),
         config.workdir.display()
     )
+}
+
+pub fn build_fuse_overlayfs_args(config: &OverlayMountConfig) -> Vec<String> {
+    vec![
+        "-o".to_string(),
+        build_mount_options(config),
+        config.merged_dir.display().to_string(),
+    ]
 }
 
 fn validate_config(config: &OverlayMountConfig) -> Result<(), OverlayFsError> {
@@ -91,7 +150,9 @@ fn validate_config(config: &OverlayMountConfig) -> Result<(), OverlayFsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayMountConfig, build_mount_options, validate_config};
+    use super::{
+        OverlayMountConfig, build_fuse_overlayfs_args, build_mount_options, validate_config,
+    };
     use std::path::PathBuf;
 
     fn sample_config() -> OverlayMountConfig {
@@ -119,5 +180,17 @@ mod tests {
         config.lowerdirs.clear();
         let err = validate_config(&config).expect_err("must reject empty lowerdirs");
         assert!(err.to_string().contains("at least one lowerdir"));
+    }
+
+    #[test]
+    fn builds_fuse_overlayfs_args() {
+        let config = sample_config();
+        let args = build_fuse_overlayfs_args(&config);
+        assert_eq!(args[0], "-o");
+        assert_eq!(
+            args[1],
+            "lowerdir=/layers/l1:/layers/l0,upperdir=/run/containers/c1/upper,workdir=/run/containers/c1/work"
+        );
+        assert_eq!(args[2], "/run/containers/c1/rootfs");
     }
 }

@@ -191,7 +191,7 @@
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | REL-01 | Runtime crash does not kill containers | Not Started | No supervisor/daemonization strategy. |
-| REL-02 | Graceful degradation without AI | Not Started | No explicit toggles or tests. |
+| REL-02 | Graceful degradation without AI | Partial | `AiConfig::from_env` reads `FERROCRATE_AI` to disable AI logic; not yet wired into runtime. |
 | REL-03 | Data integrity for image store | Not Started | Checksums not verified on every read. |
 | REL-04 | Atomic operations | Not Started | No atomic pull/volume operation guarantees. |
 | REL-05 | Test coverage | Not Started | No coverage enforcement. |

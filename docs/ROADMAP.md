@@ -37,7 +37,6 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 9. Documentation (last)
 
 ---
-
 ## PHASE 1: Foundation (Weeks 1-10)
 
 ### Runtime Implementation (OCI Runtime Spec v1.2)
@@ -112,137 +111,83 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 
 ---
 
-## PHASE 2: Documentation & Polish (Weeks 5-10, parallel with Phase 1)
+## PHASE 1: Foundation (Weeks 1-10)
 
-### API Documentation
+### Runtime Implementation (OCI Runtime Spec v1.2)
 
-- [ ] Document ferro-core public API (runtime, image, storage modules)
-- [ ] Document ferro-net public API (eBPF, fallback backends)
-- [ ] Document ferro-mind public API (inference interface)
-- [ ] Generate OpenAPI specification for HTTP APIs (if any)
-- [ ] Create API reference documentation (rustdoc)
-- [ ] Create examples for each public API
-
-### Architecture Documentation
-
-- [ ] Create C4 Context diagram (system, containers, components)
-- [ ] Create architecture decision record index with all 15 ADRs
-- [ ] Document data flow (image → container → execution)
-- [ ] Document crate dependencies and module boundaries
-- [ ] Create sequence diagrams for key operations (run, build, pull)
-- [ ] Document security architecture and isolation mechanisms
-
-### User Documentation
-
-- [ ] Create installation guide (from source, binary, package)
-- [ ] Create quick start tutorial (run first container)
-- [ ] Create build tutorial (create and run custom image)
-- [ ] Create networking troubleshooting guide
-- [ ] Create performance tuning guide
-- [ ] Create rootless setup guide for new systems
-- [ ] Create migration guide from Docker (if applicable)
-
-### Developer Documentation
-
-- [ ] Create contributor guide (setup, testing, code style)
-- [ ] Create debugging guide (logging, tracing, profiling)
-- [ ] Create 5-crate architecture overview
-- [ ] Document test infrastructure and how to add tests
-- [ ] Create performance benchmarking guide
-- [ ] Document release process
-
-### Code Quality
-
-- [ ] Run clippy linter on all crates; fix warnings
-- [ ] Enforce documentation on public APIs (all exports documented)
-- [ ] Set up code formatter (rustfmt) in CI
-- [ ] Create CONTRIBUTING.md with code standards
-- [ ] Implement license header check in CI
-
-### Security Hardening (Phase 2)
-
-- [ ] Run cargo-audit to check for known vulnerabilities
-- [ ] Implement CVE response process
-- [ ] Create security policy document (SECURITY.md)
-- [ ] Document threat model for rootless containers
-- [ ] Review all unsafe code blocks with security focus
-
-### Performance Baseline
-
-- [ ] Create performance benchmark suite (container startup, image pull)
-- [ ] Measure baseline performance metrics
-- [ ] Document performance targets (from PRD: container start <5s, image pull <30s)
-- [ ] Profile memory usage under load
-- [ ] Identify initial optimization candidates
-
-### Phase 2 Milestone: Production-Ready Documentation
-
-**Deliverable**: Complete documentation suite for users and developers
-
-- [ ] All documentation files reviewed and complete
-- [ ] API documentation auto-generated and accurate
-- [ ] Examples tested and working
-- [ ] Security policy published
+- [x] ~~Set up Rust project structure with 5-crate workspace~~
+- [x] ~~Implement OCI Runtime Spec v1.2 config.json parser~~
+- [ ] Implement Linux namespace creation (pid, network, ipc, uts, mount)
+```
 
 ---
 
-## PHASE 3: AI Layer (Weeks 11-18, depends on Phase 1)
+## Notes for External Development Teams
 
-### WASM Runtime Integration
+### Getting Started
 
-- [ ] Integrate Wasmtime 19.0 runtime into ferro-mind
-- [ ] Implement WASM module loading and validation
-- [ ] Implement host function interface (metrics import)
-- [ ] Implement pluggable backend architecture (trait-based)
-- [ ] Create WASM module embedding in binary
-- [ ] Implement graceful fallback if WASM unavailable
-- [ ] Create integration tests for WASM execution
+1. Clone the repository: `git clone <repo>`
+2. Read `/docs/development/CONTRIBUTING.md` for development setup
+3. Review Phase 1 tasks to understand the foundation
+4. Each task should have a corresponding issue/PR in GitHub
 
-### Tier 1 Models (WASM - 1-5ms latency)
+### Dependencies
 
-- [ ] Implement resource prediction model (memory, cpu based on image/history)
-- [ ] Implement anomaly detection model (metrics deviation scoring)
-- [ ] Implement restart decision model (health check → restart probability)
-- [ ] Implement cache optimization model (layer reuse prediction)
-- [ ] Pre-train models using synthetic data
-- [ ] Create model validation tests
+- **Phase 1** blocks all other phases (foundation requirement)
+- **Phase 2** can run in parallel with Phase 1 (weeks 5-10 overlap)
+- **Phase 3 & 4** can run in parallel (both depend only on Phase 1)
+- **Phase 5** depends on Phases 1-4 complete
+- **Phase 6** runs for entire project duration (weeks 21-70)
 
-### Inference Engine
+### Communication
 
-- [ ] Implement inference request routing (Tier 1/2/3)
-- [ ] Implement Tier 1 request handler (WASM models)
-- [ ] Implement Tier 2 routing stub (local LLM, future)
-- [ ] Implement Tier 3 routing stub (cloud API, future)
-- [ ] Implement metrics collection for inference performance
-- [ ] Create inference latency tests (<5ms for Tier 1)
+- Use GitHub Issues for task status updates
+- Use GitHub Projects board for visual progress tracking
+- Weekly standup recommended for Phase 1 critical path
+- Bi-weekly standups for Phases 3-6
 
-### Container Integration
+### Quality Gates
 
-- [ ] Collect metrics from running containers (cgroups, /proc)
-- [ ] Feed metrics to inference engine
-- [ ] Implement resource adjustment based on predictions
-- [ ] Implement restart logic based on anomaly scores
-- [ ] Create end-to-end tests (container running → metrics → prediction → action)
-
-### Observability
-
-- [ ] Implement structured logging for AI decisions
-- [ ] Create metrics export (Prometheus format, optional)
-- [ ] Implement tracing for inference requests
-- [ ] Create AI debugging guide
-
-### Phase 3 Milestone: MVP v0.3.0 (AI-Ready)
-
-**Deliverable**: Intelligent resource allocation with Tier 1 models
-
-- [ ] Merge all Phase 3 code
-- [ ] Create v0.3.0 release tag
-- [ ] Update documentation with AI features
-- [ ] Publish AI benchmarks and latency measurements
+Each phase must complete with:
+- ✅ All tasks marked complete
+- ✅ All integration tests passing
+- ✅ Code review approved
+- ✅ Documentation updated
+- ✅ Security baseline met for that phase
 
 ---
 
-## PHASE 4: Networking (Weeks 11-20, parallel with Phase 3)
+## Version Milestones
+
+| Version | Weeks | Phases Complete | Deliverable |
+|---------|-------|-----------------|-------------|
+| v0.1.0 | 10 | 1 | Basic container runtime |
+| v0.3.0 | 18 | 1-3 | MVP with AI inference |
+| v0.5.0 | 32 | 1-5 | Kubernetes CRI ready |
+| v1.0.0 | 52-72 | 1-6 | Production ready |
+
+---
+
+**Last Updated**: February 11, 2026
+**Maintained By**: FerroCrate Development Team
+## PHASE 2: CLI Wiring & E2E (Weeks 6-12)
+
+### CLI Runtime Wiring
+
+- [ ] Wire `ferrocrate run` to runtime execution
+- [ ] Wire `ferrocrate exec` to namespace entry
+- [ ] Wire `ferrocrate logs` to container log stream
+- [ ] Wire `ferrocrate images/containers` to local stores
+
+### End-to-End Testing
+
+- [ ] Add E2E tests for `run` and `exec`
+- [ ] Add E2E tests for image pull/build/push
+- [ ] Add E2E tests for container lifecycle and cleanup
+
+---
+
+## PHASE 3: Networking (Weeks 11-20)
 
 ### eBPF Primary Backend
 
@@ -305,64 +250,72 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [ ] Network integration tests passing
 
 ---
+## PHASE 4: Compose (Weeks 12-20)
 
-## PHASE 5: Kubernetes Integration (Weeks 21-32, depends on Phases 1-4)
+### Compose Execution
 
-### CRI Shim Implementation (ferro-cri)
-
-- [ ] Implement Container Runtime Interface (CRI) v1 specification
-- [ ] Implement gRPC service for kubelet communication
-- [ ] Implement ImageService (pull, push, list images)
-- [ ] Implement RuntimeService (create, start, stop containers)
-- [ ] Implement PodSandbox operations
-- [ ] Implement container execution and lifecycle
-- [ ] Implement logging via container log storage
-- [ ] Create CRI compliance tests
-
-### kubelet Integration
-
-- [ ] Configure kubelet to use FerroCrate as runtime (via CRI socket)
-- [ ] Test basic pod creation and execution
-- [ ] Test pod networking via CNI
-- [ ] Test pod logs retrieval
-- [ ] Test pod exec functionality
-- [ ] Create kubelet integration tests
-
-### Kubernetes Testing Environment
-
-- [ ] Set up local Kubernetes cluster (kind, kubeadm, or similar)
-- [ ] Deploy FerroCrate as CRI runtime
-- [ ] Create test pod manifests (simple, with volumes, with network policies)
-- [ ] Create test suite for Kubernetes workloads
-
-### Edge Cases & Compatibility
-
-- [ ] Test with multiple pod networks (Calico, Flannel, etc.)
-- [ ] Test with PersistentVolumes and storage
-- [ ] Test with ConfigMaps and Secrets
-- [ ] Test with DaemonSets and StatefulSets
-- [ ] Test with Helm charts
-- [ ] Create comprehensive edge case test suite
-
-### CRI Documentation
-
-- [ ] Document CRI shim architecture
-- [ ] Create Kubernetes deployment guide
-- [ ] Create troubleshooting guide for Kubernetes
-- [ ] Document known limitations
-
-### Phase 5 Milestone: Kubernetes Ready (v0.5.0)
-
-**Deliverable**: FerroCrate as working Kubernetes CRI runtime
-
-- [ ] Merge all Phase 5 code
-- [ ] Create v0.5.0 release tag
-- [ ] Pass CRI compliance tests
-- [ ] Successfully run realistic Kubernetes workloads
-- [ ] Publish Kubernetes deployment documentation
+- [ ] Implement compose config parsing and validation
+- [ ] Implement service dependency ordering
+- [ ] Implement compose up/down/ps/logs
+- [ ] Add compose integration tests
 
 ---
 
+## PHASE 5: AI Layer (Weeks 11-18, depends on Phase 1)
+
+### WASM Runtime Integration
+
+- [ ] Integrate Wasmtime 19.0 runtime into ferro-mind
+- [ ] Implement WASM module loading and validation
+- [ ] Implement host function interface (metrics import)
+- [ ] Implement pluggable backend architecture (trait-based)
+- [ ] Create WASM module embedding in binary
+- [ ] Implement graceful fallback if WASM unavailable
+- [ ] Create integration tests for WASM execution
+
+### Tier 1 Models (WASM - 1-5ms latency)
+
+- [ ] Implement resource prediction model (memory, cpu based on image/history)
+- [ ] Implement anomaly detection model (metrics deviation scoring)
+- [ ] Implement restart decision model (health check → restart probability)
+- [ ] Implement cache optimization model (layer reuse prediction)
+- [ ] Pre-train models using synthetic data
+- [ ] Create model validation tests
+
+### Inference Engine
+
+- [ ] Implement inference request routing (Tier 1/2/3)
+- [ ] Implement Tier 1 request handler (WASM models)
+- [ ] Implement Tier 2 routing stub (local LLM, future)
+- [ ] Implement Tier 3 routing stub (cloud API, future)
+- [ ] Implement metrics collection for inference performance
+- [ ] Create inference latency tests (<5ms for Tier 1)
+
+### Container Integration
+
+- [ ] Collect metrics from running containers (cgroups, /proc)
+- [ ] Feed metrics to inference engine
+- [ ] Implement resource adjustment based on predictions
+- [ ] Implement restart logic based on anomaly scores
+- [ ] Create end-to-end tests (container running → metrics → prediction → action)
+
+### Observability
+
+- [ ] Implement structured logging for AI decisions
+- [ ] Create metrics export (Prometheus format, optional)
+- [ ] Implement tracing for inference requests
+- [ ] Create AI debugging guide
+
+### Phase 3 Milestone: MVP v0.3.0 (AI-Ready)
+
+**Deliverable**: Intelligent resource allocation with Tier 1 models
+
+- [ ] Merge all Phase 3 code
+- [ ] Create v0.3.0 release tag
+- [ ] Update documentation with AI features
+- [ ] Publish AI benchmarks and latency measurements
+
+---
 ## PHASE 6: Hardening & Production Readiness (Weeks 21-70, ongoing)
 
 ### Performance Optimization
@@ -466,7 +419,135 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [ ] Announce production readiness
 
 ---
+## PHASE 7: Kubernetes Integration (Weeks 21-32, depends on Phases 1-6)
 
+### CRI Shim Implementation (ferro-cri)
+
+- [ ] Implement Container Runtime Interface (CRI) v1 specification
+- [ ] Implement gRPC service for kubelet communication
+- [ ] Implement ImageService (pull, push, list images)
+- [ ] Implement RuntimeService (create, start, stop containers)
+- [ ] Implement PodSandbox operations
+- [ ] Implement container execution and lifecycle
+- [ ] Implement logging via container log storage
+- [ ] Create CRI compliance tests
+
+### kubelet Integration
+
+- [ ] Configure kubelet to use FerroCrate as runtime (via CRI socket)
+- [ ] Test basic pod creation and execution
+- [ ] Test pod networking via CNI
+- [ ] Test pod logs retrieval
+- [ ] Test pod exec functionality
+- [ ] Create kubelet integration tests
+
+### Kubernetes Testing Environment
+
+- [ ] Set up local Kubernetes cluster (kind, kubeadm, or similar)
+- [ ] Deploy FerroCrate as CRI runtime
+- [ ] Create test pod manifests (simple, with volumes, with network policies)
+- [ ] Create test suite for Kubernetes workloads
+
+### Edge Cases & Compatibility
+
+- [ ] Test with multiple pod networks (Calico, Flannel, etc.)
+- [ ] Test with PersistentVolumes and storage
+- [ ] Test with ConfigMaps and Secrets
+- [ ] Test with DaemonSets and StatefulSets
+- [ ] Test with Helm charts
+- [ ] Create comprehensive edge case test suite
+
+### CRI Documentation
+
+- [ ] Document CRI shim architecture
+- [ ] Create Kubernetes deployment guide
+- [ ] Create troubleshooting guide for Kubernetes
+- [ ] Document known limitations
+
+### Phase 5 Milestone: Kubernetes Ready (v0.5.0)
+
+**Deliverable**: FerroCrate as working Kubernetes CRI runtime
+
+- [ ] Merge all Phase 5 code
+- [ ] Create v0.5.0 release tag
+- [ ] Pass CRI compliance tests
+- [ ] Successfully run realistic Kubernetes workloads
+- [ ] Publish Kubernetes deployment documentation
+
+---
+## PHASE 8: Documentation & Polish (Final)
+
+### API Documentation
+
+- [ ] Document ferro-core public API (runtime, image, storage modules)
+- [ ] Document ferro-net public API (eBPF, fallback backends)
+- [ ] Document ferro-mind public API (inference interface)
+- [ ] Generate OpenAPI specification for HTTP APIs (if any)
+- [ ] Create API reference documentation (rustdoc)
+- [ ] Create examples for each public API
+
+### Architecture Documentation
+
+- [ ] Create C4 Context diagram (system, containers, components)
+- [ ] Create architecture decision record index with all 15 ADRs
+- [ ] Document data flow (image → container → execution)
+- [ ] Document crate dependencies and module boundaries
+- [ ] Create sequence diagrams for key operations (run, build, pull)
+- [ ] Document security architecture and isolation mechanisms
+
+### User Documentation
+
+- [ ] Create installation guide (from source, binary, package)
+- [ ] Create quick start tutorial (run first container)
+- [ ] Create build tutorial (create and run custom image)
+- [ ] Create networking troubleshooting guide
+- [ ] Create performance tuning guide
+- [ ] Create rootless setup guide for new systems
+- [ ] Create migration guide from Docker (if applicable)
+
+### Developer Documentation
+
+- [ ] Create contributor guide (setup, testing, code style)
+- [ ] Create debugging guide (logging, tracing, profiling)
+- [ ] Create 5-crate architecture overview
+- [ ] Document test infrastructure and how to add tests
+- [ ] Create performance benchmarking guide
+- [ ] Document release process
+
+### Code Quality
+
+- [ ] Run clippy linter on all crates; fix warnings
+- [ ] Enforce documentation on public APIs (all exports documented)
+- [ ] Set up code formatter (rustfmt) in CI
+- [ ] Create CONTRIBUTING.md with code standards
+- [ ] Implement license header check in CI
+
+### Security Hardening (Phase 2)
+
+- [ ] Run cargo-audit to check for known vulnerabilities
+- [ ] Implement CVE response process
+- [ ] Create security policy document (SECURITY.md)
+- [ ] Document threat model for rootless containers
+- [ ] Review all unsafe code blocks with security focus
+
+### Performance Baseline
+
+- [ ] Create performance benchmark suite (container startup, image pull)
+- [ ] Measure baseline performance metrics
+- [ ] Document performance targets (from PRD: container start <5s, image pull <30s)
+- [ ] Profile memory usage under load
+- [ ] Identify initial optimization candidates
+
+### Phase 2 Milestone: Production-Ready Documentation
+
+**Deliverable**: Complete documentation suite for users and developers
+
+- [ ] All documentation files reviewed and complete
+- [ ] API documentation auto-generated and accurate
+- [ ] Examples tested and working
+- [ ] Security policy published
+
+---
 ## Completion Tracking
 
 ### How to Mark Tasks as Complete

@@ -8,7 +8,7 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process;
 use std::path::{Path, PathBuf};
 
@@ -33,6 +33,12 @@ pub enum Commands {
         read_only_rootfs: bool,
         #[arg(long = "no-new-privileges")]
         no_new_privs: bool,
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        #[arg(long = "annotation")]
+        annotations: Vec<String>,
         #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
@@ -146,6 +152,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             tmpfs_mounts,
             read_only_rootfs,
             no_new_privs,
+            env,
+            labels,
+            annotations,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -161,6 +170,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &tmpfs_mounts,
                 read_only_rootfs,
                 no_new_privs,
+                &env,
+                &labels,
+                &annotations,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -200,6 +212,9 @@ fn handle_run(
     tmpfs_mounts: &[String],
     read_only_rootfs: bool,
     no_new_privs: bool,
+    env: &[String],
+    labels: &[String],
+    annotations: &[String],
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -210,8 +225,22 @@ fn handle_run(
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
+    let env = parse_env_entries(env)?;
+    let labels = parse_key_values("label", labels)?;
+    let annotations = parse_key_values("annotation", annotations)?;
     let record = runtime
-        .run(image, cmd, limits.as_ref(), &mounts, &tmpfs, read_only_rootfs, no_new_privs)
+        .run(
+            image,
+            cmd,
+            &env,
+            &labels,
+            &annotations,
+            limits.as_ref(),
+            &mounts,
+            &tmpfs,
+            read_only_rootfs,
+            no_new_privs,
+        )
         .map_err(|err| err.to_string())?;
     println!(
         "run: container_id={} pid={} network_backend={}",
@@ -479,6 +508,32 @@ fn parse_driver_opts(opts: &[String]) -> Result<BTreeMap<String, String>, String
     Ok(out)
 }
 
+fn parse_env_entries(envs: &[String]) -> Result<Vec<String>, String> {
+    for entry in envs {
+        let mut parts = entry.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next();
+        if key.is_empty() || value.is_none() {
+            return Err("run: env must be KEY=VALUE".to_string());
+        }
+    }
+    Ok(envs.to_vec())
+}
+
+fn parse_key_values(kind: &str, entries: &[String]) -> Result<HashMap<String, String>, String> {
+    let mut out = HashMap::new();
+    for entry in entries {
+        let mut parts = entry.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if key.is_empty() || value.is_empty() {
+            return Err(format!("{kind}: must be key=value"));
+        }
+        out.insert(key.to_string(), value.to_string());
+    }
+    Ok(out)
+}
+
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -563,7 +618,7 @@ mod tests {
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pull, handle_push, handle_rmi,
         handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
-        parse_bind_mounts, parse_driver_opts, parse_tmpfs_mounts,
+        parse_bind_mounts, parse_driver_opts, parse_env_entries, parse_key_values, parse_tmpfs_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -582,6 +637,9 @@ mod tests {
                 tmpfs_mounts,
                 read_only_rootfs,
                 no_new_privs,
+                env,
+                labels,
+                annotations,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -594,6 +652,9 @@ mod tests {
                 assert!(tmpfs_mounts.is_empty());
                 assert!(!read_only_rootfs);
                 assert!(!no_new_privs);
+                assert!(env.is_empty());
+                assert!(labels.is_empty());
+                assert!(annotations.is_empty());
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -868,12 +929,15 @@ mod tests {
             &[],
             false,
             false,
+            &[],
+            &[],
+            &[],
             None,
             None,
             None,
             None,
         )
-            .expect_err("invalid reference");
+        .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
     }
 
@@ -887,6 +951,18 @@ mod tests {
     fn rejects_invalid_tmpfs_mount() {
         let err = parse_tmpfs_mounts(&[":size=64m".to_string()]).expect_err("invalid");
         assert!(err.contains("tmpfs"));
+    }
+
+    #[test]
+    fn rejects_invalid_env_entry() {
+        let err = parse_env_entries(&["NOVAL".to_string()]).expect_err("invalid");
+        assert!(err.contains("env"));
+    }
+
+    #[test]
+    fn rejects_invalid_label_entry() {
+        let err = parse_key_values("label", &["bad".to_string()]).expect_err("invalid");
+        assert!(err.contains("label"));
     }
 
     #[test]

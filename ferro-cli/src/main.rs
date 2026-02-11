@@ -9,6 +9,7 @@ use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
 use serde::Serialize;
+use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap};
 use std::process;
 use std::path::{Path, PathBuf};
@@ -461,6 +462,15 @@ fn validate_output_format(value: &str) -> Result<String, String> {
     }
 }
 
+fn color_status(status: &str) -> String {
+    match status {
+        "running" => status.green().to_string(),
+        "paused" => status.yellow().to_string(),
+        "stopped" | "exited" | "killed" => status.red().to_string(),
+        other => other.blue().to_string(),
+    }
+}
+
 fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
     let records = store.list_references().map_err(|err| err.to_string())?;
     if format == "json" {
@@ -473,7 +483,7 @@ fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
         return Ok(());
     }
     for record in records {
-        println!("{} {}", record.reference, record.digest);
+        println!("{} {}", record.reference.cyan(), record.digest);
     }
     Ok(())
 }
@@ -507,7 +517,12 @@ fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), Str
         return Ok(());
     }
     for record in records {
-        println!("{} {} {}", record.id, record.image, record.status);
+        println!(
+            "{} {} {}",
+            record.id.bold(),
+            record.image.cyan(),
+            color_status(&record.status)
+        );
     }
     Ok(())
 }
@@ -541,7 +556,10 @@ fn handle_inspect(runtime: &ContainerRuntime, container: &str, format: &str) -> 
     } else {
         println!(
             "id={} image={} status={} pid={}",
-            record.id, record.image, record.status, record.pid
+            record.id.bold(),
+            record.image.cyan(),
+            color_status(&record.status),
+            record.pid
         );
     }
     Ok(())

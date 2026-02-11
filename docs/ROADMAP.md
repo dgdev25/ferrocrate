@@ -153,7 +153,7 @@
 | CLI-01 | Docker-compatible CLI syntax | Partial | Core commands exist; behavior not Docker-equivalent. |
 | CLI-02 | Docker socket compatibility | Not Started | Not implemented. |
 | CLI-03 | Shell completion | Not Started | Not implemented. |
-| CLI-04 | Colored, human-friendly output | Not Started | Not implemented. |
+| CLI-04 | ~~Colored, human-friendly output~~ | Done | Colored status + image refs for text output. |
 | CLI-05 | ~~JSON output mode~~ | Done | `--format json` supported for images/containers/logs/inspect/stats. |
 | CLI-06 | Migration tool | Not Started | Not implemented. |
 | CLI-07 | Interactive TUI | Not Started | Not implemented. |

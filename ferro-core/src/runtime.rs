@@ -8,6 +8,7 @@ use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use std::fs;
 use std::fs::OpenOptions;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -70,6 +71,7 @@ impl ContainerRuntime {
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
         readonly_rootfs: bool,
+        no_new_privs: bool,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         if cmd.is_empty() {
@@ -111,6 +113,7 @@ impl ContainerRuntime {
             self.store.clone_db(),
             container_id.clone(),
             Some(&rootfs_dir),
+            no_new_privs,
         )?;
 
         if let Some(limits) = limits {
@@ -203,6 +206,7 @@ impl ContainerRuntime {
             self.store.clone_db(),
             record.id.clone(),
             None,
+            false,
         )?;
 
         record.pid = child_id;
@@ -253,6 +257,7 @@ fn spawn_process_with_logs(
     store: sled::Db,
     container_id: String,
     rootfs_dir: Option<&Path>,
+    no_new_privs: bool,
 ) -> Result<u32, RuntimeError> {
     let mut command = if let Some(rootfs) = rootfs_dir {
         if nix::unistd::Uid::effective().is_root() {
@@ -271,6 +276,18 @@ fn spawn_process_with_logs(
         host_cmd.args(&cmd[1..]);
         host_cmd
     };
+
+    if no_new_privs {
+        unsafe {
+            command.pre_exec(|| {
+                let rc = nix::libc::prctl(nix::libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
@@ -342,6 +359,7 @@ mod tests {
                 &[],
                 &[],
                 false,
+                false,
             )
             .expect("run");
 
@@ -366,6 +384,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                false,
                 false,
             )
             .expect("run");
@@ -400,6 +419,7 @@ mod tests {
                 &[],
                 &[],
                 false,
+                false,
             )
             .expect("run");
 
@@ -426,6 +446,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                false,
                 false,
             )
             .expect("run");
@@ -468,6 +489,7 @@ mod tests {
                 Some(&limits),
                 &[],
                 &[],
+                false,
                 false,
             )
             .expect("run");

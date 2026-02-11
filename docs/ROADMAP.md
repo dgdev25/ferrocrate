@@ -203,4 +203,4 @@
 | OBS-02 | OpenTelemetry trace export | Not Started | Not implemented. |
 | OBS-03 | ~~Structured JSON logging~~ | Done | JSONL event log emitted under runtime logs. |
 | OBS-04 | ~~Resource usage stats~~ | Done | CLI stats reads cgroup v2 memory/cpu/pids counters. |
-| OBS-05 | AI decision audit log | Not Started | Not implemented. |
+| OBS-05 | AI decision audit log | Partial | `ferro-mind` audit logger writes decision traces to `FERROCRATE_AI_AUDIT_LOG`. |

@@ -310,6 +310,10 @@ version = "0.1.0"
 [[package]]
 name = "ferro-net"
 version = "0.1.0"
+dependencies = [
+ "nix",
+ "thiserror",
+]
 
 [[package]]
 name = "filetime"

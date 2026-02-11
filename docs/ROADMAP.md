@@ -229,9 +229,9 @@ Each phase must complete with:
 ### Network Integration with Rootless
 
 - [x] ~~Implement network setup in rootless context~~
-- [ ] Test eBPF with user namespaces
-- [ ] Test iptables/nftables with user namespaces
-- [ ] Create rootless networking edge case tests
+- [x] ~~Test eBPF with user namespaces~~
+- [x] ~~Test iptables/nftables with user namespaces~~
+- [x] ~~Create rootless networking edge case tests~~
 
 ### Networking Observability
 

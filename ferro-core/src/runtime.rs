@@ -7,6 +7,7 @@ use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::image_config::healthcheck_from_config;
 use crate::image_fetch::resolve_layer_paths;
 use crate::image_fetch::resolve_config_path;
+use crate::observability::{log_event, make_event};
 use crate::rootfs::construct_rootfs;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
@@ -170,6 +171,16 @@ impl ContainerRuntime {
         };
 
         self.store.put(&record)?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event(
+                "run",
+                Some(&record.id),
+                Some(&record.image),
+                Some(&record.status),
+                None,
+            ),
+        );
 
         if let Some(config) = health {
             let store = self.store.clone_db();
@@ -187,7 +198,18 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        Ok(exec_in_container(record.pid, cmd)?)
+        let result = exec_in_container(record.pid, cmd)?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event(
+                "exec",
+                Some(&record.id),
+                Some(&record.image),
+                None,
+                None,
+            ),
+        );
+        Ok(result)
     }
 
     pub fn logs(&self, id: &str) -> Result<String, RuntimeError> {
@@ -225,6 +247,10 @@ impl ContainerRuntime {
         manager.add_pid(&group, record.pid)?;
         manager.freeze(&group)?;
         self.store.update_status(id, "paused")?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("pause", Some(id), Some(&record.image), Some("paused"), None),
+        );
         Ok(())
     }
 
@@ -238,6 +264,10 @@ impl ContainerRuntime {
         manager.add_pid(&group, record.pid)?;
         manager.thaw(&group)?;
         self.store.update_status(id, "running")?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("resume", Some(id), Some(&record.image), Some("running"), None),
+        );
         Ok(())
     }
 
@@ -248,6 +278,10 @@ impl ContainerRuntime {
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         stop_pid(record.pid, timeout)?;
         self.store.update_status(id, "stopped")?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("stop", Some(id), Some(&record.image), Some("stopped"), None),
+        );
         Ok(())
     }
 
@@ -258,6 +292,10 @@ impl ContainerRuntime {
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         kill_pid(record.pid)?;
         self.store.update_status(id, "killed")?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
+        );
         Ok(())
     }
 
@@ -291,6 +329,10 @@ impl ContainerRuntime {
         record.pid = child_id;
         record.status = "running".to_string();
         self.store.put(&record)?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("restart", Some(id), Some(&record.image), Some("running"), None),
+        );
 
         if let Some(config) = record.health.clone() {
             let store = self.store.clone_db();
@@ -316,6 +358,10 @@ impl ContainerRuntime {
         let container_dir = self.runtime_dir.join("containers").join(id);
         let _ = fs::remove_dir_all(&container_dir);
         let _ = self.store.remove(id)?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("remove", Some(id), Some(&record.image), Some("removed"), None),
+        );
         Ok(())
     }
 }

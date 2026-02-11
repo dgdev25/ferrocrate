@@ -39,9 +39,9 @@ pub enum Commands {
         no_new_privs: bool,
         #[arg(long, default_value = "dev")]
         profile: String,
-        #[arg(long = "env")]
+        #[arg(short = 'e', long = "env")]
         env: Vec<String>,
-        #[arg(long = "label")]
+        #[arg(short = 'l', long = "label")]
         labels: Vec<String>,
         #[arg(long = "annotation")]
         annotations: Vec<String>,
@@ -89,6 +89,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: VolumeCommands,
     },
+    #[command(alias = "ps")]
     Containers {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,

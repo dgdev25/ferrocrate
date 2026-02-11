@@ -35,4 +35,20 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn builds_slirp4netns_cmd_with_edge_values() {
+        let config = RootlessNetConfig {
+            tap_name: "tap-long-name-01".to_string(),
+            cidr: "".to_string(),
+        };
+        let cmd = build_slirp4netns_cmd(9999, &config);
+        assert_eq!(
+            cmd,
+            vec![
+                "slirp4netns", "--configure", "--mtu=65520", "--cidr", "", "9999",
+                "tap-long-name-01"
+            ]
+        );
+    }
 }

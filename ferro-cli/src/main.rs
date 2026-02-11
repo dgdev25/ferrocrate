@@ -69,7 +69,9 @@ pub enum Commands {
         cmd: Vec<String>,
     },
     Build {
-        dockerfile: String,
+        dockerfile: Option<String>,
+        #[arg(long)]
+        ferrofile: Option<String>,
         #[arg(short, long)]
         tag: Option<String>,
     },
@@ -221,7 +223,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 pids_max,
             )
         }
-        Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
+        Commands::Build {
+            dockerfile,
+            ferrofile,
+            tag,
+        } => handle_build(dockerfile.as_deref(), ferrofile.as_deref(), tag.as_deref()),
         Commands::Images => handle_images(&image_store),
         Commands::Rmi { image } => handle_rmi(&image_store, &image),
         Commands::ImagePrune => handle_image_prune(&image_store),
@@ -387,15 +393,29 @@ fn build_limits(
     }))
 }
 
-fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
-    if dockerfile.trim().is_empty() {
-        return Err("build: dockerfile path is required".to_string());
+fn handle_build(
+    dockerfile: Option<&str>,
+    ferrofile: Option<&str>,
+    tag: Option<&str>,
+) -> Result<(), String> {
+    let runtime_dir = runtime_dir();
+    if let Some(ferrofile_path) = ferrofile {
+        let result = ferro_core::ferrofile_build::build_from_ferrofile(
+            Path::new(ferrofile_path),
+            &runtime_dir,
+        )
+        .map_err(|err| err.to_string())?;
+        println!(
+            "build: ferrofile={} tag={} layer_digest={} config_digest={}",
+            ferrofile_path, result.reference, result.layer_digest, result.config_digest
+        );
+        return Ok(());
     }
 
+    let dockerfile = dockerfile.ok_or_else(|| "build: dockerfile path is required".to_string())?;
     let tag = tag.unwrap_or("local/build:latest");
     parse_image_reference(tag).map_err(|err| err.to_string())?;
 
-    let runtime_dir = runtime_dir();
     let result = ferro_core::dockerfile_build::build_from_dockerfile(
         Path::new(dockerfile),
         Some(tag),
@@ -870,8 +890,13 @@ mod tests {
         ]);
 
         match cli.command {
-            Commands::Build { dockerfile, tag } => {
-                assert_eq!(dockerfile, "./Dockerfile");
+            Commands::Build {
+                dockerfile,
+                ferrofile,
+                tag,
+            } => {
+                assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
+                assert!(ferrofile.is_none());
                 assert_eq!(tag.expect("tag"), "acme/app:dev");
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1249,13 +1274,13 @@ mod tests {
 
     #[test]
     fn build_handler_requires_dockerfile_path() {
-        let err = handle_build("", None).expect_err("dockerfile required");
+        let err = handle_build(None, None, None).expect_err("dockerfile required");
         assert!(err.contains("dockerfile path is required"));
     }
 
     #[test]
     fn build_handler_rejects_invalid_tag() {
-        let err = handle_build("./Dockerfile", Some("")).expect_err("invalid tag");
+        let err = handle_build(Some("./Dockerfile"), None, Some("")).expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
     }
 

@@ -77,7 +77,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement seccomp profile defaults~~
 - [x] ~~Implement AppArmor/SELinux profile generation~~
 - [x] ~~Run initial security audit on codebase~~
-- [ ] Create SECURITY.md with vulnerability reporting procedure
+- [x] ~~Create SECURITY.md with vulnerability reporting procedure~~
 
 ### Testing Infrastructure (Phase 1)
 

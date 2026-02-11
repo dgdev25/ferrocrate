@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use ferro_core::registry::parse_image_reference;
+use std::process;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -38,12 +40,65 @@ pub enum Commands {
 }
 
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    if let Err(err) = dispatch(cli.command) {
+        eprintln!("error: {err}");
+        process::exit(1);
+    }
+}
+
+fn dispatch(command: Commands) -> Result<(), String> {
+    match command {
+        Commands::Run { image, cmd } => handle_run(&image, &cmd),
+        Commands::Build { dockerfile, tag } => {
+            println!("build: dockerfile={dockerfile} tag={}", tag.unwrap_or_default());
+            Ok(())
+        }
+        Commands::Images => {
+            println!("images: not implemented");
+            Ok(())
+        }
+        Commands::Containers => {
+            println!("containers: not implemented");
+            Ok(())
+        }
+        Commands::Logs { container } => {
+            println!("logs: container={container}");
+            Ok(())
+        }
+        Commands::Exec { container, cmd } => {
+            if cmd.is_empty() {
+                return Err("exec: command is required".to_string());
+            }
+            println!("exec: container={container} cmd={}", cmd.join(" "));
+            Ok(())
+        }
+        Commands::Pull { image } => {
+            parse_image_reference(&image).map_err(|err| err.to_string())?;
+            println!("pull: image={image}");
+            Ok(())
+        }
+        Commands::Push { image } => {
+            parse_image_reference(&image).map_err(|err| err.to_string())?;
+            println!("push: image={image}");
+            Ok(())
+        }
+    }
+}
+
+fn handle_run(image: &str, cmd: &[String]) -> Result<(), String> {
+    parse_image_reference(image).map_err(|err| err.to_string())?;
+    if cmd.is_empty() {
+        println!("run: image={image} cmd=<default>");
+    } else {
+        println!("run: image={image} cmd={}", cmd.join(" "));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands};
+    use super::{Cli, Commands, dispatch, handle_run};
     use clap::Parser;
 
     #[test]
@@ -90,5 +145,21 @@ mod tests {
             Commands::Push { image } => assert_eq!(image, "ghcr.io/acme/app:latest"),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn run_handler_rejects_invalid_image() {
+        let err = handle_run("", &[]).expect_err("invalid reference");
+        assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn dispatch_exec_requires_command() {
+        let err = dispatch(Commands::Exec {
+            container: "c1".to_string(),
+            cmd: vec![],
+        })
+        .expect_err("missing command");
+        assert!(err.contains("exec: command is required"));
     }
 }

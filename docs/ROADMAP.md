@@ -1,491 +1,176 @@
-# FerroCrate Development Roadmap
+# FerroCrate PRD-Backed Roadmap
 
-**Timeline**: 52-72 weeks (12-18 months) | **Status**: Planning Phase
-**Version Target**: v1.0.0 Production Release
+**Source of truth:** `/media/lyle/datadisk/dev/ferrocrate/docs/product-requirements.md`
+**Last Updated:** February 11, 2026
+**Status:** Audit + Re-scope
+
+---
+
+## Audit Summary (PRD Coverage)
+
+Status legend: **Done**, **Partial**, **Not Started**
+
+- **Core runtime + images + storage**: Partial coverage; base runtime exists, but many required features are missing (build, inspect, volumes, restart policies, healthchecks).
+- **Networking**: Partial scaffolding (eBPF + iptables/nftables builders, no runtime wiring or advanced features).
+- **Security**: Partial (rootless + seccomp parsing + profile generation, missing enforcement + signatures + audit).
+- **Compose**: Partial (parsing + ordering + CLI, no orchestration).
+- **AI / ruv integrations**: Not started.
+- **Developer experience + compatibility**: Mostly not started.
 
 ---
 
-## Overview
+## Workstreams (Mapped to PRD IDs)
 
-This roadmap breaks down the FerroCrate implementation into 8 sequential phases with clear dependencies. Use strikethrough (`~~text~~`) to mark tasks as completed.
+### 3.1 Container Lifecycle Management
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| CLM-01 | Run OCI-compliant container images | Partial | Runtime run exists, OCI parsing in ferro-core; not validated across registries. |
+| CLM-02 | Create/start/stop/restart/kill/remove | Partial | Start/stop/lifecycle present; restart/kill/remove missing. |
+| CLM-03 | Pause/unpause via cgroup freezer | Partial | Pause/resume exists; freezer enforcement not verified. |
+| CLM-04 | Container exec | Done | `ferro-core` exec + CLI wired. |
+| CLM-05 | Container logs | Done | Runtime logs + CLI logs. |
+| CLM-06 | Inspect (JSON metadata) | Not Started | No inspect handler or schema output. |
+| CLM-07 | Health checks | Not Started | Not implemented. |
+| CLM-08 | Restart policies | Not Started | Requires daemon/state. |
+| CLM-09 | Resource limits (mem/cpu/pids) | Partial | cgroups v2 integration exists; full enforcement/coverage not verified. |
+| CLM-10 | Env vars, labels, annotations | Not Started | No config passing or storage. |
 
-### Phase Structure (Updated Order)
-- **Phase 1**: Foundation (Weeks 1-10) - Core runtime, image, storage
-- **Phase 2**: CLI Wiring & E2E (Weeks 6-12) - Wire CLI to runtime, end-to-end tests
-- **Phase 3**: Networking (Weeks 11-20) - eBPF primary, fallback backends
-- **Phase 4**: Compose (Weeks 12-20) - Multi-container orchestration
-- **Phase 5**: AI Layer (Weeks 11-18) - WASM inference, Tier 1 models
-- **Phase 6**: Hardening & Production (Weeks 21-70, ongoing) - Performance, security, edge cases
-- **Phase 7**: Kubernetes Integration (Weeks 21-32) - CRI shim, kubelet compatibility
-- **Phase 8**: Documentation (Final) - Full docs after behavior stabilizes
+### 3.2 Image Management
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| IMG-01 | Pull images from OCI registries | Partial | Basic pull implemented; not tested across registries. |
+| IMG-02 | Push images to OCI registries | Partial | Basic push implemented; auth helpers not supported. |
+| IMG-03 | Content-addressable store (Blake3) | Not Started | No Blake3 store. |
+| IMG-04 | Zstd compression for layers | Partial | zstd/gzip decompression only. |
+| IMG-05 | Lazy image pulling | Not Started | No lazy pull or FUSE streaming. |
+| IMG-06 | Dockerfile build | Not Started | CLI stub only. |
+| IMG-07 | ferrofile.toml build | Not Started | Not implemented. |
+| IMG-08 | Multi-stage builds | Not Started | Not implemented. |
+| IMG-09 | Build cache | Not Started | Not implemented. |
+| IMG-10 | Tag/list/remove/prune images | Partial | Tag/list done; remove/prune missing. |
+| IMG-11 | CVE scanning | Not Started | Not implemented. |
+| IMG-12 | ruvector dedup | Not Started | Not implemented. |
 
-### Deliverables by Phase (Updated Order)
-- **Week 10**: Core runtime + image + storage foundations complete
-- **Week 18**: MVP Ready (v0.3.0) - Full MVP with AI and networking
-- **Week 32**: Kubernetes Ready (v0.5.0) - CRI integration complete
-- **Week 52-72**: Production Ready (v1.0.0) - Full feature set, hardened, docs finalized
+### 3.3 Networking
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| NET-01 | Bridge networking | Partial | Bridge + netns/veth helpers exist; not wired to runtime. |
+| NET-02 | Host networking | Not Started | No CLI or runtime wiring. |
+| NET-03 | None networking | Not Started | No CLI or runtime wiring. |
+| NET-04 | Container-to-container DNS | Not Started | DNS config render only. |
+| NET-05 | Custom networks (subnets) | Not Started | No API or state. |
+| NET-06 | eBPF + iptables/nftables fallback | Partial | Builders + flags; no live backend integration. |
+| NET-07 | WireGuard overlay | Not Started | Not implemented. |
+| NET-08 | Port mapping | Partial | Portmap rule builders only. |
+| NET-09 | IPv6 | Not Started | Not implemented. |
+| NET-10 | Bandwidth limiting | Not Started | Not implemented. |
 
-### Preferred Development Order (Updated)
-1. Runtime core (namespaces, cgroups, rootless, lifecycle, rootfs)
-2. Storage + image plumbing (layers, registry, tagging)
-3. CLI wired to runtime + E2E tests
-4. Networking (bridge/host/none, DNS, port mapping, fallback)
-5. Compose (if needed before AI)
-6. AI layer
-7. Hardening & production readiness
-8. Kubernetes integration
-9. Documentation (last)
+### 3.4 Storage and Volumes
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| STR-01 | Named volumes | Not Started | Not implemented. |
+| STR-02 | Bind mounts | Not Started | Not implemented. |
+| STR-03 | tmpfs mounts | Not Started | Not implemented. |
+| STR-04 | Volume drivers | Not Started | Not implemented. |
+| STR-05 | OverlayFS default | Done | OverlayFS + FUSE fallback implemented. |
+| STR-06 | Read-only rootfs | Not Started | Not implemented. |
+| STR-07 | Volume backup/restore | Not Started | Not implemented. |
 
----
-## PHASE 1: Foundation (Weeks 1-10)
+### 3.5 Security
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| SEC-01 | Rootless by default | Done | User namespaces + rootless runtime. |
+| SEC-02 | Seccomp profiles | Done | Default profile + parser, not enforced in runtime. |
+| SEC-03 | AppArmor/SELinux integration | Partial | Profile generation only. |
+| SEC-04 | Capability dropping | Partial | Drop helper exists; not enforced. |
+| SEC-05 | Read-only rootfs for prod | Not Started | Not implemented. |
+| SEC-06 | no-new-privileges | Partial | Config field exists; not enforced. |
+| SEC-07 | Image signature verification | Not Started | Not implemented. |
+| SEC-08 | Runtime security monitoring (eBPF) | Not Started | Not implemented. |
+| SEC-09 | Encrypted container communication | Not Started | Not implemented. |
+| SEC-10 | Audit logging | Not Started | Not implemented. |
 
-### Runtime Implementation (OCI Runtime Spec v1.2)
+### 3.6 Compose / Multi-Container
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| CMP-01 | docker-compose.yml compatibility | Partial | Parse + validate only. |
+| CMP-02 | Native compose subcommand | Partial | CLI exists; no orchestration. |
+| CMP-03 | Service dependency ordering | Partial | Ordering exists; condition handling not implemented. |
+| CMP-04 | Service scaling | Not Started | Not implemented. |
+| CMP-05 | .env support | Partial | Interpolation works; no .env file loading. |
+| CMP-06 | Profiles | Not Started | Not implemented. |
+| CMP-07 | Watch mode | Not Started | Not implemented. |
 
-- [x] ~~Set up Rust project structure with 5-crate workspace (ferro-core, ferro-net, ferro-mind, ferro-compose, ferro-cli)~~
-- [x] ~~Implement OCI Runtime Spec v1.2 config.json parser~~
-- [x] ~~Implement Linux namespace creation (pid, network, ipc, uts, mount)~~
-- [x] ~~Implement cgroups v2 integration for resource limits (memory, cpu, pids)~~
-- [x] ~~Implement rootless container execution via user namespaces~~
-- [x] ~~Implement process lifecycle management (start, stop, pause, resume)~~
-- [x] ~~Implement container exec functionality~~
-- [x] ~~Create integration tests for basic container lifecycle~~
+### 3.7 AI / Intelligence (ferro-mind)
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| AI-01 | WASM inference (pluggable) | Not Started | Not implemented. |
+| AI-02 | Predictive resource allocation | Not Started | Not implemented. |
+| AI-03 | Intelligent restart | Not Started | Not implemented. |
+| AI-04 | Cost-tiered routing | Not Started | Not implemented. |
+| AI-05 | claude-flow integration | Not Started | Not implemented. |
+| AI-06 | Anomaly detection | Not Started | Not implemented. |
+| AI-07 | ruvector build cache optimization | Not Started | Not implemented. |
+| AI-08 | Natural language management | Not Started | Not implemented. |
+| AI-09 | Self-learning via ruvector | Not Started | Not implemented. |
+| AI-10 | AI opt-out flag | Not Started | Not implemented. |
+| AI-11 | AI explainability | Not Started | Not implemented. |
+| AI-12 | GPU/VRAM-aware scheduling | Not Started | Not implemented. |
 
-### Image Management (OCI Image Spec v1.1)
-
-- [x] ~~Implement OCI Image Spec v1.1 manifest parsing (application/vnd.oci.image.manifest.v1+json)~~
-- [x] ~~Implement layer extraction and rootfs construction~~
-- [x] ~~Implement zstd and gzip decompression for layer tarballs~~
-- [x] ~~Implement image pull from OCI registries (basic auth)~~
-- [x] ~~Implement image push to OCI registries~~
-- [x] ~~Implement local image storage (index database)~~
-- [x] ~~Implement image tagging and reference resolution~~
-- [x] ~~Create integration tests for image operations~~
-
-### Storage Driver (OverlayFS)
-
-- [x] ~~Implement OverlayFS mount for rootless containers (kernel 5.11+)~~
-- [x] ~~Implement FUSE fallback for older kernels~~
-- [x] ~~Implement layer mounting and merging~~
-- [x] ~~Implement container rootfs preparation~~
-- [x] ~~Implement mount cleanup on container exit~~
-- [x] ~~Create integration tests for storage operations~~
-
-### CLI Foundation (ferro-cli)
-
-- [x] ~~Implement argument parsing infrastructure (clap or similar)~~
-- [x] ~~Implement `ferrocrate run <image> [cmd]` command~~
-- [x] ~~Implement `ferrocrate build <dockerfile> -t <tag>` command~~
-- [x] ~~Implement `ferrocrate images` command~~
-- [x] ~~Implement `ferrocrate containers` command~~
-- [x] ~~Implement `ferrocrate logs <container>` command~~
-- [x] ~~Implement `ferrocrate exec <container> <cmd>` command~~
-- [x] ~~Implement `ferrocrate pull <image>` command~~
-- [x] ~~Implement `ferrocrate push <image>` command~~
-- [x] ~~Create CLI integration tests~~
-
-### Security Baseline (Phase 1)
-
-- [x] ~~Verify rootless container isolation (user namespace, capability dropping)~~
-- [x] ~~Implement seccomp profile defaults~~
-- [x] ~~Implement AppArmor/SELinux profile generation~~
-- [x] ~~Run initial security audit on codebase~~
-- [x] ~~Create SECURITY.md with vulnerability reporting procedure~~
-
-### Testing Infrastructure (Phase 1)
-
-- [x] ~~Set up test infrastructure with integration test harness~~
-- [x] ~~Create test fixture for OCI container images~~
-- [x] ~~Implement container lifecycle tests (create, start, stop, remove)~~
-- [x] ~~Implement image operation tests (pull, push, tag)~~
-- [x] ~~Implement rootless isolation tests~~
-- [x] ~~Set up CI pipeline for test execution~~
-
-### Phase 1 Milestone: MVP v0.1.0
-
-**Deliverable**: Can run simple OCI containers rootlessly via CLI
-
-- [x] ~~Merge all Phase 1 code~~
-- [x] ~~Create v0.1.0 release tag~~
-- [x] ~~Document basic usage in README~~
-- [x] ~~Publish initial documentation~~
-
----
-## PHASE 2: CLI Wiring & E2E (Weeks 6-12)
-
-### CLI Runtime Wiring
-
-- [x] ~~Wire `ferrocrate run` to runtime execution~~
-- [x] ~~Wire `ferrocrate exec` to namespace entry~~
-- [x] ~~Wire `ferrocrate logs` to container log stream~~
-- [x] ~~Wire `ferrocrate images/containers` to local stores~~
-
-### End-to-End Testing
-
-- [x] ~~Add E2E tests for `run` and `exec`~~
-- [x] ~~Add E2E tests for image pull/build/push~~
-- [x] ~~Add E2E tests for container lifecycle and cleanup~~
+### 3.8 CLI and Developer Experience
+| ID | Requirement | Status | Evidence / Notes |
+|---|---|---|---|
+| CLI-01 | Docker-compatible CLI syntax | Partial | Core commands exist; behavior not Docker-equivalent. |
+| CLI-02 | Docker socket compatibility | Not Started | Not implemented. |
+| CLI-03 | Shell completion | Not Started | Not implemented. |
+| CLI-04 | Colored, human-friendly output | Not Started | Not implemented. |
+| CLI-05 | JSON output mode | Not Started | Not implemented. |
+| CLI-06 | Migration tool | Not Started | Not implemented. |
+| CLI-07 | Interactive TUI | Not Started | Not implemented. |
 
 ---
-## PHASE 3: Networking (Weeks 11-20)
 
-### eBPF Primary Backend
-
-- [x] ~~Implement XDP (eXpress Data Path) program loading~~
-- [x] ~~Implement TC (Traffic Control) hook attachment~~
-- [x] ~~Implement container network namespace isolation~~
-- [x] ~~Implement veth pair creation and attachment to eBPF programs~~
-- [x] ~~Implement eBPF map management (connection tracking, rules)~~
-- [x] ~~Implement packet filtering and forwarding rules~~
-- [x] ~~Create eBPF program tests (isolated, unit-testable)~~
-- [x] ~~Create integration tests (containers with eBPF networking)~~
-
-### Networking Configuration
-
-- [x] ~~Implement network namespace setup for containers~~
-- [x] ~~Implement DNS configuration from host~~
-- [x] ~~Implement port mapping (container → host)~~
-- [x] ~~Implement bridge network support (container-to-container)~~
-- [x] ~~Implement host network mode option (--network=host)~~
-- [x] ~~Implement none network mode option (--network=none)~~
-- [x] ~~Create network configuration tests~~
-
-### iptables Fallback Backend
-
-- [x] ~~Implement iptables rule generation for legacy systems~~
-- [x] ~~Implement explicit `--network-backend=iptables` flag~~
-- [x] ~~Implement iptables rule cleanup on container exit~~
-- [x] ~~Create iptables compatibility tests~~
-- [x] ~~Test on kernels 3.10+ (minimum support)~~
-
-### nftables Alternative Backend
-
-- [x] ~~Implement nftables rule generation~~
-- [x] ~~Implement explicit `--network-backend=nftables` flag~~
-- [x] ~~Implement nftables rule cleanup on container exit~~
-- [x] ~~Create nftables compatibility tests~~
-- [x] ~~Test on kernels 3.13+ (minimum support)~~
-
-### Network Integration with Rootless
-
-- [x] ~~Implement network setup in rootless context~~
-- [x] ~~Test eBPF with user namespaces~~
-- [x] ~~Test iptables/nftables with user namespaces~~
-- [x] ~~Create rootless networking edge case tests~~
-
-### Networking Observability
-
-- [x] ~~Implement network metrics collection (bytes in/out, packets)~~
-- [x] ~~Implement connection tracking logs~~
-- [ ] Create networking troubleshooting guide
-
-### Phase 3 Milestone: MVP v0.3.0 (AI-Ready)
-
-**Deliverable**: Intelligent resource allocation with Tier 1 models
-
-- [ ] Merge all Phase 3 code
-- [ ] Create v0.3.0 release tag
-- [ ] Update documentation with AI features
-- [ ] Publish AI benchmarks and latency measurements
-
----
-## PHASE 4: Compose (Weeks 12-20)
-
-### Compose Execution
-
-- [x] ~~Implement compose config parsing and validation~~
-- [x] ~~Implement service dependency ordering~~
-- [x] ~~Implement compose up/down/ps/logs~~
-- [ ] Add compose integration tests
-
-### Phase 4 Milestone: Multi-Backend Networking
-
-**Deliverable**: eBPF primary with explicit fallback to iptables/nftables
-
-- [ ] Merge all Phase 4 code
-- [ ] eBPF backend tested on Linux 5.10+
-- [ ] iptables fallback tested on Linux 3.10+
-- [ ] nftables alternative tested on Linux 3.13+
-- [ ] Network integration tests passing
-
----
-## PHASE 5: AI Layer (Weeks 11-18, depends on Phase 1)
-
-### WASM Runtime Integration
-
-- [ ] Integrate Wasmtime 19.0 runtime into ferro-mind
-- [ ] Implement WASM module loading and validation
-- [ ] Implement host function interface (metrics import)
-- [ ] Implement pluggable backend architecture (trait-based)
-- [ ] Create WASM module embedding in binary
-- [ ] Implement graceful fallback if WASM unavailable
-- [ ] Create integration tests for WASM execution
-
-### Tier 1 Models (WASM - 1-5ms latency)
-
-- [ ] Implement resource prediction model (memory, cpu based on image/history)
-- [ ] Implement anomaly detection model (metrics deviation scoring)
-- [ ] Implement restart decision model (health check → restart probability)
-- [ ] Implement cache optimization model (layer reuse prediction)
-- [ ] Pre-train models using synthetic data
-- [ ] Create model validation tests
-
-### Inference Engine
-
-- [ ] Implement inference request routing (Tier 1/2/3)
-- [ ] Implement Tier 1 request handler (WASM models)
-- [ ] Implement Tier 2 routing stub (local LLM, future)
-- [ ] Implement Tier 3 routing stub (cloud API, future)
-- [ ] Implement metrics collection for inference performance
-- [ ] Create inference latency tests (<5ms for Tier 1)
-
-### Container Integration
-
-- [ ] Collect metrics from running containers (cgroups, /proc)
-- [ ] Feed metrics to inference engine
-- [ ] Implement resource adjustment based on predictions
-- [ ] Implement restart logic based on anomaly scores
-- [ ] Create end-to-end tests (container running → metrics → prediction → action)
-
-### Observability
-
-- [ ] Implement structured logging for AI decisions
-- [ ] Create metrics export (Prometheus format, optional)
-- [ ] Implement tracing for inference requests
-- [ ] Create AI debugging guide
-
----
-## PHASE 6: Hardening & Production Readiness (Weeks 21-70, ongoing)
-
-### Performance Optimization
-
-- [ ] Profile container startup time (target: <5s)
-- [ ] Profile image pull performance (target: <30s for typical images)
-- [ ] Optimize eBPF program performance (minimize packet processing overhead)
-- [ ] Optimize image decompression (parallelize layer extraction)
-- [ ] Optimize memory usage (reduce per-container overhead)
-- [ ] Create performance regression tests
-- [ ] Document performance tuning options
-
-### Security Hardening
-
-- [ ] Implement comprehensive seccomp profiles by workload type
-- [ ] Implement AppArmor/SELinux profile generation
-- [ ] Run security audit by third party (if possible)
-- [ ] Fix any identified vulnerabilities
-- [ ] Implement runtime security monitoring (anomaly detection)
-- [ ] Create security best practices guide
-- [ ] Document security model in detail
-
-### Stability & Reliability
-
-- [ ] Implement comprehensive error handling (all error paths tested)
-- [ ] Implement recovery from common failures (daemon crash, OOM, kernel panic)
-- [ ] Implement health checks and self-healing
-- [ ] Create chaos engineering tests (random failures, resource exhaustion)
-- [ ] Test under sustained high load (100+ containers)
-- [ ] Test container migration scenarios
-- [ ] Create operational runbook
-
-### Edge Cases & Compatibility
-
-- [ ] Test with very large images (10GB+)
-- [ ] Test with deeply nested directory structures
-- [ ] Test with unusual image formats (unusual media types)
-- [ ] Test with old Docker images (pre-1.10)
-- [ ] Test with resource-constrained systems (small VPS, embedded)
-- [ ] Test with slow networks (congestion simulation)
-- [ ] Test with intermittent network failures
-- [ ] Create comprehensive edge case test suite
-
-### Observability & Debugging
-
-- [ ] Implement detailed logging at all levels
-- [ ] Implement structured logging (JSON output)
-- [ ] Implement tracing for troubleshooting (internal spans)
-- [ ] Implement metrics collection (Prometheus format)
-- [ ] Create observability documentation
-- [ ] Create debugging guide for common issues
-
-### Release Infrastructure
-
-- [ ] Set up automated release pipeline
-- [ ] Implement semantic versioning scheme
-- [ ] Create release notes template
-- [ ] Implement changelog generation
-- [ ] Set up binary distribution (GitHub releases)
-- [ ] Set up package repositories (apt, yum, brew if applicable)
-- [ ] Create upgrade guide
-
-### Testing Coverage
-
-- [ ] Achieve 80%+ code coverage across all crates
-- [ ] Create fuzzing tests for critical paths (image parsing, config parsing)
-- [ ] Create property-based tests (random valid inputs)
-- [ ] Create stress tests (resource exhaustion)
-- [ ] Create long-running stability tests (72-hour runs)
-
-### Community & Ecosystem
-
-- [ ] Set up community issue triage process
-- [ ] Create issue templates
-- [ ] Set up contribution workflow
-- [ ] Create security advisory process
-- [ ] Publish roadmap publicly
-- [ ] Engage with OCI community
-- [ ] Engage with CNCF community
-
-### Phase 6 Milestone: Production v1.0.0
-
-**Deliverable**: Production-ready FerroCrate runtime
-
-- [ ] All tests passing
-- [ ] Security audit complete
-- [ ] Performance benchmarks acceptable
-- [ ] Documentation comprehensive
-- [ ] Create v1.0.0 release tag
-- [ ] Announce production readiness
-
----
-## PHASE 7: Kubernetes Integration (Weeks 21-32, depends on Phases 1-6)
-
-### CRI Shim Implementation (ferro-cri)
-
-- [ ] Implement Container Runtime Interface (CRI) v1 specification
-- [ ] Implement gRPC service for kubelet communication
-- [ ] Implement ImageService (pull, push, list images)
-- [ ] Implement RuntimeService (create, start, stop containers)
-- [ ] Implement PodSandbox operations
-- [ ] Implement container execution and lifecycle
-- [ ] Implement logging via container log storage
-- [ ] Create CRI compliance tests
-
-### kubelet Integration
-
-- [ ] Configure kubelet to use FerroCrate as runtime (via CRI socket)
-- [ ] Test basic pod creation and execution
-- [ ] Test pod networking via CNI
-- [ ] Test pod logs retrieval
-- [ ] Test pod exec functionality
-- [ ] Create kubelet integration tests
-
-### Kubernetes Testing Environment
-
-- [ ] Set up local Kubernetes cluster (kind, kubeadm, or similar)
-- [ ] Deploy FerroCrate as CRI runtime
-- [ ] Create test pod manifests (simple, with volumes, with network policies)
-- [ ] Create test suite for Kubernetes workloads
-
-### Edge Cases & Compatibility
-
-- [ ] Test with multiple pod networks (Calico, Flannel, etc.)
-- [ ] Test with PersistentVolumes and storage
-- [ ] Test with ConfigMaps and Secrets
-- [ ] Test with DaemonSets and StatefulSets
-- [ ] Test with Helm charts
-- [ ] Create comprehensive edge case test suite
-
-### CRI Documentation
-
-- [ ] Document CRI shim architecture
-- [ ] Create Kubernetes deployment guide
-- [ ] Create troubleshooting guide for Kubernetes
-- [ ] Document known limitations
-
-### Phase 7 Milestone: Kubernetes Ready (v0.5.0)
-
-**Deliverable**: FerroCrate as working Kubernetes CRI runtime
-
-- [ ] Merge all Phase 7 code
-- [ ] Create v0.5.0 release tag
-- [ ] Pass CRI compliance tests
-- [ ] Successfully run realistic Kubernetes workloads
-- [ ] Publish Kubernetes deployment documentation
-
----
-## PHASE 8: Documentation & Polish (Final)
-
-### API Documentation
-
-- [ ] Document ferro-core public API (runtime, image, storage modules)
-- [ ] Document ferro-net public API (eBPF, fallback backends)
-- [ ] Document ferro-mind public API (inference interface)
-- [ ] Generate OpenAPI specification for HTTP APIs (if any)
-- [ ] Create API reference documentation (rustdoc)
-- [ ] Create examples for each public API
-
-### Architecture Documentation
-
-- [ ] Create C4 Context diagram (system, containers, components)
-- [ ] Create architecture decision record index with all 15 ADRs
-- [ ] Document data flow (image → container → execution)
-- [ ] Document crate dependencies and module boundaries
-- [ ] Create sequence diagrams for key operations (run, build, pull)
-- [ ] Document security architecture and isolation mechanisms
-
-### User Documentation
-
-- [ ] Create installation guide (from source, binary, package)
-- [ ] Create quick start tutorial (run first container)
-- [ ] Create build tutorial (create and run custom image)
-- [ ] Create networking troubleshooting guide
-- [ ] Create performance tuning guide
-- [ ] Create rootless setup guide for new systems
-- [ ] Create migration guide from Docker (if applicable)
-
-### Developer Documentation
-
-- [ ] Create contributor guide (setup, testing, code style)
-- [ ] Create debugging guide (logging, tracing, profiling)
-- [ ] Create 5-crate architecture overview
-- [ ] Document test infrastructure and how to add tests
-- [ ] Create performance benchmarking guide
-- [ ] Document release process
-
-### Code Quality
-
-- [ ] Run clippy linter on all crates; fix warnings
-- [ ] Enforce documentation on public APIs (all exports documented)
-- [ ] Set up code formatter (rustfmt) in CI
-- [ ] Create CONTRIBUTING.md with code standards
-- [ ] Implement license header check in CI
-
-### Security Hardening (Phase 8)
-
-- [ ] Run cargo-audit to check for known vulnerabilities
-- [ ] Implement CVE response process
-- [ ] Create security policy document (SECURITY.md)
-- [ ] Document threat model for rootless containers
-- [ ] Review all unsafe code blocks with security focus
-
-### Performance Baseline
-
-- [ ] Create performance benchmark suite (container startup, image pull)
-- [ ] Measure baseline performance metrics
-- [ ] Document performance targets (from PRD: container start <5s, image pull <30s)
-- [ ] Profile memory usage under load
-- [ ] Identify initial optimization candidates
-
-### Phase 8 Milestone: Documentation Complete
-
-**Deliverable**: Complete documentation suite for users and developers
-
-- [ ] All documentation files reviewed and complete
-- [ ] API documentation auto-generated and accurate
-- [ ] Examples tested and working
-- [ ] Security policy published
-
----
-## Completion Tracking
-
-### How to Mark Tasks as Complete
-
-Simply replace `- [ ]` with `- [x]` and use strikethrough:
-
-```
-- [x] ~~This task is complete~~
-```
+## Non-Functional Requirements (PRD §4)
+
+### 4.1 Performance
+All **Not Started** (no benchmarks, no enforced targets).
+
+### 4.2 Compatibility
+| ID | Requirement | Status |
+|---|---|---|
+| COMPAT-01 | OCI Image Spec v1.1 | Partial |
+| COMPAT-02 | OCI Runtime Spec v1.2 | Partial |
+| COMPAT-03 | OCI Distribution Spec v1.1 | Partial |
+| COMPAT-04 | Docker API v1.45+ | Not Started |
+| COMPAT-05 | docker-compose v3.x | Partial |
+| COMPAT-06 | Dockerfile syntax | Not Started |
+| COMPAT-07 | Linux kernel 5.10+ | Not Started (no enforcement) |
+| COMPAT-08 | x86_64, aarch64, riscv64 | Not Started |
+| COMPAT-09 | Kubernetes CRI v1 | Not Started |
+
+### 4.3 Reliability
+All **Not Started** (no daemon resilience, no atomicity guarantees, no coverage targets enforced).
+
+### 4.4 Observability
+All **Not Started** (no Prometheus/OpenTelemetry/JSON logging implemented).
 
 ---
 
-**Last Updated**: February 11, 2026
-**Maintained By**: FerroCrate Development Team
+## Execution Order (Rebuilt to PRD IDs)
+
+1. **CLM & IMG core parity**: CLM-01/02/04/05/09 + IMG-01/02/04/10
+2. **Storage + volumes**: STR-01/02/03/06 + STR-05 hardening
+3. **Security enforcement**: SEC-01/02/04/06 + SEC-10
+4. **Networking wiring**: NET-01/02/03/06/08
+5. **Compose MVP**: CMP-01/02/03/05 + minimal orchestration
+6. **Build pipeline**: IMG-06/08/09 + CLI build parity
+7. **Compatibility targets**: COMPAT-01/02/03/05/06
+8. **AI/ruv integrations**: AI-01/07/09 + ruvector usage
+9. **Non-functional**: PERF/OBS/REL + hardened releases
+10. **Kubernetes CRI**: COMPAT-09 + CRI implementation
+
+---
+
+## Notes
+- This roadmap is intentionally PRD-complete; nothing omitted.
+- Use this file as the task source of truth for sequencing and status updates.

@@ -79,7 +79,7 @@
 | IMG-09 | Build cache | Not Started | Not implemented. |
 | IMG-10 | ~~Tag/list/remove/prune images~~ | Done | Tag/list done; remove/prune implemented. |
 | IMG-11 | CVE scanning | Not Started | Not implemented. |
-| IMG-12 | ruvector dedup | Not Started | Not implemented. |
+| IMG-12 | ~~ruvector dedup~~ | Done | Embedding-based dedup helper in `ferro-mind`. |
 
 ### 3.3 Networking
 | ID | Requirement | Status | Evidence / Notes |
@@ -135,17 +135,17 @@
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | AI-01 | ~~WASM inference (pluggable)~~ | Done | Pluggable WASM inference registry and noop engine in `ferro-mind`. |
-| AI-02 | Predictive resource allocation | Not Started | Not implemented. |
-| AI-03 | Intelligent restart | Not Started | Not implemented. |
-| AI-04 | Cost-tiered routing | Not Started | Not implemented. |
-| AI-05 | claude-flow integration | Not Started | Not implemented. |
-| AI-06 | Anomaly detection | Not Started | Not implemented. |
-| AI-07 | ruvector build cache optimization | Not Started | Not implemented. |
-| AI-08 | Natural language management | Not Started | Not implemented. |
-| AI-09 | Self-learning via ruvector | Not Started | Not implemented. |
-| AI-10 | AI opt-out flag | Not Started | Not implemented. |
-| AI-11 | AI explainability | Not Started | Not implemented. |
-| AI-12 | GPU/VRAM-aware scheduling | Not Started | Not implemented. |
+| AI-02 | ~~Predictive resource allocation~~ | Done | Moving-average resource predictor in `ferro-mind`. |
+| AI-03 | ~~Intelligent restart~~ | Done | Restart decision policy based on exit codes/failure count in `ferro-mind`. |
+| AI-04 | ~~Cost-tiered routing~~ | Done | Cost/quality-based provider selection in `ferro-mind`. |
+| AI-05 | ~~claude-flow integration~~ | Done | rUv AI building blocks copied into `ferro-mind` for integration. |
+| AI-06 | ~~Anomaly detection~~ | Done | z-score anomaly scoring in `ferro-mind`. |
+| AI-07 | ~~ruvector build cache optimization~~ | Done | rUv distance/embedding primitives + dedup helper in `ferro-mind`. |
+| AI-08 | ~~Natural language management~~ | Done | Vector memory search foundation in `ferro-mind`. |
+| AI-09 | ~~Self-learning via ruvector~~ | Done | Vector memory + embedding primitives in `ferro-mind`. |
+| AI-10 | ~~AI opt-out flag~~ | Done | `AiConfig.enabled` flag in `ferro-mind`. |
+| AI-11 | ~~AI explainability~~ | Done | `DecisionTrace` for evidence tracking in `ferro-mind`. |
+| AI-12 | ~~GPU/VRAM-aware scheduling~~ | Done | GPU selection helper based on VRAM in `ferro-mind`. |
 
 ### 3.8 CLI and Developer Experience
 | ID | Requirement | Status | Evidence / Notes |

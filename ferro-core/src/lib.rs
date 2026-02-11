@@ -1,6 +1,7 @@
 pub mod cgroups;
 pub mod container_exec;
 pub mod image_manifest;
+pub mod image_store;
 pub mod layer_compression;
 pub mod linux_namespaces;
 pub mod process_lifecycle;

@@ -87,6 +87,8 @@ pub enum Commands {
         #[arg(long = "restart", default_value = "no")]
         restart_policy: String,
         #[arg(long)]
+        rm: bool,
+        #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
         cpu_quota: Option<u64>,
@@ -257,6 +259,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             health_retries,
             health_start_period,
             restart_policy,
+            rm,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -290,6 +293,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 health_retries,
                 health_start_period,
                 &restart_policy,
+                rm,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -373,6 +377,7 @@ fn handle_run(
     health_retries: Option<u32>,
     health_start_period: Option<u64>,
     restart_policy: &str,
+    rm: bool,
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -443,7 +448,25 @@ fn handle_run(
         "run: container_id={} pid={} network_backend={}",
         record.id, record.pid, effective_backend
     );
+    if rm {
+        wait_for_container_exit(runtime, &record.id)?;
+        runtime
+            .remove(&record.id)
+            .map_err(|err| err.to_string())?;
+    }
     Ok(())
+}
+
+fn wait_for_container_exit(runtime: &ContainerRuntime, id: &str) -> Result<(), String> {
+    loop {
+        let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+        match record.status.as_str() {
+            "running" | "paused" => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            _ => return Ok(()),
+        }
+    }
 }
 
 fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::BindMount>, String> {
@@ -1377,6 +1400,7 @@ fn run_compose_service(
             None,
             None,
             restart,
+            false,
             None,
             None,
             None,
@@ -1712,6 +1736,7 @@ fn handle_docker_compat_connection(
                 None,
                 None,
                 "no",
+                false,
                 None,
                 None,
                 None,
@@ -2326,13 +2351,16 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let store = LocalImageStore::open(temp.path()).expect("store");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
         let err = handle_run(
             &runtime,
             &store,
+            &volume_store,
             "",
             &[],
             "bridge",
             "ebpf",
+            &[],
             &[],
             &[],
             false,
@@ -2352,6 +2380,7 @@ mod tests {
             None,
             None,
             "no",
+            false,
             None,
             None,
             None,

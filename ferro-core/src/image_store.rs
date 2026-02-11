@@ -89,6 +89,23 @@ impl LocalImageStore {
         out.sort_by(|a, b| a.reference.cmp(&b.reference));
         Ok(out)
     }
+
+    pub fn prune_references(&self) -> Result<usize, ImageStoreError> {
+        let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
+        let keys: Vec<Vec<u8>> = tree
+            .iter()
+            .keys()
+            .map(|key| key.map(|val| val.to_vec()))
+            .collect::<Result<_, _>>()?;
+        let mut removed = 0;
+        for key in keys {
+            if tree.remove(key)?.is_some() {
+                removed += 1;
+            }
+        }
+        tree.flush()?;
+        Ok(removed)
+    }
 }
 
 fn now_unix() -> u64 {
@@ -162,5 +179,34 @@ mod tests {
         let listed_after = store.list_references().expect("list references");
         assert_eq!(listed_after.len(), 1);
         assert_eq!(listed_after[0].reference, "ghcr.io/acme/app:v1");
+    }
+
+    #[test]
+    fn prunes_all_references() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("open store");
+
+        store
+            .put_reference(
+                "docker.io/library/alpine:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "application/vnd.oci.image.manifest.v1+json",
+                "{\"schemaVersion\":2}",
+            )
+            .expect("store record");
+
+        store
+            .put_reference(
+                "ghcr.io/acme/app:v1",
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "application/vnd.oci.image.manifest.v1+json",
+                "{\"schemaVersion\":2}",
+            )
+            .expect("store record");
+
+        let removed = store.prune_references().expect("prune");
+        assert_eq!(removed, 2);
+        let listed = store.list_references().expect("list");
+        assert!(listed.is_empty());
     }
 }

@@ -185,7 +185,7 @@
 | COMPAT-06 | Dockerfile syntax | Partial | Multi-stage + base images supported; still below 95% coverage. |
 | COMPAT-07 | Linux kernel 5.10+ | Not Started | No min-version checks. |
 | COMPAT-08 | x86_64, aarch64, riscv64 | Not Started | No multi-arch builds verified. |
-| COMPAT-09 | Kubernetes CRI v1 | Not Started | Not implemented. |
+| COMPAT-09 | Kubernetes CRI v1 | Partial | `ferro-cri` gRPC shim with Runtime/Image service skeleton (Version/Status/ListImages). |
 
 ### 4.3 Reliability
 | ID | Requirement | Status | Evidence / Notes |

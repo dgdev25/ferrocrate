@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package runtime.v1;
+
+service RuntimeService {
+  rpc Version(VersionRequest) returns (VersionResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+service ImageService {
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+}
+
+message VersionRequest {
+  string version = 1;
+}
+
+message VersionResponse {
+  string version = 1;
+  string runtime_name = 2;
+  string runtime_version = 3;
+  string runtime_api_version = 4;
+}
+
+message StatusRequest {
+  bool verbose = 1;
+}
+
+message StatusResponse {
+  RuntimeStatus status = 1;
+  map<string, string> info = 2;
+}
+
+message RuntimeStatus {
+  repeated RuntimeCondition conditions = 1;
+}
+
+message RuntimeCondition {
+  string type = 1;
+  bool status = 2;
+  string reason = 3;
+  string message = 4;
+}
+
+message ListImagesRequest {}
+
+message Image {
+  string id = 1;
+}
+
+message ListImagesResponse {
+  repeated Image images = 1;
+}

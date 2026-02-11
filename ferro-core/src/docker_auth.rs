@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,11 +16,17 @@ pub enum DockerAuthError {
     Parse(String),
     #[error("invalid auth entry for registry {0}")]
     InvalidAuth(String),
+    #[error("credential helper error: {0}")]
+    Helper(String),
 }
 
 #[derive(Debug, Deserialize)]
 struct DockerConfig {
     auths: Option<HashMap<String, DockerAuthEntry>>,
+    #[serde(rename = "credHelpers")]
+    cred_helpers: Option<HashMap<String, String>>,
+    #[serde(rename = "credsStore")]
+    creds_store: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +34,14 @@ struct DockerAuthEntry {
     auth: Option<String>,
     username: Option<String>,
     password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HelperResponse {
+    #[serde(rename = "Username")]
+    username: String,
+    #[serde(rename = "Secret")]
+    secret: String,
 }
 
 pub fn resolve_registry_auth(image: &str) -> Result<Option<RegistryAuth>, DockerAuthError> {
@@ -50,12 +65,18 @@ pub fn resolve_auth_for_registry(registry: &str) -> Result<Option<RegistryAuth>,
     let config: DockerConfig = serde_json::from_str(&content)
         .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
 
+    let target = normalize_registry_key(registry);
+    if let Some(helper) = resolve_helper(&config, &target) {
+        if let Ok(auth) = resolve_with_helper(&helper, &target) {
+            return Ok(Some(auth));
+        }
+    }
+
     let auths = match config.auths {
         Some(auths) => auths,
         None => return Ok(None),
     };
 
-    let target = normalize_registry_key(registry);
     for (key, entry) in auths {
         if normalize_registry_key(&key) == target {
             return decode_auth_entry(&target, &entry).map(Some);
@@ -87,6 +108,48 @@ fn decode_auth_entry(registry: &str, entry: &DockerAuthEntry) -> Result<Registry
     }
 
     Err(DockerAuthError::InvalidAuth(registry.to_string()))
+}
+
+fn resolve_helper(config: &DockerConfig, registry: &str) -> Option<String> {
+    if let Some(helpers) = &config.cred_helpers {
+        for (key, helper) in helpers {
+            if normalize_registry_key(key) == registry {
+                return Some(helper.clone());
+            }
+        }
+    }
+    config.creds_store.clone()
+}
+
+fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, DockerAuthError> {
+    let helper_bin = format!("docker-credential-{helper}");
+    let output = Command::new(&helper_bin)
+        .arg("get")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                stdin.write_all(registry.as_bytes())?;
+                stdin.write_all(b"\n")?;
+            }
+            child.wait_with_output()
+        })
+        .map_err(|err| DockerAuthError::Helper(err.to_string()))?;
+
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(DockerAuthError::Helper(msg));
+    }
+
+    let resp: HelperResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|err| DockerAuthError::Helper(err.to_string()))?;
+    Ok(RegistryAuth {
+        username: resp.username,
+        password: resp.secret,
+    })
 }
 
 fn docker_config_path() -> Option<PathBuf> {
@@ -127,6 +190,7 @@ mod tests {
     use super::{DockerAuthError, normalize_registry_key, resolve_auth_for_registry};
     use std::fs;
     use std::sync::Mutex;
+    use std::os::unix::fs::PermissionsExt;
 
     static DOCKER_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -166,6 +230,48 @@ mod tests {
         assert_eq!(gh.username, "writer");
         assert_eq!(gh.password, "secret");
 
+        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
+    }
+
+    #[test]
+    fn resolves_auth_from_helper() {
+        let _guard = DOCKER_ENV_LOCK.lock().expect("lock env");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.json");
+        fs::write(
+            &config_path,
+            r#"{
+  "credHelpers": {
+    "ghcr.io": "test"
+  }
+}"#,
+        )
+        .expect("write config");
+
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let helper_path = bin_dir.join("docker-credential-test");
+        fs::write(
+            &helper_path,
+            "#!/bin/sh\ncat >/dev/null\nprintf '{\"Username\":\"helper\",\"Secret\":\"token\"}'\n",
+        )
+        .expect("write helper");
+        let mut perms = fs::metadata(&helper_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("chmod");
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", bin_dir.display(), old_path);
+        unsafe { std::env::set_var("PATH", &new_path); }
+        unsafe { std::env::set_var("DOCKER_CONFIG", dir.path()); }
+
+        let auth = resolve_auth_for_registry("ghcr.io")
+            .expect("auth resolves")
+            .expect("auth present");
+        assert_eq!(auth.username, "helper");
+        assert_eq!(auth.password, "token");
+
+        unsafe { std::env::set_var("PATH", old_path); }
         unsafe { std::env::remove_var("DOCKER_CONFIG"); }
     }
 

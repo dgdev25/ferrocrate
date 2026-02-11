@@ -60,6 +60,34 @@ pub fn healthcheck_from_config(json: &str) -> Option<HealthConfig> {
     })
 }
 
+pub fn command_from_config(json: &str) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    let config = value.get("config")?;
+    let entrypoint = parse_string_array(config.get("Entrypoint"));
+    let cmd = parse_string_array(config.get("Cmd"));
+
+    let mut out = Vec::new();
+    if let Some(entrypoint) = entrypoint {
+        out.extend(entrypoint);
+    }
+    if let Some(cmd) = cmd { out.extend(cmd); }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn parse_string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    let value = value?;
+    let array = value.as_array()?;
+    let out = array
+        .iter()
+        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+        .collect::<Vec<_>>();
+    if out.is_empty() { None } else { Some(out) }
+}
+
 fn nanos_to_secs(value: Option<&Value>) -> Option<u64> {
     let nanos = value?.as_u64()?;
     if nanos == 0 {
@@ -71,7 +99,7 @@ fn nanos_to_secs(value: Option<&Value>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::healthcheck_from_config;
+    use super::{command_from_config, healthcheck_from_config};
 
     #[test]
     fn parses_cmd_healthcheck() {
@@ -116,5 +144,28 @@ mod tests {
             }
         }"#;
         assert!(healthcheck_from_config(json).is_none());
+    }
+
+    #[test]
+    fn parses_entrypoint_and_cmd() {
+        let json = r#"{
+            "config": {
+                "Entrypoint": ["/bin/sh", "-c"],
+                "Cmd": ["echo", "ok"]
+            }
+        }"#;
+        let cmd = command_from_config(json).expect("cmd");
+        assert_eq!(cmd, vec!["/bin/sh".to_string(), "-c".to_string(), "echo".to_string(), "ok".to_string()]);
+    }
+
+    #[test]
+    fn parses_cmd_only() {
+        let json = r#"{
+            "config": {
+                "Cmd": ["sleep", "1"]
+            }
+        }"#;
+        let cmd = command_from_config(json).expect("cmd");
+        assert_eq!(cmd, vec!["sleep".to_string(), "1".to_string()]);
     }
 }

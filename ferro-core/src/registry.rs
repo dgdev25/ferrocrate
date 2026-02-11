@@ -6,7 +6,6 @@ use std::time::Duration;
 use std::path::Path;
 use std::fs::File;
 use std::io::{copy, Read};
-use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,10 +65,19 @@ impl RegistryClient {
     ) -> Result<String, RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
+        let accept = [
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            crate::image_manifest::OCI_IMAGE_INDEX_MEDIA_TYPE,
+            crate::image_manifest::DOCKER_MANIFEST_MEDIA_TYPE,
+            crate::image_manifest::DOCKER_MANIFEST_LIST_MEDIA_TYPE,
+        ]
+        .join(", ");
+        let header_value = HeaderValue::from_str(&accept)
+            .map_err(|err| RegistryError::InvalidReference(format!("accept header: {err}")))?;
         let response = self.send_request_with_auth(
             Method::GET,
             &url,
-            vec![(ACCEPT, HeaderValue::from_static(OCI_IMAGE_MANIFEST_MEDIA_TYPE))],
+            vec![(ACCEPT, header_value)],
             None,
             auth,
         )?;
@@ -297,13 +305,14 @@ impl RegistryClient {
             });
         }
 
-        let parsed = serde_json::from_str::<HashMap<String, String>>(&body)
+        let parsed = serde_json::from_str::<serde_json::Value>(&body)
             .map_err(|err| RegistryError::InvalidReference(format!("token parse error: {err}")))?;
-        parsed
+        let token = parsed
             .get("token")
             .or_else(|| parsed.get("access_token"))
-            .cloned()
-            .ok_or_else(|| RegistryError::InvalidReference("token missing".to_string()))
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| RegistryError::InvalidReference("token missing".to_string()))?;
+        Ok(token.to_string())
     }
 }
 

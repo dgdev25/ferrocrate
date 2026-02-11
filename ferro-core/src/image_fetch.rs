@@ -1,5 +1,5 @@
 use crate::docker_auth::resolve_registry_auth;
-use crate::image_manifest::parse_image_manifest;
+use crate::image_manifest::{parse_image_index, parse_image_manifest};
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::ImageTaggingError;
 use crate::registry::RegistryClient;
@@ -31,12 +31,20 @@ pub struct ImageFetchResult {
 }
 
 pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, ImageFetchError> {
-    parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    pull_image_with_store(runtime_dir, image, &store)
+}
+
+pub fn pull_image_with_store(
+    runtime_dir: &Path,
+    image: &str,
+    store: &LocalImageStore,
+) -> Result<ImageFetchResult, ImageFetchError> {
+    parse_image_reference(image)?;
     let client = RegistryClient::new()?;
     let auth = resolve_registry_auth(image)?;
 
-    let manifest_json = client.pull_manifest_raw(image, auth.as_ref())?;
+    let manifest_json = resolve_manifest_json(&client, image, auth.as_ref())?;
     let manifest = parse_image_manifest(&manifest_json)?;
 
     let canonical = crate::image_tagging::canonicalize_reference(image)?;
@@ -76,12 +84,20 @@ pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, I
 }
 
 pub fn pull_manifest_only(runtime_dir: &Path, image: &str) -> Result<String, ImageFetchError> {
-    parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    pull_manifest_only_with_store(runtime_dir, image, &store)
+}
+
+pub fn pull_manifest_only_with_store(
+    runtime_dir: &Path,
+    image: &str,
+    store: &LocalImageStore,
+) -> Result<String, ImageFetchError> {
+    parse_image_reference(image)?;
     let client = RegistryClient::new()?;
     let auth = resolve_registry_auth(image)?;
 
-    let manifest_json = client.pull_manifest_raw(image, auth.as_ref())?;
+    let manifest_json = resolve_manifest_json(&client, image, auth.as_ref())?;
     let manifest = parse_image_manifest(&manifest_json)?;
 
     let canonical = crate::image_tagging::canonicalize_reference(image)?;
@@ -101,6 +117,52 @@ pub fn pull_manifest_only(runtime_dir: &Path, image: &str) -> Result<String, Ima
     }
 
     Ok(canonical)
+}
+
+fn resolve_manifest_json(
+    client: &RegistryClient,
+    image: &str,
+    auth: Option<&crate::registry::RegistryAuth>,
+) -> Result<String, ImageFetchError> {
+    let manifest_json = client.pull_manifest_raw(image, auth)?;
+    if parse_image_manifest(&manifest_json).is_ok() {
+        return Ok(manifest_json);
+    }
+
+    if let Ok(index) = parse_image_index(&manifest_json) {
+        if let Some(digest) = select_platform_manifest(&index.manifests) {
+            let parsed = parse_image_reference(image)?;
+            let reference = format!("{}/{}@{}", parsed.registry, parsed.repository, digest);
+            return Ok(client.pull_manifest_raw(&reference, auth)?);
+        }
+    }
+
+    Ok(manifest_json)
+}
+
+fn select_platform_manifest(manifests: &[crate::image_manifest::Descriptor]) -> Option<String> {
+    if manifests.is_empty() {
+        return None;
+    }
+    let os = std::env::consts::OS;
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
+    manifests
+        .iter()
+        .find(|descriptor| {
+            descriptor
+                .platform
+                .as_ref()
+                .map(|platform| platform.os == os && platform.architecture == arch)
+                .unwrap_or(false)
+        })
+        .or_else(|| manifests.iter().find(|descriptor| descriptor.platform.is_some()))
+        .or_else(|| manifests.first())
+        .map(|descriptor| descriptor.digest.clone())
 }
 
 pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBuf>, ImageFetchError> {

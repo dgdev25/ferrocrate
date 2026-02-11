@@ -68,7 +68,7 @@
 ### 3.2 Image Management
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| IMG-01 | Pull images from OCI registries | Partial | Docker config auth + credential helpers + Bearer token challenge; tests cover docker.io/ghcr/custom registry configs. |
+| IMG-01 | Pull images from OCI registries | Partial | Docker config auth + credential helpers + Bearer token challenge; supports OCI index/docker manifest list selection; tests cover docker.io/ghcr/custom registry configs. |
 | IMG-02 | Push images to OCI registries | Partial | Docker config auth + credential helpers + Bearer token challenge; tests cover docker.io/ghcr/custom registry configs. |
 | IMG-03 | Content-addressable store (Blake3) | Partial | Blake3 CAS for blobs + file-level hardlink dedup during rootfs assembly; storage reduction not validated. |
 | IMG-04 | Zstd compression for layers | Partial | `build --compress zstd` emits zstd layers; other pipelines not wired. |

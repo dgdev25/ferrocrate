@@ -3,10 +3,19 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 pub const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+pub const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 pub const OCI_IMAGE_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 pub const OCI_IMAGE_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 pub const OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 pub const OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
+pub const DOCKER_MANIFEST_MEDIA_TYPE: &str =
+    "application/vnd.docker.distribution.manifest.v2+json";
+pub const DOCKER_MANIFEST_LIST_MEDIA_TYPE: &str =
+    "application/vnd.docker.distribution.manifest.list.v2+json";
+pub const DOCKER_IMAGE_CONFIG_MEDIA_TYPE: &str = "application/vnd.docker.container.image.v1+json";
+pub const DOCKER_LAYER_MEDIA_TYPE: &str = "application/vnd.docker.image.rootfs.diff.tar";
+pub const DOCKER_LAYER_GZIP_MEDIA_TYPE: &str =
+    "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
 #[derive(Debug, Error)]
 pub enum ImageManifestParseError {
@@ -14,6 +23,8 @@ pub enum ImageManifestParseError {
     InvalidJson(#[from] serde_json::Error),
     #[error("unsupported manifest mediaType: {0}")]
     InvalidManifestMediaType(String),
+    #[error("unsupported index mediaType: {0}")]
+    InvalidIndexMediaType(String),
     #[error("unsupported config mediaType: {0}")]
     InvalidConfigMediaType(String),
     #[error("unsupported layer mediaType: {0}")]
@@ -25,6 +36,12 @@ pub fn parse_image_manifest(json: &str) -> Result<ImageManifest, ImageManifestPa
     let manifest: ImageManifest = serde_json::from_str(json)?;
     manifest.validate()?;
     Ok(manifest)
+}
+
+pub fn parse_image_index(json: &str) -> Result<ImageIndex, ImageManifestParseError> {
+    let index: ImageIndex = serde_json::from_str(json)?;
+    index.validate()?;
+    Ok(index)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,13 +61,17 @@ pub struct ImageManifest {
 
 impl ImageManifest {
     pub fn validate(&self) -> Result<(), ImageManifestParseError> {
-        if self.media_type != OCI_IMAGE_MANIFEST_MEDIA_TYPE {
+        if self.media_type != OCI_IMAGE_MANIFEST_MEDIA_TYPE
+            && self.media_type != DOCKER_MANIFEST_MEDIA_TYPE
+        {
             return Err(ImageManifestParseError::InvalidManifestMediaType(
                 self.media_type.clone(),
             ));
         }
 
-        if self.config.media_type != OCI_IMAGE_CONFIG_MEDIA_TYPE {
+        if self.config.media_type != OCI_IMAGE_CONFIG_MEDIA_TYPE
+            && self.config.media_type != DOCKER_IMAGE_CONFIG_MEDIA_TYPE
+        {
             return Err(ImageManifestParseError::InvalidConfigMediaType(
                 self.config.media_type.clone(),
             ));
@@ -59,7 +80,9 @@ impl ImageManifest {
         for layer in &self.layers {
             let supported = layer.media_type == OCI_IMAGE_LAYER_MEDIA_TYPE
                 || layer.media_type == OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE
-                || layer.media_type == OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE;
+                || layer.media_type == OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE
+                || layer.media_type == DOCKER_LAYER_MEDIA_TYPE
+                || layer.media_type == DOCKER_LAYER_GZIP_MEDIA_TYPE;
 
             if !supported {
                 return Err(ImageManifestParseError::InvalidLayerMediaType(
@@ -74,6 +97,35 @@ impl ImageManifest {
 
 fn default_manifest_media_type() -> String {
     OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string()
+}
+
+fn default_index_media_type() -> String {
+    OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageIndex {
+    pub schema_version: u32,
+    #[serde(default = "default_index_media_type")]
+    pub media_type: String,
+    #[serde(default)]
+    pub manifests: Vec<Descriptor>,
+    #[serde(default)]
+    pub annotations: HashMap<String, String>,
+}
+
+impl ImageIndex {
+    pub fn validate(&self) -> Result<(), ImageManifestParseError> {
+        if self.media_type != OCI_IMAGE_INDEX_MEDIA_TYPE
+            && self.media_type != DOCKER_MANIFEST_LIST_MEDIA_TYPE
+        {
+            return Err(ImageManifestParseError::InvalidIndexMediaType(
+                self.media_type.clone(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,11 +188,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_oci_manifest_media_type() {
+    fn rejects_unknown_manifest_media_type() {
         let manifest = r#"
         {
           "schemaVersion": 2,
-          "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+          "mediaType": "application/vnd.some.unknown.manifest",
           "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
             "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -150,7 +202,7 @@ mod tests {
         }
         "#;
 
-        let err = parse_image_manifest(manifest).expect_err("should reject non-OCI media type");
+        let err = parse_image_manifest(manifest).expect_err("should reject unknown media type");
         assert!(err
             .to_string()
             .contains("unsupported manifest mediaType"));

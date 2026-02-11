@@ -76,7 +76,10 @@ pub enum Commands {
         #[arg(short, long)]
         tag: Option<String>,
     },
-    Images,
+    Images {
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Rmi {
         image: String,
     },
@@ -85,15 +88,24 @@ pub enum Commands {
         #[command(subcommand)]
         command: VolumeCommands,
     },
-    Containers,
+    Containers {
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Logs {
         container: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
     Stats {
         container: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
     Inspect {
         container: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
     Pause {
         container: String,
@@ -232,14 +244,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             ferrofile,
             tag,
         } => handle_build(dockerfile.as_deref(), ferrofile.as_deref(), tag.as_deref()),
-        Commands::Images => handle_images(&image_store),
+        Commands::Images { format } => handle_images(&image_store, &format),
         Commands::Rmi { image } => handle_rmi(&image_store, &image),
         Commands::ImagePrune => handle_image_prune(&image_store),
         Commands::Volume { command } => handle_volume(&runtime_dir, command),
-        Commands::Containers => handle_containers(&runtime),
-        Commands::Logs { container } => handle_logs(&runtime, &container),
-        Commands::Inspect { container } => handle_inspect(&runtime, &container),
-        Commands::Stats { container } => handle_stats(&runtime, &container),
+        Commands::Containers { format } => handle_containers(&runtime, &format),
+        Commands::Logs { container, format } => handle_logs(&runtime, &container, &format),
+        Commands::Inspect { container, format } => handle_inspect(&runtime, &container, &format),
+        Commands::Stats { container, format } => handle_stats(&runtime, &container, &format),
         Commands::Pause { container } => handle_pause(&runtime, &container),
         Commands::Unpause { container } => handle_unpause(&runtime, &container),
         Commands::Stop { container, timeout } => {
@@ -442,8 +454,20 @@ fn validate_network_backend(value: &str) -> Result<(), String> {
     }
 }
 
-fn handle_images(store: &LocalImageStore) -> Result<(), String> {
+fn validate_output_format(value: &str) -> Result<String, String> {
+    match value {
+        "text" | "json" => Ok(value.to_string()),
+        _ => Err("format must be one of: text, json".to_string()),
+    }
+}
+
+fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
     let records = store.list_references().map_err(|err| err.to_string())?;
+    if format == "json" {
+        let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
+        println!("{json}");
+        return Ok(());
+    }
     if records.is_empty() {
         println!("images: no entries");
         return Ok(());
@@ -471,39 +495,55 @@ fn handle_image_prune(store: &LocalImageStore) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_containers(runtime: &ContainerRuntime) -> Result<(), String> {
+fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), String> {
     let records = runtime.list().map_err(|err| err.to_string())?;
+    if format == "json" {
+        let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
+        println!("{json}");
+        return Ok(());
+    }
     if records.is_empty() {
         println!("containers: no entries");
         return Ok(());
     }
     for record in records {
-        println!(
-            "{} {} {}",
-            record.id,
-            record.image,
-            record.status
-        );
+        println!("{} {} {}", record.id, record.image, record.status);
     }
     Ok(())
 }
 
-fn handle_logs(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+fn handle_logs(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
     }
     let logs = runtime.logs(container).map_err(|err| err.to_string())?;
+    if format == "json" {
+        let output = serde_json::json!({
+            "container": container,
+            "logs": logs,
+        });
+        let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
+        println!("{json}");
+        return Ok(());
+    }
     print!("{logs}");
     Ok(())
 }
 
-fn handle_inspect(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+fn handle_inspect(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("inspect: container is required".to_string());
     }
     let record = runtime.inspect(container).map_err(|err| err.to_string())?;
-    let json = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
-    println!("{json}");
+    if format == "json" {
+        let json = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
+        println!("{json}");
+    } else {
+        println!(
+            "id={} image={} status={} pid={}",
+            record.id, record.image, record.status, record.pid
+        );
+    }
     Ok(())
 }
 
@@ -513,17 +553,30 @@ struct StatsOutput {
     stats: ferro_core::cgroups::CgroupStats,
 }
 
-fn handle_stats(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+fn handle_stats(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("stats: container is required".to_string());
     }
     let stats = runtime.stats(container).map_err(|err| err.to_string())?;
-    let output = StatsOutput {
-        container: container.to_string(),
-        stats,
-    };
-    let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
-    println!("{json}");
+    if format == "json" {
+        let output = StatsOutput {
+            container: container.to_string(),
+            stats,
+        };
+        let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
+        println!("{json}");
+    } else {
+        println!(
+            "container={} mem_current={} mem_max={} pids_current={} cpu_usage_usec={} cpu_user_usec={} cpu_system_usec={}",
+            container,
+            stats.memory_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+            stats.memory_max.map(|v| v.to_string()).unwrap_or_else(|| "max".to_string()),
+            stats.pids_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+            stats.cpu_usage_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+            stats.cpu_user_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+            stats.cpu_system_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+        );
+    }
     Ok(())
 }
 
@@ -1037,7 +1090,10 @@ mod tests {
     fn parses_inspect_command() {
         let cli = Cli::parse_from(["ferrocrate", "inspect", "abc123"]);
         match cli.command {
-            Commands::Inspect { container } => assert_eq!(container, "abc123"),
+            Commands::Inspect { container, format } => {
+                assert_eq!(container, "abc123");
+                assert_eq!(format, "text");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -1313,21 +1369,21 @@ mod tests {
     fn images_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        handle_images(&store).expect("images handler should succeed");
+        handle_images(&store, "text").expect("images handler should succeed");
     }
 
     #[test]
     fn containers_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        handle_containers(&runtime).expect("containers handler should succeed");
+        handle_containers(&runtime, "text").expect("containers handler should succeed");
     }
 
     #[test]
     fn logs_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_logs(&runtime, "").expect_err("container required");
+        let err = handle_logs(&runtime, "", "text").expect_err("container required");
         assert!(err.contains("logs: container is required"));
     }
 
@@ -1335,7 +1391,7 @@ mod tests {
     fn inspect_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_inspect(&runtime, "").expect_err("container required");
+        let err = handle_inspect(&runtime, "", "text").expect_err("container required");
         assert!(err.contains("inspect: container is required"));
     }
 
@@ -1343,7 +1399,7 @@ mod tests {
     fn stats_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_stats(&runtime, "").expect_err("container required");
+        let err = handle_stats(&runtime, "", "text").expect_err("container required");
         assert!(err.contains("stats: container is required"));
     }
 

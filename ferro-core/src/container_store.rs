@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -11,6 +12,12 @@ pub struct ContainerRecord {
     pub pid: u32,
     pub image: String,
     pub command: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub annotations: HashMap<String, String>,
     pub created_at_unix: u64,
     pub stdout_path: String,
     pub stderr_path: String,
@@ -99,6 +106,7 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{ContainerRecord, LocalContainerStore, now_unix};
+    use std::collections::HashMap;
 
     #[test]
     fn stores_and_lists_containers() {
@@ -110,6 +118,9 @@ mod tests {
             pid: 1234,
             image: "alpine:latest".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
+            env: vec!["HELLO=world".to_string()],
+            labels: [("tier".to_string(), "test".to_string())].into_iter().collect(),
+            annotations: [("owner".to_string(), "cli".to_string())].into_iter().collect(),
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),
@@ -132,6 +143,9 @@ mod tests {
             pid: 1234,
             image: "alpine:latest".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
+            env: Vec::new(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),

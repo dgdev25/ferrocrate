@@ -6,6 +6,7 @@ use crate::rootfs::construct_rootfs;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
@@ -67,6 +68,9 @@ impl ContainerRuntime {
         &self,
         image: &str,
         cmd: &[String],
+        env: &[String],
+        labels: &HashMap<String, String>,
+        annotations: &HashMap<String, String>,
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
@@ -107,6 +111,7 @@ impl ContainerRuntime {
 
         let child_id = spawn_process_with_logs(
             cmd,
+            env,
             &stdout_path,
             &stderr_path,
             false,
@@ -128,6 +133,9 @@ impl ContainerRuntime {
             pid: child_id,
             image: image.to_string(),
             command: cmd.to_vec(),
+            env: env.to_vec(),
+            labels: labels.clone(),
+            annotations: annotations.clone(),
             created_at_unix: now_unix(),
             stdout_path: stdout_path.display().to_string(),
             stderr_path: stderr_path.display().to_string(),
@@ -206,6 +214,7 @@ impl ContainerRuntime {
         let stderr_path = PathBuf::from(&record.stderr_path);
         let child_id = spawn_process_with_logs(
             &record.command,
+            &record.env,
             &stdout_path,
             &stderr_path,
             true,
@@ -257,6 +266,7 @@ fn stream_to_file_with_options<R: std::io::Read>(
 
 fn spawn_process_with_logs(
     cmd: &[String],
+    env: &[String],
     stdout_path: &Path,
     stderr_path: &Path,
     append: bool,
@@ -282,6 +292,16 @@ fn spawn_process_with_logs(
         host_cmd.args(&cmd[1..]);
         host_cmd
     };
+
+    for entry in env {
+        let mut parts = entry.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if key.is_empty() {
+            return Err(RuntimeError::InvalidState("env var missing key".to_string()));
+        }
+        command.env(key, value);
+    }
 
     if no_new_privs {
         unsafe {
@@ -343,6 +363,7 @@ mod tests {
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_tagging::canonicalize_reference;
     use crate::cgroups::{CpuMax, ResourceLimits};
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -359,13 +380,16 @@ mod tests {
                 &[
                     "sh".to_string(),
                     "-c".to_string(),
-                    "echo hi && sleep 0.05".to_string(),
-                ],
-                None,
-                &[],
-                &[],
-                false,
-                false,
+                "echo hi && sleep 0.05".to_string(),
+            ],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &[],
+            &[],
+            false,
+            false,
             )
             .expect("run");
 
@@ -385,13 +409,16 @@ mod tests {
                 &[
                     "sh".to_string(),
                     "-c".to_string(),
-                    "echo hi".to_string(),
-                ],
-                None,
-                &[],
-                &[],
-                false,
-                false,
+                "echo hi".to_string(),
+            ],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &[],
+            &[],
+            false,
+            false,
             )
             .expect("run");
 
@@ -421,6 +448,9 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
                 None,
                 &[],
                 &[],
@@ -449,6 +479,9 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
                 None,
                 &[],
                 &[],
@@ -492,6 +525,9 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.05".to_string()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
                 Some(&limits),
                 &[],
                 &[],

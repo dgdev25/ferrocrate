@@ -33,7 +33,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | CLM-07 | Health checks | Not Started | Not implemented. |
 | CLM-08 | Restart policies | Not Started | Requires daemon/state. |
 | CLM-09 | ~~Resource limits (mem/cpu/pids)~~ | Done | cgroups v2 limits enforced when provided via CLI. |
-| CLM-10 | Env vars, labels, annotations | Not Started | No config passing or storage. |
+| CLM-10 | ~~Env vars, labels, annotations~~ | Done | CLI flags for env/label/annotation stored in container metadata. |
 
 ### 3.2 Image Management
 | ID | Requirement | Status | Evidence / Notes |

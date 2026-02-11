@@ -45,7 +45,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement zstd and gzip decompression for layer tarballs~~
 - [x] ~~Implement image pull from OCI registries (basic auth)~~
 - [x] ~~Implement image push to OCI registries~~
-- [ ] Implement local image storage (index database)
+- [x] ~~Implement local image storage (index database)~~
 - [ ] Implement image tagging and reference resolution
 - [ ] Create integration tests for image operations
 

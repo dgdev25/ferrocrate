@@ -1,5 +1,6 @@
 pub mod cgroups;
 pub mod container_exec;
+pub mod container_store;
 pub mod image_manifest;
 pub mod image_store;
 pub mod image_tagging;
@@ -17,3 +18,4 @@ pub mod rootfs;
 pub mod runtime_config;
 pub mod seccomp;
 pub mod mac_profiles;
+pub mod runtime;

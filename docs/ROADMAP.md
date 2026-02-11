@@ -174,16 +174,16 @@ Each phase must complete with:
 
 ### CLI Runtime Wiring
 
-- [ ] Wire `ferrocrate run` to runtime execution
-- [ ] Wire `ferrocrate exec` to namespace entry
-- [ ] Wire `ferrocrate logs` to container log stream
-- [ ] Wire `ferrocrate images/containers` to local stores
+- [x] ~~Wire `ferrocrate run` to runtime execution~~
+- [x] ~~Wire `ferrocrate exec` to namespace entry~~
+- [x] ~~Wire `ferrocrate logs` to container log stream~~
+- [x] ~~Wire `ferrocrate images/containers` to local stores~~
 
 ### End-to-End Testing
 
-- [ ] Add E2E tests for `run` and `exec`
-- [ ] Add E2E tests for image pull/build/push
-- [ ] Add E2E tests for container lifecycle and cleanup
+- [x] ~~Add E2E tests for `run` and `exec`~~
+- [x] ~~Add E2E tests for image pull/build/push~~
+- [x] ~~Add E2E tests for container lifecycle and cleanup~~
 
 ---
 

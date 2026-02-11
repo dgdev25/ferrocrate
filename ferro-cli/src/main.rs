@@ -21,6 +21,7 @@ use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process;
 use std::path::{Path, PathBuf};
+use std::net::TcpListener;
 use std::time::{Duration, Instant};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -190,6 +191,8 @@ pub enum Commands {
         socket: String,
         #[arg(long)]
         docker_compat: bool,
+        #[arg(long)]
+        metrics_addr: Option<String>,
     },
 }
 
@@ -353,7 +356,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Daemon {
             socket,
             docker_compat,
-        } => run_daemon(&runtime, &image_store, &socket, docker_compat),
+            metrics_addr,
+        } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
     }
 }
 
@@ -1655,6 +1659,7 @@ fn run_daemon(
     store: &LocalImageStore,
     socket: &str,
     docker_compat: bool,
+    metrics_addr: Option<&str>,
 ) -> Result<(), String> {
     let _ = (runtime, store);
     if !docker_compat {
@@ -1676,6 +1681,9 @@ fn run_daemon(
         LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,
     );
     let state = Arc::new(DockerCompatState::default());
+    if let Some(addr) = metrics_addr {
+        start_metrics_server(runtime_dir.clone(), store.clone(), addr)?;
+    }
 
     for stream in listener.incoming() {
         match stream {
@@ -1698,6 +1706,74 @@ fn run_daemon(
         }
     }
     Ok(())
+}
+
+fn start_metrics_server(
+    runtime_dir: Arc<PathBuf>,
+    store: Arc<LocalImageStore>,
+    addr: &str,
+) -> Result<(), String> {
+    let listener = TcpListener::bind(addr).map_err(|err| format!("metrics: {err}"))?;
+    let started_at = Instant::now();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let request = String::from_utf8_lossy(&buffer);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            if path != "/metrics" {
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                continue;
+            }
+            let body = build_metrics(&runtime_dir, &store, started_at);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok(())
+}
+
+fn build_metrics(runtime_dir: &Path, store: &LocalImageStore, started_at: Instant) -> String {
+    let containers = match ContainerRuntime::new(runtime_dir) {
+        Ok(runtime) => runtime.list().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let images = store.list_references().unwrap_or_default();
+    let running = containers.iter().filter(|c| c.status == "running").count();
+    let exited = containers.iter().filter(|c| c.status == "exited").count();
+    let uptime = started_at.elapsed().as_secs();
+
+    format!(
+        "# HELP ferrocrate_containers_total Total number of containers\\n\
+# TYPE ferrocrate_containers_total gauge\\n\
+ferrocrate_containers_total {}\\n\
+# HELP ferrocrate_containers_running Running containers\\n\
+# TYPE ferrocrate_containers_running gauge\\n\
+ferrocrate_containers_running {}\\n\
+# HELP ferrocrate_containers_exited Exited containers\\n\
+# TYPE ferrocrate_containers_exited gauge\\n\
+ferrocrate_containers_exited {}\\n\
+# HELP ferrocrate_images_total Total number of images\\n\
+# TYPE ferrocrate_images_total gauge\\n\
+ferrocrate_images_total {}\\n\
+# HELP ferrocrate_uptime_seconds Daemon uptime\\n\
+# TYPE ferrocrate_uptime_seconds counter\\n\
+ferrocrate_uptime_seconds {}\\n",
+        containers.len(),
+        running,
+        exited,
+        images.len(),
+        uptime
+    )
 }
 
 fn handle_docker_compat_connection(
@@ -2069,6 +2145,7 @@ mod tests {
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
     use ferro_core::runtime::ContainerRuntime;
+    use ferro_core::volume_store::LocalVolumeStore;
 
     #[test]
     fn parses_run_command() {
@@ -2104,6 +2181,7 @@ mod tests {
                 cap_add,
                 name,
                 profile,
+                ..
             } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);

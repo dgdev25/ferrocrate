@@ -1,6 +1,7 @@
 use crate::layer_compression::{LayerCompressionError, open_decompressed_layer_reader};
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use tar::Archive;
 use thiserror::Error;
@@ -25,6 +26,20 @@ pub fn construct_rootfs(rootfs_dir: &Path, layers: &[PathBuf]) -> Result<(), Roo
     fs::create_dir_all(rootfs_dir)?;
     for layer in layers {
         apply_layer_tar(rootfs_dir, layer)?;
+    }
+    Ok(())
+}
+
+/// Construct a root filesystem with file-level deduplication across layers.
+pub fn construct_rootfs_with_dedup(
+    rootfs_dir: &Path,
+    layers: &[PathBuf],
+    cas_root: &Path,
+) -> Result<(), RootfsError> {
+    fs::create_dir_all(rootfs_dir)?;
+    fs::create_dir_all(cas_root)?;
+    for layer in layers {
+        apply_layer_tar_with_dedup(rootfs_dir, layer, cas_root)?;
     }
     Ok(())
 }
@@ -73,6 +88,83 @@ pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), R
     Ok(())
 }
 
+fn apply_layer_tar_with_dedup(
+    rootfs_dir: &Path,
+    layer_tar_path: &Path,
+    cas_root: &Path,
+) -> Result<(), RootfsError> {
+    let reader = open_decompressed_layer_reader(layer_tar_path)?;
+    let mut archive = Archive::new(reader);
+
+    for entry_result in archive.entries()? {
+        let mut entry = entry_result?;
+        let entry_path = entry.path()?;
+        let normalized = sanitize_archive_path(&entry_path)?;
+
+        let file_name = normalized
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+
+        if file_name == OCI_OPAQUE_WHITEOUT {
+            let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
+            clear_directory(&rootfs_dir.join(parent))?;
+            continue;
+        }
+
+        if let Some(target_name) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) {
+            let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
+            let target = rootfs_dir.join(parent).join(target_name);
+            remove_path_if_exists(&target)?;
+            continue;
+        }
+
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(rootfs_dir.join(&normalized))?;
+            continue;
+        }
+
+        let destination = rootfs_dir.join(&normalized);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        entry.unpack(&destination)?;
+        if entry.header().entry_type().is_file() {
+            dedup_file(&destination, cas_root)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn dedup_file(path: &Path, cas_root: &Path) -> Result<(), RootfsError> {
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let cas_path = cas_root.join(hash);
+    let metadata = fs::metadata(path)?;
+    let mode = metadata.permissions().mode();
+
+    if cas_path.exists() {
+        let cas_mode = fs::metadata(&cas_path)?.permissions().mode();
+        if cas_mode != mode {
+            return Ok(());
+        }
+    } else {
+        fs::write(&cas_path, &bytes)?;
+        fs::set_permissions(&cas_path, metadata.permissions())?;
+    }
+
+    let _ = fs::remove_file(path);
+    if fs::hard_link(&cas_path, path).is_err() {
+        fs::copy(&cas_path, path)?;
+    }
+    Ok(())
+}
+
 fn sanitize_archive_path(path: &Path) -> Result<PathBuf, RootfsError> {
     let mut cleaned = PathBuf::new();
     for component in path.components() {
@@ -115,11 +207,12 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RootfsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::construct_rootfs;
+    use super::{construct_rootfs, construct_rootfs_with_dedup};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::fs;
     use std::io::{Cursor, Write};
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use tar::{Builder, Header};
 
@@ -192,6 +285,27 @@ mod tests {
             fs::read_to_string(rootfs.join("opt/data/three.txt")).expect("new file"),
             "three"
         );
+    }
+
+    #[test]
+    fn dedups_identical_files_across_layers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rootfs = temp.path().join("rootfs");
+        let cas_root = temp.path().join("cas");
+
+        let layer1 = temp.path().join("layer1.tar");
+        let layer2 = temp.path().join("layer2.tar");
+
+        create_tar(&layer1, &[("etc/dup.txt", b"same".as_slice())]);
+        create_tar(&layer2, &[("opt/dup.txt", b"same".as_slice())]);
+
+        construct_rootfs_with_dedup(&rootfs, &[layer1, layer2], &cas_root)
+            .expect("rootfs should construct");
+
+        let first = fs::metadata(rootfs.join("etc/dup.txt")).expect("first");
+        let second = fs::metadata(rootfs.join("opt/dup.txt")).expect("second");
+        assert!(first.nlink() >= 2);
+        assert_eq!(first.ino(), second.ino());
     }
 
     #[test]

@@ -35,7 +35,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement cgroups v2 integration for resource limits (memory, cpu, pids)~~
 - [x] ~~Implement rootless container execution via user namespaces~~
 - [x] ~~Implement process lifecycle management (start, stop, pause, resume)~~
-- [ ] Implement container exec functionality
+- [x] ~~Implement container exec functionality~~
 - [ ] Create integration tests for basic container lifecycle
 
 ### Image Management (OCI Image Spec v1.1)

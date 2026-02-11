@@ -54,13 +54,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Images => handle_images(),
         Commands::Containers => handle_containers(),
         Commands::Logs { container } => handle_logs(&container),
-        Commands::Exec { container, cmd } => {
-            if cmd.is_empty() {
-                return Err("exec: command is required".to_string());
-            }
-            println!("exec: container={container} cmd={}", cmd.join(" "));
-            Ok(())
-        }
+        Commands::Exec { container, cmd } => handle_exec(&container, &cmd),
         Commands::Pull { image } => {
             parse_image_reference(&image).map_err(|err| err.to_string())?;
             println!("pull: image={image}");
@@ -116,11 +110,22 @@ fn handle_logs(container: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_exec(container: &str, cmd: &[String]) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("exec: container is required".to_string());
+    }
+    if cmd.is_empty() {
+        return Err("exec: command is required".to_string());
+    }
+    println!("exec: container={container} cmd={}", cmd.join(" "));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, dispatch, handle_build, handle_containers, handle_images, handle_logs,
-        handle_run,
+        Cli, Commands, dispatch, handle_build, handle_containers, handle_exec, handle_images,
+        handle_logs, handle_run,
     };
     use clap::Parser;
 
@@ -212,5 +217,14 @@ mod tests {
     fn logs_handler_requires_container() {
         let err = handle_logs("").expect_err("container required");
         assert!(err.contains("logs: container is required"));
+    }
+
+    #[test]
+    fn exec_handler_requires_container_and_command() {
+        let err = handle_exec("", &["/bin/sh".to_string()]).expect_err("container required");
+        assert!(err.contains("exec: container is required"));
+
+        let err = handle_exec("c1", &[]).expect_err("command required");
+        assert!(err.contains("exec: command is required"));
     }
 }

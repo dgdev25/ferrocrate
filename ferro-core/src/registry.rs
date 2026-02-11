@@ -19,6 +19,26 @@ pub struct ImageReference {
     pub registry: String,
     pub repository: String,
     pub reference: String,
+    pub separator: ReferenceSeparator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceSeparator {
+    Tag,
+    Digest,
+}
+
+impl ImageReference {
+    pub fn canonical(&self) -> String {
+        match self.separator {
+            ReferenceSeparator::Tag => {
+                format!("{}/{}:{}", self.registry, self.repository, self.reference)
+            }
+            ReferenceSeparator::Digest => {
+                format!("{}/{}@{}", self.registry, self.repository, self.reference)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -65,6 +85,9 @@ impl RegistryClient {
     ) -> Result<String, RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
+        if std::env::var("FERROCRATE_DEBUG_REGISTRY").is_ok() {
+            eprintln!("registry: GET {}", url);
+        }
         let accept = [
             OCI_IMAGE_MANIFEST_MEDIA_TYPE,
             crate::image_manifest::OCI_IMAGE_INDEX_MEDIA_TYPE,
@@ -74,15 +97,35 @@ impl RegistryClient {
         .join(", ");
         let header_value = HeaderValue::from_str(&accept)
             .map_err(|err| RegistryError::InvalidReference(format!("accept header: {err}")))?;
+        let headers = vec![(ACCEPT, header_value.clone())];
         let response = self.send_request_with_auth(
             Method::GET,
             &url,
-            vec![(ACCEPT, header_value)],
+            headers,
             None,
             auth,
         )?;
         let status = response.status();
         let body = response.text().map_err(RegistryError::Request)?;
+
+        if status.as_u16() == 404 {
+            if let Some(challenge) = self.ping_bearer_challenge(&image_ref, auth)? {
+                let token = self.fetch_bearer_token(&challenge, auth)?;
+                let retry = self
+                    .build_request(&Method::GET, &url, &[(ACCEPT, header_value)], None, None, Some(&token))
+                    .send()
+                    .map_err(RegistryError::Request)?;
+                let retry_status = retry.status();
+                let retry_body = retry.text().map_err(RegistryError::Request)?;
+                if retry_status.is_success() {
+                    return Ok(retry_body);
+                }
+                return Err(RegistryError::HttpStatus {
+                    status: retry_status.as_u16(),
+                    body: retry_body,
+                });
+            }
+        }
 
         if !status.is_success() {
             return Err(RegistryError::HttpStatus {
@@ -224,6 +267,26 @@ struct BearerChallenge {
 }
 
 impl RegistryClient {
+    fn ping_bearer_challenge(
+        &self,
+        image_ref: &ImageReference,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<Option<BearerChallenge>, RegistryError> {
+        let url = ping_url(image_ref);
+        let response = self
+            .build_request(&Method::GET, &url, &[], None, auth, None)
+            .send()
+            .map_err(RegistryError::Request)?;
+        if response.status().as_u16() != 401 {
+            return Ok(None);
+        }
+        Ok(response
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_bearer_challenge))
+    }
+
     fn send_request_with_auth(
         &self,
         method: Method,
@@ -347,7 +410,7 @@ pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryErro
         ));
     }
 
-    let (name_part, reference) = split_reference(raw);
+    let (name_part, reference, separator) = split_reference(raw);
     let parts: Vec<&str> = name_part.split('/').collect();
 
     if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
@@ -372,20 +435,36 @@ pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryErro
         registry,
         repository,
         reference,
+        separator,
     })
 }
 
-fn split_reference(input: &str) -> (String, String) {
+fn split_reference(input: &str) -> (String, String, ReferenceSeparator) {
+    if let Some(at) = input.rfind('@') {
+        return (
+            input[..at].to_string(),
+            input[at + 1..].to_string(),
+            ReferenceSeparator::Digest,
+        );
+    }
     let slash_idx = input.rfind('/');
     let colon_idx = input.rfind(':');
 
     if let Some(colon) = colon_idx {
         if slash_idx.is_none_or(|slash| colon > slash) {
-            return (input[..colon].to_string(), input[colon + 1..].to_string());
+            return (
+                input[..colon].to_string(),
+                input[colon + 1..].to_string(),
+                ReferenceSeparator::Tag,
+            );
         }
     }
 
-    (input.to_string(), "latest".to_string())
+    (
+        input.to_string(),
+        "latest".to_string(),
+        ReferenceSeparator::Tag,
+    )
 }
 
 fn is_registry_component(component: &str) -> bool {
@@ -440,6 +519,19 @@ fn upload_url(image_ref: &ImageReference) -> String {
     )
 }
 
+fn ping_url(image_ref: &ImageReference) -> String {
+    let scheme = if image_ref.registry.starts_with("localhost")
+        || image_ref.registry.starts_with("127.")
+        || image_ref.registry.contains(":")
+    {
+        "http"
+    } else {
+        "https"
+    };
+
+    format!("{scheme}://{}/v2/", image_ref.registry)
+}
+
 fn normalize_location(location: &str, image_ref: &ImageReference) -> String {
     if location.starts_with("http://") || location.starts_with("https://") {
         return location.to_string();
@@ -463,7 +555,7 @@ fn normalize_location(location: &str, image_ref: &ImageReference) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistryAuth, RegistryClient, parse_image_reference};
+    use super::{ReferenceSeparator, RegistryAuth, RegistryClient, parse_image_reference};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use httptest::matchers::{all_of, contains, request};
@@ -476,6 +568,7 @@ mod tests {
         assert_eq!(parsed.registry, "registry-1.docker.io");
         assert_eq!(parsed.repository, "library/alpine");
         assert_eq!(parsed.reference, "latest");
+        assert_eq!(parsed.separator, ReferenceSeparator::Tag);
     }
 
     #[test]
@@ -484,6 +577,17 @@ mod tests {
         assert_eq!(parsed.registry, "ghcr.io");
         assert_eq!(parsed.repository, "acme/app");
         assert_eq!(parsed.reference, "v1.2.3");
+        assert_eq!(parsed.separator, ReferenceSeparator::Tag);
+    }
+
+    #[test]
+    fn parses_image_reference_with_digest() {
+        let parsed = parse_image_reference("registry-1.docker.io/library/alpine@sha256:deadbeef")
+            .expect("should parse");
+        assert_eq!(parsed.registry, "registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/alpine");
+        assert_eq!(parsed.reference, "sha256:deadbeef");
+        assert_eq!(parsed.separator, ReferenceSeparator::Digest);
     }
 
     #[test]

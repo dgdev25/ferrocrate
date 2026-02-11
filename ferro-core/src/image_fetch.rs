@@ -168,6 +168,15 @@ fn select_platform_manifest(manifests: &[crate::image_manifest::Descriptor]) -> 
 pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBuf>, ImageFetchError> {
     parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    resolve_layer_paths_with_store(runtime_dir, image, &store)
+}
+
+pub fn resolve_layer_paths_with_store(
+    runtime_dir: &Path,
+    image: &str,
+    store: &LocalImageStore,
+) -> Result<Vec<PathBuf>, ImageFetchError> {
+    parse_image_reference(image)?;
     let canonical = crate::image_tagging::canonicalize_reference(image)?;
     let record = store
         .resolve_reference(&canonical)?
@@ -200,6 +209,15 @@ pub fn resolve_config_path(
 ) -> Result<Option<PathBuf>, ImageFetchError> {
     parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    resolve_config_path_with_store(runtime_dir, image, &store)
+}
+
+pub fn resolve_config_path_with_store(
+    runtime_dir: &Path,
+    image: &str,
+    store: &LocalImageStore,
+) -> Result<Option<PathBuf>, ImageFetchError> {
+    parse_image_reference(image)?;
     let canonical = crate::image_tagging::canonicalize_reference(image)?;
     let record = store.resolve_reference(&canonical)?;
     let Some(record) = record else {

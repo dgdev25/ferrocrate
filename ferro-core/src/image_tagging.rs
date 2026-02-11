@@ -14,10 +14,7 @@ pub enum ImageTaggingError {
 
 pub fn canonicalize_reference(reference: &str) -> Result<String, ImageTaggingError> {
     let parsed = parse_image_reference(reference)?;
-    Ok(format!(
-        "{}/{}:{}",
-        parsed.registry, parsed.repository, parsed.reference
-    ))
+    Ok(parsed.canonical())
 }
 
 pub fn resolve_reference(

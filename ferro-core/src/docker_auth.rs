@@ -234,6 +234,31 @@ mod tests {
     }
 
     #[test]
+    fn resolves_auth_for_custom_registry() {
+        let _guard = DOCKER_ENV_LOCK.lock().expect("lock env");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.json");
+        fs::write(
+            &config_path,
+            r#"{
+  "auths": {
+    "registry.example.com": {"username": "alice", "password": "token123"}
+  }
+}"#,
+        )
+        .expect("write config");
+
+        unsafe { std::env::set_var("DOCKER_CONFIG", dir.path()); }
+        let auth = resolve_auth_for_registry("registry.example.com")
+            .expect("auth resolves")
+            .expect("auth present");
+        assert_eq!(auth.username, "alice");
+        assert_eq!(auth.password, "token123");
+
+        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
+    }
+
+    #[test]
     fn resolves_auth_from_helper() {
         let _guard = DOCKER_ENV_LOCK.lock().expect("lock env");
         let dir = tempfile::tempdir().expect("tempdir");

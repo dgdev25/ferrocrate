@@ -1,5 +1,5 @@
 use crate::container_exec::exec_in_container;
-use crate::container_store::{ContainerRecord, LocalContainerStore, ContainerStoreError, now_unix};
+use crate::container_store::{ContainerRecord, HealthConfig, LocalContainerStore, ContainerStoreError, now_unix};
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
 use crate::image_fetch::resolve_layer_paths;
 use crate::rootfs::construct_rootfs;
@@ -71,6 +71,7 @@ impl ContainerRuntime {
         env: &[String],
         labels: &HashMap<String, String>,
         annotations: &HashMap<String, String>,
+        health: Option<HealthConfig>,
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
@@ -136,6 +137,10 @@ impl ContainerRuntime {
             env: env.to_vec(),
             labels: labels.clone(),
             annotations: annotations.clone(),
+            health: health.clone(),
+            health_status: if health.is_some() { "starting".to_string() } else { "none".to_string() },
+            health_failures: 0,
+            health_checked_at_unix: None,
             created_at_unix: now_unix(),
             stdout_path: stdout_path.display().to_string(),
             stderr_path: stderr_path.display().to_string(),
@@ -143,6 +148,15 @@ impl ContainerRuntime {
         };
 
         self.store.put(&record)?;
+
+        if let Some(config) = health {
+            let store = self.store.clone_db();
+            let id = record.id.clone();
+            let pid = record.pid;
+            thread::spawn(move || {
+                run_health_checks(store, id, pid, config);
+            });
+        }
         Ok(record)
     }
 
@@ -227,6 +241,15 @@ impl ContainerRuntime {
         record.pid = child_id;
         record.status = "running".to_string();
         self.store.put(&record)?;
+
+        if let Some(config) = record.health.clone() {
+            let store = self.store.clone_db();
+            let id = record.id.clone();
+            let pid = record.pid;
+            thread::spawn(move || {
+                run_health_checks(store, id, pid, config);
+            });
+        }
         Ok(())
     }
 
@@ -356,6 +379,60 @@ fn update_status(db: &sled::Db, id: &str, status: &str) -> Result<(), ContainerS
     Ok(())
 }
 
+fn update_health(
+    db: &sled::Db,
+    id: &str,
+    status: &str,
+    failures: u32,
+    checked_at_unix: u64,
+) -> Result<bool, ContainerStoreError> {
+    let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
+    let Some(bytes) = tree.get(id.as_bytes())? else {
+        return Ok(false);
+    };
+    let mut record = serde_json::from_slice::<ContainerRecord>(&bytes)
+        .map_err(ContainerStoreError::Decode)?;
+    record.health_status = status.to_string();
+    record.health_failures = failures;
+    record.health_checked_at_unix = Some(checked_at_unix);
+    let encoded = serde_json::to_vec(&record)?;
+    tree.insert(id.as_bytes(), encoded)?;
+    tree.flush()?;
+    Ok(true)
+}
+
+fn run_health_checks(store: sled::Db, id: String, pid: u32, config: HealthConfig) {
+    if config.start_period_secs > 0 {
+        thread::sleep(Duration::from_secs(config.start_period_secs));
+    }
+
+    let mut failures = 0_u32;
+    loop {
+        let result = exec_in_container(pid, &config.cmd);
+        let now = now_unix();
+        match result {
+            Ok(exec) if exec.exit_code == 0 => {
+                failures = 0;
+                let _ = update_health(&store, &id, "healthy", failures, now);
+            }
+            Ok(_) | Err(_) => {
+                failures = failures.saturating_add(1);
+                let status = if failures >= config.retries.max(1) {
+                    "unhealthy"
+                } else {
+                    "starting"
+                };
+                match update_health(&store, &id, status, failures, now) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(_) => {}
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(config.interval_secs));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ContainerRuntime;
@@ -386,6 +463,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
+            None,
             &[],
             &[],
             false,
@@ -414,6 +492,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            None,
             None,
             &[],
             &[],
@@ -448,14 +527,15 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
-                &[],
-                &HashMap::new(),
-                &HashMap::new(),
-                None,
-                &[],
-                &[],
-                false,
-                false,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+            &[],
+            &[],
+            false,
+            false,
             )
             .expect("run");
 
@@ -479,14 +559,15 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
-                &[],
-                &HashMap::new(),
-                &HashMap::new(),
-                None,
-                &[],
-                &[],
-                false,
-                false,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+            &[],
+            &[],
+            false,
+            false,
             )
             .expect("run");
 
@@ -525,14 +606,15 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.05".to_string()],
-                &[],
-                &HashMap::new(),
-                &HashMap::new(),
-                Some(&limits),
-                &[],
-                &[],
-                false,
-                false,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            Some(&limits),
+            &[],
+            &[],
+            false,
+            false,
             )
             .expect("run");
 

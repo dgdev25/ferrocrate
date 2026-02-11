@@ -8,7 +8,7 @@ use crate::image_config::{command_from_config, healthcheck_from_config};
 use crate::image_fetch::resolve_layer_paths;
 use crate::image_fetch::resolve_config_path;
 use crate::observability::{log_event, make_event};
-use crate::rootfs::construct_rootfs;
+use crate::rootfs::construct_rootfs_with_dedup;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
@@ -113,7 +113,12 @@ impl ContainerRuntime {
             .map_err(|_| RuntimeError::ImageMissing(image.to_string()))?;
         let rootfs_dir = container_dir.join("rootfs");
         if !layer_paths.is_empty() {
-            construct_rootfs(&rootfs_dir, &layer_paths)?;
+            let cas_root = self
+                .runtime_dir
+                .join("images")
+                .join("file-cas")
+                .join("blake3");
+            construct_rootfs_with_dedup(&rootfs_dir, &layer_paths, &cas_root)?;
         } else {
             fs::create_dir_all(&rootfs_dir)?;
         }

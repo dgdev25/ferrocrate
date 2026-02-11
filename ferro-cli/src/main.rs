@@ -9,7 +9,7 @@ use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
 use std::process;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -45,6 +45,10 @@ pub enum Commands {
         image: String,
     },
     ImagePrune,
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommands,
+    },
     Containers,
     Logs {
         container: String,
@@ -92,6 +96,13 @@ pub enum ComposeCommands {
     Logs,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum VolumeCommands {
+    Create { name: String },
+    Ls,
+    Rm { name: String },
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(err) = dispatch(cli.command) {
@@ -132,6 +143,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Images => handle_images(&image_store),
         Commands::Rmi { image } => handle_rmi(&image_store, &image),
         Commands::ImagePrune => handle_image_prune(&image_store),
+        Commands::Volume { command } => handle_volume(&runtime_dir, command),
         Commands::Containers => handle_containers(&runtime),
         Commands::Logs { container } => handle_logs(&runtime, &container),
         Commands::Stop { container, timeout } => {
@@ -329,6 +341,36 @@ fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> 
     Ok(())
 }
 
+fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), String> {
+    let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
+        .map_err(|err| err.to_string())?;
+    match command {
+        VolumeCommands::Create { name } => {
+            let record = store.create(&name).map_err(|err| err.to_string())?;
+            println!("volume create: {} {}", record.name, record.path);
+        }
+        VolumeCommands::Ls => {
+            let records = store.list().map_err(|err| err.to_string())?;
+            if records.is_empty() {
+                println!("volumes: no entries");
+            } else {
+                for record in records {
+                    println!("{} {}", record.name, record.path);
+                }
+            }
+        }
+        VolumeCommands::Rm { name } => {
+            let removed = store.remove(&name).map_err(|err| err.to_string())?;
+            if removed {
+                println!("volume rm: {name}");
+            } else {
+                println!("volume rm: not found {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -410,9 +452,9 @@ fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, ComposeCommands, dispatch, handle_build, handle_containers, handle_exec,
+        Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
-        handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits,
+        handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
         validate_network_backend,
     };
     use clap::Parser;
@@ -548,6 +590,45 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_volume_commands() {
+        let create = Cli::parse_from(["ferrocrate", "volume", "create", "data"]);
+        match create.command {
+            Commands::Volume { command } => match command {
+                VolumeCommands::Create { name } => assert_eq!(name, "data"),
+                _ => panic!("unexpected volume command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
+        let ls = Cli::parse_from(["ferrocrate", "volume", "ls"]);
+        match ls.command {
+            Commands::Volume { command } => assert!(matches!(command, VolumeCommands::Ls)),
+            _ => panic!("unexpected command"),
+        }
+
+        let rm = Cli::parse_from(["ferrocrate", "volume", "rm", "data"]);
+        match rm.command {
+            Commands::Volume { command } => match command {
+                VolumeCommands::Rm { name } => assert_eq!(name, "data"),
+                _ => panic!("unexpected volume command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn volume_handlers_run() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().to_path_buf();
+
+        handle_volume(&runtime_dir, VolumeCommands::Create { name: "data".to_string() })
+            .expect("create volume");
+        handle_volume(&runtime_dir, VolumeCommands::Ls).expect("ls volumes");
+        handle_volume(&runtime_dir, VolumeCommands::Rm { name: "data".to_string() })
+            .expect("rm volume");
     }
 
     #[test]

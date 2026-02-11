@@ -73,7 +73,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 
 ### Security Baseline (Phase 1)
 
-- [ ] Verify rootless container isolation (user namespace, capability dropping)
+- [x] ~~Verify rootless container isolation (user namespace, capability dropping)~~
 - [ ] Implement seccomp profile defaults
 - [ ] Implement AppArmor/SELinux profile generation
 - [ ] Run initial security audit on codebase

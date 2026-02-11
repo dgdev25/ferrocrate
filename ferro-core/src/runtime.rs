@@ -3,6 +3,7 @@ use crate::container_store::{ContainerRecord, LocalContainerStore, ContainerStor
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
 use crate::image_fetch::resolve_layer_paths;
 use crate::rootfs::construct_rootfs;
+use crate::mounts::{BindMount, MountError, apply_bind_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use std::fs;
@@ -29,6 +30,8 @@ pub enum RuntimeError {
     ProcessLifecycle(#[from] ProcessLifecycleError),
     #[error("rootfs error: {0}")]
     Rootfs(#[from] crate::rootfs::RootfsError),
+    #[error("mount error: {0}")]
+    Mount(#[from] MountError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
     #[error("command is required to run container")]
@@ -64,6 +67,7 @@ impl ContainerRuntime {
         image: &str,
         cmd: &[String],
         limits: Option<&ResourceLimits>,
+        mounts: &[BindMount],
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         if cmd.is_empty() {
@@ -85,6 +89,10 @@ impl ContainerRuntime {
             construct_rootfs(&rootfs_dir, &layer_paths)?;
         } else {
             fs::create_dir_all(&rootfs_dir)?;
+        }
+
+        if !mounts.is_empty() {
+            apply_bind_mounts(&rootfs_dir, mounts)?;
         }
 
         let child_id = spawn_process_with_logs(
@@ -323,6 +331,7 @@ mod tests {
                     "echo hi && sleep 0.05".to_string(),
                 ],
                 None,
+                &[],
             )
             .expect("run");
 
@@ -345,6 +354,7 @@ mod tests {
                     "echo hi".to_string(),
                 ],
                 None,
+                &[],
             )
             .expect("run");
 
@@ -375,6 +385,7 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
                 None,
+                &[],
             )
             .expect("run");
 
@@ -399,6 +410,7 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
                 None,
+                &[],
             )
             .expect("run");
 
@@ -438,6 +450,7 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.05".to_string()],
                 Some(&limits),
+                &[],
             )
             .expect("run");
 

@@ -69,7 +69,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | STR-01 | ~~Named volumes~~ | Done | Volume store + CLI create/ls/rm implemented. |
-| STR-02 | Bind mounts | Not Started | Not implemented. |
+| STR-02 | ~~Bind mounts~~ | Done | CLI --bind with runtime bind mounts. |
 | STR-03 | tmpfs mounts | Not Started | Not implemented. |
 | STR-04 | Volume drivers | Not Started | Not implemented. |
 | STR-05 | OverlayFS default | Done | OverlayFS + FUSE fallback implemented. |

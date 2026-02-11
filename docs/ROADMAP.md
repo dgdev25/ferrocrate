@@ -84,7 +84,7 @@
 ### 3.3 Networking
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| NET-01 | ~~Bridge networking~~ | Done | Rootful bridge/netns/veth; rootless uses unshare + slirp4netns by default. |
+| NET-01 | ~~Bridge networking~~ | Done | Rootful bridge/netns/veth; rootless uses unshare + slirp4netns when `FERROCRATE_ROOTLESS_NETNS=1`. |
 | NET-02 | ~~Host networking~~ | Done | `--network host` skips netns and runs on host network. |
 | NET-03 | ~~None networking~~ | Done | `--network none` isolates netns (rootful via ip netns; rootless via unshare). |
 | NET-04 | ~~Container-to-container DNS~~ | Done | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers. |

@@ -1039,7 +1039,7 @@ fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
 fn rootless_netns_enabled() -> bool {
     std::env::var("FERROCRATE_ROOTLESS_NETNS")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn ensure_nftables_chains() -> Result<(), RuntimeError> {

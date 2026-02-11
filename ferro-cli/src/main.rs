@@ -29,6 +29,8 @@ pub enum Commands {
         bind_mounts: Vec<String>,
         #[arg(long = "tmpfs")]
         tmpfs_mounts: Vec<String>,
+        #[arg(long = "read-only")]
+        read_only_rootfs: bool,
         #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
@@ -135,6 +137,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             network_backend,
             bind_mounts,
             tmpfs_mounts,
+            read_only_rootfs,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -148,6 +151,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &network_backend,
                 &bind_mounts,
                 &tmpfs_mounts,
+                read_only_rootfs,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -184,6 +188,7 @@ fn handle_run(
     network_backend: &str,
     bind_mounts: &[String],
     tmpfs_mounts: &[String],
+    read_only_rootfs: bool,
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -195,7 +200,7 @@ fn handle_run(
     let mounts = parse_bind_mounts(bind_mounts)?;
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
     let record = runtime
-        .run(image, cmd, limits.as_ref(), &mounts, &tmpfs)
+        .run(image, cmd, limits.as_ref(), &mounts, &tmpfs, read_only_rootfs)
         .map_err(|err| err.to_string())?;
     println!(
         "run: container_id={} pid={} network_backend={}",
@@ -543,6 +548,7 @@ mod tests {
                 network_backend,
                 bind_mounts,
                 tmpfs_mounts,
+                read_only_rootfs,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -553,6 +559,7 @@ mod tests {
                 assert_eq!(network_backend, "ebpf");
                 assert!(bind_mounts.is_empty());
                 assert!(tmpfs_mounts.is_empty());
+                assert!(!read_only_rootfs);
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -756,7 +763,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_run(&runtime, &store, "", &[], "ebpf", &[], &[], None, None, None, None)
+        let err = handle_run(&runtime, &store, "", &[], "ebpf", &[], &[], false, None, None, None, None)
             .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
     }

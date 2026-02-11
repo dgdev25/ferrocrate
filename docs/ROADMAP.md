@@ -84,7 +84,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | SEC-03 | AppArmor/SELinux integration | Partial | Profile generation only. |
 | SEC-04 | Capability dropping | Partial | Drop helper exists; not enforced. |
 | SEC-05 | Read-only rootfs for prod | Not Started | Not implemented. |
-| SEC-06 | no-new-privileges | Partial | Config field exists; not enforced. |
+| SEC-06 | ~~no-new-privileges~~ | Done | CLI --no-new-privileges enforced via prctl. |
 | SEC-07 | Image signature verification | Not Started | Not implemented. |
 | SEC-08 | Runtime security monitoring (eBPF) | Not Started | Not implemented. |
 | SEC-09 | Encrypted container communication | Not Started | Not implemented. |

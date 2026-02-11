@@ -1,10 +1,10 @@
 use crate::image_manifest::{ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
 use std::time::Duration;
 use std::path::Path;
 use std::fs::File;
-use std::io::copy;
+use std::io::{copy, Read};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +168,62 @@ impl RegistryClient {
         copy(&mut response, &mut file).map_err(RegistryError::Io)?;
         Ok(())
     }
+
+    /// Push a blob using the monolithic upload flow.
+    pub fn push_blob_from_file(
+        &self,
+        image: &str,
+        digest: &str,
+        path: &Path,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<(), RegistryError> {
+        let image_ref = parse_image_reference(image)?;
+        let base = upload_url(&image_ref);
+
+        let mut request = self.client.post(base);
+        if let Some(auth) = auth {
+            request = request.basic_auth(&auth.username, Some(&auth.password));
+        }
+
+        let response = request.send().map_err(RegistryError::Request)?;
+        let status = response.status();
+        if !status.is_success() && status.as_u16() != 202 {
+            let body = response.text().unwrap_or_default();
+            return Err(RegistryError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|val| val.to_str().ok())
+            .ok_or_else(|| RegistryError::InvalidReference("missing upload location".to_string()))?;
+
+        let upload_url = normalize_location(location, &image_ref);
+        let upload_url = format!("{upload_url}?digest={digest}");
+
+        let mut file = File::open(path).map_err(RegistryError::Io)?;
+        let mut body = Vec::new();
+        file.read_to_end(&mut body).map_err(RegistryError::Io)?;
+
+        let mut upload_req = self.client.put(upload_url).body(body);
+        if let Some(auth) = auth {
+            upload_req = upload_req.basic_auth(&auth.username, Some(&auth.password));
+        }
+
+        let response = upload_req.send().map_err(RegistryError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(RegistryError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(())
+    }
 }
 
 pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryError> {
@@ -253,6 +309,43 @@ fn blob_url(image_ref: &ImageReference, digest: &str) -> String {
         "{scheme}://{}/v2/{}/blobs/{}",
         image_ref.registry, image_ref.repository, digest
     )
+}
+
+fn upload_url(image_ref: &ImageReference) -> String {
+    let scheme = if image_ref.registry.starts_with("localhost")
+        || image_ref.registry.starts_with("127.")
+        || image_ref.registry.contains(":")
+    {
+        "http"
+    } else {
+        "https"
+    };
+
+    format!(
+        "{scheme}://{}/v2/{}/blobs/uploads/",
+        image_ref.registry, image_ref.repository
+    )
+}
+
+fn normalize_location(location: &str, image_ref: &ImageReference) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return location.to_string();
+    }
+
+    let scheme = if image_ref.registry.starts_with("localhost")
+        || image_ref.registry.starts_with("127.")
+        || image_ref.registry.contains(":")
+    {
+        "http"
+    } else {
+        "https"
+    };
+
+    if location.starts_with('/') {
+        format!("{scheme}://{}{}", image_ref.registry, location)
+    } else {
+        format!("{scheme}://{}/{}", image_ref.registry, location)
+    }
 }
 
 #[cfg(test)]
@@ -342,5 +435,35 @@ mod tests {
         client
             .push_manifest_raw(&image, &manifest_json.to_string(), Some(&auth))
             .expect("manifest push should succeed");
+    }
+
+    #[test]
+    fn pushes_blob_via_monolithic_upload() {
+        let server = Server::run();
+        let upload_location = "/upload/123";
+        let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/v2/myorg/app/blobs/uploads/"))
+                .respond_with(
+                    status_code(202).append_header("Location", upload_location),
+                ),
+        );
+
+        server.expect(
+            Expectation::matching(request::method_path("PUT", "/upload/123"))
+                .respond_with(status_code(201)),
+        );
+
+        let client = RegistryClient::new().expect("create client");
+        let image = format!("{}/myorg/app:v1", server.addr());
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blob_path = temp.path().join("blob");
+        std::fs::write(&blob_path, "BLOB").expect("write blob");
+
+        client
+            .push_blob_from_file(&image, digest, &blob_path, None)
+            .expect("push blob");
     }
 }

@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ferro_core::docker_auth::resolve_registry_auth;
+use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::registry::{RegistryClient, parse_image_reference};
@@ -361,6 +362,20 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
 
     let client = RegistryClient::new().map_err(|err| err.to_string())?;
     let auth = resolve_registry_auth(&canonical).map_err(|err| err.to_string())?;
+    let runtime_dir = runtime_dir();
+    let layer_paths = ferro_core::image_fetch::resolve_layer_paths(&runtime_dir, &canonical)
+        .map_err(|err| err.to_string())?;
+    let manifest = parse_image_manifest(&record.manifest_json)
+        .map_err(|err| err.to_string())?;
+
+    for (layer, path) in manifest.layers.iter().zip(layer_paths.iter()) {
+        if !path.exists() {
+            return Err(format!("push: missing layer blob {}", layer.digest));
+        }
+        client
+            .push_blob_from_file(&canonical, &layer.digest, path, auth.as_ref())
+            .map_err(|err| err.to_string())?;
+    }
     client
         .push_manifest_raw(&canonical, &record.manifest_json, auth.as_ref())
         .map_err(|err| err.to_string())?;

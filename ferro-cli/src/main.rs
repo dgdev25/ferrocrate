@@ -55,11 +55,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Containers => handle_containers(),
         Commands::Logs { container } => handle_logs(&container),
         Commands::Exec { container, cmd } => handle_exec(&container, &cmd),
-        Commands::Pull { image } => {
-            parse_image_reference(&image).map_err(|err| err.to_string())?;
-            println!("pull: image={image}");
-            Ok(())
-        }
+        Commands::Pull { image } => handle_pull(&image),
         Commands::Push { image } => {
             parse_image_reference(&image).map_err(|err| err.to_string())?;
             println!("push: image={image}");
@@ -121,11 +117,17 @@ fn handle_exec(container: &str, cmd: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_pull(image: &str) -> Result<(), String> {
+    parse_image_reference(image).map_err(|err| err.to_string())?;
+    println!("pull: image={image}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         Cli, Commands, dispatch, handle_build, handle_containers, handle_exec, handle_images,
-        handle_logs, handle_run,
+        handle_logs, handle_pull, handle_run,
     };
     use clap::Parser;
 
@@ -226,5 +228,11 @@ mod tests {
 
         let err = handle_exec("c1", &[]).expect_err("command required");
         assert!(err.contains("exec: command is required"));
+    }
+
+    #[test]
+    fn pull_handler_rejects_invalid_image() {
+        let err = handle_pull("").expect_err("invalid image");
+        assert!(err.contains("invalid image reference"));
     }
 }

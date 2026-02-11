@@ -76,7 +76,7 @@
 | IMG-06 | Dockerfile build | Partial | Supports FROM base images + COPY --from multi-stage; still far from 95% directive parity. |
 | IMG-07 | ferrofile.toml build | Partial | Minimal [build] spec (context/dockerfile/tag) wired to Dockerfile build. |
 | IMG-08 | ~~Multi-stage builds~~ | Done | Basic multi-stage support with COPY --from between stages. |
-| IMG-09 | Build cache | Not Started | Not implemented. |
+| IMG-09 | ~~Build cache~~ | Done | Dockerfile build cache keyed by Dockerfile + context hash + base digest stored in `images/build-cache.json`. |
 | IMG-10 | ~~Tag/list/remove/prune images~~ | Done | Tag/list done; remove/prune implemented. |
 | IMG-11 | CVE scanning | Not Started | Not implemented. |
 | IMG-12 | ~~ruvector dedup~~ | Done | Embedding-based dedup helper in `ferro-mind`. |

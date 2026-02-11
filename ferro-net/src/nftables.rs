@@ -15,9 +15,18 @@ pub fn build_nft_add_rule_cmd(rule: &NftRule) -> Vec<String> {
     cmd
 }
 
+pub fn build_nft_delete_rule_cmd(rule: &NftRule) -> Vec<String> {
+    let mut cmd = vec!["nft".to_string(), "delete".to_string(), "rule".to_string()];
+    cmd.push(rule.family.clone());
+    cmd.push(rule.table.clone());
+    cmd.push(rule.chain.clone());
+    cmd.extend(rule.expr.clone());
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NftRule, build_nft_add_rule_cmd};
+    use super::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule_cmd};
 
     #[test]
     fn builds_nft_add_rule_command() {
@@ -32,6 +41,14 @@ mod tests {
             build_nft_add_rule_cmd(&rule),
             vec![
                 "nft", "add", "rule", "ip", "nat", "prerouting", "tcp", "dport", "80", "dnat",
+                "to", "10.0.0.2:80"
+            ]
+        );
+
+        assert_eq!(
+            build_nft_delete_rule_cmd(&rule),
+            vec![
+                "nft", "delete", "rule", "ip", "nat", "prerouting", "tcp", "dport", "80", "dnat",
                 "to", "10.0.0.2:80"
             ]
         );

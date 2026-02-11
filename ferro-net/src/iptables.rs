@@ -15,9 +15,19 @@ pub fn build_iptables_cmd(rule: &IptablesRule) -> Vec<String> {
     cmd
 }
 
+pub fn build_iptables_delete_cmd(rule: &IptablesRule) -> Vec<String> {
+    let mut cmd = vec!["iptables".to_string()];
+    cmd.push("-t".to_string());
+    cmd.push(rule.table.clone());
+    cmd.push("-D".to_string());
+    cmd.push(rule.chain.clone());
+    cmd.extend(rule.args.clone());
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IptablesRule, build_iptables_cmd};
+    use super::{IptablesRule, build_iptables_cmd, build_iptables_delete_cmd};
 
     #[test]
     fn builds_iptables_command() {
@@ -30,6 +40,11 @@ mod tests {
         assert_eq!(
             build_iptables_cmd(&rule),
             vec!["iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "80"]
+        );
+
+        assert_eq!(
+            build_iptables_delete_cmd(&rule),
+            vec!["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", "80"]
         );
     }
 }

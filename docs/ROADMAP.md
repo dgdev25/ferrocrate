@@ -25,7 +25,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | CLM-01 | Run OCI-compliant container images | Partial | Runtime run exists, OCI parsing in ferro-core; not validated across registries. |
-| CLM-02 | Create/start/stop/restart/kill/remove | Partial | Start/stop/lifecycle present; restart/kill/remove missing. |
+| CLM-02 | ~~Create/start/stop/restart/kill/remove~~ | Done | Restart/kill/remove implemented and wired in CLI. |
 | CLM-03 | Pause/unpause via cgroup freezer | Partial | Pause/resume exists; freezer enforcement not verified. |
 | CLM-04 | Container exec | Done | `ferro-core` exec + CLI wired. |
 | CLM-05 | Container logs | Done | Runtime logs + CLI logs. |

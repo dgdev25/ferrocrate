@@ -26,6 +26,44 @@ pub enum ProcessLifecycleError {
     Wait(std::io::Error),
 }
 
+pub fn stop_pid(pid: u32, timeout: Duration) -> Result<(), ProcessLifecycleError> {
+    let target = Pid::from_raw(pid as i32);
+    if let Err(err) = kill(target, Signal::SIGTERM) {
+        if err == nix::Error::from(Errno::ESRCH) {
+            return Ok(());
+        }
+        return Err(ProcessLifecycleError::Signal(err));
+    }
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !pid_exists(target) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if let Err(err) = kill(target, Signal::SIGKILL) {
+        if err != nix::Error::from(Errno::ESRCH) {
+            return Err(ProcessLifecycleError::Signal(err));
+        }
+    }
+    Ok(())
+}
+
+pub fn kill_pid(pid: u32) -> Result<(), ProcessLifecycleError> {
+    let target = Pid::from_raw(pid as i32);
+    if let Err(err) = kill(target, Signal::SIGKILL) {
+        if err != nix::Error::from(Errno::ESRCH) {
+            return Err(ProcessLifecycleError::Signal(err));
+        }
+    }
+    Ok(())
+}
+
+fn pid_exists(pid: Pid) -> bool {
+    let path = format!("/proc/{}", pid.as_raw());
+    std::fs::metadata(path).is_ok()
+}
+
 #[derive(Debug)]
 pub struct ManagedProcess {
     child: Child,
@@ -114,7 +152,7 @@ impl ManagedProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManagedProcess, ProcessState};
+    use super::{ManagedProcess, ProcessState, kill_pid, stop_pid};
     use std::time::Duration;
 
     #[test]
@@ -138,5 +176,17 @@ mod tests {
         let status = proc.stop(Duration::from_millis(150)).expect("stop succeeds");
         assert!(!status.success());
         assert_eq!(proc.state(), ProcessState::Exited);
+    }
+
+    #[test]
+    fn stop_pid_terminates_process() {
+        let proc = ManagedProcess::start("sh", &["-c", "sleep 5"]).expect("process starts");
+        stop_pid(proc.pid(), Duration::from_millis(100)).expect("stop pid");
+    }
+
+    #[test]
+    fn kill_pid_terminates_process() {
+        let proc = ManagedProcess::start("sh", &["-c", "sleep 5"]).expect("process starts");
+        kill_pid(proc.pid()).expect("kill pid");
     }
 }

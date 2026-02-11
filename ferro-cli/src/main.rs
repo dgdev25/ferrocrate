@@ -38,6 +38,22 @@ pub enum Commands {
     Logs {
         container: String,
     },
+    Stop {
+        container: String,
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+    },
+    Kill {
+        container: String,
+    },
+    Rm {
+        container: String,
+    },
+    Restart {
+        container: String,
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+    },
     Exec {
         container: String,
         #[arg(trailing_var_arg = true)]
@@ -89,6 +105,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::ImagePrune => handle_image_prune(&image_store),
         Commands::Containers => handle_containers(&runtime),
         Commands::Logs { container } => handle_logs(&runtime, &container),
+        Commands::Stop { container, timeout } => {
+            handle_stop(&runtime, &container, timeout)
+        }
+        Commands::Kill { container } => handle_kill(&runtime, &container),
+        Commands::Rm { container } => handle_rm(&runtime, &container),
+        Commands::Restart { container, timeout } => {
+            handle_restart(&runtime, &container, timeout)
+        }
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image } => handle_pull(&image),
         Commands::Push { image } => handle_push(&image),
@@ -189,6 +213,46 @@ fn handle_logs(runtime: &ContainerRuntime, container: &str) -> Result<(), String
     Ok(())
 }
 
+fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("stop: container is required".to_string());
+    }
+    runtime
+        .stop(container, std::time::Duration::from_secs(timeout))
+        .map_err(|err| err.to_string())?;
+    println!("stop: {container}");
+    Ok(())
+}
+
+fn handle_kill(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("kill: container is required".to_string());
+    }
+    runtime.kill(container).map_err(|err| err.to_string())?;
+    println!("kill: {container}");
+    Ok(())
+}
+
+fn handle_rm(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("rm: container is required".to_string());
+    }
+    runtime.remove(container).map_err(|err| err.to_string())?;
+    println!("rm: {container}");
+    Ok(())
+}
+
+fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("restart: container is required".to_string());
+    }
+    runtime
+        .restart(container, std::time::Duration::from_secs(timeout))
+        .map_err(|err| err.to_string())?;
+    println!("restart: {container}");
+    Ok(())
+}
+
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -247,7 +311,8 @@ mod tests {
     use super::{
         Cli, Commands, ComposeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
-        handle_run, validate_network_backend,
+        handle_run, handle_stop, handle_kill, handle_rm, handle_restart,
+        validate_network_backend,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
@@ -328,6 +393,66 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_stop_command_with_timeout() {
+        let cli = Cli::parse_from(["ferrocrate", "stop", "--timeout", "5", "abc123"]);
+        match cli.command {
+            Commands::Stop { container, timeout } => {
+                assert_eq!(container, "abc123");
+                assert_eq!(timeout, 5);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_kill_command() {
+        let cli = Cli::parse_from(["ferrocrate", "kill", "abc123"]);
+        match cli.command {
+            Commands::Kill { container } => assert_eq!(container, "abc123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rm_command() {
+        let cli = Cli::parse_from(["ferrocrate", "rm", "abc123"]);
+        match cli.command {
+            Commands::Rm { container } => assert_eq!(container, "abc123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_restart_command() {
+        let cli = Cli::parse_from(["ferrocrate", "restart", "abc123"]);
+        match cli.command {
+            Commands::Restart { container, timeout } => {
+                assert_eq!(container, "abc123");
+                assert_eq!(timeout, 10);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_kill_rm_restart_require_container() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+
+        let err = handle_stop(&runtime, "", 1).expect_err("stop requires container");
+        assert!(err.contains("stop: container is required"));
+
+        let err = handle_kill(&runtime, "").expect_err("kill requires container");
+        assert!(err.contains("kill: container is required"));
+
+        let err = handle_rm(&runtime, "").expect_err("rm requires container");
+        assert!(err.contains("rm: container is required"));
+
+        let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");
+        assert!(err.contains("restart: container is required"));
     }
 
     #[test]

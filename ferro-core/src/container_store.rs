@@ -56,6 +56,13 @@ impl LocalContainerStore {
             .transpose()
     }
 
+    pub fn remove(&self, id: &str) -> Result<bool, ContainerStoreError> {
+        let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        let removed = tree.remove(id.as_bytes())?.is_some();
+        tree.flush()?;
+        Ok(removed)
+    }
+
     pub fn list(&self) -> Result<Vec<ContainerRecord>, ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
         let mut out = Vec::new();
@@ -113,5 +120,28 @@ mod tests {
         let listed = store.list().expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "c1");
+    }
+
+    #[test]
+    fn removes_containers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalContainerStore::open(temp.path()).expect("open store");
+
+        let record = ContainerRecord {
+            id: "c1".to_string(),
+            pid: 1234,
+            image: "alpine:latest".to_string(),
+            command: vec!["echo".to_string(), "hi".to_string()],
+            created_at_unix: now_unix(),
+            stdout_path: "stdout.log".to_string(),
+            stderr_path: "stderr.log".to_string(),
+            status: "running".to_string(),
+        };
+
+        store.put(&record).expect("store record");
+        let removed = store.remove("c1").expect("remove");
+        assert!(removed);
+        let listed = store.list().expect("list");
+        assert!(listed.is_empty());
     }
 }

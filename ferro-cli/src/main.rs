@@ -51,10 +51,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
     match command {
         Commands::Run { image, cmd } => handle_run(&image, &cmd),
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
-        Commands::Images => {
-            println!("images: not implemented");
-            Ok(())
-        }
+        Commands::Images => handle_images(),
         Commands::Containers => {
             println!("containers: not implemented");
             Ok(())
@@ -107,9 +104,14 @@ fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_images() -> Result<(), String> {
+    println!("images: no entries (stub)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, dispatch, handle_build, handle_run};
+    use super::{Cli, Commands, dispatch, handle_build, handle_images, handle_run};
     use clap::Parser;
 
     #[test]
@@ -184,5 +186,10 @@ mod tests {
     fn build_handler_rejects_invalid_tag() {
         let err = handle_build("./Dockerfile", Some("")).expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn images_handler_runs() {
+        handle_images().expect("images handler should succeed");
     }
 }

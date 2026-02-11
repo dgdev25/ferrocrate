@@ -24,6 +24,7 @@ pub enum ImageStoreError {
     Decode(#[source] serde_json::Error),
 }
 
+#[derive(Clone)]
 pub struct LocalImageStore {
     db: sled::Db,
 }

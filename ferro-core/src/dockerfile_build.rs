@@ -50,6 +50,23 @@ pub fn build_from_dockerfile_with_compression(
     runtime_dir: &Path,
     compression: CompressionFormat,
 ) -> Result<BuildResult, DockerfileBuildError> {
+    let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    build_from_dockerfile_with_store_and_compression(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        &store,
+    )
+}
+
+pub fn build_from_dockerfile_with_store_and_compression(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
@@ -133,7 +150,6 @@ pub fn build_from_dockerfile_with_compression(
     })?;
 
     let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
-    let store = LocalImageStore::open(runtime_dir.join("images"))?;
     store.put_reference(
         &reference,
         &config_digest,

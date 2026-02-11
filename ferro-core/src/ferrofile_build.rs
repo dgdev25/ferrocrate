@@ -1,4 +1,10 @@
-use crate::dockerfile_build::{build_from_dockerfile_with_compression, BuildResult, DockerfileBuildError};
+use crate::dockerfile_build::{
+    build_from_dockerfile_with_compression,
+    build_from_dockerfile_with_store_and_compression,
+    BuildResult,
+    DockerfileBuildError,
+};
+use crate::image_store::LocalImageStore;
 use crate::layer_compression::CompressionFormat;
 use serde::Deserialize;
 use std::fs;
@@ -36,6 +42,15 @@ pub fn build_from_ferrofile(
     runtime_dir: &Path,
     compression: CompressionFormat,
 ) -> Result<BuildResult, FerrofileBuildError> {
+    build_from_ferrofile_with_store(ferrofile_path, runtime_dir, compression, None)
+}
+
+pub fn build_from_ferrofile_with_store(
+    ferrofile_path: &Path,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: Option<&LocalImageStore>,
+) -> Result<BuildResult, FerrofileBuildError> {
     if !ferrofile_path.exists() {
         return Err(FerrofileBuildError::Missing(
             ferrofile_path.display().to_string(),
@@ -62,8 +77,18 @@ pub fn build_from_ferrofile(
         .unwrap_or_else(|| context_dir.join("Dockerfile"));
 
     let tag = build.tag.as_deref();
-    build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression)
-        .map_err(Into::into)
+    let result = if let Some(store) = store {
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile_path,
+            tag,
+            runtime_dir,
+            compression,
+            store,
+        )
+    } else {
+        build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression)
+    };
+    result.map_err(Into::into)
 }
 
 #[cfg(test)]

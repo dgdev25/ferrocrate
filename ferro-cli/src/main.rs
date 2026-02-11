@@ -70,6 +70,8 @@ pub enum Commands {
         entrypoint: Option<String>,
         #[arg(short = 'p', long = "publish")]
         publish: Vec<String>,
+        #[arg(short = 'v', long = "volume")]
+        volumes: Vec<String>,
         #[arg(long = "cap-add")]
         cap_add: Vec<String>,
         #[arg(long = "health-cmd")]
@@ -224,6 +226,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
     let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
     let image_store = LocalImageStore::open(runtime_dir.join("images"))
         .map_err(|err| err.to_string())?;
+    let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+        .map_err(|err| err.to_string())?;
 
     match command {
         Commands::Run {
@@ -233,6 +237,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             network,
             bind_mounts,
             tmpfs_mounts,
+            volumes,
             read_only_rootfs,
             read_write_rootfs,
             no_new_privs,
@@ -260,12 +265,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             handle_run(
                 &runtime,
                 &image_store,
+                &volume_store,
                 &image,
                 &cmd,
                 &network,
                 &network_backend,
                 &bind_mounts,
                 &tmpfs_mounts,
+                &volumes,
                 effective_readonly(&profile, read_only_rootfs, read_write_rootfs)?,
                 no_new_privs,
                 &env,
@@ -295,6 +302,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             tag,
             compress,
         } => handle_build(
+            &image_store,
             dockerfile.as_deref(),
             ferrofile.as_deref(),
             tag.as_deref(),
@@ -322,8 +330,6 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
         Commands::Compose { file, command } => {
-            let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
-                .map_err(|err| err.to_string())?;
             handle_compose(
                 &runtime,
                 &image_store,
@@ -342,12 +348,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
 fn handle_run(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
     image: &str,
     cmd: &[String],
     network: &str,
     network_backend: &str,
     bind_mounts: &[String],
     tmpfs_mounts: &[String],
+    volumes: &[String],
     read_only_rootfs: bool,
     no_new_privs: bool,
     env: &[String],
@@ -382,6 +390,9 @@ fn handle_run(
     ensure_image_present(store, image)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
+    let volume_mounts = parse_volume_mounts(volume_store, volumes)?;
+    let mut mounts = mounts;
+    mounts.extend(volume_mounts);
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
     let env = parse_env_entries(env)?;
     let labels = parse_key_values("label", labels)?;
@@ -405,7 +416,8 @@ fn handle_run(
     };
 
     let record = runtime
-        .run(
+        .run_with_store(
+            store,
             image,
             &effective_cmd,
             &env,
@@ -446,6 +458,41 @@ fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::B
         let target = parts[1];
         out.push(ferro_core::mounts::BindMount {
             source: source.into(),
+            target: target.trim_start_matches('/').into(),
+            read_only,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_volume_mounts(
+    volume_store: &LocalVolumeStore,
+    volumes: &[String],
+) -> Result<Vec<ferro_core::mounts::BindMount>, String> {
+    let mut out = Vec::new();
+    for entry in volumes {
+        let parts = entry.split(':').collect::<Vec<_>>();
+        if parts.len() < 2 {
+            return Err("run: volume must be source:target[:ro]".to_string());
+        }
+        let read_only = parts.len() >= 3 && parts[2] == "ro";
+        let source = parts[0];
+        let target = parts[1];
+
+        let source_path = if source.starts_with('/') {
+            source.to_string()
+        } else {
+            let record = match volume_store.get(source).map_err(|err| err.to_string())? {
+                Some(record) => record,
+                None => volume_store
+                    .create(source)
+                    .map_err(|err| err.to_string())?,
+            };
+            record.path
+        };
+
+        out.push(ferro_core::mounts::BindMount {
+            source: source_path.into(),
             target: target.trim_start_matches('/').into(),
             read_only,
         });
@@ -540,6 +587,7 @@ fn build_limits(
 }
 
 fn handle_build(
+    store: &LocalImageStore,
     dockerfile: Option<&str>,
     ferrofile: Option<&str>,
     tag: Option<&str>,
@@ -548,10 +596,11 @@ fn handle_build(
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
     if let Some(ferrofile_path) = ferrofile {
-        let result = ferro_core::ferrofile_build::build_from_ferrofile(
+        let result = ferro_core::ferrofile_build::build_from_ferrofile_with_store(
             Path::new(ferrofile_path),
             &runtime_dir,
             compression,
+            Some(store),
         )
         .map_err(|err| err.to_string())?;
         println!(
@@ -565,11 +614,12 @@ fn handle_build(
     let tag = tag.unwrap_or("local/build:latest");
     parse_image_reference(tag).map_err(|err| err.to_string())?;
 
-    let result = ferro_core::dockerfile_build::build_from_dockerfile_with_compression(
+    let result = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
         Path::new(dockerfile),
         Some(tag),
         &runtime_dir,
         compression,
+        store,
     )
     .map_err(|err| err.to_string())?;
 
@@ -1283,11 +1333,13 @@ fn run_compose_service(
         handle_run(
             runtime,
             store,
+            volume_store,
             image,
             &cmd,
             network_mode,
             "ebpf",
             &bind_mounts,
+            &[],
             &[],
             false,
             false,
@@ -1497,15 +1549,27 @@ fn run_daemon(
     let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
     let runtime_dir = runtime_dir();
     let runtime_dir = Arc::new(runtime_dir);
+    let store = Arc::new(store.clone());
+    let volume_store = Arc::new(
+        LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,
+    );
     let state = Arc::new(DockerCompatState::default());
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let runtime_dir = runtime_dir.clone();
+                let store = store.clone();
+                let volume_store = volume_store.clone();
                 let state = state.clone();
                 std::thread::spawn(move || {
-                    let _ = handle_docker_compat_connection(stream, runtime_dir, state);
+                    let _ = handle_docker_compat_connection(
+                        stream,
+                        runtime_dir,
+                        store,
+                        volume_store,
+                        state,
+                    );
                 });
             }
             Err(_) => break,
@@ -1517,11 +1581,12 @@ fn run_daemon(
 fn handle_docker_compat_connection(
     mut stream: UnixStream,
     runtime_dir: Arc<PathBuf>,
+    store: Arc<LocalImageStore>,
+    volume_store: Arc<LocalVolumeStore>,
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
     let request = read_http_request(&mut stream)?;
     let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
-    let store = LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
     let (path, query) = split_path_query(&request.path);
     let response = match (request.method.as_str(), path.as_str()) {
@@ -1603,11 +1668,13 @@ fn handle_docker_compat_connection(
             handle_run(
                 &runtime,
                 &store,
+                &volume_store,
                 &spec.image,
                 &spec.cmd,
                 &spec.network_mode,
                 "ebpf",
                 &spec.binds,
+                &[],
                 &[],
                 false,
                 false,
@@ -2377,13 +2444,17 @@ mod tests {
 
     #[test]
     fn build_handler_requires_dockerfile_path() {
-        let err = handle_build(None, None, None, "gzip").expect_err("dockerfile required");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let err = handle_build(&store, None, None, None, "gzip").expect_err("dockerfile required");
         assert!(err.contains("dockerfile path is required"));
     }
 
     #[test]
     fn build_handler_rejects_invalid_tag() {
-        let err = handle_build(Some("./Dockerfile"), None, Some(""), "gzip")
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let err = handle_build(&store, Some("./Dockerfile"), None, Some(""), "gzip")
             .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
     }

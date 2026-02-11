@@ -38,7 +38,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 ### 3.2 Image Management
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| IMG-01 | Pull images from OCI registries | Partial | Basic pull implemented; not tested across registries. |
+| IMG-01 | Pull images from OCI registries | Partial | CLI pull wires registry + docker config auth; not tested across registries. |
 | IMG-02 | Push images to OCI registries | Partial | Basic push implemented; auth helpers not supported. |
 | IMG-03 | Content-addressable store (Blake3) | Not Started | No Blake3 store. |
 | IMG-04 | Zstd compression for layers | Partial | zstd/gzip decompression only. |

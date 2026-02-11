@@ -9,12 +9,18 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
-use ferro_compose::{Command as ComposeCommandSpec, Environment as ComposeEnvironment, Service as ComposeService};
+use ferro_compose::{
+    Command as ComposeCommandSpec,
+    DependsOn as ComposeDependsOn,
+    Environment as ComposeEnvironment,
+    Service as ComposeService,
+};
 use serde::Serialize;
 use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap};
 use std::process;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -1055,6 +1061,9 @@ fn handle_compose(
                     .services
                     .get(&name)
                     .ok_or_else(|| format!("compose: missing service {name}"))?;
+                if let Some(depends_on) = service.depends_on.as_ref() {
+                    wait_for_compose_dependencies(runtime, depends_on)?;
+                }
                 run_compose_service(runtime, store, project_dir, &name, service)?;
             }
         }
@@ -1077,6 +1086,61 @@ fn handle_compose(
         }
     }
     Ok(())
+}
+
+fn wait_for_compose_dependencies(
+    runtime: &ContainerRuntime,
+    depends_on: &ComposeDependsOn,
+) -> Result<(), String> {
+    match depends_on {
+        ComposeDependsOn::Simple(_) => Ok(()),
+        ComposeDependsOn::Conditional(map) => {
+            for (service, condition) in map {
+                match condition.condition.as_str() {
+                    "service_started" => {}
+                    "service_healthy" => wait_for_compose_health(runtime, service)?,
+                    "service_completed_successfully" => {
+                        return Err(format!(
+                            "compose: depends_on condition not supported: service_completed_successfully for {service}"
+                        ));
+                    }
+                    other => {
+                        return Err(format!(
+                            "compose: unknown depends_on condition {other} for {service}"
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
+    let id = resolve_container_id(runtime, service)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = runtime.inspect(&id).map_err(|err| err.to_string())?;
+        match record.health_status.as_str() {
+            "healthy" => return Ok(()),
+            "unhealthy" => {
+                return Err(format!("compose: dependency {service} is unhealthy"));
+            }
+            "none" => {
+                return Err(format!(
+                    "compose: dependency {service} has no healthcheck"
+                ));
+            }
+            _ => {}
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "compose: timed out waiting for {service} to become healthy"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn run_compose_service(

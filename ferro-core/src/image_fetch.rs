@@ -5,6 +5,7 @@ use crate::image_tagging::ImageTaggingError;
 use crate::registry::RegistryClient;
 use crate::registry::parse_image_reference;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -64,6 +65,7 @@ pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, I
         if !blob_path.exists() {
             client.pull_blob_to_file(&canonical, &layer.digest, auth.as_ref(), &blob_path)?;
         }
+        let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
         layer_paths.push(blob_path);
     }
 
@@ -87,6 +89,9 @@ pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBu
     for layer in &manifest.layers {
         let digest = layer.digest.replace(':', "_");
         let blob_path = blob_root.join(&digest);
+        if blob_path.exists() {
+            let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
+        }
         layer_paths.push(blob_path);
     }
     Ok(layer_paths)
@@ -114,6 +119,45 @@ pub fn resolve_config_path(
     } else {
         Ok(None)
     }
+}
+
+fn ensure_cas_blob(runtime_dir: &Path, blob_path: &Path) -> Result<PathBuf, ImageFetchError> {
+    let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+    fs::create_dir_all(&cas_root)?;
+    let hash = hash_file_blake3(blob_path)?;
+    let cas_path = cas_root.join(hash);
+
+    if !cas_path.exists() {
+        match fs::rename(blob_path, &cas_path) {
+            Ok(()) => {}
+            Err(_) => {
+                fs::copy(blob_path, &cas_path)?;
+            }
+        }
+    }
+
+    if blob_path.exists() {
+        let _ = fs::remove_file(blob_path);
+    }
+    if fs::hard_link(&cas_path, blob_path).is_err() {
+        let _ = fs::copy(&cas_path, blob_path)?;
+    }
+
+    Ok(cas_path)
+}
+
+fn hash_file_blake3(path: &Path) -> Result<String, ImageFetchError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 #[cfg(test)]
@@ -148,5 +192,9 @@ mod tests {
         assert_eq!(result.layer_paths.len(), 1);
         let content = fs::read_to_string(&result.layer_paths[0]).expect("blob content");
         assert_eq!(content, "TEST");
+
+        let hash = blake3::hash(b"TEST").to_hex().to_string();
+        let cas_path = temp.path().join("images").join("cas").join("blake3").join(hash);
+        assert!(cas_path.exists());
     }
 }

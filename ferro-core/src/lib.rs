@@ -4,6 +4,7 @@ pub mod container_store;
 pub mod docker_auth;
 pub mod volume_store;
 pub mod image_manifest;
+pub mod image_config;
 pub mod image_fetch;
 pub mod image_store;
 pub mod image_tagging;

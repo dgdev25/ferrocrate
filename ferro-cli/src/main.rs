@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
+use ferro_core::docker_auth::resolve_registry_auth;
+use ferro_core::image_manifest::{OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
 use ferro_core::image_store::LocalImageStore;
-use ferro_core::registry::parse_image_reference;
+use ferro_core::image_tagging::canonicalize_reference;
+use ferro_core::registry::{RegistryClient, parse_image_reference};
 use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
@@ -114,8 +117,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
             handle_restart(&runtime, &container, timeout)
         }
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
-        Commands::Pull { image } => handle_pull(&image),
-        Commands::Push { image } => handle_push(&image),
+        Commands::Pull { image } => handle_pull(&image_store, &image),
+        Commands::Push { image } => handle_push(&image_store, &image),
         Commands::Compose { file, command } => handle_compose(file.as_deref(), command),
     }
 }
@@ -270,13 +273,28 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
     Ok(())
 }
 
-fn handle_pull(image: &str) -> Result<(), String> {
+fn handle_pull(store: &LocalImageStore, image: &str) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
-    println!("pull: image={image}");
+    let client = RegistryClient::new().map_err(|err| err.to_string())?;
+    let auth = resolve_registry_auth(image).map_err(|err| err.to_string())?;
+    let manifest_json = client
+        .pull_manifest_raw(image, auth.as_ref())
+        .map_err(|err| err.to_string())?;
+    let manifest = parse_image_manifest(&manifest_json).map_err(|err| err.to_string())?;
+    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
+    store
+        .put_reference(
+            &canonical,
+            &manifest.config.digest,
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            &manifest_json,
+        )
+        .map_err(|err| err.to_string())?;
+    println!("pull: image={canonical}");
     Ok(())
 }
 
-fn handle_push(image: &str) -> Result<(), String> {
+fn handle_push(_store: &LocalImageStore, image: &str) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
     println!("push: image={image}");
     Ok(())
@@ -537,13 +555,17 @@ mod tests {
 
     #[test]
     fn pull_handler_rejects_invalid_image() {
-        let err = handle_pull("").expect_err("invalid image");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let err = handle_pull(&store, "").expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
 
     #[test]
     fn push_handler_rejects_invalid_image() {
-        let err = handle_push("").expect_err("invalid image");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let err = handle_push(&store, "").expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
 

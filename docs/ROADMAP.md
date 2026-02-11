@@ -191,8 +191,8 @@ Each phase must complete with:
 
 ### eBPF Primary Backend
 
-- [ ] Implement XDP (eXpress Data Path) program loading
-- [ ] Implement TC (Traffic Control) hook attachment
+- [x] ~~Implement XDP (eXpress Data Path) program loading~~
+- [x] ~~Implement TC (Traffic Control) hook attachment~~
 - [x] ~~Implement container network namespace isolation~~
 - [x] ~~Implement veth pair creation and attachment to eBPF programs~~
 - [ ] Implement eBPF map management (connection tracking, rules)
@@ -212,7 +212,7 @@ Each phase must complete with:
 
 ### iptables Fallback Backend
 
-- [ ] Implement iptables rule generation for legacy systems
+- [x] ~~Implement iptables rule generation for legacy systems~~
 - [ ] Implement explicit `--network-backend=iptables` flag
 - [ ] Implement iptables rule cleanup on container exit
 - [ ] Create iptables compatibility tests
@@ -220,7 +220,7 @@ Each phase must complete with:
 
 ### nftables Alternative Backend
 
-- [ ] Implement nftables rule generation
+- [x] ~~Implement nftables rule generation~~
 - [ ] Implement explicit `--network-backend=nftables` flag
 - [ ] Implement nftables rule cleanup on container exit
 - [ ] Create nftables compatibility tests

@@ -115,7 +115,7 @@ pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBu
     let blob_root = runtime_dir.join("images").join("blobs");
     fs::create_dir_all(&blob_root)?;
     let client = RegistryClient::new()?;
-    let auth = resolve_registry_auth(&canonical)?;
+    let auth = resolve_registry_auth(&canonical).unwrap_or(None);
     let mut layer_paths = Vec::new();
     for layer in &manifest.layers {
         let digest = layer.digest.replace(':', "_");

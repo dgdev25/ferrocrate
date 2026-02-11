@@ -1045,6 +1045,7 @@ fn handle_compose(
 ) -> Result<(), String> {
     let path = find_compose_file(file).map_err(|err| err.to_string())?;
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     match command {
         ComposeCommands::Up => {
             let order = compose_up(&project).map_err(|err| err.to_string())?;
@@ -1054,7 +1055,7 @@ fn handle_compose(
                     .services
                     .get(&name)
                     .ok_or_else(|| format!("compose: missing service {name}"))?;
-                run_compose_service(runtime, store, &name, service)?;
+                run_compose_service(runtime, store, project_dir, &name, service)?;
             }
         }
         ComposeCommands::Down => {
@@ -1081,6 +1082,7 @@ fn handle_compose(
 fn run_compose_service(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
+    project_dir: &Path,
     name: &str,
     service: &ComposeService,
 ) -> Result<(), String> {
@@ -1089,7 +1091,7 @@ fn run_compose_service(
         .as_deref()
         .ok_or_else(|| format!("compose: service {name} missing image"))?;
     let cmd = compose_service_command(service);
-    let env = compose_service_env(service);
+    let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
     let publish = compose_service_ports(service);
     let bind_mounts = compose_service_mounts(service);
@@ -1138,15 +1140,35 @@ fn compose_service_command(service: &ComposeService) -> Vec<String> {
     }
 }
 
-fn compose_service_env(service: &ComposeService) -> Vec<String> {
-    match service.environment.as_ref() {
-        Some(ComposeEnvironment::Map(map)) => map
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect(),
-        Some(ComposeEnvironment::List(list)) => list.clone(),
-        None => Vec::new(),
+fn compose_service_env(project_dir: &Path, service: &ComposeService) -> Result<Vec<String>, String> {
+    let mut env = HashMap::new();
+    if let Some(files) = service.env_file.as_ref() {
+        for file in files {
+            let path = project_dir.join(file);
+            let entries = load_env_file_map(&path)?;
+            for (key, value) in entries {
+                env.insert(key, value);
+            }
+        }
     }
+
+    match service.environment.as_ref() {
+        Some(ComposeEnvironment::Map(map)) => {
+            for (key, value) in map {
+                env.insert(key.clone(), value.clone());
+            }
+        }
+        Some(ComposeEnvironment::List(list)) => {
+            for entry in list {
+                if let Some((key, value)) = entry.split_once('=') {
+                    env.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        None => {}
+    }
+
+    Ok(env.into_iter().map(|(key, value)| format!("{key}={value}")).collect())
 }
 
 fn compose_service_labels(service: &ComposeService) -> Vec<String> {
@@ -1192,6 +1214,29 @@ fn compose_service_mounts(service: &ComposeService) -> Vec<String> {
         }
     }
     out
+}
+
+fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
+    let mut env = HashMap::new();
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("compose: failed to read env file {}: {err}", path.display()))?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (key, raw_value) = trimmed
+            .split_once('=')
+            .ok_or_else(|| format!("compose: invalid env entry: {trimmed}"))?;
+        let mut value = raw_value.trim().to_string();
+        if (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''))
+        {
+            value = value[1..value.len() - 1].to_string();
+        }
+        env.insert(key.trim().to_string(), value);
+    }
+    Ok(env)
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use crate::container_store::{ContainerRecord, LocalContainerStore, ContainerStor
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
 use crate::image_fetch::resolve_layer_paths;
 use crate::rootfs::construct_rootfs;
-use crate::mounts::{BindMount, MountError, apply_bind_mounts};
+use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use std::fs;
@@ -68,6 +68,7 @@ impl ContainerRuntime {
         cmd: &[String],
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
+        tmpfs_mounts: &[TmpfsMount],
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         if cmd.is_empty() {
@@ -93,6 +94,9 @@ impl ContainerRuntime {
 
         if !mounts.is_empty() {
             apply_bind_mounts(&rootfs_dir, mounts)?;
+        }
+        if !tmpfs_mounts.is_empty() {
+            apply_tmpfs_mounts(&rootfs_dir, tmpfs_mounts)?;
         }
 
         let child_id = spawn_process_with_logs(
@@ -332,6 +336,7 @@ mod tests {
                 ],
                 None,
                 &[],
+                &[],
             )
             .expect("run");
 
@@ -354,6 +359,7 @@ mod tests {
                     "echo hi".to_string(),
                 ],
                 None,
+                &[],
                 &[],
             )
             .expect("run");
@@ -386,6 +392,7 @@ mod tests {
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
                 None,
                 &[],
+                &[],
             )
             .expect("run");
 
@@ -410,6 +417,7 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
                 None,
+                &[],
                 &[],
             )
             .expect("run");
@@ -450,6 +458,7 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.05".to_string()],
                 Some(&limits),
+                &[],
                 &[],
             )
             .expect("run");

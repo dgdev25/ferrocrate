@@ -9,6 +9,12 @@ pub struct BindMount {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmpfsMount {
+    pub target: PathBuf,
+    pub size: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum MountError {
     #[error("io error: {0}")]
@@ -48,9 +54,31 @@ pub fn apply_bind_mounts(rootfs: &Path, mounts: &[BindMount]) -> Result<(), Moun
     Ok(())
 }
 
+pub fn apply_tmpfs_mounts(rootfs: &Path, mounts: &[TmpfsMount]) -> Result<(), MountError> {
+    for mount_spec in mounts {
+        let target = rootfs.join(&mount_spec.target);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if !target.exists() {
+            std::fs::create_dir_all(&target)?;
+        }
+
+        let data = mount_spec.size.as_ref().map(|size| format!("size={size}"));
+        mount(
+            None::<&Path>,
+            &target,
+            Some("tmpfs"),
+            MsFlags::empty(),
+            data.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BindMount, apply_bind_mounts};
+    use super::{BindMount, TmpfsMount, apply_bind_mounts};
     use std::fs;
 
     #[test]
@@ -61,6 +89,15 @@ mod tests {
             read_only: true,
         };
         assert_eq!(mount.source, std::path::PathBuf::from("/tmp/source"));
+    }
+
+    #[test]
+    fn tmpfs_mount_struct_is_constructible() {
+        let mount = TmpfsMount {
+            target: "/tmp".into(),
+            size: Some("64m".to_string()),
+        };
+        assert_eq!(mount.target, std::path::PathBuf::from("/tmp"));
     }
 
     #[test]

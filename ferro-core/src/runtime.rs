@@ -22,6 +22,7 @@ use ferro_net::veth;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
+use std::net::Ipv4Addr;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -820,11 +821,13 @@ fn setup_network(
         ));
     }
 
-    let bridge_name = "ferro0";
-    let bridge_cidr = "10.0.0.1/24";
-    run_cmd_allow_exists(&bridge::build_ip_link_add_bridge_cmd(bridge_name))?;
-    run_cmd_allow_exists(&bridge::build_ip_addr_add_bridge_cmd(bridge_name, bridge_cidr))?;
-    run_cmd(&bridge::build_ip_link_set_up_cmd(bridge_name))?;
+    let bridge_config = bridge_config()?;
+    run_cmd_allow_exists(&bridge::build_ip_link_add_bridge_cmd(&bridge_config.name))?;
+    run_cmd_allow_exists(&bridge::build_ip_addr_add_bridge_cmd(
+        &bridge_config.name,
+        &bridge_config.cidr,
+    ))?;
+    run_cmd(&bridge::build_ip_link_set_up_cmd(&bridge_config.name))?;
 
     let netns_name = format!("ferro-{container_id}");
     run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
@@ -845,11 +848,14 @@ fn setup_network(
         container_addr: None,
     };
     run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config))?;
-    run_cmd(&bridge::build_ip_link_set_master_cmd(&host_veth, bridge_name))?;
+    run_cmd(&bridge::build_ip_link_set_master_cmd(
+        &host_veth,
+        &bridge_config.name,
+    ))?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth))?;
     run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name))?;
 
-    let container_ip = allocate_container_ip(container_id);
+    let container_ip = allocate_container_ip(container_id, &bridge_config.gateway)?;
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
     run_cmd(&ip_netns_exec(
         &netns_name,
@@ -857,7 +863,7 @@ fn setup_network(
             "ip",
             "addr",
             "add",
-            &format!("{container_ip}/24"),
+            &format!("{container_ip}/{}", bridge_config.prefix),
             "dev",
             "eth0",
         ],
@@ -865,7 +871,14 @@ fn setup_network(
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
     run_cmd(&ip_netns_exec(
         &netns_name,
-        &["ip", "route", "add", "default", "via", "10.0.0.1"],
+        &[
+            "ip",
+            "route",
+            "add",
+            "default",
+            "via",
+            &bridge_config.gateway,
+        ],
     ))?;
 
     if !port_mappings.is_empty() {
@@ -1018,11 +1031,46 @@ fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
     )))
 }
 
-fn allocate_container_ip(container_id: &str) -> String {
+struct BridgeConfig {
+    name: String,
+    cidr: String,
+    gateway: String,
+    prefix: u8,
+}
+
+fn bridge_config() -> Result<BridgeConfig, RuntimeError> {
+    let name =
+        std::env::var("FERROCRATE_BRIDGE_NAME").unwrap_or_else(|_| "ferro0".to_string());
+    let cidr =
+        std::env::var("FERROCRATE_BRIDGE_CIDR").unwrap_or_else(|_| "10.0.0.1/24".to_string());
+    let mut parts = cidr.split('/');
+    let gateway = parts
+        .next()
+        .ok_or_else(|| RuntimeError::Network("invalid bridge cidr".to_string()))?
+        .to_string();
+    let prefix = parts
+        .next()
+        .ok_or_else(|| RuntimeError::Network("invalid bridge cidr".to_string()))?
+        .parse::<u8>()
+        .map_err(|_| RuntimeError::Network("invalid bridge cidr".to_string()))?;
+    Ok(BridgeConfig {
+        name,
+        cidr,
+        gateway,
+        prefix,
+    })
+}
+
+fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, RuntimeError> {
+    let gateway_ip: Ipv4Addr = gateway
+        .parse()
+        .map_err(|_| RuntimeError::Network("invalid bridge gateway".to_string()))?;
+    let mut octets = gateway_ip.octets();
     let hash = blake3::hash(container_id.as_bytes());
     let byte = hash.as_bytes()[0];
     let host = 2 + (byte % 200);
-    format!("10.0.0.{host}")
+    octets[3] = host;
+    Ok(Ipv4Addr::from(octets).to_string())
 }
 
 fn short_id(value: &str, max: usize) -> String {

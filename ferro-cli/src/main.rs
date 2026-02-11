@@ -16,6 +16,8 @@ pub struct Cli {
 pub enum Commands {
     Run {
         image: String,
+        #[arg(long, default_value = "ebpf")]
+        network_backend: String,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
@@ -57,7 +59,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
 
     match command {
-        Commands::Run { image, cmd } => handle_run(&runtime, &image, &cmd),
+        Commands::Run { image, cmd, network_backend } => {
+            handle_run(&runtime, &image, &cmd, &network_backend)
+        }
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
         Commands::Images => handle_images(&image_store),
         Commands::Containers => handle_containers(&runtime),
@@ -68,11 +72,20 @@ fn dispatch(command: Commands) -> Result<(), String> {
     }
 }
 
-fn handle_run(runtime: &ContainerRuntime, image: &str, cmd: &[String]) -> Result<(), String> {
+fn handle_run(
+    runtime: &ContainerRuntime,
+    image: &str,
+    cmd: &[String],
+    network_backend: &str,
+) -> Result<(), String> {
+    validate_network_backend(network_backend)?;
     let record = runtime
         .run(image, cmd)
         .map_err(|err| err.to_string())?;
-    println!("run: container_id={} pid={}", record.id, record.pid);
+    println!(
+        "run: container_id={} pid={} network_backend={}",
+        record.id, record.pid, network_backend
+    );
     Ok(())
 }
 
@@ -88,6 +101,13 @@ fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
 
     println!("build: dockerfile={dockerfile} tag={tag_display}");
     Ok(())
+}
+
+fn validate_network_backend(value: &str) -> Result<(), String> {
+    match value {
+        "ebpf" | "iptables" | "nftables" => Ok(()),
+        _ => Err("network-backend must be one of: ebpf, iptables, nftables".to_string()),
+    }
 }
 
 fn handle_images(store: &LocalImageStore) -> Result<(), String> {
@@ -161,7 +181,7 @@ fn handle_push(image: &str) -> Result<(), String> {
 mod tests {
     use super::{
         Cli, Commands, dispatch, handle_build, handle_containers, handle_exec, handle_images,
-        handle_logs, handle_pull, handle_push, handle_run,
+        handle_logs, handle_pull, handle_push, handle_run, validate_network_backend,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
@@ -171,9 +191,10 @@ mod tests {
     fn parses_run_command() {
         let cli = Cli::parse_from(["ferrocrate", "run", "alpine:latest", "echo", "hi"]);
         match cli.command {
-            Commands::Run { image, cmd } => {
+            Commands::Run { image, cmd, network_backend } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);
+                assert_eq!(network_backend, "ebpf");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -217,7 +238,7 @@ mod tests {
     fn run_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_run(&runtime, "", &[]).expect_err("invalid reference");
+        let err = handle_run(&runtime, "", &[], "ebpf").expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
     }
 
@@ -288,6 +309,15 @@ mod tests {
     fn push_handler_rejects_invalid_image() {
         let err = handle_push("").expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn network_backend_validation() {
+        validate_network_backend("ebpf").expect("ok");
+        validate_network_backend("iptables").expect("ok");
+        validate_network_backend("nftables").expect("ok");
+        let err = validate_network_backend("bogus").expect_err("invalid backend");
+        assert!(err.contains("network-backend"));
     }
 
     struct TestRuntimeDir {

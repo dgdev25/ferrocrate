@@ -195,9 +195,9 @@ Each phase must complete with:
 - [x] ~~Implement TC (Traffic Control) hook attachment~~
 - [x] ~~Implement container network namespace isolation~~
 - [x] ~~Implement veth pair creation and attachment to eBPF programs~~
-- [ ] Implement eBPF map management (connection tracking, rules)
-- [ ] Implement packet filtering and forwarding rules
-- [ ] Create eBPF program tests (isolated, unit-testable)
+- [x] ~~Implement eBPF map management (connection tracking, rules)~~
+- [x] ~~Implement packet filtering and forwarding rules~~
+- [x] ~~Create eBPF program tests (isolated, unit-testable)~~
 - [ ] Create integration tests (containers with eBPF networking)
 
 ### Networking Configuration
@@ -208,35 +208,35 @@ Each phase must complete with:
 - [x] ~~Implement bridge network support (container-to-container)~~
 - [x] ~~Implement host network mode option (--network=host)~~
 - [x] ~~Implement none network mode option (--network=none)~~
-- [ ] Create network configuration tests
+- [x] ~~Create network configuration tests~~
 
 ### iptables Fallback Backend
 
 - [x] ~~Implement iptables rule generation for legacy systems~~
-- [ ] Implement explicit `--network-backend=iptables` flag
-- [ ] Implement iptables rule cleanup on container exit
-- [ ] Create iptables compatibility tests
+- [x] ~~Implement explicit `--network-backend=iptables` flag~~
+- [x] ~~Implement iptables rule cleanup on container exit~~
+- [x] ~~Create iptables compatibility tests~~
 - [ ] Test on kernels 3.10+ (minimum support)
 
 ### nftables Alternative Backend
 
 - [x] ~~Implement nftables rule generation~~
-- [ ] Implement explicit `--network-backend=nftables` flag
-- [ ] Implement nftables rule cleanup on container exit
-- [ ] Create nftables compatibility tests
+- [x] ~~Implement explicit `--network-backend=nftables` flag~~
+- [x] ~~Implement nftables rule cleanup on container exit~~
+- [x] ~~Create nftables compatibility tests~~
 - [ ] Test on kernels 3.13+ (minimum support)
 
 ### Network Integration with Rootless
 
-- [ ] Implement network setup in rootless context
+- [x] ~~Implement network setup in rootless context~~
 - [ ] Test eBPF with user namespaces
 - [ ] Test iptables/nftables with user namespaces
 - [ ] Create rootless networking edge case tests
 
 ### Networking Observability
 
-- [ ] Implement network metrics collection (bytes in/out, packets)
-- [ ] Implement connection tracking logs
+- [x] ~~Implement network metrics collection (bytes in/out, packets)~~
+- [x] ~~Implement connection tracking logs~~
 - [ ] Create networking troubleshooting guide
 
 ### Phase 4 Milestone: Multi-Backend Networking

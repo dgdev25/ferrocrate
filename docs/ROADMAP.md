@@ -199,7 +199,7 @@
 ### 4.4 Observability
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| OBS-01 | Prometheus metrics endpoint | Not Started | Not implemented. |
+| OBS-01 | ~~Prometheus metrics endpoint~~ | Done | `ferrocrate daemon --metrics-addr` serves Prometheus metrics at `/metrics`. |
 | OBS-02 | OpenTelemetry trace export | Not Started | Not implemented. |
 | OBS-03 | ~~Structured JSON logging~~ | Done | JSONL event log emitted under runtime logs. |
 | OBS-04 | ~~Resource usage stats~~ | Done | CLI stats reads cgroup v2 memory/cpu/pids counters. |

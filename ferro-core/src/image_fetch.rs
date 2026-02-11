@@ -62,6 +62,7 @@ pub fn pull_image_with_store(
     if !config_path.exists() {
         client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
     }
+    let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
     let blob_root = runtime_dir.join("images").join("blobs");
     fs::create_dir_all(&blob_root)?;
@@ -115,6 +116,7 @@ pub fn pull_manifest_only_with_store(
     if !config_path.exists() {
         client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
     }
+    let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
     Ok(canonical)
 }

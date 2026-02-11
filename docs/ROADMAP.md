@@ -193,8 +193,8 @@ Each phase must complete with:
 
 - [ ] Implement XDP (eXpress Data Path) program loading
 - [ ] Implement TC (Traffic Control) hook attachment
-- [ ] Implement container network namespace isolation
-- [ ] Implement veth pair creation and attachment to eBPF programs
+- [x] ~~Implement container network namespace isolation~~
+- [x] ~~Implement veth pair creation and attachment to eBPF programs~~
 - [ ] Implement eBPF map management (connection tracking, rules)
 - [ ] Implement packet filtering and forwarding rules
 - [ ] Create eBPF program tests (isolated, unit-testable)
@@ -202,12 +202,12 @@ Each phase must complete with:
 
 ### Networking Configuration
 
-- [ ] Implement network namespace setup for containers
-- [ ] Implement DNS configuration from host
-- [ ] Implement port mapping (container → host)
-- [ ] Implement bridge network support (container-to-container)
-- [ ] Implement host network mode option (--network=host)
-- [ ] Implement none network mode option (--network=none)
+- [x] ~~Implement network namespace setup for containers~~
+- [x] ~~Implement DNS configuration from host~~
+- [x] ~~Implement port mapping (container → host)~~
+- [x] ~~Implement bridge network support (container-to-container)~~
+- [x] ~~Implement host network mode option (--network=host)~~
+- [x] ~~Implement none network mode option (--network=none)~~
 - [ ] Create network configuration tests
 
 ### iptables Fallback Backend

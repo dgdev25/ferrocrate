@@ -1,0 +1,17 @@
+[workspace]
+members = [
+  "ferro-core",
+  "ferro-net",
+  "ferro-mind",
+  "ferro-compose",
+  "ferro-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

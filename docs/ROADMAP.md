@@ -89,9 +89,9 @@
 | NET-03 | None networking | Partial | CLI `--network none` creates netns with loopback only; not tested. |
 | NET-04 | Container-to-container DNS | Partial | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers; no DNS server yet. |
 | NET-05 | Custom networks (subnets) | Partial | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME`. |
-| NET-06 | eBPF + iptables/nftables fallback | Partial | Builders + flags; no live backend integration. |
+| NET-06 | eBPF + iptables/nftables fallback | Partial | Port mapping supports iptables/nftables; eBPF path still stubbed. |
 | NET-07 | WireGuard overlay | Not Started | Not implemented. |
-| NET-08 | Port mapping | Partial | `-p` uses iptables DNAT/forward rules when backend=iptables. |
+| NET-08 | Port mapping | Partial | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
 | NET-09 | IPv6 | Not Started | Not implemented. |
 | NET-10 | Bandwidth limiting | Not Started | Not implemented. |
 

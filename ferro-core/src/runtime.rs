@@ -15,6 +15,10 @@ use crate::rootfs::construct_rootfs_with_dedup;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
+use ferro_net::bridge;
+use ferro_net::netns;
+use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
+use ferro_net::veth;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
@@ -51,6 +55,8 @@ pub enum RuntimeError {
     InvalidState(String),
     #[error("image not found in store: {0}")]
     ImageMissing(String),
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 pub struct ContainerRuntime {
@@ -91,6 +97,8 @@ impl ContainerRuntime {
         workdir: Option<&str>,
         user: Option<&str>,
         name: Option<&str>,
+        port_mappings: &[crate::container_store::PortMappingRecord],
+        network_backend: &str,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         let mut config_json = None;
@@ -159,6 +167,9 @@ impl ContainerRuntime {
             apply_readonly_rootfs(&rootfs_dir)?;
         }
 
+        let (netns_name, container_ip) =
+            setup_network(&container_id, port_mappings, network_backend)?;
+
         let child_id = spawn_process_with_logs(
             &command,
             &merged_env,
@@ -173,6 +184,7 @@ impl ContainerRuntime {
             capabilities.to_vec(),
             resolved_workdir.as_deref(),
             resolved_user.as_deref(),
+            netns_name.as_deref(),
         )?;
 
         if let Some(limits) = limits {
@@ -214,6 +226,16 @@ impl ContainerRuntime {
             stdout_path: stdout_path.display().to_string(),
             stderr_path: stderr_path.display().to_string(),
             status: "running".to_string(),
+            netns: netns_name.clone(),
+            ip_address: container_ip.clone(),
+            ports: port_mappings
+                .iter()
+                .map(|mapping| crate::container_store::PortMappingRecord {
+                    host_port: mapping.host_port,
+                    container_port: mapping.container_port,
+                    protocol: mapping.protocol.clone(),
+                })
+                .collect(),
         };
 
         self.store.put(&record)?;
@@ -382,6 +404,7 @@ impl ContainerRuntime {
             parse_capabilities(&record.capabilities),
             record.workdir.as_deref(),
             record.user.as_deref(),
+            record.netns.as_deref(),
         )?;
 
         record.pid = child_id;
@@ -413,6 +436,7 @@ impl ContainerRuntime {
                 "container {id} is still running"
             )));
         }
+        let _ = cleanup_network(&record);
         let container_dir = self.runtime_dir.join("containers").join(id);
         let _ = fs::remove_dir_all(&container_dir);
         let _ = self.store.remove(id)?;
@@ -455,6 +479,7 @@ fn spawn_process_with_logs(
     capabilities: Vec<caps::Capability>,
     workdir: Option<&str>,
     user: Option<&str>,
+    netns_name: Option<&str>,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -464,6 +489,7 @@ fn spawn_process_with_logs(
         &capabilities,
         workdir,
         user,
+        netns_name,
     )?;
     let (child_id, child, join_handles) = spawn_child_with_logs(
         command,
@@ -481,6 +507,7 @@ fn spawn_process_with_logs(
     let caps_for_restart = capabilities.clone();
     let workdir = workdir.map(|val| val.to_string());
     let user = user.map(|val| val.to_string());
+    let netns_name = netns_name.map(|val| val.to_string());
     thread::spawn(move || {
         supervise_child(
             child,
@@ -498,6 +525,7 @@ fn spawn_process_with_logs(
             caps_for_restart,
             workdir,
             user,
+            netns_name,
         );
     });
 
@@ -512,8 +540,22 @@ fn build_command(
     capabilities: &[caps::Capability],
     workdir: Option<&str>,
     user: Option<&str>,
+    netns_name: Option<&str>,
 ) -> Result<Command, RuntimeError> {
-    let mut command = if let Some(rootfs) = rootfs_dir {
+    let mut command = if let Some(netns) = netns_name {
+        let mut netns_cmd = Command::new("ip");
+        netns_cmd.arg("netns").arg("exec").arg(netns);
+        if let Some(rootfs) = rootfs_dir {
+            if nix::unistd::Uid::effective().is_root() {
+                netns_cmd.arg("chroot").arg(rootfs).arg(&cmd[0]).args(&cmd[1..]);
+            } else {
+                netns_cmd.arg(&cmd[0]).args(&cmd[1..]);
+            }
+        } else {
+            netns_cmd.arg(&cmd[0]).args(&cmd[1..]);
+        }
+        netns_cmd
+    } else if let Some(rootfs) = rootfs_dir {
         if nix::unistd::Uid::effective().is_root() {
             let mut chroot_cmd = Command::new("chroot");
             chroot_cmd.arg(rootfs);
@@ -625,6 +667,7 @@ fn supervise_child(
     capabilities: Vec<caps::Capability>,
     workdir: Option<String>,
     user: Option<String>,
+    netns_name: Option<String>,
 ) {
     loop {
         let status = child.wait();
@@ -653,6 +696,7 @@ fn supervise_child(
             &capabilities,
             workdir.as_deref(),
             user.as_deref(),
+            netns_name.as_deref(),
         ) {
             Ok(cmd) => cmd,
             Err(_) => break,
@@ -712,6 +756,173 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
     let uid = parts.next()?.parse::<u32>().ok()?;
     let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
     Some((uid, gid))
+}
+
+fn setup_network(
+    container_id: &str,
+    port_mappings: &[crate::container_store::PortMappingRecord],
+    network_backend: &str,
+) -> Result<(Option<String>, Option<String>), RuntimeError> {
+    if port_mappings.is_empty() {
+        return Ok((None, None));
+    }
+    if !nix::unistd::Uid::effective().is_root() {
+        return Err(RuntimeError::Network(
+            "port mapping requires root".to_string(),
+        ));
+    }
+    if network_backend != "iptables" {
+        return Err(RuntimeError::Network(
+            "port mapping requires network-backend=iptables".to_string(),
+        ));
+    }
+
+    let bridge_name = "ferro0";
+    let bridge_cidr = "10.0.0.1/24";
+    run_cmd_allow_exists(&bridge::build_ip_link_add_bridge_cmd(bridge_name))?;
+    run_cmd_allow_exists(&bridge::build_ip_addr_add_bridge_cmd(bridge_name, bridge_cidr))?;
+    run_cmd(&bridge::build_ip_link_set_up_cmd(bridge_name))?;
+
+    let netns_name = format!("ferro-{container_id}");
+    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
+
+    let host_veth = format!("veth{}", short_id(container_id, 8));
+    let host_veth = if host_veth.len() > 15 {
+        host_veth[..15].to_string()
+    } else {
+        host_veth
+    };
+    let veth_config = veth::VethConfig {
+        pair: veth::VethPair {
+            host: host_veth.clone(),
+            container: "eth0".to_string(),
+        },
+        mtu: None,
+        host_addr: None,
+        container_addr: None,
+    };
+    run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config))?;
+    run_cmd(&bridge::build_ip_link_set_master_cmd(&host_veth, bridge_name))?;
+    run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth))?;
+    run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name))?;
+
+    let container_ip = allocate_container_ip(container_id);
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &[
+            "ip",
+            "addr",
+            "add",
+            &format!("{container_ip}/24"),
+            "dev",
+            "eth0",
+        ],
+    ))?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "route", "add", "default", "via", "10.0.0.1"],
+    ))?;
+
+    for mapping in port_mappings {
+        let map = ferro_net::portmap::PortMapping {
+            host_port: mapping.host_port,
+            container_port: mapping.container_port,
+            protocol: mapping.protocol.clone(),
+        };
+        let prerouting = build_iptables_prerouting_cmd(&map, &container_ip);
+        let forward = build_iptables_forward_cmd(&map, &container_ip);
+        run_cmd(&prerouting)?;
+        run_cmd(&forward)?;
+    }
+
+    Ok((Some(netns_name), Some(container_ip)))
+}
+
+fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
+    if let Some(netns_name) = record.netns.as_ref() {
+        let _ = run_cmd(&netns::build_ip_netns_del_cmd(netns_name));
+    }
+    if let Some(container_ip) = record.ip_address.as_ref() {
+        for mapping in &record.ports {
+            let map = ferro_net::portmap::PortMapping {
+                host_port: mapping.host_port,
+                container_port: mapping.container_port,
+                protocol: mapping.protocol.clone(),
+            };
+            let mut prerouting = build_iptables_prerouting_cmd(&map, container_ip);
+            let mut forward = build_iptables_forward_cmd(&map, container_ip);
+            replace_iptables_action(&mut prerouting, "-D");
+            replace_iptables_action(&mut forward, "-D");
+            let _ = run_cmd(&prerouting);
+            let _ = run_cmd(&forward);
+        }
+    }
+    Ok(())
+}
+
+fn replace_iptables_action(cmd: &mut Vec<String>, replacement: &str) {
+    for entry in cmd.iter_mut() {
+        if entry == "-A" {
+            *entry = replacement.to_string();
+            break;
+        }
+    }
+}
+
+fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
+    let mut out = vec!["ip".to_string(), "netns".to_string(), "exec".to_string(), netns_name.to_string()];
+    out.extend(args.iter().map(|val| (*val).to_string()));
+    out
+}
+
+fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
+    if args.is_empty() {
+        return Ok(());
+    }
+    let (bin, rest) = args.split_first().unwrap();
+    let output = Command::new(bin).args(rest).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Err(RuntimeError::Network(format!(
+        "command failed: {} {}",
+        bin,
+        stderr.trim()
+    )))
+}
+
+fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
+    if args.is_empty() {
+        return Ok(());
+    }
+    let (bin, rest) = args.split_first().unwrap();
+    let output = Command::new(bin).args(rest).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if stderr.contains("File exists") || stderr.contains("exists") {
+        return Ok(());
+    }
+    Err(RuntimeError::Network(format!(
+        "command failed: {} {}",
+        bin,
+        stderr.trim()
+    )))
+}
+
+fn allocate_container_ip(container_id: &str) -> String {
+    let hash = blake3::hash(container_id.as_bytes());
+    let byte = hash.as_bytes()[0];
+    let host = 2 + (byte % 200);
+    format!("10.0.0.{host}")
+}
+
+fn short_id(value: &str, max: usize) -> String {
+    value.chars().filter(|c| c.is_ascii_alphanumeric()).rev().take(max).collect::<String>().chars().rev().collect()
 }
 
 fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool {
@@ -866,6 +1077,8 @@ mod tests {
             None,
             None,
             None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 
@@ -901,6 +1114,8 @@ mod tests {
             None,
             None,
             None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 
@@ -931,11 +1146,13 @@ mod tests {
                 None,
                 &[],
                 &[],
-                false,
-                false,
-                None,
-                None,
-                None,
+            false,
+            false,
+            None,
+            None,
+            None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 
@@ -976,6 +1193,8 @@ mod tests {
                 Some(&workdir),
                 Some("1000:1000"),
                 Some("named"),
+                &[],
+                "ebpf",
             )
             .expect("run");
 
@@ -1023,6 +1242,8 @@ mod tests {
             None,
             None,
             None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 
@@ -1060,6 +1281,8 @@ mod tests {
             None,
             None,
             None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 
@@ -1113,6 +1336,8 @@ mod tests {
             None,
             None,
             None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 
@@ -1169,6 +1394,8 @@ mod tests {
             None,
             None,
             None,
+            &[],
+            "ebpf",
             )
             .expect("run");
 

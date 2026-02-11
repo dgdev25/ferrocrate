@@ -84,14 +84,14 @@
 ### 3.3 Networking
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| NET-01 | Bridge networking | Partial | Bridge + netns/veth helpers exist; not wired to runtime. |
+| NET-01 | Bridge networking | Partial | Runtime can create bridge/netns/veth for published ports (iptables backend); not configurable yet. |
 | NET-02 | Host networking | Not Started | No CLI or runtime wiring. |
 | NET-03 | None networking | Not Started | No CLI or runtime wiring. |
 | NET-04 | Container-to-container DNS | Not Started | DNS config render only. |
 | NET-05 | Custom networks (subnets) | Not Started | No API or state. |
 | NET-06 | eBPF + iptables/nftables fallback | Partial | Builders + flags; no live backend integration. |
 | NET-07 | WireGuard overlay | Not Started | Not implemented. |
-| NET-08 | Port mapping | Partial | Portmap rule builders only. |
+| NET-08 | Port mapping | Partial | `-p` uses iptables DNAT/forward rules when backend=iptables. |
 | NET-09 | IPv6 | Not Started | Not implemented. |
 | NET-10 | Bandwidth limiting | Not Started | Not implemented. |
 

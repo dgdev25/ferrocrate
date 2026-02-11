@@ -343,6 +343,7 @@ dependencies = [
  "base64",
  "blake3",
  "caps",
+ "ferro-net",
  "flate2",
  "httptest",
  "nix",

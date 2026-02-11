@@ -54,6 +54,8 @@ pub enum Commands {
         workdir: Option<String>,
         #[arg(long)]
         entrypoint: Option<String>,
+        #[arg(short = 'p', long = "publish")]
+        publish: Vec<String>,
         #[arg(long = "cap-add")]
         cap_add: Vec<String>,
         #[arg(long = "health-cmd")]
@@ -218,6 +220,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             user,
             workdir,
             entrypoint,
+            publish,
             name,
             health_cmd,
             health_interval,
@@ -248,6 +251,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 workdir.as_deref(),
                 user.as_deref(),
                 name.as_deref(),
+                &publish,
                 health_cmd.as_deref(),
                 health_interval,
                 health_timeout,
@@ -314,6 +318,7 @@ fn handle_run(
     workdir: Option<&str>,
     user: Option<&str>,
     name: Option<&str>,
+    publish: &[String],
     health_cmd: Option<&str>,
     health_interval: Option<u64>,
     health_timeout: Option<u64>,
@@ -334,6 +339,7 @@ fn handle_run(
     let labels = parse_key_values("label", labels)?;
     let annotations = parse_key_values("annotation", annotations)?;
     let caps = parse_capabilities(cap_add)?;
+    let port_mappings = parse_publish(publish)?;
     let health = build_health_config(
         health_cmd,
         health_interval,
@@ -368,6 +374,8 @@ fn handle_run(
             workdir,
             user,
             name,
+            &port_mappings,
+            network_backend,
         )
         .map_err(|err| err.to_string())?;
     println!(
@@ -391,6 +399,36 @@ fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::B
             source: source.into(),
             target: target.trim_start_matches('/').into(),
             read_only,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_publish(entries: &[String]) -> Result<Vec<ferro_core::container_store::PortMappingRecord>, String> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let mut parts = entry.splitn(2, '/');
+        let ports = parts.next().unwrap_or("");
+        let proto = parts.next().unwrap_or("tcp");
+        let proto = proto.to_ascii_lowercase();
+        if proto != "tcp" && proto != "udp" {
+            return Err("run: publish protocol must be tcp or udp".to_string());
+        }
+
+        let port_parts = ports.split(':').collect::<Vec<_>>();
+        if port_parts.len() != 2 {
+            return Err("run: publish must be host:container[/proto]".to_string());
+        }
+        let host_port = port_parts[0]
+            .parse::<u16>()
+            .map_err(|_| "run: invalid host port".to_string())?;
+        let container_port = port_parts[1]
+            .parse::<u16>()
+            .map_err(|_| "run: invalid container port".to_string())?;
+        out.push(ferro_core::container_store::PortMappingRecord {
+            host_port,
+            container_port,
+            protocol: proto,
         });
     }
     Ok(out)
@@ -1007,7 +1045,7 @@ mod tests {
         handle_push, handle_rmi, handle_run, handle_stats, handle_stop, handle_kill, handle_rm, handle_restart,
         handle_unpause, build_limits, handle_volume,
         build_health_config, effective_readonly, parse_bind_mounts, parse_capabilities,
-        parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy, parse_publish,
         parse_tmpfs_mounts,
         validate_network_backend,
     };
@@ -1034,6 +1072,7 @@ mod tests {
                 user,
                 workdir,
                 entrypoint,
+                publish,
                 health_cmd,
                 health_interval,
                 health_timeout,
@@ -1062,6 +1101,7 @@ mod tests {
                 assert!(user.is_none());
                 assert!(workdir.is_none());
                 assert!(entrypoint.is_none());
+                assert!(publish.is_empty());
                 assert!(name.is_none());
                 assert!(cap_add.is_empty());
                 assert!(health_cmd.is_none());
@@ -1391,6 +1431,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
             None,
             None,
             None,
@@ -1416,6 +1457,29 @@ mod tests {
     fn rejects_invalid_tmpfs_mount() {
         let err = parse_tmpfs_mounts(&[":size=64m".to_string()]).expect_err("invalid");
         assert!(err.contains("tmpfs"));
+    }
+
+    #[test]
+    fn parses_publish_mappings() {
+        let mappings = parse_publish(&[
+            "8080:80".to_string(),
+            "8443:443/tcp".to_string(),
+            "5353:53/udp".to_string(),
+        ])
+        .expect("publish mappings");
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings[0].host_port, 8080);
+        assert_eq!(mappings[0].container_port, 80);
+        assert_eq!(mappings[0].protocol, "tcp");
+        assert_eq!(mappings[2].protocol, "udp");
+    }
+
+    #[test]
+    fn rejects_invalid_publish_mappings() {
+        let err = parse_publish(&["bad".to_string()]).expect_err("invalid");
+        assert!(err.contains("publish"));
+        let err = parse_publish(&["1:2/icmp".to_string()]).expect_err("invalid proto");
+        assert!(err.contains("protocol"));
     }
 
     #[test]

@@ -2,6 +2,9 @@ use crate::image_manifest::{ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use std::time::Duration;
+use std::path::Path;
+use std::fs::File;
+use std::io::copy;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +30,8 @@ pub enum RegistryError {
     Request(#[source] reqwest::Error),
     #[error("registry returned HTTP {status}: {body}")]
     HttpStatus { status: u16, body: String },
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("manifest parse error: {0}")]
     ManifestParse(#[from] crate::image_manifest::ImageManifestParseError),
 }
@@ -129,6 +134,40 @@ impl RegistryClient {
 
         Ok(())
     }
+
+    /// Pull a blob (layer/config) by digest and write to a file.
+    pub fn pull_blob_to_file(
+        &self,
+        image: &str,
+        digest: &str,
+        auth: Option<&RegistryAuth>,
+        dest: &Path,
+    ) -> Result<(), RegistryError> {
+        let image_ref = parse_image_reference(image)?;
+        let url = blob_url(&image_ref, digest);
+
+        let mut request = self.client.get(url);
+        if let Some(auth) = auth {
+            request = request.basic_auth(&auth.username, Some(&auth.password));
+        }
+
+        let mut response = request.send().map_err(RegistryError::Request)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(RegistryError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(RegistryError::Io)?;
+        }
+        let mut file = File::create(dest).map_err(RegistryError::Io)?;
+        copy(&mut response, &mut file).map_err(RegistryError::Io)?;
+        Ok(())
+    }
 }
 
 pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryError> {
@@ -197,6 +236,22 @@ fn manifest_url(image_ref: &ImageReference) -> String {
     format!(
         "{scheme}://{}/v2/{}/manifests/{}",
         image_ref.registry, image_ref.repository, image_ref.reference
+    )
+}
+
+fn blob_url(image_ref: &ImageReference, digest: &str) -> String {
+    let scheme = if image_ref.registry.starts_with("localhost")
+        || image_ref.registry.starts_with("127.")
+        || image_ref.registry.contains(":")
+    {
+        "http"
+    } else {
+        "https"
+    };
+
+    format!(
+        "{scheme}://{}/v2/{}/blobs/{}",
+        image_ref.registry, image_ref.repository, digest
     )
 }
 

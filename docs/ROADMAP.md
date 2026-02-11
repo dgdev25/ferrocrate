@@ -24,7 +24,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 ### 3.1 Container Lifecycle Management
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| CLM-01 | Run OCI-compliant container images | Partial | Run now ensures image is pulled/stored; still no rootfs execution. |
+| CLM-01 | Run OCI-compliant container images | Partial | Run pulls manifest + layers, constructs rootfs; chroot only when root. |
 | CLM-02 | ~~Create/start/stop/restart/kill/remove~~ | Done | Restart/kill/remove implemented and wired in CLI. |
 | CLM-03 | Pause/unpause via cgroup freezer | Partial | Pause/resume exists; freezer enforcement not verified. |
 | CLM-04 | Container exec | Done | `ferro-core` exec + CLI wired. |
@@ -38,7 +38,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 ### 3.2 Image Management
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| IMG-01 | Pull images from OCI registries | Partial | CLI pull wires registry + docker config auth; not tested across registries. |
+| IMG-01 | Pull images from OCI registries | Partial | CLI pull downloads manifest + blobs with docker config auth; not tested across registries. |
 | IMG-02 | Push images to OCI registries | Partial | CLI push wires registry + docker config auth; auth helpers not supported. |
 | IMG-03 | Content-addressable store (Blake3) | Not Started | No Blake3 store. |
 | IMG-04 | Zstd compression for layers | Partial | zstd/gzip decompression only. |

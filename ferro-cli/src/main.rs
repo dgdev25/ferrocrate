@@ -1371,10 +1371,11 @@ fn run_compose_service(
     name: &str,
     service: &ComposeService,
 ) -> Result<(), String> {
-    let image = service
-        .image
-        .as_deref()
-        .ok_or_else(|| format!("compose: service {name} missing image"))?;
+    let image = if service.image.is_some() || service.build.is_some() {
+        build_compose_image(store, project_dir, name, service)?
+    } else {
+        return Err(format!("compose: service {name} missing image or build"));
+    };
     if let Some(networks) = service.networks.as_ref() {
         if networks.iter().any(|net| net != "default") {
             return Err(format!(
@@ -1422,7 +1423,7 @@ fn run_compose_service(
             runtime,
             store,
             volume_store,
-            image,
+            &image,
             &cmd,
             network_mode,
             "ebpf",
@@ -1456,6 +1457,36 @@ fn run_compose_service(
         )?;
     }
     Ok(())
+}
+
+fn build_compose_image(
+    store: &LocalImageStore,
+    project_dir: &Path,
+    name: &str,
+    service: &ComposeService,
+) -> Result<String, String> {
+    let runtime_dir = runtime_dir();
+    let tag = service
+        .image
+        .clone()
+        .unwrap_or_else(|| format!("local/compose-{name}:latest"));
+
+    let Some(build) = service.build.as_ref() else {
+        return Ok(tag);
+    };
+
+    let context = build.context.as_deref().unwrap_or(".");
+    let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
+    let dockerfile_path = project_dir.join(context).join(dockerfile);
+    let result = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
+        &dockerfile_path,
+        Some(&tag),
+        &runtime_dir,
+        CompressionFormat::Gzip,
+        store,
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(result.reference)
 }
 
 fn compose_service_command(service: &ComposeService) -> Vec<String> {

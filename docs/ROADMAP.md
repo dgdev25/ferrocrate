@@ -123,11 +123,11 @@
 ### 3.6 Compose / Multi-Container
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| CMP-01 | docker-compose.yml compatibility | Partial | Parse + validate with .env interpolation; env_file and network_mode parsed. |
-| CMP-02 | Native compose subcommand | Partial | `compose up` starts services sequentially with image/env/ports/labels/volumes; `compose down` stops/removes by service name. |
-| CMP-03 | Service dependency ordering | Partial | Ordering exists; waits for `service_healthy` dependencies before start. |
-| CMP-04 | Service scaling | Partial | `deploy.replicas` spawns service-N instances. |
-| CMP-05 | .env support | Partial | `.env` loaded for interpolation; service env_file merged into env. |
+| CMP-01 | ~~docker-compose.yml compatibility~~ | Done | Parse + validate with .env interpolation; env_file, build, and network_mode supported. |
+| CMP-02 | ~~Native compose subcommand~~ | Done | `compose up` starts services sequentially with image/build/env/ports/labels/volumes; `compose down` stops/removes by service name. |
+| CMP-03 | ~~Service dependency ordering~~ | Done | Ordering exists; waits for `service_healthy` dependencies before start. |
+| CMP-04 | ~~Service scaling~~ | Done | `deploy.replicas` spawns service-N instances. |
+| CMP-05 | ~~.env support~~ | Done | `.env` loaded for interpolation; service env_file merged into env. |
 | CMP-06 | Profiles | Partial | `compose up --profile` enables profiled services; default excludes profiled services. |
 | CMP-07 | Watch mode | Not Started | Not implemented. |
 
@@ -181,7 +181,7 @@
 | COMPAT-02 | OCI Runtime Spec v1.2 | Partial | Namespaces + cgroups v2; spec parity not verified. |
 | COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Basic pull/push; error parity not verified. |
 | COMPAT-04 | Docker API v1.45+ | Partial | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. |
-| COMPAT-05 | docker-compose v3.x | Partial | Parse/validate + interpolation only. |
+| COMPAT-05 | ~~docker-compose v3.x~~ | Done | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
 | COMPAT-06 | Dockerfile syntax | Partial | Minimal builder; far from 95% coverage. |
 | COMPAT-07 | Linux kernel 5.10+ | Not Started | No min-version checks. |
 | COMPAT-08 | x86_64, aarch64, riscv64 | Not Started | No multi-arch builds verified. |

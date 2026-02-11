@@ -1,12 +1,13 @@
 use crate::image_manifest::{
     Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE, OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE,
-    OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+    OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::canonicalize_reference;
+use crate::layer_compression::{CompressionFormat, compress_bytes_gzip, compress_bytes_zstd, LayerCompressionError};
 use serde_json::json;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use tar::Builder;
 use thiserror::Error;
@@ -25,6 +26,8 @@ pub enum DockerfileBuildError {
     Unsupported(String),
     #[error("invalid Dockerfile: {0}")]
     Invalid(String),
+    #[error("compression error: {0}")]
+    Compression(#[from] LayerCompressionError),
 }
 
 pub struct BuildResult {
@@ -37,6 +40,15 @@ pub fn build_from_dockerfile(
     dockerfile_path: &Path,
     tag: Option<&str>,
     runtime_dir: &Path,
+) -> Result<BuildResult, DockerfileBuildError> {
+    build_from_dockerfile_with_compression(dockerfile_path, tag, runtime_dir, CompressionFormat::Gzip)
+}
+
+pub fn build_from_dockerfile_with_compression(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
 ) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
@@ -82,7 +94,8 @@ pub fn build_from_dockerfile(
     let context_dir = dockerfile_path
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
-    let layer_bytes = build_context_layer(context_dir, dockerfile_path)?;
+    let (layer_bytes, layer_media_type) =
+        build_context_layer(context_dir, dockerfile_path, compression)?;
     let layer_digest = format!("sha256:{}", blake3::hash(&layer_bytes).to_hex());
     let layer_size = layer_bytes.len() as i64;
 
@@ -103,7 +116,7 @@ pub fn build_from_dockerfile(
             platform: None,
         },
         layers: vec![Descriptor {
-            media_type: OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(),
+            media_type: layer_media_type,
             digest: layer_digest.clone(),
             size: layer_size,
             urls: Vec::new(),
@@ -141,7 +154,8 @@ pub fn build_from_dockerfile(
 fn build_context_layer(
     context_dir: &Path,
     dockerfile_path: &Path,
-) -> Result<Vec<u8>, DockerfileBuildError> {
+    compression: CompressionFormat,
+) -> Result<(Vec<u8>, String), DockerfileBuildError> {
     let mut tar_builder = Builder::new(Vec::new());
     add_directory(
         &mut tar_builder,
@@ -152,10 +166,19 @@ fn build_context_layer(
     let tar_bytes = tar_builder.into_inner().map_err(|err| {
         io::Error::new(io::ErrorKind::Other, err.to_string())
     })?;
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(&tar_bytes)?;
-    let gzip_bytes = encoder.finish()?;
-    Ok(gzip_bytes)
+    match compression {
+        CompressionFormat::Gzip => {
+            let gzip_bytes = compress_bytes_gzip(&tar_bytes)?;
+            Ok((gzip_bytes, OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string()))
+        }
+        CompressionFormat::Zstd => {
+            let zstd_bytes = compress_bytes_zstd(&tar_bytes)?;
+            Ok((zstd_bytes, OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE.to_string()))
+        }
+        CompressionFormat::None => Err(DockerfileBuildError::Unsupported(
+            "uncompressed layers are not supported".to_string(),
+        )),
+    }
 }
 
 fn add_directory(

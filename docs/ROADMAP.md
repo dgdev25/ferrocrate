@@ -42,7 +42,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 
 - [x] ~~Implement OCI Image Spec v1.1 manifest parsing (application/vnd.oci.image.manifest.v1+json)~~
 - [x] ~~Implement layer extraction and rootfs construction~~
-- [ ] Implement zstd and gzip decompression for layer tarballs
+- [x] ~~Implement zstd and gzip decompression for layer tarballs~~
 - [ ] Implement image pull from OCI registries (basic auth)
 - [ ] Implement image push to OCI registries
 - [ ] Implement local image storage (index database)

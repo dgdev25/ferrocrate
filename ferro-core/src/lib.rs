@@ -5,6 +5,7 @@ pub mod image_store;
 pub mod image_tagging;
 pub mod layer_compression;
 pub mod linux_namespaces;
+pub mod overlayfs;
 pub mod process_lifecycle;
 pub mod registry;
 pub mod rootless;

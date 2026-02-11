@@ -73,9 +73,9 @@
 | IMG-03 | ~~Content-addressable store (Blake3)~~ | Done | Blake3 CAS for blobs + configs with hardlink dedup during rootfs assembly and build outputs. |
 | IMG-04 | Zstd compression for layers | Partial | `build --compress zstd` emits zstd layers; other pipelines not wired. |
 | IMG-05 | ~~Lazy image pulling~~ | Done | `pull --lazy` stores manifest/config; runtime fetches missing blobs on demand. |
-| IMG-06 | Dockerfile build | Partial | Minimal FROM scratch + COPY + HEALTHCHECK build; no multi-stage or base images. |
+| IMG-06 | Dockerfile build | Partial | Supports FROM base images + COPY --from multi-stage; still far from 95% directive parity. |
 | IMG-07 | ferrofile.toml build | Partial | Minimal [build] spec (context/dockerfile/tag) wired to Dockerfile build. |
-| IMG-08 | Multi-stage builds | Not Started | Not implemented. |
+| IMG-08 | ~~Multi-stage builds~~ | Done | Basic multi-stage support with COPY --from between stages. |
 | IMG-09 | Build cache | Not Started | Not implemented. |
 | IMG-10 | ~~Tag/list/remove/prune images~~ | Done | Tag/list done; remove/prune implemented. |
 | IMG-11 | CVE scanning | Not Started | Not implemented. |
@@ -182,7 +182,7 @@
 | COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Basic pull/push; error parity not verified. |
 | COMPAT-04 | Docker API v1.45+ | Partial | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
-| COMPAT-06 | Dockerfile syntax | Partial | Minimal builder; far from 95% coverage. |
+| COMPAT-06 | Dockerfile syntax | Partial | Multi-stage + base images supported; still below 95% coverage. |
 | COMPAT-07 | Linux kernel 5.10+ | Not Started | No min-version checks. |
 | COMPAT-08 | x86_64, aarch64, riscv64 | Not Started | No multi-arch builds verified. |
 | COMPAT-09 | Kubernetes CRI v1 | Not Started | Not implemented. |

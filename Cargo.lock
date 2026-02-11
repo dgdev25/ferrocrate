@@ -361,6 +361,11 @@ dependencies = [
 [[package]]
 name = "ferro-mind"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "ferro-net"

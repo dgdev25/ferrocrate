@@ -2,13 +2,17 @@ use crate::image_manifest::{
     Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE, OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE,
     OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
+use crate::image_fetch::{pull_image_with_store, resolve_layer_paths_with_store};
+use crate::image_manifest::parse_image_manifest;
 use crate::image_store::LocalImageStore;
-use crate::image_tagging::canonicalize_reference;
+use crate::image_tagging::{canonicalize_reference, resolve_reference};
+use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 use crate::layer_compression::{CompressionFormat, compress_bytes_gzip, compress_bytes_zstd, LayerCompressionError};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tar::Builder;
 use thiserror::Error;
 
@@ -74,111 +78,122 @@ pub fn build_from_dockerfile_with_store_and_compression(
     }
 
     let dockerfile = fs::read_to_string(dockerfile_path)?;
-    let instructions = parse_instructions(&dockerfile)?;
-    let mut from_scratch = false;
-    let mut healthcheck = None;
-
-    for instr in &instructions {
-        match instr.keyword.as_str() {
-            "FROM" => {
-                if instr.value.eq_ignore_ascii_case("scratch") {
-                    from_scratch = true;
-                } else {
-                    return Err(DockerfileBuildError::Unsupported(
-                        "only FROM scratch is supported".to_string(),
-                    ));
-                }
-            }
-            "COPY" => {}
-            "CMD" => {}
-            "HEALTHCHECK" => {
-                healthcheck = parse_healthcheck(&instr.value)?;
-            }
-            other => {
-                return Err(DockerfileBuildError::Unsupported(format!(
-                    "instruction {other} is not supported"
-                )));
-            }
-        }
-    }
-
-    if !from_scratch {
-        return Err(DockerfileBuildError::Invalid(
-            "missing FROM scratch".to_string(),
-        ));
-    }
-
+    let stages = parse_stages(&dockerfile)?;
     let context_dir = dockerfile_path
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
-    let (layer_bytes, layer_media_type) =
-        build_context_layer(context_dir, dockerfile_path, compression)?;
-    let layer_digest = format!("sha256:{}", blake3::hash(&layer_bytes).to_hex());
-    let layer_size = layer_bytes.len() as i64;
+    let mut stage_roots: Vec<PathBuf> = Vec::new();
+    let mut stage_names: HashMap<String, PathBuf> = HashMap::new();
+    let mut final_result = None;
 
-    let config_json = build_config_json(healthcheck);
-    let config_bytes = config_json.as_bytes();
-    let config_digest = format!("sha256:{}", blake3::hash(config_bytes).to_hex());
+    for (idx, stage) in stages.iter().enumerate() {
+        let (base_layers, base_descriptors) =
+            resolve_base_image(store, runtime_dir, &stage.base)?;
+        let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
+        if stage_root.exists() {
+            let _ = fs::remove_dir_all(&stage_root);
+        }
+        let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+        if !base_layers.is_empty() {
+            construct_rootfs_with_dedup(&stage_root, &base_layers, &cas_root)
+                .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+        } else {
+            fs::create_dir_all(&stage_root)?;
+        }
 
-    let manifest = ImageManifest {
-        schema_version: 2,
-        media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
-        config: Descriptor {
-            media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
-            digest: config_digest.clone(),
-            size: config_bytes.len() as i64,
-            urls: Vec::new(),
-            annotations: None,
-            artifact_type: None,
-            platform: None,
-        },
-        layers: vec![Descriptor {
-            media_type: layer_media_type,
-            digest: layer_digest.clone(),
-            size: layer_size,
-            urls: Vec::new(),
-            annotations: None,
-            artifact_type: None,
-            platform: None,
-        }],
-        artifact_type: None,
-        subject: None,
-        annotations: Default::default(),
-    };
-    let manifest_json = serde_json::to_string(&manifest).map_err(|err| {
-        io::Error::new(io::ErrorKind::Other, err.to_string())
-    })?;
+        let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
+        copy_context_dir(context_dir, &context_root, dockerfile_path)?;
 
-    let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
-    store.put_reference(
-        &reference,
-        &config_digest,
-        OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-        &manifest_json,
-    )?;
+        for copy in &stage.copy_from {
+            let source_root = resolve_stage_root(&stage_roots, &stage_names, &copy.from)
+                .ok_or_else(|| DockerfileBuildError::Invalid(format!(
+                    "unknown COPY --from stage: {}",
+                    copy.from
+                )))?;
+            let source = source_root.join(copy.src.trim_start_matches('/'));
+            let dest = context_root.join(copy.dest.trim_start_matches('/'));
+            copy_path_recursive(&source, &dest)?;
+        }
 
-    write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
-    write_config(runtime_dir, &config_digest, config_bytes)?;
+        let (layer_bytes, layer_media_type) =
+            build_context_layer_from_dir(&context_root, compression)?;
+        let layer_digest = format!("sha256:{}", blake3::hash(&layer_bytes).to_hex());
+        let layer_size = layer_bytes.len() as i64;
+        write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
 
-    Ok(BuildResult {
-        reference,
-        layer_digest,
-        config_digest,
-    })
+        let layer_path = blob_path(runtime_dir, &layer_digest);
+        apply_layer_tar(&stage_root, &layer_path)
+            .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+
+        stage_roots.push(stage_root.clone());
+        if let Some(name) = stage.name.as_ref() {
+            stage_names.insert(name.to_string(), stage_root.clone());
+        }
+
+        if idx == stages.len() - 1 {
+            let config_json = build_config_json(stage.healthcheck.clone());
+            let config_bytes = config_json.as_bytes();
+            let config_digest = format!("sha256:{}", blake3::hash(config_bytes).to_hex());
+
+            let mut layers = base_descriptors;
+            layers.push(Descriptor {
+                media_type: layer_media_type,
+                digest: layer_digest.clone(),
+                size: layer_size,
+                urls: Vec::new(),
+                annotations: None,
+                artifact_type: None,
+                platform: None,
+            });
+
+            let manifest = ImageManifest {
+                schema_version: 2,
+                media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+                config: Descriptor {
+                    media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+                    digest: config_digest.clone(),
+                    size: config_bytes.len() as i64,
+                    urls: Vec::new(),
+                    annotations: None,
+                    artifact_type: None,
+                    platform: None,
+                },
+                layers,
+                artifact_type: None,
+                subject: None,
+                annotations: Default::default(),
+            };
+            let manifest_json = serde_json::to_string(&manifest).map_err(|err| {
+                io::Error::new(io::ErrorKind::Other, err.to_string())
+            })?;
+
+            let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+            store.put_reference(
+                &reference,
+                &config_digest,
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                &manifest_json,
+            )?;
+
+            write_config(runtime_dir, &config_digest, config_bytes)?;
+
+            final_result = Some(BuildResult {
+                reference,
+                layer_digest,
+                config_digest,
+            });
+        }
+    }
+
+    final_result.ok_or_else(|| DockerfileBuildError::Invalid("no stages built".to_string()))
 }
 
-fn build_context_layer(
+fn build_context_layer_from_dir(
     context_dir: &Path,
-    dockerfile_path: &Path,
     compression: CompressionFormat,
 ) -> Result<(Vec<u8>, String), DockerfileBuildError> {
     let mut tar_builder = Builder::new(Vec::new());
-    add_directory(
-        &mut tar_builder,
-        context_dir,
-        context_dir,
-        dockerfile_path,
-    )?;
+    add_directory(&mut tar_builder, context_dir, context_dir, None)?;
     let tar_bytes = tar_builder.into_inner().map_err(|err| {
         io::Error::new(io::ErrorKind::Other, err.to_string())
     })?;
@@ -201,7 +216,7 @@ fn add_directory(
     builder: &mut Builder<Vec<u8>>,
     base: &Path,
     path: &Path,
-    dockerfile_path: &Path,
+    dockerfile_path: Option<&Path>,
 ) -> Result<(), DockerfileBuildError> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
@@ -210,8 +225,10 @@ fn add_directory(
             .strip_prefix(base)
             .unwrap_or(&entry_path)
             .to_path_buf();
-        if entry_path == dockerfile_path {
-            continue;
+        if let Some(dockerfile_path) = dockerfile_path {
+            if entry_path == dockerfile_path {
+                continue;
+            }
         }
         if relative.components().next().map(|c| c.as_os_str()) == Some(".git".as_ref()) {
             continue;
@@ -299,14 +316,25 @@ fn write_cas_blob(
     Ok(())
 }
 
-#[derive(Debug)]
-struct Instruction {
-    keyword: String,
-    value: String,
+#[derive(Debug, Clone)]
+struct CopyFromSpec {
+    from: String,
+    src: String,
+    dest: String,
 }
 
-fn parse_instructions(contents: &str) -> Result<Vec<Instruction>, DockerfileBuildError> {
-    let mut out = Vec::new();
+#[derive(Debug, Clone)]
+struct StageSpec {
+    base: String,
+    name: Option<String>,
+    copy_from: Vec<CopyFromSpec>,
+    healthcheck: Option<HealthcheckSpec>,
+}
+
+fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
+    let mut stages = Vec::new();
+    let mut current: Option<StageSpec> = None;
+
     for raw_line in contents.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -318,12 +346,106 @@ fn parse_instructions(contents: &str) -> Result<Vec<Instruction>, DockerfileBuil
         if keyword.is_empty() {
             continue;
         }
-        out.push(Instruction { keyword, value });
+
+        if keyword == "FROM" {
+            if let Some(stage) = current.take() {
+                stages.push(stage);
+            }
+            let (base, name) = parse_from(&value)?;
+            current = Some(StageSpec {
+                base,
+                name,
+                copy_from: Vec::new(),
+                healthcheck: None,
+            });
+            continue;
+        }
+
+        let stage = current.as_mut().ok_or_else(|| {
+            DockerfileBuildError::Invalid("missing FROM instruction".to_string())
+        })?;
+
+        match keyword.as_str() {
+            "COPY" => {
+                if let Some(copy) = parse_copy_from(&value)? {
+                    stage.copy_from.push(copy);
+                }
+            }
+            "CMD" => {}
+            "HEALTHCHECK" => {
+                stage.healthcheck = parse_healthcheck(&value)?;
+            }
+            other => {
+                return Err(DockerfileBuildError::Unsupported(format!(
+                    "instruction {other} is not supported"
+                )));
+            }
+        }
     }
-    Ok(out)
+
+    if let Some(stage) = current.take() {
+        stages.push(stage);
+    }
+
+    if stages.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "missing FROM instruction".to_string(),
+        ));
+    }
+
+    Ok(stages)
 }
 
-#[derive(Debug)]
+fn parse_from(value: &str) -> Result<(String, Option<String>), DockerfileBuildError> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "invalid FROM instruction".to_string(),
+        ));
+    }
+    if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("AS") {
+        return Ok((parts[0].to_string(), Some(parts[2].to_string())));
+    }
+    Ok((parts[0].to_string(), None))
+}
+
+fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildError> {
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut idx = 0;
+    let mut from = None;
+    if tokens[idx].starts_with("--from=") {
+        from = Some(tokens[idx].trim_start_matches("--from=").to_string());
+        idx += 1;
+    } else if tokens[idx] == "--from" {
+        if tokens.len() <= idx + 1 {
+            return Err(DockerfileBuildError::Invalid(
+                "COPY --from missing stage".to_string(),
+            ));
+        }
+        from = Some(tokens[idx + 1].to_string());
+        idx += 2;
+    }
+
+    let Some(from) = from else {
+        return Ok(None);
+    };
+
+    if tokens.len() <= idx + 1 {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY --from requires src and dest".to_string(),
+        ));
+    }
+    Ok(Some(CopyFromSpec {
+        from,
+        src: tokens[idx].to_string(),
+        dest: tokens[idx + 1].to_string(),
+    }))
+}
+
+#[derive(Debug, Clone)]
 struct HealthcheckSpec {
     test: Vec<String>,
     interval_nanos: u64,
@@ -419,10 +541,113 @@ fn parse_duration_to_nanos(value: &str) -> Option<u64> {
     }
 }
 
+fn resolve_base_image(
+    store: &LocalImageStore,
+    runtime_dir: &Path,
+    base: &str,
+) -> Result<(Vec<PathBuf>, Vec<Descriptor>), DockerfileBuildError> {
+    if base.eq_ignore_ascii_case("scratch") {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let _ = pull_image_with_store(runtime_dir, base, store);
+    let record = resolve_reference(store, base)
+        .map_err(DockerfileBuildError::Reference)?
+        .ok_or_else(|| DockerfileBuildError::Invalid(format!("base image not found: {base}")))?;
+    let manifest = parse_image_manifest(&record.manifest_json)
+        .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+    let layers = resolve_layer_paths_with_store(runtime_dir, base, store)
+        .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+    Ok((layers, manifest.layers))
+}
+
+fn resolve_stage_root(
+    roots: &[PathBuf],
+    names: &HashMap<String, PathBuf>,
+    from: &str,
+) -> Option<PathBuf> {
+    if let Ok(idx) = from.parse::<usize>() {
+        return roots.get(idx).cloned();
+    }
+    names.get(from).cloned()
+}
+
+fn create_build_dir(_runtime_dir: &Path, name: &str) -> Result<PathBuf, DockerfileBuildError> {
+    let root = std::env::temp_dir().join("ferrocrate-build");
+    fs::create_dir_all(&root)?;
+    let candidate = root.join(format!("{}-{}", name, std::process::id()));
+    if candidate.exists() {
+        let _ = fs::remove_dir_all(&candidate);
+    }
+    fs::create_dir_all(&candidate)?;
+    Ok(candidate)
+}
+
+fn copy_context_dir(
+    src: &Path,
+    dst: &Path,
+    dockerfile_path: &Path,
+) -> Result<(), DockerfileBuildError> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(src).unwrap_or(&path);
+        if path == dockerfile_path {
+            continue;
+        }
+        if relative.components().next().map(|c| c.as_os_str()) == Some(".git".as_ref()) {
+            continue;
+        }
+        if relative.components().next().map(|c| c.as_os_str()) == Some(".ferrocrate".as_ref()) {
+            continue;
+        }
+        let target = dst.join(relative);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_context_dir(&path, &target, dockerfile_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
+    let metadata = fs::metadata(src)?;
+    if metadata.is_dir() {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            copy_path_recursive(&path, &dst.join(name))?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+fn blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
+    runtime_dir
+        .join("images")
+        .join("blobs")
+        .join(digest.replace(':', "_"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_from_dockerfile;
-    use crate::image_fetch::resolve_layer_paths;
+    use super::build_from_dockerfile_with_store_and_compression;
+    use crate::image_fetch::resolve_layer_paths_with_store;
+    use crate::image_store::LocalImageStore;
+    use crate::layer_compression::CompressionFormat;
     use std::fs;
 
     #[test]
@@ -433,9 +658,17 @@ mod tests {
         fs::write(temp.path().join("hello.txt"), "hi").expect("write file");
 
         let runtime_dir = temp.path().join("runtime");
-        let result = build_from_dockerfile(&dockerfile, Some("local/test:latest"), &runtime_dir)
+        let store = LocalImageStore::open(runtime_dir.join("images")).expect("open store");
+        let result = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/test:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+        )
             .expect("build");
-        let layers = resolve_layer_paths(&runtime_dir, &result.reference).expect("layers");
+        let layers =
+            resolve_layer_paths_with_store(&runtime_dir, &result.reference, &store).expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
     }

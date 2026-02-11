@@ -112,6 +112,9 @@ pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBu
         .ok_or_else(|| crate::registry::RegistryError::InvalidReference(canonical.clone()))?;
 
     let manifest = parse_image_manifest(&record.manifest_json)?;
+    if manifest.layers.is_empty() {
+        return Ok(Vec::new());
+    }
     let blob_root = runtime_dir.join("images").join("blobs");
     fs::create_dir_all(&blob_root)?;
     let client = RegistryClient::new()?;

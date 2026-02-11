@@ -10,6 +10,7 @@ use crate::image_config::{
 };
 use crate::image_fetch::{resolve_layer_paths_with_store, resolve_config_path_with_store};
 use crate::image_store::LocalImageStore;
+use crate::mac_profiles::generate_apparmor_profile;
 use crate::observability::{log_event, make_event};
 use crate::rootfs::construct_rootfs_with_dedup;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
@@ -52,6 +53,8 @@ pub enum RuntimeError {
     Rootfs(#[from] crate::rootfs::RootfsError),
     #[error("mount error: {0}")]
     Mount(#[from] MountError),
+    #[error("mac profile error: {0}")]
+    MacProfile(#[from] crate::mac_profiles::MacProfileError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
     #[error("command is required to run container")]
@@ -191,6 +194,7 @@ impl ContainerRuntime {
             .or_else(|| config_json.as_deref().and_then(user_from_config));
 
         let container_id = generate_container_id();
+        let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
         let container_dir = self.runtime_dir.join("containers").join(&container_id);
         let log_dir = container_dir.join("logs");
         fs::create_dir_all(&log_dir)?;
@@ -229,7 +233,7 @@ impl ContainerRuntime {
         let use_slirp = unshare_netns && network_mode == "bridge";
 
         let child_id = spawn_process_with_logs(
-            &command,
+            &exec_cmd,
             &merged_env,
             &stdout_path,
             &stderr_path,
@@ -1040,6 +1044,54 @@ fn rootless_netns_enabled() -> bool {
     std::env::var("FERROCRATE_ROOTLESS_NETNS")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn apparmor_enabled() -> bool {
+    std::env::var("FERROCRATE_APPARMOR")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn apply_apparmor_if_enabled(
+    runtime_dir: &Path,
+    container_id: &str,
+    cmd: &[String],
+) -> Result<Vec<String>, RuntimeError> {
+    if !apparmor_enabled() {
+        return Ok(cmd.to_vec());
+    }
+    if cmd.is_empty() {
+        return Ok(cmd.to_vec());
+    }
+    if !command_available("apparmor_parser") || !command_available("aa-exec") {
+        return Ok(cmd.to_vec());
+    }
+    let profile_name = format!("ferrocrate-{container_id}");
+    let profile = generate_apparmor_profile(container_id)?;
+    let profile_dir = runtime_dir.join("security").join("apparmor");
+    fs::create_dir_all(&profile_dir)?;
+    let profile_path = profile_dir.join(format!("{profile_name}.profile"));
+    fs::write(&profile_path, profile)?;
+
+    let output = Command::new("apparmor_parser")
+        .arg("-r")
+        .arg(&profile_path)
+        .output()?;
+    if !output.status.success() {
+        return Ok(cmd.to_vec());
+    }
+
+    let mut wrapped = Vec::new();
+    wrapped.push("aa-exec".to_string());
+    wrapped.push("-p".to_string());
+    wrapped.push(profile_name);
+    wrapped.push("--".to_string());
+    wrapped.extend(cmd.iter().cloned());
+    Ok(wrapped)
+}
+
+fn command_available(bin: &str) -> bool {
+    Command::new(bin).arg("--version").output().is_ok()
 }
 
 fn ensure_nftables_chains() -> Result<(), RuntimeError> {

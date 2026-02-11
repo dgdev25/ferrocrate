@@ -83,7 +83,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | SEC-02 | Seccomp profiles | Done | Default profile + parser, not enforced in runtime. |
 | SEC-03 | AppArmor/SELinux integration | Partial | Profile generation only. |
 | SEC-04 | ~~Capability dropping~~ | Done | Drop all by default; CLI `--cap-add` allows explicit caps. |
-| SEC-05 | Read-only rootfs for prod | Not Started | Not implemented. |
+| SEC-05 | ~~Read-only rootfs for prod~~ | Done | CLI profile defaults to read-only for prod; override with --read-write. |
 | SEC-06 | ~~no-new-privileges~~ | Done | CLI --no-new-privileges enforced via prctl. |
 | SEC-07 | Image signature verification | Not Started | Not implemented. |
 | SEC-08 | Runtime security monitoring (eBPF) | Not Started | Not implemented. |

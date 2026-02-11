@@ -112,6 +112,8 @@ pub enum VolumeCommands {
         #[arg(long = "opt")]
         opts: Vec<String>,
     },
+    Backup { name: String, path: String },
+    Restore { name: String, path: String },
     Ls,
     Rm { name: String },
 }
@@ -411,6 +413,17 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
                 .map_err(|err| err.to_string())?;
             println!("volume create: {} {}", record.name, record.path);
         }
+        VolumeCommands::Backup { name, path } => {
+            store.backup(&name, &path).map_err(|err| err.to_string())?;
+            println!("volume backup: {name} -> {path}");
+        }
+        VolumeCommands::Restore { name, path } => {
+            if store.get(&name).map_err(|err| err.to_string())?.is_none() {
+                store.create(&name).map_err(|err| err.to_string())?;
+            }
+            store.restore(&name, &path).map_err(|err| err.to_string())?;
+            println!("volume restore: {name} <- {path}");
+        }
         VolumeCommands::Ls => {
             let records = store.list().map_err(|err| err.to_string())?;
             if records.is_empty() {
@@ -690,6 +703,30 @@ mod tests {
             _ => panic!("unexpected command"),
         }
 
+        let backup = Cli::parse_from(["ferrocrate", "volume", "backup", "data", "/tmp/data.tar"]);
+        match backup.command {
+            Commands::Volume { command } => match command {
+                VolumeCommands::Backup { name, path } => {
+                    assert_eq!(name, "data");
+                    assert_eq!(path, "/tmp/data.tar");
+                }
+                _ => panic!("unexpected volume command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
+        let restore = Cli::parse_from(["ferrocrate", "volume", "restore", "data", "/tmp/data.tar"]);
+        match restore.command {
+            Commands::Volume { command } => match command {
+                VolumeCommands::Restore { name, path } => {
+                    assert_eq!(name, "data");
+                    assert_eq!(path, "/tmp/data.tar");
+                }
+                _ => panic!("unexpected volume command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
         let ls = Cli::parse_from(["ferrocrate", "volume", "ls"]);
         match ls.command {
             Commands::Volume { command } => assert!(matches!(command, VolumeCommands::Ls)),
@@ -720,6 +757,34 @@ mod tests {
             },
         )
         .expect("create volume");
+        let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
+            .expect("store");
+        let record = store.get("data").expect("get").expect("record");
+        std::fs::write(std::path::PathBuf::from(&record.path).join("hello.txt"), "hi")
+            .expect("write");
+        drop(store);
+
+        let archive = runtime_dir.join("backup.tar");
+        handle_volume(
+            &runtime_dir,
+            VolumeCommands::Backup {
+                name: "data".to_string(),
+                path: archive.display().to_string(),
+            },
+        )
+        .expect("backup volume");
+
+        handle_volume(&runtime_dir, VolumeCommands::Rm { name: "data".to_string() })
+            .expect("rm volume");
+
+        handle_volume(
+            &runtime_dir,
+            VolumeCommands::Restore {
+                name: "data".to_string(),
+                path: archive.display().to_string(),
+            },
+        )
+        .expect("restore volume");
         handle_volume(&runtime_dir, VolumeCommands::Ls).expect("ls volumes");
         handle_volume(&runtime_dir, VolumeCommands::Rm { name: "data".to_string() })
             .expect("rm volume");

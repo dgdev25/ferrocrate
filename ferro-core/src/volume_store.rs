@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use tar::{Archive, Builder};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,6 +34,8 @@ pub enum VolumeStoreError {
     Exists(String),
     #[error("unknown volume driver: {0}")]
     UnknownDriver(String),
+    #[error("volume not found: {0}")]
+    NotFound(String),
 }
 
 pub trait VolumeDriver: Send + Sync {
@@ -159,6 +162,16 @@ impl LocalVolumeStore {
         Ok(out)
     }
 
+    pub fn get(&self, name: &str) -> Result<Option<VolumeRecord>, VolumeStoreError> {
+        let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
+        let Some(value) = tree.get(name.as_bytes())? else {
+            return Ok(None);
+        };
+        let record = serde_json::from_slice::<VolumeRecord>(&value)
+            .map_err(VolumeStoreError::Decode)?;
+        Ok(Some(record))
+    }
+
     pub fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {
         let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
         let Some(value) = tree.get(name.as_bytes())? else {
@@ -178,6 +191,33 @@ impl LocalVolumeStore {
         tree.flush()?;
         Ok(true)
     }
+
+    pub fn backup(&self, name: &str, dest: impl AsRef<Path>) -> Result<(), VolumeStoreError> {
+        let record = self
+            .get(name)?
+            .ok_or_else(|| VolumeStoreError::NotFound(name.to_string()))?;
+        let volume_dir = PathBuf::from(&record.path);
+        if !volume_dir.exists() {
+            return Err(VolumeStoreError::NotFound(name.to_string()));
+        }
+        let file = fs::File::create(dest)?;
+        let mut builder = Builder::new(file);
+        builder.append_dir_all(".", &volume_dir)?;
+        builder.finish()?;
+        Ok(())
+    }
+
+    pub fn restore(&self, name: &str, src: impl AsRef<Path>) -> Result<(), VolumeStoreError> {
+        let record = self
+            .get(name)?
+            .ok_or_else(|| VolumeStoreError::NotFound(name.to_string()))?;
+        let volume_dir = PathBuf::from(&record.path);
+        fs::create_dir_all(&volume_dir)?;
+        let file = fs::File::open(src)?;
+        let mut archive = Archive::new(file);
+        archive.unpack(&volume_dir)?;
+        Ok(())
+    }
 }
 
 fn now_unix() -> u64 {
@@ -195,6 +235,7 @@ fn default_driver() -> String {
 mod tests {
     use super::{LocalVolumeStore, VolumeStoreError};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     #[test]
     fn creates_lists_and_removes_volumes() {
@@ -222,5 +263,28 @@ mod tests {
             .create_with_driver("data", "unknown", BTreeMap::new())
             .expect_err("unknown driver");
         assert!(matches!(err, VolumeStoreError::UnknownDriver(_)));
+    }
+
+    #[test]
+    fn backup_and_restore_volume() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalVolumeStore::open(temp.path()).expect("store");
+
+        let record = store.create("data").expect("create");
+        let volume_dir = PathBuf::from(&record.path);
+        std::fs::write(volume_dir.join("hello.txt"), "hi").expect("write");
+
+        let archive = temp.path().join("backup.tar");
+        store.backup("data", &archive).expect("backup");
+
+        store.remove("data").expect("remove");
+        store.create("data").expect("recreate");
+        store.restore("data", &archive).expect("restore");
+
+        let restored = std::fs::read_to_string(
+            PathBuf::from(&store.get("data").unwrap().unwrap().path).join("hello.txt"),
+        )
+        .expect("read");
+        assert_eq!(restored, "hi");
     }
 }

@@ -10,5 +10,6 @@ pub mod overlayfs;
 pub mod process_lifecycle;
 pub mod registry;
 pub mod rootless;
+pub mod rootfs_prep;
 pub mod rootfs;
 pub mod runtime_config;

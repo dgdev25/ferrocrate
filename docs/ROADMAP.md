@@ -39,7 +39,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | IMG-01 | Pull images from OCI registries | Partial | CLI pull downloads manifest + blobs with docker config auth; not tested across registries. |
-| IMG-02 | Push images to OCI registries | Partial | CLI push wires registry + docker config auth; auth helpers not supported. |
+| IMG-02 | Push images to OCI registries | Partial | CLI push uploads blobs + manifest with docker config auth; auth helpers not supported. |
 | IMG-03 | Content-addressable store (Blake3) | Not Started | No Blake3 store. |
 | IMG-04 | Zstd compression for layers | Partial | zstd/gzip decompression only. |
 | IMG-05 | Lazy image pulling | Not Started | No lazy pull or FUSE streaming. |

@@ -33,7 +33,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement OCI Runtime Spec v1.2 config.json parser~~
 - [x] ~~Implement Linux namespace creation (pid, network, ipc, uts, mount)~~
 - [x] ~~Implement cgroups v2 integration for resource limits (memory, cpu, pids)~~
-- [ ] Implement rootless container execution via user namespaces
+- [x] ~~Implement rootless container execution via user namespaces~~
 - [ ] Implement process lifecycle management (start, stop, pause, resume)
 - [ ] Implement container exec functionality
 - [ ] Create integration tests for basic container lifecycle

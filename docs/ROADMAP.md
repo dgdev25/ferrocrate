@@ -32,7 +32,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | CLM-06 | Inspect (JSON metadata) | Not Started | No inspect handler or schema output. |
 | CLM-07 | Health checks | Not Started | Not implemented. |
 | CLM-08 | Restart policies | Not Started | Requires daemon/state. |
-| CLM-09 | Resource limits (mem/cpu/pids) | Partial | cgroups v2 integration exists; full enforcement/coverage not verified. |
+| CLM-09 | ~~Resource limits (mem/cpu/pids)~~ | Done | cgroups v2 limits enforced when provided via CLI. |
 | CLM-10 | Env vars, labels, annotations | Not Started | No config passing or storage. |
 
 ### 3.2 Image Management

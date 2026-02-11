@@ -1,5 +1,6 @@
 use crate::container_exec::exec_in_container;
 use crate::container_store::{ContainerRecord, LocalContainerStore, ContainerStoreError, now_unix};
+use crate::cgroups::{CgroupV2Manager, ResourceLimits};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use std::fs;
@@ -16,6 +17,8 @@ pub enum RuntimeError {
     InvalidImage(#[from] crate::registry::RegistryError),
     #[error("container store error: {0}")]
     Store(#[from] ContainerStoreError),
+    #[error("cgroup error: {0}")]
+    Cgroup(#[from] crate::cgroups::CgroupError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("exec error: {0}")]
@@ -33,19 +36,29 @@ pub enum RuntimeError {
 pub struct ContainerRuntime {
     store: LocalContainerStore,
     runtime_dir: PathBuf,
+    cgroup_root: PathBuf,
 }
 
 impl ContainerRuntime {
     pub fn new(runtime_dir: &Path) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
         let store = LocalContainerStore::open(runtime_dir.join("containers.db"))?;
+        let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup"));
         Ok(Self {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
+            cgroup_root,
         })
     }
 
-    pub fn run(&self, image: &str, cmd: &[String]) -> Result<ContainerRecord, RuntimeError> {
+    pub fn run(
+        &self,
+        image: &str,
+        cmd: &[String],
+        limits: Option<&ResourceLimits>,
+    ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         if cmd.is_empty() {
             return Err(RuntimeError::MissingCommand);
@@ -67,6 +80,13 @@ impl ContainerRuntime {
             self.store.clone_db(),
             container_id.clone(),
         )?;
+
+        if let Some(limits) = limits {
+            let manager = CgroupV2Manager::new(&self.cgroup_root);
+            let group = manager.create_group(&format!("ferrocrate/{container_id}"))?;
+            manager.apply_limits(&group, limits)?;
+            manager.add_pid(&group, child_id)?;
+        }
 
         let record = ContainerRecord {
             id: container_id.clone(),
@@ -248,6 +268,10 @@ fn update_status(db: &sled::Db, id: &str, status: &str) -> Result<(), ContainerS
 #[cfg(test)]
 mod tests {
     use super::ContainerRuntime;
+    use crate::cgroups::{CpuMax, ResourceLimits};
+    use std::sync::Mutex;
+
+    static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn run_starts_process_and_persists_record() {
@@ -262,6 +286,7 @@ mod tests {
                     "-c".to_string(),
                     "echo hi && sleep 0.05".to_string(),
                 ],
+                None,
             )
             .expect("run");
 
@@ -282,6 +307,7 @@ mod tests {
                     "-c".to_string(),
                     "echo hi".to_string(),
                 ],
+                None,
             )
             .expect("run");
 
@@ -310,6 +336,7 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
+                None,
             )
             .expect("run");
 
@@ -332,6 +359,7 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
+                None,
             )
             .expect("run");
 
@@ -345,5 +373,52 @@ mod tests {
             .find(|c| c.id == record.id)
             .expect("record");
         assert_ne!(updated.pid, record.pid);
+    }
+
+    #[test]
+    fn run_applies_cgroup_limits_when_set() {
+        let _guard = CGROUP_ENV_LOCK.lock().expect("lock env");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
+
+        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", root); }
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+
+        let limits = ResourceLimits {
+            memory_max: Some(1024),
+            cpu_max: Some(CpuMax { quota: 1000, period: 1000 }),
+            pids_max: Some(8),
+        };
+
+        let record = runtime
+            .run(
+                "alpine:latest",
+                &["sh".to_string(), "-c".to_string(), "sleep 0.05".to_string()],
+                Some(&limits),
+            )
+            .expect("run");
+
+        let group = root.join("ferrocrate").join(&record.id);
+        assert_eq!(
+            std::fs::read_to_string(group.join("memory.max")).expect("memory.max"),
+            "1024"
+        );
+        assert_eq!(
+            std::fs::read_to_string(group.join("cpu.max")).expect("cpu.max"),
+            "1000 1000"
+        );
+        assert_eq!(
+            std::fs::read_to_string(group.join("pids.max")).expect("pids.max"),
+            "8"
+        );
+        assert_eq!(
+            std::fs::read_to_string(group.join("cgroup.procs")).expect("cgroup.procs"),
+            record.pid.to_string()
+        );
+
+        unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
     }
 }

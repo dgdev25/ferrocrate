@@ -84,10 +84,10 @@
 ### 3.3 Networking
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| NET-01 | Bridge networking | Partial | Runtime can create bridge/netns/veth for published ports (iptables backend); not configurable yet. |
+| NET-01 | Bridge networking | Partial | Runtime can create bridge/netns/veth for rootful runs; iptables used for published ports; rootless skips netns. |
 | NET-02 | Host networking | Partial | CLI `--network host` skips netns setup; not tested. |
 | NET-03 | None networking | Partial | CLI `--network none` creates netns with loopback only; not tested. |
-| NET-04 | Container-to-container DNS | Not Started | DNS config render only. |
+| NET-04 | Container-to-container DNS | Partial | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers; no DNS server yet. |
 | NET-05 | Custom networks (subnets) | Not Started | No API or state. |
 | NET-06 | eBPF + iptables/nftables fallback | Partial | Builders + flags; no live backend integration. |
 | NET-07 | WireGuard overlay | Not Started | Not implemented. |

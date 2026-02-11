@@ -68,7 +68,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 ### 3.4 Storage and Volumes
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| STR-01 | Named volumes | Not Started | Not implemented. |
+| STR-01 | ~~Named volumes~~ | Done | Volume store + CLI create/ls/rm implemented. |
 | STR-02 | Bind mounts | Not Started | Not implemented. |
 | STR-03 | tmpfs mounts | Not Started | Not implemented. |
 | STR-04 | Volume drivers | Not Started | Not implemented. |

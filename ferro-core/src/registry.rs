@@ -1,10 +1,12 @@
 use crate::image_manifest::{ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE, HeaderValue};
+use reqwest::Method;
 use std::time::Duration;
 use std::path::Path;
 use std::fs::File;
 use std::io::{copy, Read};
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,17 +66,13 @@ impl RegistryClient {
     ) -> Result<String, RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
-
-        let mut request = self
-            .client
-            .get(url)
-            .header(ACCEPT, OCI_IMAGE_MANIFEST_MEDIA_TYPE);
-
-        if let Some(auth) = auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
-        }
-
-        let response = request.send().map_err(RegistryError::Request)?;
+        let response = self.send_request_with_auth(
+            Method::GET,
+            &url,
+            vec![(ACCEPT, HeaderValue::from_static(OCI_IMAGE_MANIFEST_MEDIA_TYPE))],
+            None,
+            auth,
+        )?;
         let status = response.status();
         let body = response.text().map_err(RegistryError::Request)?;
 
@@ -111,18 +109,13 @@ impl RegistryClient {
         parse_image_manifest(manifest_json)?;
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
-
-        let mut request = self
-            .client
-            .put(url)
-            .header(CONTENT_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE)
-            .body(manifest_json.to_string());
-
-        if let Some(auth) = auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
-        }
-
-        let response = request.send().map_err(RegistryError::Request)?;
+        let response = self.send_request_with_auth(
+            Method::PUT,
+            &url,
+            vec![(CONTENT_TYPE, HeaderValue::from_static(OCI_IMAGE_MANIFEST_MEDIA_TYPE))],
+            Some(manifest_json.as_bytes().to_vec()),
+            auth,
+        )?;
         let status = response.status();
         let body = response.text().map_err(RegistryError::Request)?;
         if !status.is_success() {
@@ -145,13 +138,7 @@ impl RegistryClient {
     ) -> Result<(), RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = blob_url(&image_ref, digest);
-
-        let mut request = self.client.get(url);
-        if let Some(auth) = auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
-        }
-
-        let mut response = request.send().map_err(RegistryError::Request)?;
+        let mut response = self.send_request_with_auth(Method::GET, &url, Vec::new(), None, auth)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -179,13 +166,7 @@ impl RegistryClient {
     ) -> Result<(), RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let base = upload_url(&image_ref);
-
-        let mut request = self.client.post(base);
-        if let Some(auth) = auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
-        }
-
-        let response = request.send().map_err(RegistryError::Request)?;
+        let response = self.send_request_with_auth(Method::POST, &base, Vec::new(), None, auth)?;
         let status = response.status();
         if !status.is_success() && status.as_u16() != 202 {
             let body = response.text().unwrap_or_default();
@@ -208,12 +189,13 @@ impl RegistryClient {
         let mut body = Vec::new();
         file.read_to_end(&mut body).map_err(RegistryError::Io)?;
 
-        let mut upload_req = self.client.put(upload_url).body(body);
-        if let Some(auth) = auth {
-            upload_req = upload_req.basic_auth(&auth.username, Some(&auth.password));
-        }
-
-        let response = upload_req.send().map_err(RegistryError::Request)?;
+        let response = self.send_request_with_auth(
+            Method::PUT,
+            &upload_url,
+            Vec::new(),
+            Some(body),
+            auth,
+        )?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -224,6 +206,128 @@ impl RegistryClient {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BearerChallenge {
+    realm: String,
+    service: Option<String>,
+    scope: Option<String>,
+}
+
+impl RegistryClient {
+    fn send_request_with_auth(
+        &self,
+        method: Method,
+        url: &str,
+        headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+        body: Option<Vec<u8>>,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<reqwest::blocking::Response, RegistryError> {
+        let mut response = self
+            .build_request(&method, url, &headers, body.as_ref(), auth, None)
+            .send()
+            .map_err(RegistryError::Request)?;
+
+        if response.status().as_u16() == 401 {
+            let challenge = response
+                .headers()
+                .get(WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_bearer_challenge);
+            if let Some(challenge) = challenge {
+                let token = self.fetch_bearer_token(&challenge, auth)?;
+                response = self
+                    .build_request(&method, url, &headers, body.as_ref(), None, Some(&token))
+                    .send()
+                    .map_err(RegistryError::Request)?;
+            }
+        }
+        Ok(response)
+    }
+
+    fn build_request(
+        &self,
+        method: &Method,
+        url: &str,
+        headers: &[(reqwest::header::HeaderName, reqwest::header::HeaderValue)],
+        body: Option<&Vec<u8>>,
+        auth: Option<&RegistryAuth>,
+        bearer: Option<&str>,
+    ) -> reqwest::blocking::RequestBuilder {
+        let mut request = self.client.request(method.clone(), url);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        if let Some(auth) = auth {
+            request = request.basic_auth(&auth.username, Some(&auth.password));
+        }
+        if let Some(token) = bearer {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        if let Some(body) = body {
+            request = request.body(body.clone());
+        }
+        request
+    }
+
+    fn fetch_bearer_token(
+        &self,
+        challenge: &BearerChallenge,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<String, RegistryError> {
+        let mut request = self.client.get(&challenge.realm);
+        if let Some(service) = challenge.service.as_ref() {
+            request = request.query(&[("service", service)]);
+        }
+        if let Some(scope) = challenge.scope.as_ref() {
+            request = request.query(&[("scope", scope)]);
+        }
+        if let Some(auth) = auth {
+            request = request.basic_auth(&auth.username, Some(&auth.password));
+        }
+
+        let response = request.send().map_err(RegistryError::Request)?;
+        let status = response.status();
+        let body = response.text().map_err(RegistryError::Request)?;
+        if !status.is_success() {
+            return Err(RegistryError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let parsed = serde_json::from_str::<HashMap<String, String>>(&body)
+            .map_err(|err| RegistryError::InvalidReference(format!("token parse error: {err}")))?;
+        parsed
+            .get("token")
+            .or_else(|| parsed.get("access_token"))
+            .cloned()
+            .ok_or_else(|| RegistryError::InvalidReference("token missing".to_string()))
+    }
+}
+
+fn parse_bearer_challenge(header: &str) -> Option<BearerChallenge> {
+    let trimmed = header.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("bearer ") {
+        return None;
+    }
+    let params = trimmed[7..].split(',').map(|part| part.trim());
+    let mut realm = None;
+    let mut service = None;
+    let mut scope = None;
+    for param in params {
+        let mut parts = param.splitn(2, '=');
+        let key = parts.next()?.trim();
+        let value = parts.next()?.trim().trim_matches('"');
+        match key {
+            "realm" => realm = Some(value.to_string()),
+            "service" => service = Some(value.to_string()),
+            "scope" => scope = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    realm.map(|realm| BearerChallenge { realm, service, scope })
 }
 
 pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryError> {
@@ -435,6 +539,44 @@ mod tests {
         client
             .push_manifest_raw(&image, &manifest_json.to_string(), Some(&auth))
             .expect("manifest push should succeed");
+    }
+
+    #[test]
+    fn pulls_manifest_with_bearer_token() {
+        let server = Server::run();
+        let token = "token-123";
+        let realm = format!("http://{}/token", server.addr());
+        let challenge = format!(
+            "Bearer realm=\"{realm}\",service=\"test\",scope=\"repository:test/image:pull\""
+        );
+
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/v2/test/image/manifests/latest"))
+                .respond_with(status_code(401).append_header("WWW-Authenticate", challenge)),
+        );
+
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/token"))
+                .respond_with(status_code(200).body(format!("{{\"token\":\"{token}\"}}"))),
+        );
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/v2/test/image/manifests/latest"),
+                request::headers(contains(("authorization", format!("Bearer {token}"))))
+            ])
+            .respond_with(status_code(200).body(
+                r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#,
+            )),
+        );
+
+        let client = RegistryClient::new().expect("client");
+        let image = format!("{}/test/image", server.addr());
+
+        let manifest = client
+            .pull_manifest(&image, None)
+            .expect("manifest should be pulled");
+        assert_eq!(manifest.schema_version, 2);
     }
 
     #[test]

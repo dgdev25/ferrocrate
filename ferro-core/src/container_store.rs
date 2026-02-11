@@ -18,10 +18,27 @@ pub struct ContainerRecord {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
+    #[serde(default)]
+    pub health: Option<HealthConfig>,
+    #[serde(default = "default_health_status")]
+    pub health_status: String,
+    #[serde(default)]
+    pub health_failures: u32,
+    #[serde(default)]
+    pub health_checked_at_unix: Option<u64>,
     pub created_at_unix: u64,
     pub stdout_path: String,
     pub stderr_path: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthConfig {
+    pub cmd: Vec<String>,
+    pub interval_secs: u64,
+    pub timeout_secs: u64,
+    pub retries: u32,
+    pub start_period_secs: u64,
 }
 
 #[derive(Debug, Error)]
@@ -103,6 +120,10 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
+fn default_health_status() -> String {
+    "none".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ContainerRecord, LocalContainerStore, now_unix};
@@ -121,6 +142,10 @@ mod tests {
             env: vec!["HELLO=world".to_string()],
             labels: [("tier".to_string(), "test".to_string())].into_iter().collect(),
             annotations: [("owner".to_string(), "cli".to_string())].into_iter().collect(),
+            health: None,
+            health_status: "none".to_string(),
+            health_failures: 0,
+            health_checked_at_unix: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),
@@ -146,6 +171,10 @@ mod tests {
             env: Vec::new(),
             labels: HashMap::new(),
             annotations: HashMap::new(),
+            health: None,
+            health_status: "none".to_string(),
+            health_failures: 0,
+            health_checked_at_unix: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),

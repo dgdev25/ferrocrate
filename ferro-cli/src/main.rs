@@ -39,6 +39,16 @@ pub enum Commands {
         labels: Vec<String>,
         #[arg(long = "annotation")]
         annotations: Vec<String>,
+        #[arg(long = "health-cmd")]
+        health_cmd: Option<String>,
+        #[arg(long = "health-interval")]
+        health_interval: Option<u64>,
+        #[arg(long = "health-timeout")]
+        health_timeout: Option<u64>,
+        #[arg(long = "health-retries")]
+        health_retries: Option<u32>,
+        #[arg(long = "health-start-period")]
+        health_start_period: Option<u64>,
         #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
@@ -155,6 +165,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
             env,
             labels,
             annotations,
+            health_cmd,
+            health_interval,
+            health_timeout,
+            health_retries,
+            health_start_period,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -173,6 +188,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &env,
                 &labels,
                 &annotations,
+                health_cmd.as_deref(),
+                health_interval,
+                health_timeout,
+                health_retries,
+                health_start_period,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -215,6 +235,11 @@ fn handle_run(
     env: &[String],
     labels: &[String],
     annotations: &[String],
+    health_cmd: Option<&str>,
+    health_interval: Option<u64>,
+    health_timeout: Option<u64>,
+    health_retries: Option<u32>,
+    health_start_period: Option<u64>,
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -228,6 +253,13 @@ fn handle_run(
     let env = parse_env_entries(env)?;
     let labels = parse_key_values("label", labels)?;
     let annotations = parse_key_values("annotation", annotations)?;
+    let health = build_health_config(
+        health_cmd,
+        health_interval,
+        health_timeout,
+        health_retries,
+        health_start_period,
+    )?;
     let record = runtime
         .run(
             image,
@@ -235,6 +267,7 @@ fn handle_run(
             &env,
             &labels,
             &annotations,
+            health,
             limits.as_ref(),
             &mounts,
             &tmpfs,
@@ -534,6 +567,35 @@ fn parse_key_values(kind: &str, entries: &[String]) -> Result<HashMap<String, St
     Ok(out)
 }
 
+fn build_health_config(
+    health_cmd: Option<&str>,
+    health_interval: Option<u64>,
+    health_timeout: Option<u64>,
+    health_retries: Option<u32>,
+    health_start_period: Option<u64>,
+) -> Result<Option<ferro_core::container_store::HealthConfig>, String> {
+    let has_overrides = health_interval.is_some()
+        || health_timeout.is_some()
+        || health_retries.is_some()
+        || health_start_period.is_some();
+    let Some(cmd) = health_cmd else {
+        if has_overrides {
+            return Err("run: health-cmd is required when health options are set".to_string());
+        }
+        return Ok(None);
+    };
+    if cmd.trim().is_empty() {
+        return Err("run: health-cmd must not be empty".to_string());
+    }
+    Ok(Some(ferro_core::container_store::HealthConfig {
+        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
+        interval_secs: health_interval.unwrap_or(30),
+        timeout_secs: health_timeout.unwrap_or(5),
+        retries: health_retries.unwrap_or(3),
+        start_period_secs: health_start_period.unwrap_or(0),
+    }))
+}
+
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -618,7 +680,8 @@ mod tests {
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pull, handle_push, handle_rmi,
         handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
-        parse_bind_mounts, parse_driver_opts, parse_env_entries, parse_key_values, parse_tmpfs_mounts,
+        build_health_config, parse_bind_mounts, parse_driver_opts, parse_env_entries, parse_key_values,
+        parse_tmpfs_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -640,6 +703,11 @@ mod tests {
                 env,
                 labels,
                 annotations,
+                health_cmd,
+                health_interval,
+                health_timeout,
+                health_retries,
+                health_start_period,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -655,6 +723,11 @@ mod tests {
                 assert!(env.is_empty());
                 assert!(labels.is_empty());
                 assert!(annotations.is_empty());
+                assert!(health_cmd.is_none());
+                assert!(health_interval.is_none());
+                assert!(health_timeout.is_none());
+                assert!(health_retries.is_none());
+                assert!(health_start_period.is_none());
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -936,6 +1009,11 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
@@ -963,6 +1041,12 @@ mod tests {
     fn rejects_invalid_label_entry() {
         let err = parse_key_values("label", &["bad".to_string()]).expect_err("invalid");
         assert!(err.contains("label"));
+    }
+
+    #[test]
+    fn health_requires_cmd_when_options_set() {
+        let err = build_health_config(None, Some(10), None, None, None).expect_err("missing cmd");
+        assert!(err.contains("health-cmd"));
     }
 
     #[test]

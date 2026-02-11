@@ -116,6 +116,8 @@ pub struct Volume {
     pub driver: Option<String>,
 }
 
+pub mod service_graph;
+
 impl ComposeFile {
     pub fn parse(content: &str, env: &HashMap<String, String>) -> ComposeResult<Self> {
         let interpolated = interpolate_variables(content, env)?;

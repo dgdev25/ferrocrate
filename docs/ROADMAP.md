@@ -193,7 +193,7 @@ This roadmap breaks down the FerroCrate implementation into 8 sequential phases 
 ### Compose Execution
 
 - [x] ~~Implement compose config parsing and validation~~
-- [ ] Implement service dependency ordering
+- [x] ~~Implement service dependency ordering~~
 - [ ] Implement compose up/down/ps/logs
 - [ ] Add compose integration tests
 

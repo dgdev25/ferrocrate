@@ -4,7 +4,10 @@ use crate::container_store::{
 };
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
-use crate::image_config::{command_from_config, healthcheck_from_config};
+use crate::image_config::{
+    command_from_config, env_from_config, healthcheck_from_config, user_from_config,
+    working_dir_from_config,
+};
 use crate::image_fetch::resolve_layer_paths;
 use crate::image_fetch::resolve_config_path;
 use crate::observability::{log_event, make_event};
@@ -85,21 +88,44 @@ impl ContainerRuntime {
         tmpfs_mounts: &[TmpfsMount],
         readonly_rootfs: bool,
         no_new_privs: bool,
+        workdir: Option<&str>,
+        user: Option<&str>,
+        name: Option<&str>,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
+        let mut config_json = None;
+        if let Ok(Some(config_path)) = resolve_config_path(&self.runtime_dir, image) {
+            if let Ok(json) = fs::read_to_string(config_path) {
+                config_json = Some(json);
+            }
+        }
+
         let mut command = cmd.to_vec();
         if command.is_empty() {
-            if let Ok(Some(config_path)) = resolve_config_path(&self.runtime_dir, image) {
-                if let Ok(json) = fs::read_to_string(config_path) {
-                    if let Some(from_config) = command_from_config(&json) {
-                        command = from_config;
-                    }
+            if let Some(json) = config_json.as_deref() {
+                if let Some(from_config) = command_from_config(json) {
+                    command = from_config;
                 }
             }
         }
         if command.is_empty() {
             return Err(RuntimeError::MissingCommand);
         }
+
+        let mut merged_env = if let Some(json) = config_json.as_deref() {
+            env_from_config(json)
+        } else {
+            Vec::new()
+        };
+        merged_env.extend(env.iter().cloned());
+        let merged_env = dedup_env(merged_env);
+
+        let resolved_workdir = workdir
+            .map(|s| s.to_string())
+            .or_else(|| config_json.as_deref().and_then(working_dir_from_config));
+        let resolved_user = user
+            .map(|s| s.to_string())
+            .or_else(|| config_json.as_deref().and_then(user_from_config));
 
         let container_id = generate_container_id();
         let container_dir = self.runtime_dir.join("containers").join(&container_id);
@@ -135,7 +161,7 @@ impl ContainerRuntime {
 
         let child_id = spawn_process_with_logs(
             &command,
-            env,
+            &merged_env,
             &stdout_path,
             &stderr_path,
             false,
@@ -145,6 +171,8 @@ impl ContainerRuntime {
             no_new_privs,
             restart_policy.clone(),
             capabilities.to_vec(),
+            resolved_workdir.as_deref(),
+            resolved_user.as_deref(),
         )?;
 
         if let Some(limits) = limits {
@@ -166,10 +194,13 @@ impl ContainerRuntime {
 
         let record = ContainerRecord {
             id: container_id.clone(),
+            name: name.map(|val| val.to_string()),
             pid: child_id,
             image: image.to_string(),
             command: command.clone(),
-            env: env.to_vec(),
+            workdir: resolved_workdir.clone(),
+            user: resolved_user.clone(),
+            env: merged_env,
             labels: labels.clone(),
             annotations: annotations.clone(),
             capabilities: capabilities.iter().map(|cap| cap.to_string()).collect(),
@@ -349,6 +380,8 @@ impl ContainerRuntime {
             false,
             record.restart_policy.clone(),
             parse_capabilities(&record.capabilities),
+            record.workdir.as_deref(),
+            record.user.as_deref(),
         )?;
 
         record.pid = child_id;
@@ -420,6 +453,8 @@ fn spawn_process_with_logs(
     no_new_privs: bool,
     restart_policy: RestartPolicy,
     capabilities: Vec<caps::Capability>,
+    workdir: Option<&str>,
+    user: Option<&str>,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -427,6 +462,8 @@ fn spawn_process_with_logs(
         rootfs_dir.as_deref(),
         no_new_privs,
         &capabilities,
+        workdir,
+        user,
     )?;
     let (child_id, child, join_handles) = spawn_child_with_logs(
         command,
@@ -442,6 +479,8 @@ fn spawn_process_with_logs(
     let rootfs_dir = rootfs_dir.clone();
     let no_new_privs = no_new_privs;
     let caps_for_restart = capabilities.clone();
+    let workdir = workdir.map(|val| val.to_string());
+    let user = user.map(|val| val.to_string());
     thread::spawn(move || {
         supervise_child(
             child,
@@ -457,6 +496,8 @@ fn spawn_process_with_logs(
             no_new_privs,
             restart_policy,
             caps_for_restart,
+            workdir,
+            user,
         );
     });
 
@@ -469,6 +510,8 @@ fn build_command(
     rootfs_dir: Option<&Path>,
     no_new_privs: bool,
     capabilities: &[caps::Capability],
+    workdir: Option<&str>,
+    user: Option<&str>,
 ) -> Result<Command, RuntimeError> {
     let mut command = if let Some(rootfs) = rootfs_dir {
         if nix::unistd::Uid::effective().is_root() {
@@ -496,6 +539,19 @@ fn build_command(
             return Err(RuntimeError::InvalidState("env var missing key".to_string()));
         }
         command.env(key, value);
+    }
+
+    if let Some(dir) = workdir {
+        command.current_dir(dir);
+    }
+
+    if let Some(user_spec) = user {
+        if nix::unistd::Uid::effective().is_root() {
+            if let Some((uid, gid)) = parse_user_spec(user_spec) {
+                command.uid(uid);
+                command.gid(gid);
+            }
+        }
     }
 
     if no_new_privs {
@@ -567,6 +623,8 @@ fn supervise_child(
     no_new_privs: bool,
     restart_policy: RestartPolicy,
     capabilities: Vec<caps::Capability>,
+    workdir: Option<String>,
+    user: Option<String>,
 ) {
     loop {
         let status = child.wait();
@@ -593,6 +651,8 @@ fn supervise_child(
             rootfs_dir.as_deref(),
             no_new_privs,
             &capabilities,
+            workdir.as_deref(),
+            user.as_deref(),
         ) {
             Ok(cmd) => cmd,
             Err(_) => break,
@@ -621,6 +681,37 @@ fn parse_capabilities(entries: &[String]) -> Vec<caps::Capability> {
             normalized.parse::<caps::Capability>().ok()
         })
         .collect()
+}
+
+fn dedup_env(entries: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashMap::new();
+    let mut order = Vec::new();
+    for entry in entries {
+        let mut parts = entry.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        if !seen.contains_key(&key) {
+            order.push(key.clone());
+        }
+        seen.insert(key, entry);
+    }
+    order
+        .into_iter()
+        .filter_map(|key| seen.remove(&key))
+        .collect()
+}
+
+fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.splitn(2, ':');
+    let uid = parts.next()?.parse::<u32>().ok()?;
+    let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
+    Some((uid, gid))
 }
 
 fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool {
@@ -772,6 +863,9 @@ mod tests {
             &[],
             false,
             false,
+            None,
+            None,
+            None,
             )
             .expect("run");
 
@@ -804,6 +898,9 @@ mod tests {
             &[],
             false,
             false,
+            None,
+            None,
+            None,
             )
             .expect("run");
 
@@ -836,6 +933,9 @@ mod tests {
                 &[],
                 false,
                 false,
+                None,
+                None,
+                None,
             )
             .expect("run");
 
@@ -843,6 +943,48 @@ mod tests {
             record.command,
             vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()]
         );
+    }
+
+    #[test]
+    fn run_merges_env_and_respects_workdir_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
+        write_image_config(
+            temp.path(),
+            r#"{"config":{"Env":["A=1","B=2"],"WorkingDir":"/app","User":"1001:1002"}}"#,
+        );
+        let workdir_path = temp.path().join("workdir");
+        std::fs::create_dir_all(&workdir_path).expect("workdir");
+        let workdir = workdir_path.to_string_lossy().to_string();
+
+        let record = runtime
+            .run(
+                "alpine:latest",
+                &["sh".to_string(), "-c".to_string(), "echo hi".to_string()],
+                &["A=override".to_string(), "C=3".to_string()],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                Some(&workdir),
+                Some("1000:1000"),
+                Some("named"),
+            )
+            .expect("run");
+
+        assert!(record.env.contains(&"A=override".to_string()));
+        assert!(record.env.contains(&"B=2".to_string()));
+        assert!(record.env.contains(&"C=3".to_string()));
+        assert_eq!(record.workdir.as_deref(), Some(workdir.as_str()));
+        assert_eq!(record.user.as_deref(), Some("1000:1000"));
+        assert_eq!(record.name.as_deref(), Some("named"));
     }
 
     fn wait_for_logs(runtime: &ContainerRuntime, id: &str) -> Result<String, super::RuntimeError> {
@@ -878,6 +1020,9 @@ mod tests {
             &[],
             false,
             false,
+            None,
+            None,
+            None,
             )
             .expect("run");
 
@@ -912,6 +1057,9 @@ mod tests {
             &[],
             false,
             false,
+            None,
+            None,
+            None,
             )
             .expect("run");
 
@@ -962,6 +1110,9 @@ mod tests {
             &[],
             false,
             false,
+            None,
+            None,
+            None,
             )
             .expect("run");
 
@@ -1015,6 +1166,9 @@ mod tests {
             &[],
             false,
             false,
+            None,
+            None,
+            None,
             )
             .expect("run");
 

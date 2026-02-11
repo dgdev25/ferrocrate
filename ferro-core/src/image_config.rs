@@ -78,6 +78,30 @@ pub fn command_from_config(json: &str) -> Option<Vec<String>> {
     }
 }
 
+pub fn env_from_config(json: &str) -> Vec<String> {
+    let value: Value = match serde_json::from_str(json) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let config = match value.get("config") {
+        Some(config) => config,
+        None => return Vec::new(),
+    };
+    parse_string_array(config.get("Env")).unwrap_or_default()
+}
+
+pub fn working_dir_from_config(json: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    let config = value.get("config")?;
+    config.get("WorkingDir")?.as_str().map(|s| s.to_string())
+}
+
+pub fn user_from_config(json: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    let config = value.get("config")?;
+    config.get("User")?.as_str().map(|s| s.to_string())
+}
+
 fn parse_string_array(value: Option<&Value>) -> Option<Vec<String>> {
     let value = value?;
     let array = value.as_array()?;
@@ -99,7 +123,10 @@ fn nanos_to_secs(value: Option<&Value>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_from_config, healthcheck_from_config};
+    use super::{
+        command_from_config, env_from_config, healthcheck_from_config, user_from_config,
+        working_dir_from_config,
+    };
 
     #[test]
     fn parses_cmd_healthcheck() {
@@ -167,5 +194,19 @@ mod tests {
         }"#;
         let cmd = command_from_config(json).expect("cmd");
         assert_eq!(cmd, vec!["sleep".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn parses_env_workdir_user() {
+        let json = r#"{
+            "config": {
+                "Env": ["A=1", "B=2"],
+                "WorkingDir": "/app",
+                "User": "1001:1002"
+            }
+        }"#;
+        assert_eq!(env_from_config(json), vec!["A=1".to_string(), "B=2".to_string()]);
+        assert_eq!(working_dir_from_config(json), Some("/app".to_string()));
+        assert_eq!(user_from_config(json), Some("1001:1002".to_string()));
     }
 }

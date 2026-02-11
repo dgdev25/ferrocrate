@@ -9,9 +9,15 @@ pub const CONTAINER_INDEX_TREE: &str = "container_index";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContainerRecord {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub pid: u32,
     pub image: String,
     pub command: Vec<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
@@ -157,9 +163,12 @@ mod tests {
 
         let record = ContainerRecord {
             id: "c1".to_string(),
+            name: Some("demo".to_string()),
             pid: 1234,
             image: "alpine:latest".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
+            workdir: Some("/app".to_string()),
+            user: Some("1000:1000".to_string()),
             env: vec!["HELLO=world".to_string()],
             labels: [("tier".to_string(), "test".to_string())].into_iter().collect(),
             annotations: [("owner".to_string(), "cli".to_string())].into_iter().collect(),
@@ -189,9 +198,12 @@ mod tests {
 
         let record = ContainerRecord {
             id: "c1".to_string(),
+            name: None,
             pid: 1234,
             image: "alpine:latest".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
+            workdir: None,
+            user: None,
             env: Vec::new(),
             labels: HashMap::new(),
             annotations: HashMap::new(),

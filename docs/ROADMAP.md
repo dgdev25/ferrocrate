@@ -54,7 +54,7 @@
 ### 3.1 Container Lifecycle Management
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| CLM-01 | Run OCI-compliant container images | Partial | Run pulls manifest + layers, constructs rootfs; config CMD/Entrypoint used when no CLI cmd. |
+| CLM-01 | Run OCI-compliant container images | Partial | Run pulls manifest + layers; config CMD/Entrypoint, Env, User, WorkingDir used when provided; ports/volumes not wired. |
 | CLM-02 | ~~Create/start/stop/restart/kill/remove~~ | Done | Restart/kill/remove implemented and wired in CLI. |
 | CLM-03 | ~~Pause/unpause via cgroup freezer~~ | Done | CLI pause/unpause uses cgroup.freeze via cgroups v2. |
 | CLM-04 | ~~Container exec~~ | Done | `ferro-core` exec + CLI wired. |

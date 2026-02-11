@@ -75,6 +75,34 @@ pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, I
     })
 }
 
+pub fn pull_manifest_only(runtime_dir: &Path, image: &str) -> Result<String, ImageFetchError> {
+    parse_image_reference(image)?;
+    let store = LocalImageStore::open(runtime_dir.join("images"))?;
+    let client = RegistryClient::new()?;
+    let auth = resolve_registry_auth(image)?;
+
+    let manifest_json = client.pull_manifest_raw(image, auth.as_ref())?;
+    let manifest = parse_image_manifest(&manifest_json)?;
+
+    let canonical = crate::image_tagging::canonicalize_reference(image)?;
+    store.put_reference(
+        &canonical,
+        &manifest.config.digest,
+        crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        &manifest_json,
+    )?;
+
+    let config_root = runtime_dir.join("images").join("configs");
+    fs::create_dir_all(&config_root)?;
+    let config_digest = manifest.config.digest.replace(':', "_");
+    let config_path = config_root.join(&config_digest);
+    if !config_path.exists() {
+        client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
+    }
+
+    Ok(canonical)
+}
+
 pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBuf>, ImageFetchError> {
     parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
@@ -85,13 +113,17 @@ pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBu
 
     let manifest = parse_image_manifest(&record.manifest_json)?;
     let blob_root = runtime_dir.join("images").join("blobs");
+    fs::create_dir_all(&blob_root)?;
+    let client = RegistryClient::new()?;
+    let auth = resolve_registry_auth(&canonical)?;
     let mut layer_paths = Vec::new();
     for layer in &manifest.layers {
         let digest = layer.digest.replace(':', "_");
         let blob_path = blob_root.join(&digest);
-        if blob_path.exists() {
-            let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
+        if !blob_path.exists() {
+            client.pull_blob_to_file(&canonical, &layer.digest, auth.as_ref(), &blob_path)?;
         }
+        let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
         layer_paths.push(blob_path);
     }
     Ok(layer_paths)
@@ -162,7 +194,7 @@ fn hash_file_blake3(path: &Path) -> Result<String, ImageFetchError> {
 
 #[cfg(test)]
 mod tests {
-    use super::pull_image;
+    use super::{pull_image, pull_manifest_only};
     use httptest::matchers::request;
     use httptest::responders::status_code;
     use httptest::{Expectation, Server};
@@ -196,5 +228,27 @@ mod tests {
         let hash = blake3::hash(b"TEST").to_hex().to_string();
         let cas_path = temp.path().join("images").join("cas").join("blake3").join(hash);
         assert!(cas_path.exists());
+    }
+
+    #[test]
+    fn pulls_manifest_only_without_layers() {
+        let server = Server::run();
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4}]}"#;
+
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/v2/library/busybox/manifests/latest"))
+                .respond_with(status_code(200).body(manifest_json)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/v2/library/busybox/blobs/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
+                .respond_with(status_code(200).body("{\"config\":{}}")),
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let image = format!("{}/library/busybox", server.addr());
+        pull_manifest_only(temp.path(), &image).expect("pull manifest only");
+        let blob_root = temp.path().join("images").join("blobs");
+        let layer_path = blob_root.join("sha256_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        assert!(!layer_path.exists());
     }
 }

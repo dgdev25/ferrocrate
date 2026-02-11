@@ -118,6 +118,8 @@ pub enum Commands {
     },
     Pull {
         image: String,
+        #[arg(long)]
+        lazy: bool,
     },
     Push {
         image: String,
@@ -238,7 +240,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             handle_restart(&runtime, &container, timeout)
         }
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
-        Commands::Pull { image } => handle_pull(&image_store, &image),
+        Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
         Commands::Compose { file, command } => handle_compose(file.as_deref(), command),
     }
@@ -706,7 +708,14 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
     Ok(())
 }
 
-fn handle_pull(store: &LocalImageStore, image: &str) -> Result<(), String> {
+fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool) -> Result<(), String> {
+    if lazy {
+        let runtime_dir = runtime_dir();
+        let canonical = ferro_core::image_fetch::pull_manifest_only(&runtime_dir, image)
+            .map_err(|err| err.to_string())?;
+        println!("pull: manifest-only image={canonical}");
+        return Ok(());
+    }
     ensure_image_present(store, image)?;
     let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
     println!("pull: image={canonical}");
@@ -1104,7 +1113,10 @@ mod tests {
     fn parses_pull_and_push_commands() {
         let pull = Cli::parse_from(["ferrocrate", "pull", "ghcr.io/acme/app:latest"]);
         match pull.command {
-            Commands::Pull { image } => assert_eq!(image, "ghcr.io/acme/app:latest"),
+            Commands::Pull { image, lazy } => {
+                assert_eq!(image, "ghcr.io/acme/app:latest");
+                assert!(!lazy);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
@@ -1284,7 +1296,7 @@ mod tests {
     fn pull_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_pull(&store, "").expect_err("invalid image");
+        let err = handle_pull(&store, "", false).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
 

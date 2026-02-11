@@ -47,7 +47,7 @@ Status legend: **Done**, **Partial**, **Not Started**
 | IMG-07 | ferrofile.toml build | Not Started | Not implemented. |
 | IMG-08 | Multi-stage builds | Not Started | Not implemented. |
 | IMG-09 | Build cache | Not Started | Not implemented. |
-| IMG-10 | Tag/list/remove/prune images | Partial | Tag/list done; remove/prune missing. |
+| IMG-10 | ~~Tag/list/remove/prune images~~ | Done | Tag/list done; remove/prune implemented. |
 | IMG-11 | CVE scanning | Not Started | Not implemented. |
 | IMG-12 | ruvector dedup | Not Started | Not implemented. |
 

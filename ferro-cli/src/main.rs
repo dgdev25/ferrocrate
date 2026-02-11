@@ -30,6 +30,10 @@ pub enum Commands {
         tag: Option<String>,
     },
     Images,
+    Rmi {
+        image: String,
+    },
+    ImagePrune,
     Containers,
     Logs {
         container: String,
@@ -81,6 +85,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
         }
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
         Commands::Images => handle_images(&image_store),
+        Commands::Rmi { image } => handle_rmi(&image_store, &image),
+        Commands::ImagePrune => handle_image_prune(&image_store),
         Commands::Containers => handle_containers(&runtime),
         Commands::Logs { container } => handle_logs(&runtime, &container),
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
@@ -137,6 +143,23 @@ fn handle_images(store: &LocalImageStore) -> Result<(), String> {
     for record in records {
         println!("{} {}", record.reference, record.digest);
     }
+    Ok(())
+}
+
+fn handle_rmi(store: &LocalImageStore, image: &str) -> Result<(), String> {
+    parse_image_reference(image).map_err(|err| err.to_string())?;
+    let removed = store.remove_reference(image).map_err(|err| err.to_string())?;
+    if removed {
+        println!("rmi: removed {image}");
+    } else {
+        println!("rmi: not found {image}");
+    }
+    Ok(())
+}
+
+fn handle_image_prune(store: &LocalImageStore) -> Result<(), String> {
+    let removed = store.prune_references().map_err(|err| err.to_string())?;
+    println!("image prune: removed={removed}");
     Ok(())
 }
 
@@ -223,7 +246,8 @@ fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), St
 mod tests {
     use super::{
         Cli, Commands, ComposeCommands, dispatch, handle_build, handle_containers, handle_exec,
-        handle_images, handle_logs, handle_pull, handle_push, handle_run, validate_network_backend,
+        handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
+        handle_run, validate_network_backend,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
@@ -259,6 +283,39 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_rmi_command() {
+        let cli = Cli::parse_from(["ferrocrate", "rmi", "alpine:latest"]);
+        match cli.command {
+            Commands::Rmi { image } => assert_eq!(image, "alpine:latest"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_image_prune_command() {
+        let cli = Cli::parse_from(["ferrocrate", "image-prune"]);
+        match cli.command {
+            Commands::ImagePrune => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rmi_handler_rejects_invalid_image() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let err = handle_rmi(&store, "").expect_err("invalid image");
+        assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn image_prune_handler_runs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        handle_image_prune(&store).expect("prune");
     }
 
     #[test]

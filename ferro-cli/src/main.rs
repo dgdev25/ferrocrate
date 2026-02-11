@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use ferro_core::docker_auth::resolve_registry_auth;
-use ferro_core::image_manifest::{OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::registry::{RegistryClient, parse_image_reference};
@@ -181,20 +180,8 @@ fn ensure_image_present(store: &LocalImageStore, image: &str) -> Result<(), Stri
     if existing.is_some() {
         return Ok(());
     }
-
-    let client = RegistryClient::new().map_err(|err| err.to_string())?;
-    let auth = resolve_registry_auth(&canonical).map_err(|err| err.to_string())?;
-    let manifest_json = client
-        .pull_manifest_raw(&canonical, auth.as_ref())
-        .map_err(|err| err.to_string())?;
-    let manifest = parse_image_manifest(&manifest_json).map_err(|err| err.to_string())?;
-    store
-        .put_reference(
-            &canonical,
-            &manifest.config.digest,
-            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-            &manifest_json,
-        )
+    let runtime_dir = runtime_dir();
+    ferro_core::image_fetch::pull_image(&runtime_dir, &canonical)
         .map_err(|err| err.to_string())?;
     Ok(())
 }

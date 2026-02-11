@@ -1,6 +1,8 @@
 use crate::container_exec::exec_in_container;
 use crate::container_store::{ContainerRecord, LocalContainerStore, ContainerStoreError, now_unix};
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
+use crate::image_fetch::resolve_layer_paths;
+use crate::rootfs::construct_rootfs;
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use std::fs;
@@ -25,12 +27,16 @@ pub enum RuntimeError {
     Exec(#[from] crate::container_exec::ContainerExecError),
     #[error("process lifecycle error: {0}")]
     ProcessLifecycle(#[from] ProcessLifecycleError),
+    #[error("rootfs error: {0}")]
+    Rootfs(#[from] crate::rootfs::RootfsError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
     #[error("command is required to run container")]
     MissingCommand,
     #[error("invalid container state: {0}")]
     InvalidState(String),
+    #[error("image not found in store: {0}")]
+    ImageMissing(String),
 }
 
 pub struct ContainerRuntime {
@@ -72,6 +78,15 @@ impl ContainerRuntime {
         let stdout_path = log_dir.join("stdout.log");
         let stderr_path = log_dir.join("stderr.log");
 
+        let layer_paths = resolve_layer_paths(&self.runtime_dir, image)
+            .map_err(|_| RuntimeError::ImageMissing(image.to_string()))?;
+        let rootfs_dir = container_dir.join("rootfs");
+        if !layer_paths.is_empty() {
+            construct_rootfs(&rootfs_dir, &layer_paths)?;
+        } else {
+            fs::create_dir_all(&rootfs_dir)?;
+        }
+
         let child_id = spawn_process_with_logs(
             cmd,
             &stdout_path,
@@ -79,6 +94,7 @@ impl ContainerRuntime {
             false,
             self.store.clone_db(),
             container_id.clone(),
+            Some(&rootfs_dir),
         )?;
 
         if let Some(limits) = limits {
@@ -170,6 +186,7 @@ impl ContainerRuntime {
             true,
             self.store.clone_db(),
             record.id.clone(),
+            None,
         )?;
 
         record.pid = child_id;
@@ -219,12 +236,27 @@ fn spawn_process_with_logs(
     append: bool,
     store: sled::Db,
     container_id: String,
+    rootfs_dir: Option<&Path>,
 ) -> Result<u32, RuntimeError> {
-    let mut child = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut command = if let Some(rootfs) = rootfs_dir {
+        if nix::unistd::Uid::effective().is_root() {
+            let mut chroot_cmd = Command::new("chroot");
+            chroot_cmd.arg(rootfs);
+            chroot_cmd.arg(&cmd[0]);
+            chroot_cmd.args(&cmd[1..]);
+            chroot_cmd
+        } else {
+            let mut host_cmd = Command::new(&cmd[0]);
+            host_cmd.args(&cmd[1..]);
+            host_cmd
+        }
+    } else {
+        let mut host_cmd = Command::new(&cmd[0]);
+        host_cmd.args(&cmd[1..]);
+        host_cmd
+    };
+
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
     let mut join_handles = Vec::new();
     if let Some(stdout) = child.stdout.take() {
@@ -268,6 +300,9 @@ fn update_status(db: &sled::Db, id: &str, status: &str) -> Result<(), ContainerS
 #[cfg(test)]
 mod tests {
     use super::ContainerRuntime;
+    use crate::image_store::LocalImageStore;
+    use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
+    use crate::image_tagging::canonicalize_reference;
     use crate::cgroups::{CpuMax, ResourceLimits};
     use std::sync::Mutex;
 
@@ -277,6 +312,7 @@ mod tests {
     fn run_starts_process_and_persists_record() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
 
         let record = runtime
             .run(
@@ -298,6 +334,7 @@ mod tests {
     fn logs_returns_output() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
 
         let record = runtime
             .run(
@@ -331,6 +368,7 @@ mod tests {
     fn stop_kill_remove_flow() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
 
         let record = runtime
             .run(
@@ -354,6 +392,7 @@ mod tests {
     fn restart_updates_pid() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
 
         let record = runtime
             .run(
@@ -386,6 +425,7 @@ mod tests {
 
         unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", root); }
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
 
         let limits = ResourceLimits {
             memory_max: Some(1024),
@@ -420,5 +460,19 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
+    }
+
+    fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {
+        let store = LocalImageStore::open(runtime_dir.join("images")).expect("store");
+        let canonical = canonicalize_reference(image).expect("canonical");
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;
+        store
+            .put_reference(
+                &canonical,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                manifest_json,
+            )
+            .expect("seed manifest");
     }
 }

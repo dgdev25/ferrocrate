@@ -1,3 +1,4 @@
+use crate::layer_compression::{LayerCompressionError, open_decompressed_layer_reader};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -9,6 +10,8 @@ const OCI_OPAQUE_WHITEOUT: &str = ".wh..wh..opq";
 
 #[derive(Debug, Error)]
 pub enum RootfsError {
+    #[error("layer decompression failed: {0}")]
+    Decompression(#[from] LayerCompressionError),
     #[error("failed to open layer archive {path}: {source}")]
     OpenLayer { path: PathBuf, source: io::Error },
     #[error("failed to read layer archive: {0}")]
@@ -28,12 +31,8 @@ pub fn construct_rootfs(rootfs_dir: &Path, layers: &[PathBuf]) -> Result<(), Roo
 
 /// Apply a single tar layer to an existing rootfs directory.
 pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), RootfsError> {
-    let file = fs::File::open(layer_tar_path).map_err(|source| RootfsError::OpenLayer {
-        path: layer_tar_path.to_path_buf(),
-        source,
-    })?;
-
-    let mut archive = Archive::new(file);
+    let reader = open_decompressed_layer_reader(layer_tar_path)?;
+    let mut archive = Archive::new(reader);
 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
@@ -117,8 +116,10 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RootfsError> {
 #[cfg(test)]
 mod tests {
     use super::construct_rootfs;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
     use std::path::{Path, PathBuf};
     use tar::{Builder, Header};
 
@@ -193,6 +194,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn supports_gzip_and_zstd_compressed_layers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rootfs = temp.path().join("rootfs");
+
+        let layer_plain = temp.path().join("layer_plain.tar");
+        let layer_gz = temp.path().join("layer_gz.tar.gz");
+        let layer_zstd = temp.path().join("layer_zstd.tar.zst");
+
+        create_tar(&layer_plain, &[("usr/bin/tool", b"v1".as_slice())]);
+        gzip_file(&layer_plain, &layer_gz);
+        zstd_file(&layer_plain, &layer_zstd);
+
+        construct_rootfs(&rootfs, &[layer_gz]).expect("gzip layer should apply");
+        assert_eq!(
+            fs::read_to_string(rootfs.join("usr/bin/tool")).expect("file from gzip layer"),
+            "v1"
+        );
+
+        fs::remove_dir_all(&rootfs).expect("cleanup rootfs");
+        construct_rootfs(&rootfs, &[layer_zstd]).expect("zstd layer should apply");
+        assert_eq!(
+            fs::read_to_string(rootfs.join("usr/bin/tool")).expect("file from zstd layer"),
+            "v1"
+        );
+    }
+
     fn create_tar(path: &Path, entries: &[(&str, &[u8])]) {
         let file = fs::File::create(path).expect("create tar");
         let mut builder = Builder::new(file);
@@ -212,5 +240,19 @@ mod tests {
         builder
             .append_data(&mut header, PathBuf::from(path), Cursor::new(content))
             .expect("append data");
+    }
+
+    fn gzip_file(input: &Path, output: &Path) {
+        let data = fs::read(input).expect("read tar");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&data).expect("write gzip data");
+        let compressed = encoder.finish().expect("finalize gzip");
+        fs::write(output, compressed).expect("write gzip file");
+    }
+
+    fn zstd_file(input: &Path, output: &Path) {
+        let data = fs::read(input).expect("read tar");
+        let compressed = zstd::stream::encode_all(&data[..], 0).expect("encode zstd");
+        fs::write(output, compressed).expect("write zstd file");
     }
 }

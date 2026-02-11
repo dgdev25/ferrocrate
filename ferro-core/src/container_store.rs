@@ -42,6 +42,19 @@ pub struct ContainerRecord {
     pub stdout_path: String,
     pub stderr_path: String,
     pub status: String,
+    #[serde(default)]
+    pub netns: Option<String>,
+    #[serde(default)]
+    pub ip_address: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<PortMappingRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortMappingRecord {
+    pub host_port: u16,
+    pub container_port: u16,
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,6 +196,13 @@ mod tests {
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
+            netns: Some("ferro-c1".to_string()),
+            ip_address: Some("10.0.0.2".to_string()),
+            ports: vec![super::PortMappingRecord {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
         };
 
         store.put(&record).expect("store record");
@@ -218,6 +238,9 @@ mod tests {
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
+            netns: None,
+            ip_address: None,
+            ports: Vec::new(),
         };
 
         store.put(&record).expect("store record");

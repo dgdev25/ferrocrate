@@ -134,7 +134,7 @@
 ### 3.7 AI / Intelligence (ferro-mind + ruv)
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| AI-01 | WASM inference (pluggable) | Not Started | Not implemented. |
+| AI-01 | ~~WASM inference (pluggable)~~ | Done | Pluggable WASM inference registry and noop engine in `ferro-mind`. |
 | AI-02 | Predictive resource allocation | Not Started | Not implemented. |
 | AI-03 | Intelligent restart | Not Started | Not implemented. |
 | AI-04 | Cost-tiered routing | Not Started | Not implemented. |

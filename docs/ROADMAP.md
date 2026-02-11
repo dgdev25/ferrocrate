@@ -61,7 +61,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 ### CLI Foundation (ferro-cli)
 
 - [x] ~~Implement argument parsing infrastructure (clap or similar)~~
-- [ ] Implement `ferrocrate run <image> [cmd]` command
+- [x] ~~Implement `ferrocrate run <image> [cmd]` command~~
 - [ ] Implement `ferrocrate build <dockerfile> -t <tag>` command
 - [ ] Implement `ferrocrate images` command
 - [ ] Implement `ferrocrate containers` command

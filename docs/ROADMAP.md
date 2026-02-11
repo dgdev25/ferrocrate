@@ -31,7 +31,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 
 - [x] ~~Set up Rust project structure with 5-crate workspace (ferro-core, ferro-net, ferro-mind, ferro-compose, ferro-cli)~~
 - [x] ~~Implement OCI Runtime Spec v1.2 config.json parser~~
-- [ ] Implement Linux namespace creation (pid, network, ipc, uts, mount)
+- [x] ~~Implement Linux namespace creation (pid, network, ipc, uts, mount)~~
 - [ ] Implement cgroups v2 integration for resource limits (memory, cpu, pids)
 - [ ] Implement rootless container execution via user namespaces
 - [ ] Implement process lifecycle management (start, stop, pause, resume)

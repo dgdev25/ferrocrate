@@ -165,6 +165,12 @@ impl ContainerRuntime {
         Ok(self.store.list()?)
     }
 
+    pub fn inspect(&self, id: &str) -> Result<ContainerRecord, RuntimeError> {
+        self.store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))
+    }
+
     pub fn stop(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
         let record = self
             .store

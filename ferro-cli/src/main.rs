@@ -62,6 +62,9 @@ pub enum Commands {
     Logs {
         container: String,
     },
+    Inspect {
+        container: String,
+    },
     Stop {
         container: String,
         #[arg(long, default_value = "10")]
@@ -171,6 +174,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Volume { command } => handle_volume(&runtime_dir, command),
         Commands::Containers => handle_containers(&runtime),
         Commands::Logs { container } => handle_logs(&runtime, &container),
+        Commands::Inspect { container } => handle_inspect(&runtime, &container),
         Commands::Stop { container, timeout } => {
             handle_stop(&runtime, &container, timeout)
         }
@@ -367,6 +371,16 @@ fn handle_logs(runtime: &ContainerRuntime, container: &str) -> Result<(), String
     Ok(())
 }
 
+fn handle_inspect(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("inspect: container is required".to_string());
+    }
+    let record = runtime.inspect(container).map_err(|err| err.to_string())?;
+    let json = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
+    println!("{json}");
+    Ok(())
+}
+
 fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("stop: container is required".to_string());
@@ -547,7 +561,7 @@ fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), St
 mod tests {
     use super::{
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
-        handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
+        handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pull, handle_push, handle_rmi,
         handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
         parse_bind_mounts, parse_driver_opts, parse_tmpfs_mounts,
         validate_network_backend,
@@ -691,6 +705,15 @@ mod tests {
                 assert_eq!(container, "abc123");
                 assert_eq!(timeout, 10);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_inspect_command() {
+        let cli = Cli::parse_from(["ferrocrate", "inspect", "abc123"]);
+        match cli.command {
+            Commands::Inspect { container } => assert_eq!(container, "abc123"),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -921,6 +944,14 @@ mod tests {
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let err = handle_logs(&runtime, "").expect_err("container required");
         assert!(err.contains("logs: container is required"));
+    }
+
+    #[test]
+    fn inspect_handler_requires_container() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let err = handle_inspect(&runtime, "").expect_err("container required");
+        assert!(err.contains("inspect: container is required"));
     }
 
     #[test]

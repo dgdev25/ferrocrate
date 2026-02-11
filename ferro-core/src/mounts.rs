@@ -76,6 +76,24 @@ pub fn apply_tmpfs_mounts(rootfs: &Path, mounts: &[TmpfsMount]) -> Result<(), Mo
     Ok(())
 }
 
+pub fn apply_readonly_rootfs(rootfs: &Path) -> Result<(), MountError> {
+    mount(
+        Some(rootfs),
+        rootfs,
+        Some("bind"),
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )?;
+    mount(
+        Some(rootfs),
+        rootfs,
+        Some("bind"),
+        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+        None::<&str>,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BindMount, TmpfsMount, apply_bind_mounts};

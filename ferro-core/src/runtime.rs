@@ -3,7 +3,7 @@ use crate::container_store::{ContainerRecord, LocalContainerStore, ContainerStor
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
 use crate::image_fetch::resolve_layer_paths;
 use crate::rootfs::construct_rootfs;
-use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_tmpfs_mounts};
+use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use std::fs;
@@ -69,6 +69,7 @@ impl ContainerRuntime {
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
+        readonly_rootfs: bool,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         if cmd.is_empty() {
@@ -97,6 +98,9 @@ impl ContainerRuntime {
         }
         if !tmpfs_mounts.is_empty() {
             apply_tmpfs_mounts(&rootfs_dir, tmpfs_mounts)?;
+        }
+        if readonly_rootfs {
+            apply_readonly_rootfs(&rootfs_dir)?;
         }
 
         let child_id = spawn_process_with_logs(
@@ -337,6 +341,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                false,
             )
             .expect("run");
 
@@ -361,6 +366,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                false,
             )
             .expect("run");
 
@@ -393,6 +399,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                false,
             )
             .expect("run");
 
@@ -419,6 +426,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                false,
             )
             .expect("run");
 
@@ -460,6 +468,7 @@ mod tests {
                 Some(&limits),
                 &[],
                 &[],
+                false,
             )
             .expect("run");
 

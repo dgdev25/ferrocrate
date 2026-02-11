@@ -8,8 +8,8 @@ use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
     working_dir_from_config,
 };
-use crate::image_fetch::resolve_layer_paths;
-use crate::image_fetch::resolve_config_path;
+use crate::image_fetch::{resolve_layer_paths_with_store, resolve_config_path_with_store};
+use crate::image_store::LocalImageStore;
 use crate::observability::{log_event, make_event};
 use crate::rootfs::construct_rootfs_with_dedup;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
@@ -42,6 +42,8 @@ pub enum RuntimeError {
     Cgroup(#[from] crate::cgroups::CgroupError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("image store error: {0}")]
+    ImageStore(#[from] crate::image_store::ImageStoreError),
     #[error("exec error: {0}")]
     Exec(#[from] crate::container_exec::ContainerExecError),
     #[error("process lifecycle error: {0}")]
@@ -104,9 +106,58 @@ impl ContainerRuntime {
         network_mode: &str,
         network_backend: &str,
     ) -> Result<ContainerRecord, RuntimeError> {
+        let store = LocalImageStore::open(self.runtime_dir.join("images"))?;
+        self.run_with_store(
+            &store,
+            image,
+            cmd,
+            env,
+            labels,
+            annotations,
+            health,
+            restart_policy,
+            capabilities,
+            limits,
+            mounts,
+            tmpfs_mounts,
+            readonly_rootfs,
+            no_new_privs,
+            workdir,
+            user,
+            name,
+            port_mappings,
+            network_mode,
+            network_backend,
+        )
+    }
+
+    pub fn run_with_store(
+        &self,
+        store: &LocalImageStore,
+        image: &str,
+        cmd: &[String],
+        env: &[String],
+        labels: &HashMap<String, String>,
+        annotations: &HashMap<String, String>,
+        health: Option<HealthConfig>,
+        restart_policy: RestartPolicy,
+        capabilities: &[caps::Capability],
+        limits: Option<&ResourceLimits>,
+        mounts: &[BindMount],
+        tmpfs_mounts: &[TmpfsMount],
+        readonly_rootfs: bool,
+        no_new_privs: bool,
+        workdir: Option<&str>,
+        user: Option<&str>,
+        name: Option<&str>,
+        port_mappings: &[crate::container_store::PortMappingRecord],
+        network_mode: &str,
+        network_backend: &str,
+    ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         let mut config_json = None;
-        if let Ok(Some(config_path)) = resolve_config_path(&self.runtime_dir, image) {
+        if let Ok(Some(config_path)) = resolve_config_path_with_store(&self.runtime_dir, image, store)
+        {
             if let Ok(json) = fs::read_to_string(config_path) {
                 config_json = Some(json);
             }
@@ -147,8 +198,8 @@ impl ContainerRuntime {
         let stdout_path = log_dir.join("stdout.log");
         let stderr_path = log_dir.join("stderr.log");
 
-        let layer_paths = resolve_layer_paths(&self.runtime_dir, image)
-            .map_err(|_| RuntimeError::ImageMissing(image.to_string()))?;
+        let layer_paths = resolve_layer_paths_with_store(&self.runtime_dir, image, store)
+            .map_err(|err| RuntimeError::ImageMissing(format!("{image}: {err}")))?;
         let rootfs_dir = container_dir.join("rootfs");
         if !layer_paths.is_empty() {
             let cas_root = self
@@ -206,7 +257,7 @@ impl ContainerRuntime {
         }
 
         let health = if health.is_none() {
-            resolve_config_path(&self.runtime_dir, image)
+            resolve_config_path_with_store(&self.runtime_dir, image, store)
                 .ok()
                 .flatten()
                 .and_then(|path| fs::read_to_string(path).ok())

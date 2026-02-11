@@ -340,7 +340,7 @@ fn handle_run(
     if !publish.is_empty() && network != "bridge" {
         return Err("run: publish requires --network bridge".to_string());
     }
-    if !publish.is_empty() && effective_backend != "iptables" {
+    if !publish.is_empty() && effective_backend == "ebpf" {
         effective_backend = "iptables".to_string();
     }
     validate_network_backend(&effective_backend)?;

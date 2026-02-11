@@ -17,6 +17,7 @@ use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use ferro_net::bridge;
 use ferro_net::netns;
+use ferro_net::nftables::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule_cmd};
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
 use ferro_net::veth;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -815,9 +816,12 @@ fn setup_network(
         }
         return Ok((None, None));
     }
-    if !port_mappings.is_empty() && network_backend != "iptables" {
+    if !port_mappings.is_empty()
+        && network_backend != "iptables"
+        && network_backend != "nftables"
+    {
         return Err(RuntimeError::Network(
-            "port mapping requires network-backend=iptables".to_string(),
+            "port mapping requires network-backend=iptables or nftables".to_string(),
         ));
     }
 
@@ -882,16 +886,26 @@ fn setup_network(
     ))?;
 
     if !port_mappings.is_empty() {
+        if network_backend == "nftables" {
+            ensure_nftables_chains()?;
+        }
         for mapping in port_mappings {
             let map = ferro_net::portmap::PortMapping {
                 host_port: mapping.host_port,
                 container_port: mapping.container_port,
                 protocol: mapping.protocol.clone(),
             };
-            let prerouting = build_iptables_prerouting_cmd(&map, &container_ip);
-            let forward = build_iptables_forward_cmd(&map, &container_ip);
-            run_cmd(&prerouting)?;
-            run_cmd(&forward)?;
+            if network_backend == "nftables" {
+                let prerouting = build_nft_prerouting_cmd(&map, &container_ip);
+                let forward = build_nft_forward_cmd(&map, &container_ip);
+                run_cmd(&prerouting)?;
+                run_cmd(&forward)?;
+            } else {
+                let prerouting = build_iptables_prerouting_cmd(&map, &container_ip);
+                let forward = build_iptables_forward_cmd(&map, &container_ip);
+                run_cmd(&prerouting)?;
+                run_cmd(&forward)?;
+            }
         }
     }
 
@@ -915,9 +929,140 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
             replace_iptables_action(&mut forward, "-D");
             let _ = run_cmd(&prerouting);
             let _ = run_cmd(&forward);
+            let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
+            let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
+            let _ = run_cmd(&nft_prerouting);
+            let _ = run_cmd(&nft_forward);
         }
     }
     Ok(())
+}
+
+fn ensure_nftables_chains() -> Result<(), RuntimeError> {
+    let commands = vec![
+        vec![
+            "nft".to_string(),
+            "add".to_string(),
+            "table".to_string(),
+            "ip".to_string(),
+            "nat".to_string(),
+        ],
+        vec![
+            "nft".to_string(),
+            "add".to_string(),
+            "chain".to_string(),
+            "ip".to_string(),
+            "nat".to_string(),
+            "prerouting".to_string(),
+            "{".to_string(),
+            "type".to_string(),
+            "nat".to_string(),
+            "hook".to_string(),
+            "prerouting".to_string(),
+            "priority".to_string(),
+            "0".to_string(),
+            ";".to_string(),
+            "}".to_string(),
+        ],
+        vec![
+            "nft".to_string(),
+            "add".to_string(),
+            "table".to_string(),
+            "ip".to_string(),
+            "filter".to_string(),
+        ],
+        vec![
+            "nft".to_string(),
+            "add".to_string(),
+            "chain".to_string(),
+            "ip".to_string(),
+            "filter".to_string(),
+            "forward".to_string(),
+            "{".to_string(),
+            "type".to_string(),
+            "filter".to_string(),
+            "hook".to_string(),
+            "forward".to_string(),
+            "priority".to_string(),
+            "0".to_string(),
+            ";".to_string(),
+            "policy".to_string(),
+            "accept".to_string(),
+            ";".to_string(),
+            "}".to_string(),
+        ],
+    ];
+    for cmd in commands {
+        run_cmd_allow_exists(&cmd)?;
+    }
+    Ok(())
+}
+
+fn build_nft_prerouting_cmd(
+    mapping: &ferro_net::portmap::PortMapping,
+    container_ip: &str,
+) -> Vec<String> {
+    build_nft_add_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip))
+}
+
+fn build_nft_forward_cmd(
+    mapping: &ferro_net::portmap::PortMapping,
+    container_ip: &str,
+) -> Vec<String> {
+    build_nft_add_rule_cmd(&build_nft_forward_rule(mapping, container_ip))
+}
+
+fn build_nft_prerouting_delete_cmd(
+    mapping: &ferro_net::portmap::PortMapping,
+    container_ip: &str,
+) -> Vec<String> {
+    build_nft_delete_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip))
+}
+
+fn build_nft_forward_delete_cmd(
+    mapping: &ferro_net::portmap::PortMapping,
+    container_ip: &str,
+) -> Vec<String> {
+    build_nft_delete_rule_cmd(&build_nft_forward_rule(mapping, container_ip))
+}
+
+fn build_nft_prerouting_rule(
+    mapping: &ferro_net::portmap::PortMapping,
+    container_ip: &str,
+) -> NftRule {
+    NftRule {
+        family: "ip".to_string(),
+        table: "nat".to_string(),
+        chain: "prerouting".to_string(),
+        expr: vec![
+            mapping.protocol.clone(),
+            "dport".to_string(),
+            mapping.host_port.to_string(),
+            "dnat".to_string(),
+            "to".to_string(),
+            format!("{container_ip}:{}", mapping.container_port),
+        ],
+    }
+}
+
+fn build_nft_forward_rule(
+    mapping: &ferro_net::portmap::PortMapping,
+    container_ip: &str,
+) -> NftRule {
+    NftRule {
+        family: "ip".to_string(),
+        table: "filter".to_string(),
+        chain: "forward".to_string(),
+        expr: vec![
+            "ip".to_string(),
+            "daddr".to_string(),
+            container_ip.to_string(),
+            mapping.protocol.clone(),
+            "dport".to_string(),
+            mapping.container_port.to_string(),
+            "accept".to_string(),
+        ],
+    }
 }
 
 fn update_container_hosts(

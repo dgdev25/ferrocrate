@@ -22,7 +22,10 @@ impl ComposeProject {
     pub fn load(path: &Path) -> ComposeResult<Self> {
         let content = fs::read_to_string(path)
             .map_err(|err| ComposeError::Parse(err.to_string()))?;
-        let env = HashMap::new();
+        let mut env = load_env_file(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        for (key, value) in std::env::vars() {
+            env.insert(key, value);
+        }
         let compose = ComposeFile::parse(&content, &env)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -88,6 +91,34 @@ pub fn compose_ps(project: &ComposeProject) -> ComposeResult<Vec<String>> {
 
 pub fn compose_logs(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     Ok(project.services())
+}
+
+fn load_env_file(dir: &Path) -> ComposeResult<HashMap<String, String>> {
+    let mut env = HashMap::new();
+    let env_path = dir.join(".env");
+    if !env_path.exists() {
+        return Ok(env);
+    }
+
+    let content =
+        fs::read_to_string(&env_path).map_err(|err| ComposeError::Parse(err.to_string()))?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (key, raw_value) = trimmed
+            .split_once('=')
+            .ok_or_else(|| ComposeError::Parse(format!("invalid .env entry: {trimmed}")))?;
+        let mut value = raw_value.trim().to_string();
+        if (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''))
+        {
+            value = value[1..value.len() - 1].to_string();
+        }
+        env.insert(key.trim().to_string(), value);
+    }
+    Ok(env)
 }
 
 #[cfg(test)]
@@ -169,5 +200,26 @@ services:
     #[test]
     fn compose_command_enum() {
         assert_eq!(ComposeCommand::Up, ComposeCommand::Up);
+    }
+
+    #[test]
+    fn compose_loads_dotenv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("compose.yaml");
+        fs::write(dir.path().join(".env"), "IMAGE=nginx:latest\n").expect("write env");
+        let content = r#"
+version: "3.8"
+services:
+  web:
+    image: ${IMAGE}
+"#;
+        fs::write(&path, content).expect("write compose");
+        let project = ComposeProject::load(&path).expect("load");
+        let image = project
+            .compose
+            .services
+            .get("web")
+            .and_then(|svc| svc.image.clone());
+        assert_eq!(image.as_deref(), Some("nginx:latest"));
     }
 }

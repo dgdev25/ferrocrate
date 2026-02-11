@@ -49,6 +49,8 @@ pub enum Commands {
         health_retries: Option<u32>,
         #[arg(long = "health-start-period")]
         health_start_period: Option<u64>,
+        #[arg(long = "restart", default_value = "no")]
+        restart_policy: String,
         #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
@@ -170,6 +172,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             health_timeout,
             health_retries,
             health_start_period,
+            restart_policy,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -193,6 +196,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 health_timeout,
                 health_retries,
                 health_start_period,
+                &restart_policy,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -240,6 +244,7 @@ fn handle_run(
     health_timeout: Option<u64>,
     health_retries: Option<u32>,
     health_start_period: Option<u64>,
+    restart_policy: &str,
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -260,6 +265,7 @@ fn handle_run(
         health_retries,
         health_start_period,
     )?;
+    let restart_policy = parse_restart_policy(restart_policy)?;
     let record = runtime
         .run(
             image,
@@ -268,6 +274,7 @@ fn handle_run(
             &labels,
             &annotations,
             health,
+            restart_policy,
             limits.as_ref(),
             &mounts,
             &tmpfs,
@@ -596,6 +603,16 @@ fn build_health_config(
     }))
 }
 
+fn parse_restart_policy(policy: &str) -> Result<ferro_core::container_store::RestartPolicy, String> {
+    match policy {
+        "no" => Ok(ferro_core::container_store::RestartPolicy::No),
+        "on-failure" => Ok(ferro_core::container_store::RestartPolicy::OnFailure),
+        "always" => Ok(ferro_core::container_store::RestartPolicy::Always),
+        "unless-stopped" => Ok(ferro_core::container_store::RestartPolicy::UnlessStopped),
+        _ => Err("run: restart must be no|on-failure|always|unless-stopped".to_string()),
+    }
+}
+
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -681,7 +698,7 @@ mod tests {
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pull, handle_push, handle_rmi,
         handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
         build_health_config, parse_bind_mounts, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_tmpfs_mounts,
+        parse_restart_policy, parse_tmpfs_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -708,6 +725,7 @@ mod tests {
                 health_timeout,
                 health_retries,
                 health_start_period,
+                restart_policy,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -728,6 +746,7 @@ mod tests {
                 assert!(health_timeout.is_none());
                 assert!(health_retries.is_none());
                 assert!(health_start_period.is_none());
+                assert_eq!(restart_policy, "no");
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -1010,6 +1029,7 @@ mod tests {
             None,
             None,
             None,
+            "no",
             None,
             None,
             None,
@@ -1047,6 +1067,12 @@ mod tests {
     fn health_requires_cmd_when_options_set() {
         let err = build_health_config(None, Some(10), None, None, None).expect_err("missing cmd");
         assert!(err.contains("health-cmd"));
+    }
+
+    #[test]
+    fn rejects_invalid_restart_policy() {
+        let err = parse_restart_policy("nope").expect_err("invalid");
+        assert!(err.contains("restart"));
     }
 
     #[test]

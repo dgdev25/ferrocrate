@@ -95,7 +95,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [ ] Merge all Phase 1 code
 - [ ] Create v0.1.0 release tag
 - [x] ~~Document basic usage in README~~
-- [ ] Publish initial documentation
+- [x] ~~Publish initial documentation~~
 
 ---
 

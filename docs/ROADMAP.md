@@ -56,7 +56,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement layer mounting and merging~~
 - [x] ~~Implement container rootfs preparation~~
 - [x] ~~Implement mount cleanup on container exit~~
-- [ ] Create integration tests for storage operations
+- [x] ~~Create integration tests for storage operations~~
 
 ### CLI Foundation (ferro-cli)
 

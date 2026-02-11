@@ -92,7 +92,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 
 **Deliverable**: Can run simple OCI containers rootlessly via CLI
 
-- [ ] Merge all Phase 1 code
+- [x] ~~Merge all Phase 1 code~~
 - [ ] Create v0.1.0 release tag
 - [x] ~~Document basic usage in README~~
 - [x] ~~Publish initial documentation~~

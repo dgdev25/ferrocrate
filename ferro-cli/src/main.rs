@@ -118,6 +118,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         } => {
             handle_run(
                 &runtime,
+                &image_store,
                 &image,
                 &cmd,
                 &network_backend,
@@ -150,6 +151,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
 
 fn handle_run(
     runtime: &ContainerRuntime,
+    store: &LocalImageStore,
     image: &str,
     cmd: &[String],
     network_backend: &str,
@@ -159,6 +161,7 @@ fn handle_run(
     pids_max: Option<u64>,
 ) -> Result<(), String> {
     validate_network_backend(network_backend)?;
+    ensure_image_present(store, image)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let record = runtime
         .run(image, cmd, limits.as_ref())
@@ -167,6 +170,32 @@ fn handle_run(
         "run: container_id={} pid={} network_backend={}",
         record.id, record.pid, network_backend
     );
+    Ok(())
+}
+
+fn ensure_image_present(store: &LocalImageStore, image: &str) -> Result<(), String> {
+    parse_image_reference(image).map_err(|err| err.to_string())?;
+    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
+    let existing = resolve_reference(store, &canonical)
+        .map_err(|err| err.to_string())?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let client = RegistryClient::new().map_err(|err| err.to_string())?;
+    let auth = resolve_registry_auth(&canonical).map_err(|err| err.to_string())?;
+    let manifest_json = client
+        .pull_manifest_raw(&canonical, auth.as_ref())
+        .map_err(|err| err.to_string())?;
+    let manifest = parse_image_manifest(&manifest_json).map_err(|err| err.to_string())?;
+    store
+        .put_reference(
+            &canonical,
+            &manifest.config.digest,
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            &manifest_json,
+        )
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -330,22 +359,8 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
 }
 
 fn handle_pull(store: &LocalImageStore, image: &str) -> Result<(), String> {
-    parse_image_reference(image).map_err(|err| err.to_string())?;
-    let client = RegistryClient::new().map_err(|err| err.to_string())?;
-    let auth = resolve_registry_auth(image).map_err(|err| err.to_string())?;
-    let manifest_json = client
-        .pull_manifest_raw(image, auth.as_ref())
-        .map_err(|err| err.to_string())?;
-    let manifest = parse_image_manifest(&manifest_json).map_err(|err| err.to_string())?;
+    ensure_image_present(store, image)?;
     let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
-    store
-        .put_reference(
-            &canonical,
-            &manifest.config.digest,
-            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-            &manifest_json,
-        )
-        .map_err(|err| err.to_string())?;
     println!("pull: image={canonical}");
     Ok(())
 }
@@ -570,7 +585,8 @@ mod tests {
     fn run_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_run(&runtime, "", &[], "ebpf", None, None, None, None)
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let err = handle_run(&runtime, &store, "", &[], "ebpf", None, None, None, None)
             .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
     }

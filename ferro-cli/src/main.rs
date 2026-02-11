@@ -53,10 +53,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
         Commands::Images => handle_images(),
         Commands::Containers => handle_containers(),
-        Commands::Logs { container } => {
-            println!("logs: container={container}");
-            Ok(())
-        }
+        Commands::Logs { container } => handle_logs(&container),
         Commands::Exec { container, cmd } => {
             if cmd.is_empty() {
                 return Err("exec: command is required".to_string());
@@ -111,9 +108,20 @@ fn handle_containers() -> Result<(), String> {
     Ok(())
 }
 
+fn handle_logs(container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("logs: container is required".to_string());
+    }
+    println!("logs: container={container}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, dispatch, handle_build, handle_containers, handle_images, handle_run};
+    use super::{
+        Cli, Commands, dispatch, handle_build, handle_containers, handle_images, handle_logs,
+        handle_run,
+    };
     use clap::Parser;
 
     #[test]
@@ -198,5 +206,11 @@ mod tests {
     #[test]
     fn containers_handler_runs() {
         handle_containers().expect("containers handler should succeed");
+    }
+
+    #[test]
+    fn logs_handler_requires_container() {
+        let err = handle_logs("").expect_err("container required");
+        assert!(err.contains("logs: container is required"));
     }
 }

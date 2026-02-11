@@ -52,10 +52,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Run { image, cmd } => handle_run(&image, &cmd),
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
         Commands::Images => handle_images(),
-        Commands::Containers => {
-            println!("containers: not implemented");
-            Ok(())
-        }
+        Commands::Containers => handle_containers(),
         Commands::Logs { container } => {
             println!("logs: container={container}");
             Ok(())
@@ -109,9 +106,14 @@ fn handle_images() -> Result<(), String> {
     Ok(())
 }
 
+fn handle_containers() -> Result<(), String> {
+    println!("containers: no entries (stub)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, dispatch, handle_build, handle_images, handle_run};
+    use super::{Cli, Commands, dispatch, handle_build, handle_containers, handle_images, handle_run};
     use clap::Parser;
 
     #[test]
@@ -191,5 +193,10 @@ mod tests {
     #[test]
     fn images_handler_runs() {
         handle_images().expect("images handler should succeed");
+    }
+
+    #[test]
+    fn containers_handler_runs() {
+        handle_containers().expect("containers handler should succeed");
     }
 }

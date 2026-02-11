@@ -89,6 +89,10 @@ pub enum Commands {
         #[arg(long)]
         rm: bool,
         #[arg(long)]
+        bridge_cidr: Option<String>,
+        #[arg(long)]
+        bridge_name: Option<String>,
+        #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
         cpu_quota: Option<u64>,
@@ -260,6 +264,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
             health_start_period,
             restart_policy,
             rm,
+            bridge_cidr,
+            bridge_name,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -294,6 +300,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 health_start_period,
                 &restart_policy,
                 rm,
+                bridge_cidr.as_deref(),
+                bridge_name.as_deref(),
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -378,11 +386,15 @@ fn handle_run(
     health_start_period: Option<u64>,
     restart_policy: &str,
     rm: bool,
+    bridge_cidr: Option<&str>,
+    bridge_name: Option<&str>,
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
     pids_max: Option<u64>,
 ) -> Result<(), String> {
+    let _bridge_cidr_guard = ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", bridge_cidr);
+    let _bridge_name_guard = ScopedEnv::set("FERROCRATE_BRIDGE_NAME", bridge_name);
     validate_network_mode(network)?;
     let mut effective_backend = network_backend.to_string();
     if !publish.is_empty() && network != "bridge" {
@@ -455,6 +467,40 @@ fn handle_run(
             .map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+struct ScopedEnv {
+    key: String,
+    original: Option<String>,
+}
+
+impl ScopedEnv {
+    fn set(key: &str, value: Option<&str>) -> Self {
+        let original = std::env::var(key).ok();
+        if let Some(value) = value {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+        Self {
+            key: key.to_string(),
+            original,
+        }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        if let Some(value) = &self.original {
+            unsafe {
+                std::env::set_var(&self.key, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(&self.key);
+            }
+        }
+    }
 }
 
 fn wait_for_container_exit(runtime: &ContainerRuntime, id: &str) -> Result<(), String> {
@@ -1405,6 +1451,8 @@ fn run_compose_service(
             None,
             None,
             None,
+            None,
+            None,
         )?;
     }
     Ok(())
@@ -1737,6 +1785,8 @@ fn handle_docker_compat_connection(
                 None,
                 "no",
                 false,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -2381,6 +2431,8 @@ mod tests {
             None,
             "no",
             false,
+            None,
+            None,
             None,
             None,
             None,

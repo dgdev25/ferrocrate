@@ -87,8 +87,8 @@
 | NET-01 | ~~Bridge networking~~ | Done | Rootful bridge/netns/veth; rootless uses unshare + slirp4netns by default. |
 | NET-02 | ~~Host networking~~ | Done | `--network host` skips netns and runs on host network. |
 | NET-03 | ~~None networking~~ | Done | `--network none` isolates netns (rootful via ip netns; rootless via unshare). |
-| NET-04 | Container-to-container DNS | Partial | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers; no DNS server yet. |
-| NET-05 | Custom networks (subnets) | Partial | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME`. |
+| NET-04 | ~~Container-to-container DNS~~ | Done | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers. |
+| NET-05 | ~~Custom networks (subnets)~~ | Done | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME` or CLI flags. |
 | NET-06 | ~~eBPF + iptables/nftables fallback~~ | Done | eBPF mode falls back to iptables/nftables for port mappings. |
 | NET-07 | WireGuard overlay | Not Started | Not implemented. |
 | NET-08 | ~~Port mapping~~ | Done | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |

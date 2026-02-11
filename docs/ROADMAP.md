@@ -224,7 +224,7 @@ Each phase must complete with:
 - [x] ~~Implement explicit `--network-backend=nftables` flag~~
 - [x] ~~Implement nftables rule cleanup on container exit~~
 - [x] ~~Create nftables compatibility tests~~
-- [ ] Test on kernels 3.13+ (minimum support)
+- [x] ~~Test on kernels 3.13+ (minimum support)~~
 
 ### Network Integration with Rootless
 

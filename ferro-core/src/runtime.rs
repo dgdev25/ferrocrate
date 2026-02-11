@@ -4,7 +4,7 @@ use crate::container_store::{
 };
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
-use crate::image_config::healthcheck_from_config;
+use crate::image_config::{command_from_config, healthcheck_from_config};
 use crate::image_fetch::resolve_layer_paths;
 use crate::image_fetch::resolve_config_path;
 use crate::observability::{log_event, make_event};
@@ -87,7 +87,17 @@ impl ContainerRuntime {
         no_new_privs: bool,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
-        if cmd.is_empty() {
+        let mut command = cmd.to_vec();
+        if command.is_empty() {
+            if let Ok(Some(config_path)) = resolve_config_path(&self.runtime_dir, image) {
+                if let Ok(json) = fs::read_to_string(config_path) {
+                    if let Some(from_config) = command_from_config(&json) {
+                        command = from_config;
+                    }
+                }
+            }
+        }
+        if command.is_empty() {
             return Err(RuntimeError::MissingCommand);
         }
 
@@ -119,7 +129,7 @@ impl ContainerRuntime {
         }
 
         let child_id = spawn_process_with_logs(
-            cmd,
+            &command,
             env,
             &stdout_path,
             &stderr_path,
@@ -153,7 +163,7 @@ impl ContainerRuntime {
             id: container_id.clone(),
             pid: child_id,
             image: image.to_string(),
-            command: cmd.to_vec(),
+            command: command.clone(),
             env: env.to_vec(),
             labels: labels.clone(),
             annotations: annotations.clone(),
@@ -792,6 +802,40 @@ mod tests {
         assert!(logs.contains("hi"));
     }
 
+    #[test]
+    fn run_uses_image_config_command_when_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
+        write_image_config(
+            temp.path(),
+            r#"{"config":{"Entrypoint":["/bin/sh","-c"],"Cmd":["echo hi"]}}"#,
+        );
+
+        let record = runtime
+            .run(
+                "alpine:latest",
+                &[],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+            )
+            .expect("run");
+
+        assert_eq!(
+            record.command,
+            vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()]
+        );
+    }
+
     fn wait_for_logs(runtime: &ContainerRuntime, id: &str) -> Result<String, super::RuntimeError> {
         let mut attempts = 0;
         loop {
@@ -988,5 +1032,14 @@ mod tests {
                 manifest_json,
             )
             .expect("seed manifest");
+    }
+
+    fn write_image_config(runtime_dir: &std::path::Path, json: &str) {
+        let config_root = runtime_dir.join("images").join("configs");
+        std::fs::create_dir_all(&config_root).expect("configs dir");
+        let config_path = config_root.join(
+            "sha256_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        std::fs::write(config_path, json).expect("write config");
     }
 }

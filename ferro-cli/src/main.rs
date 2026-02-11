@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
+use ferro_core::image_store::LocalImageStore;
 use ferro_core::registry::parse_image_reference;
+use ferro_core::runtime::ContainerRuntime;
 use std::process;
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -48,25 +51,28 @@ fn main() {
 }
 
 fn dispatch(command: Commands) -> Result<(), String> {
+    let runtime_dir = runtime_dir();
+    let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
+    let image_store = LocalImageStore::open(runtime_dir.join("images"))
+        .map_err(|err| err.to_string())?;
+
     match command {
-        Commands::Run { image, cmd } => handle_run(&image, &cmd),
+        Commands::Run { image, cmd } => handle_run(&runtime, &image, &cmd),
         Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
-        Commands::Images => handle_images(),
-        Commands::Containers => handle_containers(),
-        Commands::Logs { container } => handle_logs(&container),
-        Commands::Exec { container, cmd } => handle_exec(&container, &cmd),
+        Commands::Images => handle_images(&image_store),
+        Commands::Containers => handle_containers(&runtime),
+        Commands::Logs { container } => handle_logs(&runtime, &container),
+        Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image } => handle_pull(&image),
         Commands::Push { image } => handle_push(&image),
     }
 }
 
-fn handle_run(image: &str, cmd: &[String]) -> Result<(), String> {
-    parse_image_reference(image).map_err(|err| err.to_string())?;
-    if cmd.is_empty() {
-        println!("run: image={image} cmd=<default>");
-    } else {
-        println!("run: image={image} cmd={}", cmd.join(" "));
-    }
+fn handle_run(runtime: &ContainerRuntime, image: &str, cmd: &[String]) -> Result<(), String> {
+    let record = runtime
+        .run(image, cmd)
+        .map_err(|err| err.to_string())?;
+    println!("run: container_id={} pid={}", record.id, record.pid);
     Ok(())
 }
 
@@ -84,32 +90,58 @@ fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_images() -> Result<(), String> {
-    println!("images: no entries (stub)");
+fn handle_images(store: &LocalImageStore) -> Result<(), String> {
+    let records = store.list_references().map_err(|err| err.to_string())?;
+    if records.is_empty() {
+        println!("images: no entries");
+        return Ok(());
+    }
+    for record in records {
+        println!("{} {}", record.reference, record.digest);
+    }
     Ok(())
 }
 
-fn handle_containers() -> Result<(), String> {
-    println!("containers: no entries (stub)");
+fn handle_containers(runtime: &ContainerRuntime) -> Result<(), String> {
+    let records = runtime.list().map_err(|err| err.to_string())?;
+    if records.is_empty() {
+        println!("containers: no entries");
+        return Ok(());
+    }
+    for record in records {
+        println!(
+            "{} {} {}",
+            record.id,
+            record.image,
+            record.status
+        );
+    }
     Ok(())
 }
 
-fn handle_logs(container: &str) -> Result<(), String> {
+fn handle_logs(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
     }
-    println!("logs: container={container}");
+    let logs = runtime.logs(container).map_err(|err| err.to_string())?;
+    print!("{logs}");
     Ok(())
 }
 
-fn handle_exec(container: &str, cmd: &[String]) -> Result<(), String> {
+fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
     }
     if cmd.is_empty() {
         return Err("exec: command is required".to_string());
     }
-    println!("exec: container={container} cmd={}", cmd.join(" "));
+    let result = runtime.exec(container, cmd).map_err(|err| err.to_string())?;
+    if !result.stdout.is_empty() {
+        print!("{}", result.stdout);
+    }
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
     Ok(())
 }
 
@@ -132,6 +164,8 @@ mod tests {
         handle_logs, handle_pull, handle_push, handle_run,
     };
     use clap::Parser;
+    use ferro_core::image_store::LocalImageStore;
+    use ferro_core::runtime::ContainerRuntime;
 
     #[test]
     fn parses_run_command() {
@@ -181,12 +215,15 @@ mod tests {
 
     #[test]
     fn run_handler_rejects_invalid_image() {
-        let err = handle_run("", &[]).expect_err("invalid reference");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let err = handle_run(&runtime, "", &[]).expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
     }
 
     #[test]
     fn dispatch_exec_requires_command() {
+        let _guard = TestRuntimeDir::new();
         let err = dispatch(Commands::Exec {
             container: "c1".to_string(),
             cmd: vec![],
@@ -209,26 +246,35 @@ mod tests {
 
     #[test]
     fn images_handler_runs() {
-        handle_images().expect("images handler should succeed");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        handle_images(&store).expect("images handler should succeed");
     }
 
     #[test]
     fn containers_handler_runs() {
-        handle_containers().expect("containers handler should succeed");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        handle_containers(&runtime).expect("containers handler should succeed");
     }
 
     #[test]
     fn logs_handler_requires_container() {
-        let err = handle_logs("").expect_err("container required");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let err = handle_logs(&runtime, "").expect_err("container required");
         assert!(err.contains("logs: container is required"));
     }
 
     #[test]
     fn exec_handler_requires_container_and_command() {
-        let err = handle_exec("", &["/bin/sh".to_string()]).expect_err("container required");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()])
+            .expect_err("container required");
         assert!(err.contains("exec: container is required"));
 
-        let err = handle_exec("c1", &[]).expect_err("command required");
+        let err = handle_exec(&runtime, "c1", &[]).expect_err("command required");
         assert!(err.contains("exec: command is required"));
     }
 
@@ -243,4 +289,44 @@ mod tests {
         let err = handle_push("").expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
+
+    struct TestRuntimeDir {
+        original: Option<String>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl TestRuntimeDir {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let original = std::env::var("FERROCRATE_RUNTIME_DIR").ok();
+            unsafe {
+                std::env::set_var("FERROCRATE_RUNTIME_DIR", dir.path());
+            }
+            Self { original, _dir: dir }
+        }
+    }
+
+    impl Drop for TestRuntimeDir {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                unsafe {
+                    std::env::set_var("FERROCRATE_RUNTIME_DIR", value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+                }
+            }
+        }
+    }
+}
+
+fn runtime_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("FERROCRATE_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".ferrocrate");
+    }
+    PathBuf::from(".ferrocrate")
 }

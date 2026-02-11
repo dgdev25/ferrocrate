@@ -69,7 +69,7 @@
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | IMG-01 | ~~Pull images from OCI registries~~ | Done | Docker config auth + credential helpers + Bearer token challenge; supports OCI index/docker manifest list selection; handles digest references. |
-| IMG-02 | Push images to OCI registries | Partial | Docker config auth + credential helpers + Bearer token challenge; tests cover docker.io/ghcr/custom registry configs. |
+| IMG-02 | ~~Push images to OCI registries~~ | Done | Push uploads config + layers + manifest using stored media type with auth support. |
 | IMG-03 | Content-addressable store (Blake3) | Partial | Blake3 CAS for blobs + file-level hardlink dedup during rootfs assembly; storage reduction not validated. |
 | IMG-04 | Zstd compression for layers | Partial | `build --compress zstd` emits zstd layers; other pipelines not wired. |
 | IMG-05 | Lazy image pulling | Partial | `pull --lazy` stores manifest/config; missing blobs fetched on demand. |

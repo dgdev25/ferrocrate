@@ -157,13 +157,31 @@ impl RegistryClient {
         manifest_json: &str,
         auth: Option<&RegistryAuth>,
     ) -> Result<(), RegistryError> {
+        self.push_manifest_raw_with_media_type(
+            image,
+            manifest_json,
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            auth,
+        )
+    }
+
+    pub fn push_manifest_raw_with_media_type(
+        &self,
+        image: &str,
+        manifest_json: &str,
+        media_type: &str,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<(), RegistryError> {
         parse_image_manifest(manifest_json)?;
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
+        let content_type = HeaderValue::from_str(media_type).map_err(|err| {
+            RegistryError::InvalidReference(format!("content-type: {err}"))
+        })?;
         let response = self.send_request_with_auth(
             Method::PUT,
             &url,
-            vec![(CONTENT_TYPE, HeaderValue::from_static(OCI_IMAGE_MANIFEST_MEDIA_TYPE))],
+            vec![(CONTENT_TYPE, content_type)],
             Some(manifest_json.as_bytes().to_vec()),
             auth,
         )?;

@@ -1246,6 +1246,13 @@ fn run_compose_service(
     let publish = compose_service_ports(service);
     let bind_mounts = compose_service_mounts(volume_store, service)?;
     let restart = service.restart.as_deref().unwrap_or("no");
+    let restart = match restart {
+        "always" => "always",
+        "unless-stopped" => "unless-stopped",
+        "no" => "no",
+        "on-failure" => "on-failure",
+        _ => "no",
+    };
     let replicas = service
         .deploy
         .as_ref()

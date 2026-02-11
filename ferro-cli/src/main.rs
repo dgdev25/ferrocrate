@@ -6,6 +6,7 @@ use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{RegistryClient, parse_image_reference};
 use ferro_core::runtime::ContainerRuntime;
+use ferro_core::volume_store::LocalVolumeStore;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
@@ -17,10 +18,14 @@ use ferro_compose::{
 };
 use serde::Serialize;
 use owo_colors::OwoColorize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::io::{Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -172,11 +177,20 @@ pub enum Commands {
         #[command(subcommand)]
         command: ComposeCommands,
     },
+    Daemon {
+        #[arg(long, default_value = "/var/run/ferrocrate.sock")]
+        socket: String,
+        #[arg(long)]
+        docker_compat: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ComposeCommands {
-    Up,
+    Up {
+        #[arg(long)]
+        profile: Vec<String>,
+    },
     Down,
     Ps,
     Logs,
@@ -308,8 +322,20 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
         Commands::Compose { file, command } => {
-            handle_compose(&runtime, &image_store, file.as_deref(), command)
+            let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                .map_err(|err| err.to_string())?;
+            handle_compose(
+                &runtime,
+                &image_store,
+                &volume_store,
+                file.as_deref(),
+                command,
+            )
         }
+        Commands::Daemon {
+            socket,
+            docker_compat,
+        } => run_daemon(&runtime, &image_store, &socket, docker_compat),
     }
 }
 
@@ -1046,6 +1072,7 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
 fn handle_compose(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
     file: Option<&str>,
     command: ComposeCommands,
 ) -> Result<(), String> {
@@ -1053,9 +1080,13 @@ fn handle_compose(
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     match command {
-        ComposeCommands::Up => {
+        ComposeCommands::Up { profile } => {
             let order = compose_up(&project).map_err(|err| err.to_string())?;
+            let enabled = build_compose_enabled_set(&project, &profile)?;
             for name in order {
+                if !enabled.contains(&name) {
+                    continue;
+                }
                 let service = project
                     .compose
                     .services
@@ -1064,15 +1095,28 @@ fn handle_compose(
                 if let Some(depends_on) = service.depends_on.as_ref() {
                     wait_for_compose_dependencies(runtime, depends_on)?;
                 }
-                run_compose_service(runtime, store, project_dir, &name, service)?;
+                run_compose_service(
+                    runtime,
+                    store,
+                    volume_store,
+                    project_dir,
+                    &name,
+                    service,
+                )?;
             }
         }
         ComposeCommands::Down => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
+            let containers = runtime.list().map_err(|err| err.to_string())?;
             for name in order {
-                if let Ok(id) = resolve_container_id(runtime, &name) {
-                    let _ = runtime.stop(&id, std::time::Duration::from_secs(5));
-                    let _ = runtime.remove(&id);
+                for record in containers.iter().filter(|rec| {
+                    rec.name
+                        .as_deref()
+                        .map(|val| val == name || val.starts_with(&format!("{name}-")))
+                        .unwrap_or(false)
+                }) {
+                    let _ = runtime.stop(&record.id, std::time::Duration::from_secs(5));
+                    let _ = runtime.remove(&record.id);
                 }
             }
         }
@@ -1086,6 +1130,40 @@ fn handle_compose(
         }
     }
     Ok(())
+}
+
+fn build_compose_enabled_set(
+    project: &ComposeProject,
+    profiles: &[String],
+) -> Result<HashSet<String>, String> {
+    let mut enabled = HashSet::new();
+    for (name, service) in &project.compose.services {
+        let active = match service.profiles.as_ref() {
+            None => true,
+            Some(list) if list.is_empty() => true,
+            Some(list) => profiles.iter().any(|profile| list.contains(profile)),
+        };
+        if active {
+            enabled.insert(name.clone());
+        }
+    }
+
+    for (name, service) in &project.compose.services {
+        if !enabled.contains(name) {
+            continue;
+        }
+        if let Some(depends_on) = &service.depends_on {
+            for dep in depends_on.iter() {
+                if !enabled.contains(dep) {
+                    return Err(format!(
+                        "compose: service {name} depends on disabled profile service {dep}"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(enabled)
 }
 
 fn wait_for_compose_dependencies(
@@ -1146,6 +1224,7 @@ fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<
 fn run_compose_service(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
     project_dir: &Path,
     name: &str,
     service: &ComposeService,
@@ -1154,44 +1233,75 @@ fn run_compose_service(
         .image
         .as_deref()
         .ok_or_else(|| format!("compose: service {name} missing image"))?;
+    if let Some(networks) = service.networks.as_ref() {
+        if networks.iter().any(|net| net != "default") {
+            return Err(format!(
+                "compose: custom networks not supported for service {name}"
+            ));
+        }
+    }
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
     let publish = compose_service_ports(service);
-    let bind_mounts = compose_service_mounts(service);
+    let bind_mounts = compose_service_mounts(volume_store, service)?;
     let restart = service.restart.as_deref().unwrap_or("no");
+    let replicas = service
+        .deploy
+        .as_ref()
+        .and_then(|deploy| deploy.replicas)
+        .unwrap_or(1);
 
-    handle_run(
-        runtime,
-        store,
-        image,
-        &cmd,
-        "bridge",
-        "ebpf",
-        &bind_mounts,
-        &[],
-        false,
-        false,
-        &env,
-        &labels,
-        &[],
-        &[],
-        service.entrypoint.as_deref(),
-        None,
-        None,
-        Some(name),
-        &publish,
-        None,
-        None,
-        None,
-        None,
-        None,
-        restart,
-        None,
-        None,
-        None,
-        None,
-    )
+    for idx in 1..=replicas {
+        let instance_name = if replicas == 1 {
+            name.to_string()
+        } else {
+            format!("{name}-{idx}")
+        };
+        let network_mode = match service.network_mode.as_deref() {
+            None => "bridge",
+            Some("bridge") => "bridge",
+            Some("host") => "host",
+            Some("none") => "none",
+            Some(other) => {
+                return Err(format!(
+                    "compose: unsupported network_mode {other} for service {name}"
+                ))
+            }
+        };
+        handle_run(
+            runtime,
+            store,
+            image,
+            &cmd,
+            network_mode,
+            "ebpf",
+            &bind_mounts,
+            &[],
+            false,
+            false,
+            &env,
+            &labels,
+            &[],
+            &[],
+            service.entrypoint.as_deref(),
+            None,
+            None,
+            Some(&instance_name),
+            &publish,
+            None,
+            None,
+            None,
+            None,
+            None,
+            restart,
+            None,
+            None,
+            None,
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 fn compose_service_command(service: &ComposeService) -> Vec<String> {
@@ -1267,17 +1377,455 @@ fn compose_service_ports(service: &ComposeService) -> Vec<String> {
     out
 }
 
-fn compose_service_mounts(service: &ComposeService) -> Vec<String> {
+fn compose_service_mounts(
+    volume_store: &LocalVolumeStore,
+    service: &ComposeService,
+) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     if let Some(volumes) = service.volumes.as_ref() {
         for entry in volumes {
-            let source = entry.split(':').next().unwrap_or("");
+            let mut parts = entry.split(':');
+            let source = parts.next().unwrap_or("");
+            let target = parts.next().unwrap_or("");
+            if source.is_empty() || target.is_empty() {
+                return Err(format!("compose: invalid volume entry {entry}"));
+            }
             if source.starts_with('.') || source.contains('/') {
                 out.push(entry.clone());
+                continue;
+            }
+            let record = match volume_store.get(source).map_err(|err| err.to_string())? {
+                Some(record) => record,
+                None => volume_store.create(source).map_err(|err| err.to_string())?,
+            };
+            let mode = parts.next().unwrap_or("");
+            if mode.is_empty() {
+                out.push(format!("{}:{target}", record.path));
+            } else {
+                out.push(format!("{}:{target}:{mode}", record.path));
             }
         }
     }
+    Ok(out)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DockerCreateRequest {
+    #[serde(rename = "Image")]
+    image: String,
+    #[serde(rename = "Cmd")]
+    cmd: Option<Vec<String>>,
+    #[serde(rename = "Env")]
+    env: Option<Vec<String>>,
+    #[serde(rename = "Entrypoint")]
+    entrypoint: Option<Vec<String>>,
+    #[serde(rename = "WorkingDir")]
+    working_dir: Option<String>,
+    #[serde(rename = "User")]
+    user: Option<String>,
+    #[serde(rename = "Labels")]
+    labels: Option<HashMap<String, String>>,
+    #[serde(rename = "HostConfig")]
+    host_config: Option<DockerHostConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DockerHostConfig {
+    #[serde(rename = "Binds")]
+    binds: Option<Vec<String>>,
+    #[serde(rename = "PortBindings")]
+    port_bindings: Option<HashMap<String, Vec<DockerPortBinding>>>,
+    #[serde(rename = "NetworkMode")]
+    network_mode: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DockerPortBinding {
+    #[serde(rename = "HostPort")]
+    host_port: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DockerCreateSpec {
+    image: String,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    labels: Vec<String>,
+    binds: Vec<String>,
+    publish: Vec<String>,
+    workdir: Option<String>,
+    user: Option<String>,
+    name: Option<String>,
+    network_mode: String,
+}
+
+#[derive(Default)]
+struct DockerCompatState {
+    next_id: AtomicU64,
+    pending: Mutex<HashMap<String, DockerCreateSpec>>,
+}
+
+fn run_daemon(
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    socket: &str,
+    docker_compat: bool,
+) -> Result<(), String> {
+    let _ = (runtime, store);
+    if !docker_compat {
+        return Err("daemon: --docker-compat is required".to_string());
+    }
+    let socket_path = Path::new(socket);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path).map_err(|err| err.to_string())?;
+    }
+
+    let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
+    let runtime_dir = runtime_dir();
+    let runtime_dir = Arc::new(runtime_dir);
+    let state = Arc::new(DockerCompatState::default());
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let runtime_dir = runtime_dir.clone();
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    let _ = handle_docker_compat_connection(stream, runtime_dir, state);
+                });
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+fn handle_docker_compat_connection(
+    mut stream: UnixStream,
+    runtime_dir: Arc<PathBuf>,
+    state: Arc<DockerCompatState>,
+) -> Result<(), String> {
+    let request = read_http_request(&mut stream)?;
+    let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
+    let store = LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
+
+    let (path, query) = split_path_query(&request.path);
+    let response = match (request.method.as_str(), path.as_str()) {
+        ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
+        ("GET", "/version") => {
+            let body = serde_json::json!({
+                "Version": env!("CARGO_PKG_VERSION"),
+                "ApiVersion": "1.45",
+                "MinAPIVersion": "1.24",
+                "GitCommit": "unknown",
+                "Os": std::env::consts::OS,
+                "Arch": std::env::consts::ARCH
+            });
+            http_response(200, body.to_string().as_bytes(), "application/json")
+        }
+        ("GET", "/containers/json") => {
+            let records = runtime.list().map_err(|err| err.to_string())?;
+            let entries: Vec<serde_json::Value> = records
+                .iter()
+                .map(|record| {
+                    let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+                    serde_json::json!({
+                        "Id": record.id,
+                        "Image": record.image,
+                        "Command": record.command.join(" "),
+                        "Created": record.created_at_unix,
+                        "State": record.status,
+                        "Status": record.status,
+                        "Names": vec![format!("/{name}")],
+                    })
+                })
+                .collect();
+            http_response(200, serde_json::to_string(&entries).unwrap().as_bytes(), "application/json")
+        }
+        ("GET", path) if path.starts_with("/containers/") && path.ends_with("/json") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/json");
+            let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+            let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+            let body = serde_json::json!({
+                "Id": record.id,
+                "Name": format!("/{name}"),
+                "Image": record.image,
+                "Config": {
+                    "Env": record.env,
+                    "Cmd": record.command,
+                    "WorkingDir": record.workdir,
+                    "User": record.user,
+                    "Labels": record.labels,
+                },
+                "State": {
+                    "Status": record.status,
+                    "Pid": record.pid,
+                    "ExitCode": record.last_exit_code,
+                    "StartedAt": record.created_at_unix,
+                }
+            });
+            http_response(200, body.to_string().as_bytes(), "application/json")
+        }
+        ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/logs");
+            let logs = runtime.logs(id).map_err(|err| err.to_string())?;
+            http_response(200, logs.as_bytes(), "text/plain")
+        }
+        ("POST", "/containers/create") => {
+            let name = query.get("name").cloned();
+            let spec = parse_docker_create_spec(&request.body, name)?;
+            let id = format!("d{}", state.next_id.fetch_add(1, Ordering::SeqCst));
+            state.pending.lock().unwrap().insert(id.clone(), spec);
+            let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
+            http_response(201, body.to_string().as_bytes(), "application/json")
+        }
+        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/start") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/start");
+            let spec = {
+                let mut pending = state.pending.lock().unwrap();
+                pending.remove(id)
+            }
+            .ok_or_else(|| format!("docker: unknown container {id}"))?;
+            handle_run(
+                &runtime,
+                &store,
+                &spec.image,
+                &spec.cmd,
+                &spec.network_mode,
+                "ebpf",
+                &spec.binds,
+                &[],
+                false,
+                false,
+                &spec.env,
+                &spec.labels,
+                &[],
+                &[],
+                None,
+                spec.workdir.as_deref(),
+                spec.user.as_deref(),
+                spec.name.as_deref(),
+                &spec.publish,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "no",
+                None,
+                None,
+                None,
+                None,
+            )?;
+            http_response(204, &[], "text/plain")
+        }
+        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/stop") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/stop");
+            runtime
+                .stop(id, Duration::from_secs(5))
+                .map_err(|err| err.to_string())?;
+            http_response(204, &[], "text/plain")
+        }
+        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/kill") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/kill");
+            runtime.kill(id).map_err(|err| err.to_string())?;
+            http_response(204, &[], "text/plain")
+        }
+        ("DELETE", path) if path.starts_with("/containers/") => {
+            let id = path.trim_start_matches("/containers/");
+            runtime.remove(id).map_err(|err| err.to_string())?;
+            http_response(204, &[], "text/plain")
+        }
+        ("GET", "/images/json") => {
+            let images = store.list_references().map_err(|err| err.to_string())?;
+            let entries: Vec<serde_json::Value> = images
+                .into_iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "Id": record.digest,
+                        "RepoTags": vec![record.reference],
+                        "Created": record.created_at_unix,
+                    })
+                })
+                .collect();
+            http_response(200, serde_json::to_string(&entries).unwrap().as_bytes(), "application/json")
+        }
+        ("POST", "/images/create") => {
+            let from_image = query
+                .get("fromImage")
+                .ok_or_else(|| "docker: missing fromImage".to_string())?;
+            let reference = if let Some(tag) = query.get("tag") {
+                format!("{from_image}:{tag}")
+            } else {
+                from_image.to_string()
+            };
+            ensure_image_present(&store, &reference)?;
+            http_response(200, b"{}", "application/json")
+        }
+        _ => http_response(404, b"{\"message\":\"not found\"}", "application/json"),
+    };
+
+    stream.write_all(&response).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
+    let request: DockerCreateRequest =
+        serde_json::from_slice(body).map_err(|err| err.to_string())?;
+    let mut cmd = request.cmd.unwrap_or_default();
+    if let Some(entry) = request.entrypoint {
+        let mut merged = entry;
+        merged.extend(cmd);
+        cmd = merged;
+    }
+    let env = request.env.unwrap_or_default();
+    let labels = request
+        .labels
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    let host_config = request.host_config.unwrap_or(DockerHostConfig {
+        binds: None,
+        port_bindings: None,
+        network_mode: None,
+    });
+    let publish = port_bindings_to_publish(host_config.port_bindings)?;
+    let network_mode = match host_config.network_mode.as_deref() {
+        None | Some("default") | Some("bridge") => "bridge".to_string(),
+        Some("host") => "host".to_string(),
+        Some("none") => "none".to_string(),
+        Some(other) => {
+            return Err(format!(
+                "docker: unsupported network mode {other}"
+            ))
+        }
+    };
+    Ok(DockerCreateSpec {
+        image: request.image,
+        cmd,
+        env,
+        labels,
+        binds: host_config.binds.unwrap_or_default(),
+        publish,
+        workdir: request.working_dir,
+        user: request.user,
+        name,
+        network_mode,
+    })
+}
+
+fn port_bindings_to_publish(
+    bindings: Option<HashMap<String, Vec<DockerPortBinding>>>,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let Some(bindings) = bindings else {
+        return Ok(out);
+    };
+    for (container_spec, host_bindings) in bindings {
+        let (container_port, proto) = container_spec
+            .split_once('/')
+            .map(|(port, proto)| (port, proto))
+            .unwrap_or((container_spec.as_str(), "tcp"));
+        for binding in host_bindings {
+            let Some(host_port) = binding.host_port else {
+                continue;
+            };
+            out.push(format!("{host_port}:{container_port}/{proto}"));
+        }
+    }
+    Ok(out)
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
+    let mut buffer = Vec::new();
+    let mut header_end = None;
+    let mut temp = [0u8; 4096];
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| err.to_string())?;
+    loop {
+        let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = Some(pos + 4);
+            break;
+        }
+        if buffer.len() > 1024 * 1024 {
+            return Err("docker: request too large".to_string());
+        }
+    }
+    let header_end = header_end.ok_or_else(|| "docker: invalid request".to_string())?;
+    let header_str = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = header_str.lines();
+    let request_line = lines.next().ok_or_else(|| "docker: invalid request".to_string())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+    let mut content_length = 0usize;
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            if key.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = buffer[header_end..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&temp[..read]);
+    }
+    Ok(HttpRequest { method, path, body })
+}
+
+fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
+    let status_line = match status {
+        200 => "200 OK",
+        201 => "201 Created",
+        204 => "204 No Content",
+        400 => "400 Bad Request",
+        404 => "404 Not Found",
+        500 => "500 Internal Server Error",
+        _ => "200 OK",
+    };
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("HTTP/1.1 {status_line}\r\n").as_bytes());
+    out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(body);
     out
+}
+
+fn split_path_query(path: &str) -> (String, HashMap<String, String>) {
+    let mut query_map = HashMap::new();
+    let mut parts = path.splitn(2, '?');
+    let base = parts.next().unwrap_or("").to_string();
+    let query = parts.next().unwrap_or("");
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = pair.split_once('=') {
+            query_map.insert(key.to_string(), value.to_string());
+        }
+    }
+    (base, query_map)
 }
 
 fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
@@ -1454,7 +2002,7 @@ mod tests {
         match cli.command {
             Commands::Compose { file, command } => {
                 assert!(file.is_none());
-                assert!(matches!(command, ComposeCommands::Up));
+                assert!(matches!(command, ComposeCommands::Up { profile } if profile.is_empty()));
             }
             other => panic!("unexpected command: {other:?}"),
         }

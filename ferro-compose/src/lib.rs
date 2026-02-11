@@ -30,11 +30,14 @@ pub struct Service {
     pub ports: Option<Vec<String>>,
     pub volumes: Option<Vec<String>>,
     pub networks: Option<Vec<String>>,
+    #[serde(rename = "network_mode")]
+    pub network_mode: Option<String>,
     pub depends_on: Option<DependsOn>,
     pub restart: Option<String>,
     pub healthcheck: Option<HealthCheck>,
     pub deploy: Option<Deploy>,
     pub labels: Option<HashMap<String, String>>,
+    pub profiles: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

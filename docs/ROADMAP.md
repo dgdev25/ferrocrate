@@ -86,7 +86,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [ ] Implement container lifecycle tests (create, start, stop, remove)
 - [ ] Implement image operation tests (pull, push, tag)
 - [x] ~~Implement rootless isolation tests~~
-- [ ] Set up CI pipeline for test execution
+- [x] ~~Set up CI pipeline for test execution~~
 
 ### Phase 1 Milestone: MVP v0.1.0
 

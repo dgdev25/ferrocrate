@@ -11,6 +11,7 @@ use crate::layer_compression::{
     CompressionFormat, LayerCompressionError, compress_bytes_gzip, compress_bytes_zstd,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -165,7 +166,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
 
         let (layer_bytes, layer_media_type) =
             build_context_layer_from_dir(&context_root, compression)?;
-        let layer_digest = format!("sha256:{}", blake3::hash(&layer_bytes).to_hex());
+        let layer_digest = sha256_digest_bytes(&layer_bytes);
         let layer_size = layer_bytes.len() as i64;
         write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
 
@@ -181,7 +182,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
         if idx == stages.len() - 1 {
             let config_json = build_config_json(stage.healthcheck.clone());
             let config_bytes = config_json.as_bytes();
-            let config_digest = format!("sha256:{}", blake3::hash(config_bytes).to_hex());
+            let config_digest = sha256_digest_bytes(config_bytes);
 
             let mut layers = base_descriptors;
             layers.push(Descriptor {
@@ -484,6 +485,12 @@ fn config_path(runtime_dir: &Path, digest: &str) -> PathBuf {
         .join("images")
         .join("configs")
         .join(digest.replace(':', "_"))
+}
+
+fn sha256_digest_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone)]

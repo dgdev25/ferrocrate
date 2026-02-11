@@ -4,6 +4,7 @@ use crate::image_store::LocalImageStore;
 use crate::image_tagging::ImageTaggingError;
 use crate::registry::RegistryClient;
 use crate::registry::parse_image_reference;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,8 @@ pub enum ImageFetchError {
     Manifest(#[from] crate::image_manifest::ImageManifestParseError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("digest verification failed: {0}")]
+    Integrity(String),
 }
 
 pub struct ImageFetchResult {
@@ -62,6 +65,7 @@ pub fn pull_image_with_store(
     if !config_path.exists() {
         client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
     }
+    verify_digest(&config_path, &manifest.config.digest)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
     let blob_root = runtime_dir.join("images").join("blobs");
@@ -74,6 +78,7 @@ pub fn pull_image_with_store(
         if !blob_path.exists() {
             client.pull_blob_to_file(&canonical, &layer.digest, auth.as_ref(), &blob_path)?;
         }
+        verify_digest(&blob_path, &layer.digest)?;
         let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
         layer_paths.push(blob_path);
     }
@@ -116,6 +121,7 @@ pub fn pull_manifest_only_with_store(
     if !config_path.exists() {
         client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
     }
+    verify_digest(&config_path, &manifest.config.digest)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
     Ok(canonical)
@@ -199,6 +205,7 @@ pub fn resolve_layer_paths_with_store(
         if !blob_path.exists() {
             client.pull_blob_to_file(&canonical, &layer.digest, auth.as_ref(), &blob_path)?;
         }
+        verify_digest(&blob_path, &layer.digest)?;
         let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
         layer_paths.push(blob_path);
     }
@@ -277,6 +284,30 @@ fn hash_file_blake3(path: &Path) -> Result<String, ImageFetchError> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn verify_digest(path: &Path, digest: &str) -> Result<(), ImageFetchError> {
+    let Some(expected) = digest.strip_prefix("sha256:") else {
+        return Ok(());
+    };
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected {
+        return Err(ImageFetchError::Integrity(format!(
+            "expected sha256:{expected} got sha256:{actual} for {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{pull_image, pull_manifest_only};
@@ -288,18 +319,18 @@ mod tests {
     #[test]
     fn pulls_manifest_and_layers() {
         let server = Server::run();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":4}]}"#;
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2","size":4}]}"#;
 
         server.expect(
             Expectation::matching(request::method_path("GET", "/v2/library/alpine/manifests/latest"))
                 .respond_with(status_code(200).body(manifest_json)),
         );
         server.expect(
-            Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+            Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be"))
                 .respond_with(status_code(200).body("{\"config\":{}}")),
         );
         server.expect(
-            Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+            Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2"))
                 .respond_with(status_code(200).body("TEST")),
         );
 
@@ -318,14 +349,14 @@ mod tests {
     #[test]
     fn pulls_manifest_only_without_layers() {
         let server = Server::run();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4}]}"#;
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4}]}"#;
 
         server.expect(
             Expectation::matching(request::method_path("GET", "/v2/library/busybox/manifests/latest"))
                 .respond_with(status_code(200).body(manifest_json)),
         );
         server.expect(
-            Expectation::matching(request::method_path("GET", "/v2/library/busybox/blobs/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
+            Expectation::matching(request::method_path("GET", "/v2/library/busybox/blobs/sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be"))
                 .respond_with(status_code(200).body("{\"config\":{}}")),
         );
 

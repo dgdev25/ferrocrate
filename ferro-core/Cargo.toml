@@ -17,6 +17,7 @@ thiserror = "2.0"
 blake3 = "1.5"
 zstd = "0.13"
 toml = "0.8"
+sha2 = "0.10"
 ferro-net = { path = "../ferro-net" }
 
 [dev-dependencies]

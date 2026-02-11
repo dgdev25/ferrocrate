@@ -66,10 +66,10 @@ pub enum DependsOn {
 }
 
 impl DependsOn {
-    pub fn iter(&self) -> impl Iterator<Item = &String> {
+    pub fn iter(&self) -> Box<dyn Iterator<Item = &String> + '_> {
         match self {
-            DependsOn::Simple(list) => list.iter(),
-            DependsOn::Conditional(map) => map.keys(),
+            DependsOn::Simple(list) => Box::new(list.iter()),
+            DependsOn::Conditional(map) => Box::new(map.keys()),
         }
     }
 }
@@ -117,6 +117,7 @@ pub struct Volume {
 }
 
 pub mod service_graph;
+pub mod compose;
 
 impl ComposeFile {
     pub fn parse(content: &str, env: &HashMap<String, String>) -> ComposeResult<Self> {

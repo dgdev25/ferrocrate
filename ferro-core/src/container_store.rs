@@ -26,10 +26,29 @@ pub struct ContainerRecord {
     pub health_failures: u32,
     #[serde(default)]
     pub health_checked_at_unix: Option<u64>,
+    #[serde(default)]
+    pub restart_policy: RestartPolicy,
+    #[serde(default)]
+    pub last_exit_code: Option<i32>,
     pub created_at_unix: u64,
     pub stdout_path: String,
     pub stderr_path: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    No,
+    OnFailure,
+    Always,
+    UnlessStopped,
+}
+
+impl Default for RestartPolicy {
+    fn default() -> Self {
+        RestartPolicy::No
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,7 +145,7 @@ fn default_health_status() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContainerRecord, LocalContainerStore, now_unix};
+    use super::{ContainerRecord, LocalContainerStore, RestartPolicy, now_unix};
     use std::collections::HashMap;
 
     #[test]
@@ -146,6 +165,8 @@ mod tests {
             health_status: "none".to_string(),
             health_failures: 0,
             health_checked_at_unix: None,
+            restart_policy: RestartPolicy::No,
+            last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),
@@ -175,6 +196,8 @@ mod tests {
             health_status: "none".to_string(),
             health_failures: 0,
             health_checked_at_unix: None,
+            restart_policy: RestartPolicy::No,
+            last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
             stderr_path: "stderr.log".to_string(),

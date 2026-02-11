@@ -1,5 +1,7 @@
 use crate::container_exec::exec_in_container;
-use crate::container_store::{ContainerRecord, HealthConfig, LocalContainerStore, ContainerStoreError, now_unix};
+use crate::container_store::{
+    ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
+};
 use crate::cgroups::{CgroupV2Manager, ResourceLimits};
 use crate::image_fetch::resolve_layer_paths;
 use crate::rootfs::construct_rootfs;
@@ -11,7 +13,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -72,6 +74,7 @@ impl ContainerRuntime {
         labels: &HashMap<String, String>,
         annotations: &HashMap<String, String>,
         health: Option<HealthConfig>,
+        restart_policy: RestartPolicy,
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
@@ -118,8 +121,9 @@ impl ContainerRuntime {
             false,
             self.store.clone_db(),
             container_id.clone(),
-            Some(&rootfs_dir),
+            Some(rootfs_dir.clone()),
             no_new_privs,
+            restart_policy.clone(),
         )?;
 
         if let Some(limits) = limits {
@@ -141,6 +145,8 @@ impl ContainerRuntime {
             health_status: if health.is_some() { "starting".to_string() } else { "none".to_string() },
             health_failures: 0,
             health_checked_at_unix: None,
+            restart_policy: restart_policy.clone(),
+            last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: stdout_path.display().to_string(),
             stderr_path: stderr_path.display().to_string(),
@@ -199,7 +205,7 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         stop_pid(record.pid, timeout)?;
-        self.store.update_status(id, "exited")?;
+        self.store.update_status(id, "stopped")?;
         Ok(())
     }
 
@@ -234,8 +240,9 @@ impl ContainerRuntime {
             true,
             self.store.clone_db(),
             record.id.clone(),
-            None,
+            Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
+            record.restart_policy.clone(),
         )?;
 
         record.pid = child_id;
@@ -295,9 +302,50 @@ fn spawn_process_with_logs(
     append: bool,
     store: sled::Db,
     container_id: String,
+    rootfs_dir: Option<PathBuf>,
+    no_new_privs: bool,
+    restart_policy: RestartPolicy,
+) -> Result<u32, RuntimeError> {
+    let command = build_command(cmd, env, rootfs_dir.as_deref(), no_new_privs)?;
+    let (child_id, child, join_handles) = spawn_child_with_logs(
+        command,
+        stdout_path,
+        stderr_path,
+        append,
+    )?;
+
+    let cmd_owned = cmd.to_vec();
+    let env_owned = env.to_vec();
+    let stdout_path = stdout_path.to_path_buf();
+    let stderr_path = stderr_path.to_path_buf();
+    let rootfs_dir = rootfs_dir.clone();
+    let no_new_privs = no_new_privs;
+    thread::spawn(move || {
+        supervise_child(
+            child,
+            join_handles,
+            store,
+            container_id,
+            cmd_owned,
+            env_owned,
+            stdout_path,
+            stderr_path,
+            append,
+            rootfs_dir,
+            no_new_privs,
+            restart_policy,
+        );
+    });
+
+    Ok(child_id)
+}
+
+fn build_command(
+    cmd: &[String],
+    env: &[String],
     rootfs_dir: Option<&Path>,
     no_new_privs: bool,
-) -> Result<u32, RuntimeError> {
+) -> Result<Command, RuntimeError> {
     let mut command = if let Some(rootfs) = rootfs_dir {
         if nix::unistd::Uid::effective().is_root() {
             let mut chroot_cmd = Command::new("chroot");
@@ -338,8 +386,16 @@ fn spawn_process_with_logs(
         }
     }
 
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    Ok(command)
+}
 
+fn spawn_child_with_logs(
+    mut command: Command,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    append: bool,
+) -> Result<(u32, Child, Vec<thread::JoinHandle<()>>), RuntimeError> {
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut join_handles = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         let out_path = stdout_path.to_path_buf();
@@ -353,30 +409,109 @@ fn spawn_process_with_logs(
             let _ = stream_to_file_with_options(stderr, &err_path, append);
         }));
     }
-
     let child_id = child.id();
-    thread::spawn(move || {
-        let _ = child.wait();
-        for handle in join_handles {
-            let _ = handle.join();
-        }
-        let _ = update_status(&store, &container_id, "exited");
-    });
-
-    Ok(child_id)
+    Ok((child_id, child, join_handles))
 }
 
-fn update_status(db: &sled::Db, id: &str, status: &str) -> Result<(), ContainerStoreError> {
+fn supervise_child(
+    mut child: Child,
+    mut join_handles: Vec<thread::JoinHandle<()>>,
+    store: sled::Db,
+    container_id: String,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    append: bool,
+    rootfs_dir: Option<PathBuf>,
+    no_new_privs: bool,
+    restart_policy: RestartPolicy,
+) {
+    loop {
+        let status = child.wait();
+        for handle in join_handles.drain(..) {
+            let _ = handle.join();
+        }
+        let exit_code = status
+            .ok()
+            .and_then(|s| s.code())
+            .unwrap_or(-1);
+        let current_status = match update_exit(&store, &container_id, exit_code) {
+            Ok(status) => status,
+            Err(_) => "exited".to_string(),
+        };
+
+        if !should_restart(&restart_policy, &current_status, exit_code) {
+            break;
+        }
+
+        thread::sleep(Duration::from_secs(1));
+        let command = match build_command(&cmd, &env, rootfs_dir.as_deref(), no_new_privs) {
+            Ok(cmd) => cmd,
+            Err(_) => break,
+        };
+        let (pid, new_child, new_handles) =
+            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append) {
+                Ok(tuple) => tuple,
+                Err(_) => break,
+            };
+        let _ = update_pid_status(&store, &container_id, pid, "running");
+        child = new_child;
+        join_handles = new_handles;
+    }
+}
+
+fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool {
+    if status == "stopped" || status == "killed" {
+        return false;
+    }
+    match policy {
+        RestartPolicy::No => false,
+        RestartPolicy::Always => true,
+        RestartPolicy::UnlessStopped => true,
+        RestartPolicy::OnFailure => exit_code != 0,
+    }
+}
+
+fn update_pid_status(
+    db: &sled::Db,
+    id: &str,
+    pid: u32,
+    status: &str,
+) -> Result<(), ContainerStoreError> {
     let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
     if let Some(bytes) = tree.get(id.as_bytes())? {
         let mut record = serde_json::from_slice::<ContainerRecord>(&bytes)
             .map_err(ContainerStoreError::Decode)?;
+        record.pid = pid;
         record.status = status.to_string();
         let encoded = serde_json::to_vec(&record)?;
         tree.insert(id.as_bytes(), encoded)?;
         tree.flush()?;
     }
     Ok(())
+}
+
+fn update_exit(
+    db: &sled::Db,
+    id: &str,
+    exit_code: i32,
+) -> Result<String, ContainerStoreError> {
+    let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
+    let Some(bytes) = tree.get(id.as_bytes())? else {
+        return Ok("exited".to_string());
+    };
+    let mut record = serde_json::from_slice::<ContainerRecord>(&bytes)
+        .map_err(ContainerStoreError::Decode)?;
+    record.last_exit_code = Some(exit_code);
+    if record.status != "stopped" && record.status != "killed" {
+        record.status = "exited".to_string();
+    }
+    let status = record.status.clone();
+    let encoded = serde_json::to_vec(&record)?;
+    tree.insert(id.as_bytes(), encoded)?;
+    tree.flush()?;
+    Ok(status)
 }
 
 fn update_health(
@@ -436,6 +571,7 @@ fn run_health_checks(store: sled::Db, id: String, pid: u32, config: HealthConfig
 #[cfg(test)]
 mod tests {
     use super::ContainerRuntime;
+    use crate::container_store::RestartPolicy;
     use crate::image_store::LocalImageStore;
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_tagging::canonicalize_reference;
@@ -463,6 +599,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
+            RestartPolicy::No,
             None,
             &[],
             &[],
@@ -493,6 +630,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
+            RestartPolicy::No,
             None,
             &[],
             &[],
@@ -531,6 +669,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
+            RestartPolicy::No,
             None,
             &[],
             &[],
@@ -563,6 +702,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
+            RestartPolicy::No,
             None,
             &[],
             &[],
@@ -610,6 +750,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
+            RestartPolicy::No,
             Some(&limits),
             &[],
             &[],

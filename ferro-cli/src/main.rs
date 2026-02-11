@@ -28,6 +28,8 @@ pub enum Commands {
         image: String,
         #[arg(long)]
         name: Option<String>,
+        #[arg(long, default_value = "bridge")]
+        network: String,
         #[arg(long, default_value = "ebpf")]
         network_backend: String,
         #[arg(long = "bind")]
@@ -207,6 +209,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             image,
             cmd,
             network_backend,
+            network,
             bind_mounts,
             tmpfs_mounts,
             read_only_rootfs,
@@ -238,6 +241,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &image_store,
                 &image,
                 &cmd,
+                &network,
                 &network_backend,
                 &bind_mounts,
                 &tmpfs_mounts,
@@ -305,6 +309,7 @@ fn handle_run(
     store: &LocalImageStore,
     image: &str,
     cmd: &[String],
+    network: &str,
     network_backend: &str,
     bind_mounts: &[String],
     tmpfs_mounts: &[String],
@@ -330,7 +335,11 @@ fn handle_run(
     cpu_period: Option<u64>,
     pids_max: Option<u64>,
 ) -> Result<(), String> {
+    validate_network_mode(network)?;
     let mut effective_backend = network_backend.to_string();
+    if !publish.is_empty() && network != "bridge" {
+        return Err("run: publish requires --network bridge".to_string());
+    }
     if !publish.is_empty() && effective_backend != "iptables" {
         effective_backend = "iptables".to_string();
     }
@@ -379,6 +388,7 @@ fn handle_run(
             user,
             name,
             &port_mappings,
+            network,
             &effective_backend,
         )
         .map_err(|err| err.to_string())?;
@@ -539,6 +549,13 @@ fn validate_network_backend(value: &str) -> Result<(), String> {
     match value {
         "ebpf" | "iptables" | "nftables" => Ok(()),
         _ => Err("network-backend must be one of: ebpf, iptables, nftables".to_string()),
+    }
+}
+
+fn validate_network_mode(value: &str) -> Result<(), String> {
+    match value {
+        "bridge" | "host" | "none" => Ok(()),
+        _ => Err("network must be one of: bridge, host, none".to_string()),
     }
 }
 
@@ -1051,7 +1068,7 @@ mod tests {
         build_health_config, effective_readonly, parse_bind_mounts, parse_capabilities,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy, parse_publish,
         parse_tmpfs_mounts,
-        validate_network_backend,
+        validate_network_backend, validate_network_mode,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
@@ -1065,6 +1082,7 @@ mod tests {
                 image,
                 cmd,
                 network_backend,
+                network,
                 bind_mounts,
                 tmpfs_mounts,
                 read_only_rootfs,
@@ -1094,6 +1112,7 @@ mod tests {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);
                 assert_eq!(network_backend, "ebpf");
+                assert_eq!(network, "bridge");
                 assert!(bind_mounts.is_empty());
                 assert!(tmpfs_mounts.is_empty());
                 assert!(!read_only_rootfs);
@@ -1422,6 +1441,7 @@ mod tests {
             &store,
             "",
             &[],
+            "bridge",
             "ebpf",
             &[],
             &[],
@@ -1637,6 +1657,15 @@ mod tests {
         validate_network_backend("nftables").expect("ok");
         let err = validate_network_backend("bogus").expect_err("invalid backend");
         assert!(err.contains("network-backend"));
+    }
+
+    #[test]
+    fn network_mode_validation() {
+        validate_network_mode("bridge").expect("ok");
+        validate_network_mode("host").expect("ok");
+        validate_network_mode("none").expect("ok");
+        let err = validate_network_mode("bogus").expect_err("invalid mode");
+        assert!(err.contains("network"));
     }
 
     struct TestRuntimeDir {

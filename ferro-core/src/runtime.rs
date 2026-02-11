@@ -98,6 +98,7 @@ impl ContainerRuntime {
         user: Option<&str>,
         name: Option<&str>,
         port_mappings: &[crate::container_store::PortMappingRecord],
+        network_mode: &str,
         network_backend: &str,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
@@ -168,7 +169,7 @@ impl ContainerRuntime {
         }
 
         let (netns_name, container_ip) =
-            setup_network(&container_id, port_mappings, network_backend)?;
+            setup_network(&container_id, port_mappings, network_mode, network_backend)?;
 
         let child_id = spawn_process_with_logs(
             &command,
@@ -761,8 +762,42 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
 fn setup_network(
     container_id: &str,
     port_mappings: &[crate::container_store::PortMappingRecord],
+    network_mode: &str,
     network_backend: &str,
 ) -> Result<(Option<String>, Option<String>), RuntimeError> {
+    match network_mode {
+        "host" => {
+            if !port_mappings.is_empty() {
+                return Err(RuntimeError::Network(
+                    "port mapping requires network bridge".to_string(),
+                ));
+            }
+            return Ok((None, None));
+        }
+        "none" => {
+            if !port_mappings.is_empty() {
+                return Err(RuntimeError::Network(
+                    "port mapping requires network bridge".to_string(),
+                ));
+            }
+            if !nix::unistd::Uid::effective().is_root() {
+                return Err(RuntimeError::Network(
+                    "network none requires root".to_string(),
+                ));
+            }
+            let netns_name = format!("ferro-{container_id}");
+            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
+            run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+            return Ok((Some(netns_name), None));
+        }
+        "bridge" => {}
+        _ => {
+            return Err(RuntimeError::Network(
+                "network mode must be one of: bridge, host, none".to_string(),
+            ))
+        }
+    }
+
     if port_mappings.is_empty() {
         return Ok((None, None));
     }
@@ -1048,9 +1083,11 @@ mod tests {
     use std::sync::Mutex;
 
     static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn run_starts_process_and_persists_record() {
+        let _guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
@@ -1078,6 +1115,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");
@@ -1088,6 +1126,7 @@ mod tests {
 
     #[test]
     fn logs_returns_output() {
+        let _guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
@@ -1115,6 +1154,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");
@@ -1125,6 +1165,7 @@ mod tests {
 
     #[test]
     fn run_uses_image_config_command_when_missing() {
+        let _guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
@@ -1152,6 +1193,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");
@@ -1164,6 +1206,7 @@ mod tests {
 
     #[test]
     fn run_merges_env_and_respects_workdir_user() {
+        let _guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
@@ -1194,6 +1237,7 @@ mod tests {
                 Some("1000:1000"),
                 Some("named"),
                 &[],
+                "bridge",
                 "ebpf",
             )
             .expect("run");
@@ -1220,6 +1264,7 @@ mod tests {
 
     #[test]
     fn stop_kill_remove_flow() {
+        let _guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
@@ -1243,6 +1288,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");
@@ -1259,6 +1305,7 @@ mod tests {
 
     #[test]
     fn restart_updates_pid() {
+        let _guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
@@ -1282,6 +1329,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");
@@ -1301,6 +1349,7 @@ mod tests {
     #[test]
     fn run_applies_cgroup_limits_when_set() {
         let _guard = CGROUP_ENV_LOCK.lock().expect("lock env");
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("cgroup");
         std::fs::create_dir_all(&root).expect("cgroup root");
@@ -1337,6 +1386,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");
@@ -1365,6 +1415,7 @@ mod tests {
     #[test]
     fn pause_and_resume_updates_status() {
         let _guard = CGROUP_ENV_LOCK.lock().expect("lock env");
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().expect("lock runtime");
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("cgroup");
         std::fs::create_dir_all(&root).expect("cgroup root");
@@ -1395,6 +1446,7 @@ mod tests {
             None,
             None,
             &[],
+            "bridge",
             "ebpf",
             )
             .expect("run");

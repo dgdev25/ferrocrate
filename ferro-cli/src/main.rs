@@ -24,6 +24,8 @@ pub enum Commands {
         image: String,
         #[arg(long, default_value = "ebpf")]
         network_backend: String,
+        #[arg(long = "bind")]
+        bind_mounts: Vec<String>,
         #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
@@ -122,6 +124,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             image,
             cmd,
             network_backend,
+            bind_mounts,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -133,6 +136,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &image,
                 &cmd,
                 &network_backend,
+                &bind_mounts,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -167,6 +171,7 @@ fn handle_run(
     image: &str,
     cmd: &[String],
     network_backend: &str,
+    bind_mounts: &[String],
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -175,14 +180,34 @@ fn handle_run(
     validate_network_backend(network_backend)?;
     ensure_image_present(store, image)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
+    let mounts = parse_bind_mounts(bind_mounts)?;
     let record = runtime
-        .run(image, cmd, limits.as_ref())
+        .run(image, cmd, limits.as_ref(), &mounts)
         .map_err(|err| err.to_string())?;
     println!(
         "run: container_id={} pid={} network_backend={}",
         record.id, record.pid, network_backend
     );
     Ok(())
+}
+
+fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::BindMount>, String> {
+    let mut out = Vec::new();
+    for entry in bind_mounts {
+        let parts = entry.split(':').collect::<Vec<_>>();
+        if parts.len() < 2 {
+            return Err("run: bind mount must be source:target[:ro]".to_string());
+        }
+        let read_only = parts.len() >= 3 && parts[2] == "ro";
+        let source = parts[0];
+        let target = parts[1];
+        out.push(ferro_core::mounts::BindMount {
+            source: source.into(),
+            target: target.trim_start_matches('/').into(),
+            read_only,
+        });
+    }
+    Ok(out)
 }
 
 fn ensure_image_present(store: &LocalImageStore, image: &str) -> Result<(), String> {
@@ -455,6 +480,7 @@ mod tests {
         Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_logs, handle_pull, handle_push, handle_rmi,
         handle_run, handle_stop, handle_kill, handle_rm, handle_restart, build_limits, handle_volume,
+        parse_bind_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -469,6 +495,7 @@ mod tests {
                 image,
                 cmd,
                 network_backend,
+                bind_mounts,
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -477,6 +504,7 @@ mod tests {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);
                 assert_eq!(network_backend, "ebpf");
+                assert!(bind_mounts.is_empty());
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -669,9 +697,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_run(&runtime, &store, "", &[], "ebpf", None, None, None, None)
+        let err = handle_run(&runtime, &store, "", &[], "ebpf", &[], None, None, None, None)
             .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn rejects_invalid_bind_mount() {
+        let err = parse_bind_mounts(&["/host".to_string()]).expect_err("invalid");
+        assert!(err.contains("bind mount"));
     }
 
     #[test]

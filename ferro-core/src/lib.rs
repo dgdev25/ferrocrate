@@ -12,6 +12,7 @@ pub mod layer_mount;
 pub mod linux_namespaces;
 pub mod capabilities;
 pub mod mount_cleanup;
+pub mod mounts;
 pub mod overlayfs;
 pub mod process_lifecycle;
 pub mod registry;

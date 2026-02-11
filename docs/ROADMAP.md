@@ -84,7 +84,7 @@
 ### 3.3 Networking
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| NET-01 | Bridge networking | Partial | Runtime can create bridge/netns/veth for rootful runs; iptables used for published ports; rootless skips netns. |
+| NET-01 | Bridge networking | Partial | Runtime can create bridge/netns/veth for rootful runs; rootless uses slirp4netns when `FERROCRATE_ROOTLESS_NETNS=1`; iptables used for published ports. |
 | NET-02 | Host networking | Partial | CLI `--network host` skips netns setup; not tested. |
 | NET-03 | None networking | Partial | CLI `--network none` creates netns with loopback only; not tested. |
 | NET-04 | Container-to-container DNS | Partial | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers; no DNS server yet. |
@@ -123,12 +123,12 @@
 ### 3.6 Compose / Multi-Container
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
-| CMP-01 | docker-compose.yml compatibility | Partial | Parse + validate with .env interpolation; orchestration missing. |
-| CMP-02 | Native compose subcommand | Partial | `compose up` starts services sequentially with basic image/env/ports/labels; `compose down` stops/removes by service name. |
+| CMP-01 | docker-compose.yml compatibility | Partial | Parse + validate with .env interpolation; env_file and network_mode parsed. |
+| CMP-02 | Native compose subcommand | Partial | `compose up` starts services sequentially with image/env/ports/labels/volumes; `compose down` stops/removes by service name. |
 | CMP-03 | Service dependency ordering | Partial | Ordering exists; waits for `service_healthy` dependencies before start. |
-| CMP-04 | Service scaling | Not Started | Not implemented. |
+| CMP-04 | Service scaling | Partial | `deploy.replicas` spawns service-N instances. |
 | CMP-05 | .env support | Partial | `.env` loaded for interpolation; service env_file merged into env. |
-| CMP-06 | Profiles | Not Started | Not implemented. |
+| CMP-06 | Profiles | Partial | `compose up --profile` enables profiled services; default excludes profiled services. |
 | CMP-07 | Watch mode | Not Started | Not implemented. |
 
 ### 3.7 AI / Intelligence (ferro-mind + ruv)
@@ -151,7 +151,7 @@
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | CLI-01 | Docker-compatible CLI syntax | Partial | Core commands exist; `ps` alias + `-e/-l` flags added; behavior still not Docker-equivalent. |
-| CLI-02 | Docker socket compatibility | Not Started | Not implemented. |
+| CLI-02 | Docker socket compatibility | Partial | `ferrocrate daemon --docker-compat` serves basic Docker API over Unix socket. |
 | CLI-03 | Shell completion | Not Started | Not implemented. |
 | CLI-04 | ~~Colored, human-friendly output~~ | Done | Colored status + image refs for text output. |
 | CLI-05 | ~~JSON output mode~~ | Done | `--format json` supported for images/containers/logs/inspect/stats. |
@@ -180,7 +180,7 @@
 | COMPAT-01 | OCI Image Spec v1.1 | Partial | Basic image handling; full compliance not verified. |
 | COMPAT-02 | OCI Runtime Spec v1.2 | Partial | Namespaces + cgroups v2; spec parity not verified. |
 | COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Basic pull/push; error parity not verified. |
-| COMPAT-04 | Docker API v1.45+ | Not Started | Not implemented. |
+| COMPAT-04 | Docker API v1.45+ | Partial | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. |
 | COMPAT-05 | docker-compose v3.x | Partial | Parse/validate + interpolation only. |
 | COMPAT-06 | Dockerfile syntax | Partial | Minimal builder; far from 95% coverage. |
 | COMPAT-07 | Linux kernel 5.10+ | Not Started | No min-version checks. |

@@ -19,6 +19,7 @@ use ferro_net::bridge;
 use ferro_net::netns;
 use ferro_net::nftables::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule_cmd};
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
+use ferro_net::rootless::{RootlessNetConfig, build_slirp4netns_cmd};
 use ferro_net::veth;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -170,8 +171,10 @@ impl ContainerRuntime {
             apply_readonly_rootfs(&rootfs_dir)?;
         }
 
+        let rootless = !nix::unistd::Uid::effective().is_root();
         let (netns_name, container_ip) =
             setup_network(&container_id, port_mappings, network_mode, network_backend)?;
+        let use_slirp = rootless && network_mode == "bridge" && rootless_netns_enabled();
 
         let child_id = spawn_process_with_logs(
             &command,
@@ -188,7 +191,12 @@ impl ContainerRuntime {
             resolved_workdir.as_deref(),
             resolved_user.as_deref(),
             netns_name.as_deref(),
+            use_slirp,
         )?;
+
+        if use_slirp {
+            start_slirp4netns(child_id)?;
+        }
 
         if let Some(limits) = limits {
             let manager = CgroupV2Manager::new(&self.cgroup_root);
@@ -413,6 +421,7 @@ impl ContainerRuntime {
             record.workdir.as_deref(),
             record.user.as_deref(),
             record.netns.as_deref(),
+            false,
         )?;
 
         record.pid = child_id;
@@ -491,6 +500,7 @@ fn spawn_process_with_logs(
     workdir: Option<&str>,
     user: Option<&str>,
     netns_name: Option<&str>,
+    unshare_netns: bool,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -501,6 +511,7 @@ fn spawn_process_with_logs(
         workdir,
         user,
         netns_name,
+        unshare_netns,
     )?;
     let (child_id, child, join_handles) = spawn_child_with_logs(
         command,
@@ -552,6 +563,7 @@ fn build_command(
     workdir: Option<&str>,
     user: Option<&str>,
     netns_name: Option<&str>,
+    unshare_netns: bool,
 ) -> Result<Command, RuntimeError> {
     let mut command = if let Some(netns) = netns_name {
         let mut netns_cmd = Command::new("ip");
@@ -566,6 +578,12 @@ fn build_command(
             netns_cmd.arg(&cmd[0]).args(&cmd[1..]);
         }
         netns_cmd
+    } else if unshare_netns {
+        let mut unshare_cmd = Command::new("unshare");
+        unshare_cmd.arg("-n").arg("--");
+        unshare_cmd.arg(&cmd[0]);
+        unshare_cmd.args(&cmd[1..]);
+        unshare_cmd
     } else if let Some(rootfs) = rootfs_dir {
         if nix::unistd::Uid::effective().is_root() {
             let mut chroot_cmd = Command::new("chroot");
@@ -708,6 +726,7 @@ fn supervise_child(
             workdir.as_deref(),
             user.as_deref(),
             netns_name.as_deref(),
+            false,
         ) {
             Ok(cmd) => cmd,
             Err(_) => break,
@@ -936,6 +955,36 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
         }
     }
     Ok(())
+}
+
+fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
+    let tap_name = format!("tap{pid}");
+    let tap_name = if tap_name.len() > 15 {
+        tap_name[..15].to_string()
+    } else {
+        tap_name
+    };
+    let config = RootlessNetConfig {
+        tap_name,
+        cidr: "10.0.2.0/24".to_string(),
+    };
+    let cmd = build_slirp4netns_cmd(pid, &config);
+    if cmd.is_empty() {
+        return Ok(());
+    }
+    let (bin, rest) = cmd.split_first().unwrap();
+    Command::new(bin)
+        .args(rest)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+fn rootless_netns_enabled() -> bool {
+    std::env::var("FERROCRATE_ROOTLESS_NETNS")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn ensure_nftables_chains() -> Result<(), RuntimeError> {

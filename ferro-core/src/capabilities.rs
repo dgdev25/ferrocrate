@@ -1,4 +1,4 @@
-use caps::CapSet;
+use caps::{CapSet, Capability, CapsHashSet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,6 +20,15 @@ pub fn drop_all_capabilities() -> Result<(), CapabilityError> {
 /// Return current capabilities for a specific capability set.
 pub fn get_capabilities(set: CapSet) -> Result<caps::CapsHashSet, CapabilityError> {
     Ok(caps::read(None, set)?)
+}
+
+pub fn set_capabilities(caps_to_set: &[Capability]) -> Result<(), CapabilityError> {
+    let set: CapsHashSet = caps_to_set.iter().copied().collect();
+    caps::set(None, CapSet::Bounding, &set)?;
+    caps::set(None, CapSet::Effective, &set)?;
+    caps::set(None, CapSet::Permitted, &set)?;
+    caps::set(None, CapSet::Inheritable, &set)?;
+    Ok(())
 }
 
 #[cfg(test)]

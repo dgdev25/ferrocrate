@@ -39,6 +39,8 @@ pub enum Commands {
         labels: Vec<String>,
         #[arg(long = "annotation")]
         annotations: Vec<String>,
+        #[arg(long = "cap-add")]
+        cap_add: Vec<String>,
         #[arg(long = "health-cmd")]
         health_cmd: Option<String>,
         #[arg(long = "health-interval")]
@@ -173,6 +175,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             env,
             labels,
             annotations,
+            cap_add,
             health_cmd,
             health_interval,
             health_timeout,
@@ -197,6 +200,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &env,
                 &labels,
                 &annotations,
+                &cap_add,
                 health_cmd.as_deref(),
                 health_interval,
                 health_timeout,
@@ -247,6 +251,7 @@ fn handle_run(
     env: &[String],
     labels: &[String],
     annotations: &[String],
+    cap_add: &[String],
     health_cmd: Option<&str>,
     health_interval: Option<u64>,
     health_timeout: Option<u64>,
@@ -266,6 +271,7 @@ fn handle_run(
     let env = parse_env_entries(env)?;
     let labels = parse_key_values("label", labels)?;
     let annotations = parse_key_values("annotation", annotations)?;
+    let caps = parse_capabilities(cap_add)?;
     let health = build_health_config(
         health_cmd,
         health_interval,
@@ -283,6 +289,7 @@ fn handle_run(
             &annotations,
             health,
             restart_policy,
+            &caps,
             limits.as_ref(),
             &mounts,
             &tmpfs,
@@ -639,6 +646,26 @@ fn parse_restart_policy(policy: &str) -> Result<ferro_core::container_store::Res
     }
 }
 
+fn parse_capabilities(entries: &[String]) -> Result<Vec<caps::Capability>, String> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return Err("run: cap-add must not be empty".to_string());
+        }
+        let normalized = if trimmed.starts_with("CAP_") {
+            trimmed.to_string()
+        } else {
+            format!("CAP_{}", trimmed)
+        };
+        let cap = normalized
+            .parse::<caps::Capability>()
+            .map_err(|_| format!("run: unknown capability {trimmed}"))?;
+        out.push(cap);
+    }
+    Ok(out)
+}
+
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -724,8 +751,8 @@ mod tests {
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pause, handle_pull,
         handle_push, handle_rmi, handle_run, handle_stop, handle_kill, handle_rm, handle_restart,
         handle_unpause, build_limits, handle_volume,
-        build_health_config, parse_bind_mounts, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_restart_policy, parse_tmpfs_mounts,
+        build_health_config, parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_restart_policy, parse_tmpfs_mounts,
         validate_network_backend,
     };
     use clap::Parser;
@@ -757,6 +784,7 @@ mod tests {
                 cpu_quota,
                 cpu_period,
                 pids_max,
+                cap_add,
             } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(cmd, vec!["echo", "hi"]);
@@ -768,6 +796,7 @@ mod tests {
                 assert!(env.is_empty());
                 assert!(labels.is_empty());
                 assert!(annotations.is_empty());
+                assert!(cap_add.is_empty());
                 assert!(health_cmd.is_none());
                 assert!(health_interval.is_none());
                 assert!(health_timeout.is_none());
@@ -778,6 +807,7 @@ mod tests {
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
                 assert!(pids_max.is_none());
+                assert!(cap_add.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1075,6 +1105,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             None,
             None,
             None,
@@ -1124,6 +1155,12 @@ mod tests {
     fn rejects_invalid_restart_policy() {
         let err = parse_restart_policy("nope").expect_err("invalid");
         assert!(err.contains("restart"));
+    }
+
+    #[test]
+    fn rejects_invalid_capability() {
+        let err = parse_capabilities(&["notacap".to_string()]).expect_err("invalid");
+        assert!(err.contains("unknown capability"));
     }
 
     #[test]

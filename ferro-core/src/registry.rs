@@ -1,6 +1,6 @@
 use crate::image_manifest::{ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
 use reqwest::blocking::Client;
-use reqwest::header::ACCEPT;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -58,19 +58,7 @@ impl RegistryClient {
         auth: Option<&RegistryAuth>,
     ) -> Result<String, RegistryError> {
         let image_ref = parse_image_reference(image)?;
-        let scheme = if image_ref.registry.starts_with("localhost")
-            || image_ref.registry.starts_with("127.")
-            || image_ref.registry.contains(":")
-        {
-            "http"
-        } else {
-            "https"
-        };
-
-        let url = format!(
-            "{scheme}://{}/v2/{}/manifests/{}",
-            image_ref.registry, image_ref.repository, image_ref.reference
-        );
+        let url = manifest_url(&image_ref);
 
         let mut request = self
             .client
@@ -93,6 +81,53 @@ impl RegistryClient {
         }
 
         Ok(body)
+    }
+
+    /// Push manifest JSON to an OCI registry using optional basic auth.
+    pub fn push_manifest(
+        &self,
+        image: &str,
+        manifest: &ImageManifest,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<(), RegistryError> {
+        let payload = serde_json::to_string(manifest).map_err(|err| {
+            RegistryError::InvalidReference(format!("failed to serialize manifest: {err}"))
+        })?;
+        self.push_manifest_raw(image, &payload, auth)
+    }
+
+    /// Push raw manifest JSON to an OCI registry using optional basic auth.
+    pub fn push_manifest_raw(
+        &self,
+        image: &str,
+        manifest_json: &str,
+        auth: Option<&RegistryAuth>,
+    ) -> Result<(), RegistryError> {
+        parse_image_manifest(manifest_json)?;
+        let image_ref = parse_image_reference(image)?;
+        let url = manifest_url(&image_ref);
+
+        let mut request = self
+            .client
+            .put(url)
+            .header(CONTENT_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE)
+            .body(manifest_json.to_string());
+
+        if let Some(auth) = auth {
+            request = request.basic_auth(&auth.username, Some(&auth.password));
+        }
+
+        let response = request.send().map_err(RegistryError::Request)?;
+        let status = response.status();
+        let body = response.text().map_err(RegistryError::Request)?;
+        if !status.is_success() {
+            return Err(RegistryError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -149,6 +184,22 @@ fn is_registry_component(component: &str) -> bool {
     component.contains('.') || component.contains(':') || component == "localhost"
 }
 
+fn manifest_url(image_ref: &ImageReference) -> String {
+    let scheme = if image_ref.registry.starts_with("localhost")
+        || image_ref.registry.starts_with("127.")
+        || image_ref.registry.contains(":")
+    {
+        "http"
+    } else {
+        "https"
+    };
+
+    format!(
+        "{scheme}://{}/v2/{}/manifests/{}",
+        image_ref.registry, image_ref.repository, image_ref.reference
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RegistryAuth, RegistryClient, parse_image_reference};
@@ -200,5 +251,41 @@ mod tests {
             .pull_manifest(&image, Some(&auth))
             .expect("manifest should be pulled");
         assert_eq!(manifest.schema_version, 2);
+    }
+
+    #[test]
+    fn pushes_manifest_with_basic_auth() {
+        let server = Server::run();
+        let auth_value = format!("Basic {}", STANDARD.encode("writer:secret"));
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size": 1
+            },
+            "layers": []
+        });
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("PUT", "/v2/test/image/manifests/latest"),
+                request::headers(contains(("authorization", auth_value.clone()))),
+                request::headers(contains(("content-type", "application/vnd.oci.image.manifest.v1+json")))
+            ])
+            .respond_with(status_code(201)),
+        );
+
+        let client = RegistryClient::new().expect("client");
+        let image = format!("{}/test/image", server.addr());
+        let auth = RegistryAuth {
+            username: "writer".to_string(),
+            password: "secret".to_string(),
+        };
+
+        client
+            .push_manifest_raw(&image, &manifest_json.to_string(), Some(&auth))
+            .expect("manifest push should succeed");
     }
 }

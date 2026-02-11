@@ -65,7 +65,7 @@ This roadmap breaks down the FerroCrate implementation into 6 sequential phases 
 - [x] ~~Implement `ferrocrate build <dockerfile> -t <tag>` command~~
 - [x] ~~Implement `ferrocrate images` command~~
 - [x] ~~Implement `ferrocrate containers` command~~
-- [ ] Implement `ferrocrate logs <container>` command
+- [x] ~~Implement `ferrocrate logs <container>` command~~
 - [ ] Implement `ferrocrate exec <container> <cmd>` command
 - [ ] Implement `ferrocrate pull <image>` command
 - [ ] Implement `ferrocrate push <image>` command

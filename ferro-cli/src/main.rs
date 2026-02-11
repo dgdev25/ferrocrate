@@ -9,6 +9,7 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
 };
+use ferro_compose::{Command as ComposeCommandSpec, Environment as ComposeEnvironment, Service as ComposeService};
 use serde::Serialize;
 use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap};
@@ -300,7 +301,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
-        Commands::Compose { file, command } => handle_compose(file.as_deref(), command),
+        Commands::Compose { file, command } => {
+            handle_compose(&runtime, &image_store, file.as_deref(), command)
+        }
     }
 }
 
@@ -1034,17 +1037,34 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), String> {
+fn handle_compose(
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    file: Option<&str>,
+    command: ComposeCommands,
+) -> Result<(), String> {
     let path = find_compose_file(file).map_err(|err| err.to_string())?;
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     match command {
         ComposeCommands::Up => {
             let order = compose_up(&project).map_err(|err| err.to_string())?;
-            println!("compose up: {:?}", order);
+            for name in order {
+                let service = project
+                    .compose
+                    .services
+                    .get(&name)
+                    .ok_or_else(|| format!("compose: missing service {name}"))?;
+                run_compose_service(runtime, store, &name, service)?;
+            }
         }
         ComposeCommands::Down => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
-            println!("compose down: {:?}", order);
+            for name in order {
+                if let Ok(id) = resolve_container_id(runtime, &name) {
+                    let _ = runtime.stop(&id, std::time::Duration::from_secs(5));
+                    let _ = runtime.remove(&id);
+                }
+            }
         }
         ComposeCommands::Ps => {
             let services = compose_ps(&project).map_err(|err| err.to_string())?;
@@ -1056,6 +1076,122 @@ fn handle_compose(file: Option<&str>, command: ComposeCommands) -> Result<(), St
         }
     }
     Ok(())
+}
+
+fn run_compose_service(
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    name: &str,
+    service: &ComposeService,
+) -> Result<(), String> {
+    let image = service
+        .image
+        .as_deref()
+        .ok_or_else(|| format!("compose: service {name} missing image"))?;
+    let cmd = compose_service_command(service);
+    let env = compose_service_env(service);
+    let labels = compose_service_labels(service);
+    let publish = compose_service_ports(service);
+    let bind_mounts = compose_service_mounts(service);
+    let restart = service.restart.as_deref().unwrap_or("no");
+
+    handle_run(
+        runtime,
+        store,
+        image,
+        &cmd,
+        "bridge",
+        "ebpf",
+        &bind_mounts,
+        &[],
+        false,
+        false,
+        &env,
+        &labels,
+        &[],
+        &[],
+        service.entrypoint.as_deref(),
+        None,
+        None,
+        Some(name),
+        &publish,
+        None,
+        None,
+        None,
+        None,
+        None,
+        restart,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+fn compose_service_command(service: &ComposeService) -> Vec<String> {
+    match service.command.as_ref() {
+        Some(ComposeCommandSpec::List(list)) => list.clone(),
+        Some(ComposeCommandSpec::String(cmd)) => {
+            vec!["sh".to_string(), "-c".to_string(), cmd.clone()]
+        }
+        None => Vec::new(),
+    }
+}
+
+fn compose_service_env(service: &ComposeService) -> Vec<String> {
+    match service.environment.as_ref() {
+        Some(ComposeEnvironment::Map(map)) => map
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect(),
+        Some(ComposeEnvironment::List(list)) => list.clone(),
+        None => Vec::new(),
+    }
+}
+
+fn compose_service_labels(service: &ComposeService) -> Vec<String> {
+    match service.labels.as_ref() {
+        Some(map) => map
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn compose_service_ports(service: &ComposeService) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(ports) = service.ports.as_ref() {
+        for entry in ports {
+            if entry.contains(':') {
+                out.push(entry.clone());
+                continue;
+            }
+            let (port, proto) = entry
+                .split_once('/')
+                .map(|(port, proto)| (port, Some(proto)))
+                .unwrap_or((entry.as_str(), None));
+            if let Some(proto) = proto {
+                out.push(format!("{port}:{port}/{proto}"));
+            } else {
+                out.push(format!("{port}:{port}"));
+            }
+        }
+    }
+    out
+}
+
+fn compose_service_mounts(service: &ComposeService) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(volumes) = service.volumes.as_ref() {
+        for entry in volumes {
+            let source = entry.split(':').next().unwrap_or("");
+            if source.starts_with('.') || source.contains('/') {
+                out.push(entry.clone());
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

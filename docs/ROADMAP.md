@@ -198,7 +198,7 @@ Each phase must complete with:
 - [x] ~~Implement eBPF map management (connection tracking, rules)~~
 - [x] ~~Implement packet filtering and forwarding rules~~
 - [x] ~~Create eBPF program tests (isolated, unit-testable)~~
-- [ ] Create integration tests (containers with eBPF networking)
+- [x] ~~Create integration tests (containers with eBPF networking)~~
 
 ### Networking Configuration
 

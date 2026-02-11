@@ -124,7 +124,7 @@
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | CMP-01 | docker-compose.yml compatibility | Partial | Parse + validate with .env interpolation; orchestration missing. |
-| CMP-02 | Native compose subcommand | Partial | CLI exists; no orchestration. |
+| CMP-02 | Native compose subcommand | Partial | `compose up` starts services sequentially with basic image/env/ports/labels; `compose down` stops/removes by service name. |
 | CMP-03 | Service dependency ordering | Partial | Ordering exists; condition handling not implemented. |
 | CMP-04 | Service scaling | Not Started | Not implemented. |
 | CMP-05 | .env support | Partial | `.env` file loaded for interpolation; service env_file not applied. |

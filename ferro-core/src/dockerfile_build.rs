@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tar::Builder;
 use thiserror::Error;
 
@@ -752,7 +753,11 @@ fn resolve_stage_root(
 fn create_build_dir(_runtime_dir: &Path, name: &str) -> Result<PathBuf, DockerfileBuildError> {
     let root = std::env::temp_dir().join("ferrocrate-build");
     fs::create_dir_all(&root)?;
-    let candidate = root.join(format!("{}-{}", name, std::process::id()));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let candidate = root.join(format!("{}-{}-{}", name, std::process::id(), nanos));
     if candidate.exists() {
         let _ = fs::remove_dir_all(&candidate);
     }

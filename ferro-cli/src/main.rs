@@ -330,7 +330,11 @@ fn handle_run(
     cpu_period: Option<u64>,
     pids_max: Option<u64>,
 ) -> Result<(), String> {
-    validate_network_backend(network_backend)?;
+    let mut effective_backend = network_backend.to_string();
+    if !publish.is_empty() && effective_backend != "iptables" {
+        effective_backend = "iptables".to_string();
+    }
+    validate_network_backend(&effective_backend)?;
     ensure_image_present(store, image)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
@@ -375,12 +379,12 @@ fn handle_run(
             user,
             name,
             &port_mappings,
-            network_backend,
+            &effective_backend,
         )
         .map_err(|err| err.to_string())?;
     println!(
         "run: container_id={} pid={} network_backend={}",
-        record.id, record.pid, network_backend
+        record.id, record.pid, effective_backend
     );
     Ok(())
 }

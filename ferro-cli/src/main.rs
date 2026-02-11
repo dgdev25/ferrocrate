@@ -50,10 +50,7 @@ fn main() {
 fn dispatch(command: Commands) -> Result<(), String> {
     match command {
         Commands::Run { image, cmd } => handle_run(&image, &cmd),
-        Commands::Build { dockerfile, tag } => {
-            println!("build: dockerfile={dockerfile} tag={}", tag.unwrap_or_default());
-            Ok(())
-        }
+        Commands::Build { dockerfile, tag } => handle_build(&dockerfile, tag.as_deref()),
         Commands::Images => {
             println!("images: not implemented");
             Ok(())
@@ -96,9 +93,23 @@ fn handle_run(image: &str, cmd: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_build(dockerfile: &str, tag: Option<&str>) -> Result<(), String> {
+    if dockerfile.trim().is_empty() {
+        return Err("build: dockerfile path is required".to_string());
+    }
+
+    let tag_display = tag.unwrap_or("<none>");
+    if let Some(tag) = tag {
+        parse_image_reference(tag).map_err(|err| err.to_string())?;
+    }
+
+    println!("build: dockerfile={dockerfile} tag={tag_display}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, dispatch, handle_run};
+    use super::{Cli, Commands, dispatch, handle_build, handle_run};
     use clap::Parser;
 
     #[test]
@@ -161,5 +172,17 @@ mod tests {
         })
         .expect_err("missing command");
         assert!(err.contains("exec: command is required"));
+    }
+
+    #[test]
+    fn build_handler_requires_dockerfile_path() {
+        let err = handle_build("", None).expect_err("dockerfile required");
+        assert!(err.contains("dockerfile path is required"));
+    }
+
+    #[test]
+    fn build_handler_rejects_invalid_tag() {
+        let err = handle_build("./Dockerfile", Some("")).expect_err("invalid tag");
+        assert!(err.contains("invalid image reference"));
     }
 }

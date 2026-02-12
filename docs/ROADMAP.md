@@ -180,7 +180,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | COMPAT-01 | ~~OCI Image Spec v1.1~~ | Done | Yes | Basic compliance script added; full compliance not verified. Rework Needed. |
 | COMPAT-02 | ~~OCI Runtime Spec v1.2~~ | Done | Yes | Basic runtime validation script added; full parity not verified. Rework Needed. |
 | COMPAT-03 | ~~OCI Distribution Spec v1.1~~ | Done | Yes | Basic distribution validation script added; full parity not verified. Rework Needed. |
-| COMPAT-04 | ~~Docker API v1.45+~~ | Done | Yes | Basic docker API compatibility script added; broader parity still needed. Rework Needed. |
+| COMPAT-04 | ~~Docker API v1.45+~~ | Done | Yes | Added stats endpoint; broader parity still needed. Rework Needed. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | No | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
 | COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |
 | COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | No | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |

@@ -239,6 +239,7 @@ pub fn resolve_config_path_with_store(
         .join("configs")
         .join(config_digest);
     if config_path.exists() {
+        verify_digest(&config_path, &manifest.config.digest)?;
         Ok(Some(config_path))
     } else {
         Ok(None)

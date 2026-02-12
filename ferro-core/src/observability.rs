@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 pub struct LogEvent<'a> {
@@ -36,6 +37,7 @@ pub fn log_event(runtime_dir: &Path, event: LogEvent<'_>) -> Result<(), std::io:
     let mut value = serde_json::to_vec(&event)?;
     value.push(b'\n');
     file.write_all(&value)?;
+    let _ = export_trace("event", &event);
     Ok(())
 }
 
@@ -50,6 +52,7 @@ pub fn log_audit_event(runtime_dir: &Path, event: AuditEvent<'_>) -> Result<(), 
     let mut value = serde_json::to_vec(&event)?;
     value.push(b'\n');
     file.write_all(&value)?;
+    let _ = export_trace("audit", &event);
     Ok(())
 }
 
@@ -87,4 +90,25 @@ pub fn make_audit_event<'a>(
         status,
         message,
     }
+}
+
+fn export_trace<T: Serialize>(kind: &str, payload: &T) -> Result<(), std::io::Error> {
+    let endpoint = match std::env::var("FERROCRATE_OTEL_ENDPOINT") {
+        Ok(val) => val,
+        Err(_) => return Ok(()),
+    };
+    let body = serde_json::json!({
+        "kind": kind,
+        "payload": payload,
+    });
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+    let _ = client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+    Ok(())
 }

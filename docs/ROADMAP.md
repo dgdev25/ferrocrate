@@ -128,7 +128,7 @@
 | CMP-03 | ~~Service dependency ordering~~ | Done | Ordering exists; waits for `service_healthy` dependencies before start. |
 | CMP-04 | ~~Service scaling~~ | Done | `deploy.replicas` spawns service-N instances. |
 | CMP-05 | ~~.env support~~ | Done | `.env` loaded for interpolation; service env_file merged into env. |
-| CMP-06 | Profiles | Partial | `compose up --profile` enables profiled services; default excludes profiled services. |
+| CMP-06 | ~~Profiles~~ | Done | `compose up --profile` enables profiled services; default excludes profiled services. |
 | CMP-07 | Watch mode | Not Started | Not implemented. |
 
 ### 3.7 AI / Intelligence (ferro-mind + ruv)

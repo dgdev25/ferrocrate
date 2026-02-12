@@ -68,6 +68,8 @@ pub enum RuntimeError {
     ImageMissing(String),
     #[error("network error: {0}")]
     Network(String),
+    #[error("kernel version error: {0}")]
+    Kernel(String),
 }
 
 pub struct ContainerRuntime {
@@ -161,6 +163,7 @@ impl ContainerRuntime {
         network_backend: &str,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
+        ensure_kernel_min_version()?;
         verify_image_signature(image)
             .map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
         let mut config_json = None;
@@ -940,6 +943,30 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
 
 fn audit_actor() -> String {
     std::env::var("FERROCRATE_AUDIT_ACTOR").unwrap_or_else(|_| "cli".to_string())
+}
+
+fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
+    if std::env::var("FERROCRATE_IGNORE_KERNEL_MIN")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let output = Command::new("uname")
+        .arg("-r")
+        .output()
+        .map_err(RuntimeError::Io)?;
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let version = raw.trim();
+    let mut parts = version.split(|c| c == '.' || c == '-');
+    let major = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    if major < 5 || (major == 5 && minor < 10) {
+        return Err(RuntimeError::Kernel(format!(
+            "kernel {version} below required 5.10"
+        )));
+    }
+    Ok(())
 }
 
 fn setup_network(

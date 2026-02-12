@@ -455,6 +455,7 @@ dependencies = [
  "clap_complete",
  "ferro-compose",
  "ferro-core",
+ "ferro-mind",
  "owo-colors",
  "serde",
  "serde_json",
@@ -468,7 +469,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror",
 ]
 
 [[package]]
@@ -489,7 +490,7 @@ dependencies = [
  "sled",
  "tar",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror",
  "toml",
  "zstd",
 ]
@@ -498,16 +499,27 @@ dependencies = [
 name = "ferro-cri"
 version = "0.1.0"
 dependencies = [
+ "ferro-core",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "ferro-desktop"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -516,7 +528,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror",
 ]
 
 [[package]]
@@ -524,7 +536,7 @@ name = "ferro-net"
 version = "0.1.0"
 dependencies = [
  "nix",
- "thiserror 2.0.18",
+ "thiserror",
 ]
 
 [[package]]
@@ -1556,7 +1568,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2 0.6.2",
- "thiserror 2.0.18",
+ "thiserror",
  "tokio",
  "tracing",
  "web-time",
@@ -1577,7 +1589,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.18",
+ "thiserror",
  "tinyvec",
  "tracing",
  "web-time",
@@ -2079,31 +2091,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl 2.0.18",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "thiserror-impl",
 ]
 
 [[package]]

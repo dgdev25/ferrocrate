@@ -243,6 +243,7 @@ mod tests {
             status: "running".to_string(),
             netns: None,
             ip_address: None,
+            ipv6_address: None,
             ports: Vec::new(),
         };
 

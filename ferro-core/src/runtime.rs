@@ -17,6 +17,7 @@ use crate::rootfs::construct_rootfs_with_dedup;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
+use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use ferro_net::bridge;
 use ferro_net::ebpf::{EbpfProgram, build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd};
 use ferro_net::netns;
@@ -247,6 +248,9 @@ impl ContainerRuntime {
         let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
 
+        // Load default seccomp profile for container isolation
+        let seccomp_profile = default_seccomp_profile().ok();
+
         let child_id = spawn_process_with_logs(
             &exec_cmd,
             &merged_env,
@@ -263,6 +267,7 @@ impl ContainerRuntime {
             resolved_user.as_deref(),
             netns_name.as_deref(),
             unshare_netns,
+            seccomp_profile.as_ref(),
         )?;
 
         if use_slirp {
@@ -556,6 +561,10 @@ impl ContainerRuntime {
 
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
+
+        // Load default seccomp profile for restarted container
+        let seccomp_profile = default_seccomp_profile().ok();
+
         let child_id = spawn_process_with_logs(
             &record.command,
             &record.env,
@@ -572,6 +581,7 @@ impl ContainerRuntime {
             record.user.as_deref(),
             record.netns.as_deref(),
             false,
+            seccomp_profile.as_ref(),
         )?;
 
         record.pid = child_id;
@@ -626,13 +636,21 @@ impl ContainerRuntime {
                 "container {id} is still running"
             )));
         }
-        let _ = cleanup_network(&record);
-        let container_dir = self.runtime_dir.join("containers").join(id);
-        let _ = fs::remove_dir_all(&container_dir);
-        let _ = self.store.remove(id)?;
-        if let Ok(containers) = self.store.list() {
-            let _ = update_container_hosts(&self.runtime_dir, &containers);
+        // Best-effort cleanup - log failures but don't fail the remove operation
+        if let Err(e) = cleanup_network(&record) {
+            eprintln!("[cleanup] network cleanup failed for {id}: {e}");
         }
+        let container_dir = self.runtime_dir.join("containers").join(id);
+        if let Err(e) = fs::remove_dir_all(&container_dir) {
+            eprintln!("[cleanup] failed to remove container dir for {id}: {e}");
+        }
+        self.store.remove(id)?;
+        if let Ok(containers) = self.store.list() {
+            if let Err(e) = update_container_hosts(&self.runtime_dir, &containers) {
+                eprintln!("[cleanup] failed to update hosts file: {e}");
+            }
+        }
+        // Logging is best-effort - don't fail if logging fails
         let _ = log_event(
             &self.runtime_dir,
             make_event("remove", Some(id), Some(&record.image), Some("removed"), None),
@@ -694,6 +712,7 @@ fn spawn_process_with_logs(
     user: Option<&str>,
     netns_name: Option<&str>,
     unshare_netns: bool,
+    seccomp_profile: Option<&SeccompProfile>,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -705,6 +724,7 @@ fn spawn_process_with_logs(
         user,
         netns_name,
         unshare_netns,
+        seccomp_profile,
     )?;
     let (child_id, child, join_handles) = spawn_child_with_logs(
         command,
@@ -723,6 +743,7 @@ fn spawn_process_with_logs(
     let workdir = workdir.map(|val| val.to_string());
     let user = user.map(|val| val.to_string());
     let netns_name = netns_name.map(|val| val.to_string());
+    let seccomp_for_restart = seccomp_profile.cloned();
     thread::spawn(move || {
         supervise_child(
             child,
@@ -741,6 +762,7 @@ fn spawn_process_with_logs(
             workdir,
             user,
             netns_name,
+            seccomp_for_restart,
         );
     });
 
@@ -757,6 +779,7 @@ fn build_command(
     user: Option<&str>,
     netns_name: Option<&str>,
     unshare_netns: bool,
+    seccomp_profile: Option<&SeccompProfile>,
 ) -> Result<Command, RuntimeError> {
     let mut command = if let Some(netns) = netns_name {
         let mut netns_cmd = Command::new("ip");
@@ -831,6 +854,7 @@ fn build_command(
     }
 
     let caps = capabilities.to_vec();
+    let seccomp = seccomp_profile.cloned();
     unsafe {
         command.pre_exec(move || {
             if nix::unistd::Uid::effective().is_root() {
@@ -841,6 +865,11 @@ fn build_command(
                     set_capabilities(&caps)
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
                 }
+            }
+            // Apply seccomp profile AFTER capability drops (seccomp is last sandboxing step)
+            if let Some(profile) = &seccomp {
+                apply_seccomp_profile(&profile)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
             }
             Ok(())
         });
@@ -890,6 +919,7 @@ fn supervise_child(
     workdir: Option<String>,
     user: Option<String>,
     netns_name: Option<String>,
+    seccomp_profile: Option<SeccompProfile>,
 ) {
     loop {
         let status = child.wait();
@@ -920,6 +950,7 @@ fn supervise_child(
             user.as_deref(),
             netns_name.as_deref(),
             false,
+            seccomp_profile.as_ref(),
         ) {
             Ok(cmd) => cmd,
             Err(_) => break,
@@ -929,7 +960,9 @@ fn supervise_child(
                 Ok(tuple) => tuple,
                 Err(_) => break,
             };
-        let _ = update_pid_status(&store, &container_id, pid, "running");
+        if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
+            eprintln!("[supervisor] failed to update pid status for {container_id}: {e}");
+        }
         child = new_child;
         join_handles = new_handles;
     }

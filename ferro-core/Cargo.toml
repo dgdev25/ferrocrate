@@ -20,6 +20,7 @@ toml = "0.8"
 sha2 = "0.10"
 ferro-net = { path = "../ferro-net" }
 rand = "0.9"
+libseccomp = "0.3"
 
 [dev-dependencies]
 base64 = "0.22"

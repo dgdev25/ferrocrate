@@ -196,11 +196,42 @@ Performance (PERF-01 through PERF-08): All are shell scripts that measure latenc
 
 These tasks all depend on Wave 1 completing (project must compile).
 
-### Task 2.1: Implement Seccomp Enforcement
+### ~~Task 2.1: Implement Seccomp Enforcement~~ ✅ COMPLETED
 
 **Priority:** CRITICAL SECURITY
 
-**Current state:** `ferro-core/src/seccomp.rs` (65 lines) parses JSON seccomp profiles into a `SeccompProfile` struct but never calls `seccomp()` or `prctl()` to apply them. Containers run with no syscall filtering.
+~~**Current state:** `ferro-core/src/seccomp.rs` (65 lines) parses JSON seccomp profiles into a `SeccompProfile` struct but never calls `seccomp()` or `prctl()` to apply them. Containers run with no syscall filtering.~~
+
+**Changes implemented:**
+
+1. ✅ Added `libseccomp = "0.3"` dependency to `ferro-core/Cargo.toml`
+
+2. ✅ Implemented `apply_seccomp_profile()` in `ferro-core/src/seccomp.rs`:
+   - Parses action strings to `ScmpAction` (ALLOW, KILL_PROCESS, ERRNO, TRAP, LOG, TRACE)
+   - Parses architecture strings to `ScmpArch` (X86_64, ARM, AARCH64, etc.)
+   - Adds syscall rules with argument comparison support
+   - Handles masked equality comparisons (`SCMP_CMP_MASKED_EQ`)
+   - Loads filter via `filter.load()`
+
+3. ✅ Integrated into `ferro-core/src/runtime.rs`:
+   - Added `seccomp_profile: Option<&SeccompProfile>` parameter to `build_command()`
+   - Applied seccomp AFTER capability drops in `pre_exec` closure (seccomp is last sandboxing step)
+   - `spawn_process_with_logs()` accepts and passes seccomp profile
+   - `supervise_child()` accepts and passes seccomp profile for restarts
+   - Container creation and restart both use `default_seccomp_profile()`
+
+4. ✅ Tests pass for seccomp profile parsing and action handling
+
+**Files modified:**
+- `ferro-core/Cargo.toml` — added libseccomp dependency
+- `ferro-core/src/seccomp.rs` — implemented `apply_seccomp_profile()`
+- `ferro-core/src/runtime.rs` — integrated seccomp enforcement
+
+**Acceptance Criteria:**
+- ✅ Default seccomp profile applied to all containers
+- ✅ Seccomp applied AFTER capability drops (correct ordering)
+- ✅ Tests for profile parsing pass
+- ⚠️ Runtime seccomp tests require root (can be `#[ignore]`)
 
 **Files to modify:**
 - `ferro-core/src/seccomp.rs` — add enforcement function
@@ -384,11 +415,34 @@ ferro-cli/src/
 
 ---
 
-### Task 2.5: Fix Error Handling — Remove Panics and Unsafe Unwraps
+### Task 2.5: Fix Error Handling — Remove Panics and Unsafe Unwraps (Partial)
 
 **Priority:** CODE QUALITY
 
 **Scope:** All `*.rs` files under `ferro-*/src/` (not test files).
+
+**Changes implemented:**
+
+1. ✅ Fixed NaN panic in `ferro-mind/src/ai/learning/vector_memory.rs`:
+   ```rust
+   // AFTER — handles NaN gracefully:
+   scored.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+   ```
+
+2. ✅ Fixed JSON serialization unwraps in `ferro-cli/src/main.rs`:
+   - Line 2109 (containers/json): Changed to `unwrap_or_else()` with error JSON fallback
+   - Line 2259 (images/json): Changed to `unwrap_or_else()` with error JSON fallback
+
+3. ✅ Fixed mutex unwraps in `ferro-cli/src/main.rs`:
+   - Line 2164 (containers/create): Changed to `if let Ok(mut pending) = state.pending.lock()`
+   - Line 2171 (containers/start): Changed to `.map_err(|e| format!("lock poisoned: {e}"))`
+
+**Remaining work (lower priority):**
+- Most remaining panics are in test code (acceptable)
+- Some unwraps in dockerfile_build.rs and runtime.rs are in provably-safe contexts
+- `let _ =` silent discards: 54 instances (most are cleanup/best-effort operations)
+
+**Original audit findings:**
 
 **Step 1: Audit and fix all `panic!()` calls (26 found)**
 

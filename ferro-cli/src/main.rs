@@ -2106,7 +2106,8 @@ fn handle_docker_compat_connection(
                     })
                 })
                 .collect();
-            http_response(200, serde_json::to_string(&entries).unwrap().as_bytes(), "application/json")
+            let json = serde_json::to_string(&entries).unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
+            http_response(200, json.as_bytes(), "application/json")
         }
         ("GET", path) if path.starts_with("/containers/") && path.ends_with("/json") => {
             let id = path.trim_start_matches("/containers/").trim_end_matches("/json");
@@ -2160,14 +2161,18 @@ fn handle_docker_compat_connection(
             let name = query.get("name").cloned();
             let spec = parse_docker_create_spec(&request.body, name)?;
             let id = format!("d{}", state.next_id.fetch_add(1, Ordering::SeqCst));
-            state.pending.lock().unwrap().insert(id.clone(), spec);
+            if let Ok(mut pending) = state.pending.lock() {
+                pending.insert(id.clone(), spec);
+            } else {
+                return Err("failed to acquire lock".to_string());
+            }
             let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
             http_response(201, body.to_string().as_bytes(), "application/json")
         }
         ("POST", path) if path.starts_with("/containers/") && path.ends_with("/start") => {
             let id = path.trim_start_matches("/containers/").trim_end_matches("/start");
             let spec = {
-                let mut pending = state.pending.lock().unwrap();
+                let mut pending = state.pending.lock().map_err(|e| format!("lock poisoned: {e}"))?;
                 pending.remove(id)
             }
             .ok_or_else(|| format!("docker: unknown container {id}"))?;
@@ -2256,7 +2261,8 @@ fn handle_docker_compat_connection(
                     })
                 })
                 .collect();
-            http_response(200, serde_json::to_string(&entries).unwrap().as_bytes(), "application/json")
+            let json = serde_json::to_string(&entries).unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
+            http_response(200, json.as_bytes(), "application/json")
         }
         ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
             let name = path.trim_start_matches("/images/").trim_end_matches("/json");

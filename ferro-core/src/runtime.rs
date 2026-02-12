@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -875,9 +876,26 @@ fn setup_network(
             return Ok((Some(netns_name), None, None));
         }
         "bridge" => {}
+        "wireguard" => {
+            if !nix::unistd::Uid::effective().is_root() {
+                return Err(RuntimeError::Network(
+                    "wireguard requires root".to_string(),
+                ));
+            }
+            if !port_mappings.is_empty() {
+                return Err(RuntimeError::Network(
+                    "port mapping requires network bridge".to_string(),
+                ));
+            }
+            let netns_name = format!("ferro-{container_id}");
+            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
+            run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+            let (ipv4, ipv6) = setup_wireguard(&netns_name, container_id)?;
+            return Ok((Some(netns_name), ipv4, ipv6));
+        }
         _ => {
             return Err(RuntimeError::Network(
-                "network mode must be one of: bridge, host, none".to_string(),
+                "network mode must be one of: bridge, host, none, wireguard".to_string(),
             ))
         }
     }

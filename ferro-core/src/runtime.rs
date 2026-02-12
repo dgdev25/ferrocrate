@@ -24,6 +24,7 @@ use ferro_net::nftables::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
 use ferro_net::rootless::{RootlessNetConfig, build_slirp4netns_cmd};
 use ferro_net::veth;
+use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
@@ -31,6 +32,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -75,6 +78,7 @@ pub struct ContainerRuntime {
     store: LocalContainerStore,
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
+    health_cancel: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl ContainerRuntime {
@@ -88,6 +92,7 @@ impl ContainerRuntime {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
+            health_cancel: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -346,8 +351,13 @@ impl ContainerRuntime {
             let store = self.store.clone_db();
             let id = record.id.clone();
             let pid = record.pid;
+            let cancel = Arc::new(AtomicBool::new(false));
+            // Store cancellation token for later signaling
+            if let Ok(mut map) = self.health_cancel.lock() {
+                map.insert(id.clone(), cancel.clone());
+            }
             thread::spawn(move || {
-                run_health_checks(store, id, pid, config);
+                run_health_checks(store, id, pid, config, cancel);
             });
         }
         Ok(record)
@@ -475,6 +485,13 @@ impl ContainerRuntime {
     }
 
     pub fn stop(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
+        // Signal health check thread to stop
+        if let Ok(mut map) = self.health_cancel.lock() {
+            if let Some(cancel) = map.remove(id) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+
         let record = self
             .store
             .get(id)?
@@ -578,14 +595,26 @@ impl ContainerRuntime {
             let store = self.store.clone_db();
             let id = record.id.clone();
             let pid = record.pid;
+            let cancel = Arc::new(AtomicBool::new(false));
+            // Store cancellation token for later signaling
+            if let Ok(mut map) = self.health_cancel.lock() {
+                map.insert(id.clone(), cancel.clone());
+            }
             thread::spawn(move || {
-                run_health_checks(store, id, pid, config);
+                run_health_checks(store, id, pid, config, cancel);
             });
         }
         Ok(())
     }
 
     pub fn remove(&self, id: &str) -> Result<(), RuntimeError> {
+        // Clean up health check cancellation token if present
+        if let Ok(mut map) = self.health_cancel.lock() {
+            if let Some(cancel) = map.remove(id) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+
         let record = self
             .store
             .get(id)?
@@ -621,7 +650,16 @@ impl ContainerRuntime {
     }
 }
 fn generate_container_id() -> String {
-    format!("c{}-{}", now_unix(), std::process::id())
+    // Use cryptographic randomness for unpredictable container IDs
+    // Previously used predictable format: c<timestamp>-<pid>
+    use std::fmt::Write;
+    let mut rng = rand::rng();
+    let random_bytes: [u8; 16] = rng.random();
+    let mut hex = String::with_capacity(32);
+    for byte in random_bytes {
+        write!(&mut hex, "{byte:02x}").expect("hex format");
+    }
+    hex
 }
 
 fn stream_to_file_with_options<R: std::io::Read>(
@@ -1032,6 +1070,7 @@ fn setup_network(
         return Ok((None, None, None));
     }
     let effective_backend = if network_backend == "ebpf" {
+        eprintln!("WARNING: eBPF network backend is not yet implemented, falling back to iptables");
         "iptables"
     } else {
         network_backend
@@ -1778,13 +1817,40 @@ fn update_health(
     Ok(true)
 }
 
-fn run_health_checks(store: sled::Db, id: String, pid: u32, config: HealthConfig) {
+fn run_health_checks(
+    store: sled::Db,
+    id: String,
+    pid: u32,
+    config: HealthConfig,
+    cancel: Arc<AtomicBool>,
+) {
+    // Cancellation-aware start period sleep
     if config.start_period_secs > 0 {
-        thread::sleep(Duration::from_secs(config.start_period_secs));
+        let deadline = std::time::Instant::now() + Duration::from_secs(config.start_period_secs);
+        while std::time::Instant::now() < deadline {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
     }
 
     let mut failures = 0_u32;
     loop {
+        // Check for explicit cancellation
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Check if container still exists (handles removal during health check)
+        let tree = match store.open_tree("containers") {
+            Ok(t) => t,
+            Err(_) => return, // Store error, exit
+        };
+        if !tree.contains_key(&id).unwrap_or(false) {
+            return; // Container removed, exit
+        }
+
         let result = if config.timeout_secs > 0 {
             exec_in_container_with_timeout(pid, &config.cmd, Duration::from_secs(config.timeout_secs))
         } else {
@@ -1794,7 +1860,9 @@ fn run_health_checks(store: sled::Db, id: String, pid: u32, config: HealthConfig
         match result {
             Ok(exec) if exec.exit_code == 0 => {
                 failures = 0;
-                let _ = update_health(&store, &id, "healthy", failures, now);
+                if let Err(e) = update_health(&store, &id, "healthy", failures, now) {
+                    eprintln!("[health] failed to update health for {id}: {e}");
+                }
             }
             Ok(_) | Err(_) => {
                 failures = failures.saturating_add(1);
@@ -1805,12 +1873,20 @@ fn run_health_checks(store: sled::Db, id: String, pid: u32, config: HealthConfig
                 };
                 match update_health(&store, &id, status, failures, now) {
                     Ok(true) => {}
-                    Ok(false) => break,
+                    Ok(false) => return, // Container gone
                     Err(_) => {}
                 }
             }
         }
-        thread::sleep(Duration::from_secs(config.interval_secs));
+
+        // Cancellation-aware interval sleep
+        let deadline = std::time::Instant::now() + Duration::from_secs(config.interval_secs);
+        while std::time::Instant::now() < deadline {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
     }
 }
 

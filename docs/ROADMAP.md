@@ -1,8 +1,14 @@
-Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
+# FerroCrate PRD-Backed Roadmap (Rebuilt)
 
-**Source of truth:** `docs/product-requirements.md`  \
-**Last Updated:** February 12, 2026  \
-**Status:** Audit + Re-scope (PRD-complete)
+**Source of truth:** `docs/product-requirements.md`
+**Last Updated:** February 12, 2026
+**Status:** Honest Audit (Task 1.3 completed)
+
+> **Status Definitions:**
+> - **Done**: Fully implemented, tested, working
+> - **Partial**: Some implementation but significant gaps (stubs, scaffolding, or missing execution)
+> - **Rework Needed**: Needs significant refactoring or redesign
+> - **API Designed**: Data structures and command builders exist, no execution
 
 ## Rules
 - Every PRD ID is listed here; no gaps.
@@ -84,16 +90,16 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 ### 3.3 Networking
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
-| NET-01 | ~~Bridge networking~~ | Done | No | Rootful bridge/netns/veth; rootless uses unshare + slirp4netns when `FERROCRATE_ROOTLESS_NETNS=1`. |
+| NET-01 | ~~Bridge networking~~ | Partial | No | Runtime calls command builders via `run_cmd` but ferro-net has no execution layer — 95% command-builder stubs only. |
 | NET-02 | ~~Host networking~~ | Done | No | `--network host` skips netns and runs on host network. |
 | NET-03 | ~~None networking~~ | Done | No | `--network none` isolates netns (rootful via ip netns; rootless via unshare). |
-| NET-04 | ~~Container-to-container DNS~~ | Done | No | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers. |
-| NET-05 | ~~Custom networks (subnets)~~ | Done | No | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME` or CLI flags. |
-| NET-06 | ~~eBPF + iptables/nftables fallback~~ | Done | No | eBPF mode falls back to iptables/nftables for port mappings. |
-| NET-07 | ~~WireGuard overlay~~ | Done | No | `--network wireguard` config via `FERROCRATE_WG_*` env for netns wg0. |
-| NET-08 | ~~Port mapping~~ | Done | No | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
-| NET-09 | ~~IPv6~~ | Done | No | Bridge IPv6 CIDR + container IPv6 allocation via `FERROCRATE_BRIDGE_IPV6_CIDR`. |
-| NET-10 | ~~Bandwidth limiting~~ | Done | No | `--net-limit`/`FERROCRATE_BANDWIDTH_LIMIT` applies `tc tbf` on veth. |
+| NET-04 | ~~Container-to-container DNS~~ | Partial | No | Runtime writes `/etc/hosts` entries but ferro-net DNS module is command-builder stubs only. |
+| NET-05 | ~~Custom networks (subnets)~~ | Partial | No | Bridge CIDR/name configurable but ferro-net bridge.rs only builds commands — no execution layer. |
+| NET-06 | ~~eBPF + iptables/nftables fallback~~ | Partial | No | eBPF mode silently falls back to iptables (no warning). ferro-net ebpf.rs is command-builder stubs only. |
+| NET-07 | ~~WireGuard overlay~~ | Partial | No | Runtime calls `setup_wireguard` stub that returns error. ferro-net has no WireGuard execution. |
+| NET-08 | ~~Port mapping~~ | Partial | No | `-p` works via runtime `run_cmd` calls but ferro-net iptables.rs/nftables.rs are command-builder stubs only. |
+| NET-09 | ~~IPv6~~ | Partial | No | IPv6 CIDR config exists but allocation/wiring not fully tested. ferro-net stubs only. |
+| NET-10 | ~~Bandwidth limiting~~ | Partial | No | `tc` commands built but not executed by ferro-net. Runtime shells out directly. |
 
 ### 3.4 Storage and Volumes
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
@@ -110,14 +116,14 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
 | SEC-01 | ~~Rootless by default~~ | Done | No | User namespaces + rootless runtime. |
-| SEC-02 | ~~Seccomp profiles~~ | Done | No | Default profile + parser, not enforced in runtime. |
-| SEC-03 | ~~AppArmor/SELinux integration~~ | Done | Yes | AppArmor via `aa-exec` and SELinux via `runcon` when enabled; policy enforcement still limited. Rework Needed. |
+| SEC-02 | ~~Seccomp profiles~~ | Partial | No | seccomp.rs parses JSON profiles into `SeccompProfile` struct but NEVER calls `seccomp()`/`prctl()` to apply them. Containers run with no syscall filtering. |
+| SEC-03 | ~~AppArmor/SELinux integration~~ | Rework Needed | Yes | AppArmor via `aa-exec` and SELinux via `runcon` when enabled; policy enforcement still limited. |
 | SEC-04 | ~~Capability dropping~~ | Done | No | Drop all by default; CLI `--cap-add` allows explicit caps. |
 | SEC-05 | ~~Read-only rootfs for prod~~ | Done | No | CLI profile defaults to read-only for prod; override with --read-write. |
 | SEC-06 | ~~no-new-privileges~~ | Done | No | CLI --no-new-privileges enforced via prctl. |
 | SEC-07 | ~~Image signature verification~~ | Done | No | `FERROCRATE_SIGNATURE_VERIFY=1` uses cosign with `FERROCRATE_SIGNATURE_KEY`. |
-| SEC-08 | ~~Runtime security monitoring (eBPF)~~ | Done | No | Optional `FERROCRATE_EBPF_MONITOR=1` loads/attaches eBPF program via bpftool. |
-| SEC-09 | ~~Encrypted container communication~~ | Done | No | `--network encrypted` maps to WireGuard overlay mode. |
+| SEC-08 | ~~Runtime security monitoring (eBPF)~~ | Partial | No | Optional `FERROCRATE_EBPF_MONITOR=1` shells out to bpftool but ferro-net ebpf.rs is command-builder stubs only. |
+| SEC-09 | ~~Encrypted container communication~~ | Partial | No | `--network encrypted` maps to WireGuard but `setup_wireguard` stub returns error. |
 | SEC-10 | ~~Audit logging~~ | Done | No | Audit JSONL emitted for run/exec/pause/resume/stop/kill/restart/remove actions. |
 
 ### 3.6 Compose / Multi-Container
@@ -134,18 +140,18 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 ### 3.7 AI / Intelligence (ferro-mind + ruv)
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
-| AI-01 | ~~WASM inference (pluggable)~~ | Done | No | Pluggable WASM inference registry and noop engine in `ferro-mind`. |
-| AI-02 | ~~Predictive resource allocation~~ | Done | No | Moving-average resource predictor in `ferro-mind`. |
-| AI-03 | ~~Intelligent restart~~ | Done | No | Restart decision policy based on exit codes/failure count in `ferro-mind`. |
-| AI-04 | ~~Cost-tiered routing~~ | Done | No | Cost/quality-based provider selection in `ferro-mind`. |
-| AI-05 | ~~claude-flow integration~~ | Done | No | rUv AI building blocks copied into `ferro-mind` for integration. |
-| AI-06 | ~~Anomaly detection~~ | Done | No | z-score anomaly scoring in `ferro-mind`. |
-| AI-07 | ~~ruvector build cache optimization~~ | Done | No | rUv distance/embedding primitives + dedup helper in `ferro-mind`. |
-| AI-08 | ~~Natural language management~~ | Done | No | Vector memory search foundation in `ferro-mind`. |
-| AI-09 | ~~Self-learning via ruvector~~ | Done | No | Vector memory + embedding primitives in `ferro-mind`. |
-| AI-10 | ~~AI opt-out flag~~ | Done | No | `AiConfig.enabled` flag in `ferro-mind`. |
-| AI-11 | ~~AI explainability~~ | Done | No | `DecisionTrace` for evidence tracking in `ferro-mind`. |
-| AI-12 | ~~GPU/VRAM-aware scheduling~~ | Done | No | GPU selection helper based on VRAM in `ferro-mind`. |
+| AI-01 | ~~WASM inference (pluggable)~~ | Partial | No | Pluggable WASM inference registry exists but engine is NOOP — returns empty predictions. Needs wiring to `tract` (ONNX) or `synaptic-neural-wasm`. |
+| AI-02 | ~~Predictive resource allocation~~ | Partial | No | Simple moving-average predictor only. No neural network. Needs wiring to `ruv-fann` or `neuro-divergent-models` for real predictions. |
+| AI-03 | ~~Intelligent restart~~ | Partial | No | Static restart policy (failures > threshold). No adaptive learning. Needs `ruvector-sona` for self-optimizing restart decisions. |
+| AI-04 | ~~Cost-tiered routing~~ | Partial | No | Cost/quality selection exists but no real routing intelligence — placeholder logic only. |
+| AI-05 | ~~claude-flow integration~~ | Partial | No | rUv AI building blocks copied but NOT wired. Integration scaffolding only. |
+| AI-06 | ~~Anomaly detection~~ | Partial | No | Static z-score computation only (16 lines). No neural network. Needs `ruv-fann` for multi-variate anomaly detection. |
+| AI-07 | ~~ruvector build cache optimization~~ | Done | No | rUv distance/embedding primitives + dedup helper works correctly. |
+| AI-08 | ~~Natural language management~~ | Partial | No | Vector memory uses O(n) brute-force cosine similarity. Needs `ruvector-core` HNSW for O(log n) search at scale. |
+| AI-09 | ~~Self-learning via ruvector~~ | Partial | No | Vector memory + embeddings exist but NO actual learning. Needs `ruvector-sona` (LoRA + EWC++) for self-optimizing neural architecture. |
+| AI-10 | ~~AI opt-out flag~~ | Done | No | `AiConfig.enabled` flag works correctly. `FERROCRATE_AI=0` disables all AI features. |
+| AI-11 | ~~AI explainability~~ | Partial | No | `DecisionTrace` struct exists but not populated with real decision evidence. |
+| AI-12 | ~~GPU/VRAM-aware scheduling~~ | Partial | No | 13-line stub takes VRAM requirement, returns hardcoded GPU index. No device discovery. Needs `cuda-rust-wasm` for real GPU enumeration. |
 
 ### 3.8 CLI and Developer Experience
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
@@ -165,14 +171,14 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 ### 4.1 Performance
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
-| PERF-01 | ~~Container startup time~~ | Done | Yes | `scripts/perf/startup.sh` measures run latency. Rework Needed. |
-| PERF-02 | ~~Image pull throughput~~ | Done | Yes | `scripts/perf/pull.sh` measures download throughput. Rework Needed. |
-| PERF-03 | ~~Idle memory (no daemon)~~ | Done | Yes | `scripts/perf/idle-no-daemon.sh` reports RSS of daemon processes. Rework Needed. |
-| PERF-04 | ~~Idle memory (with daemon)~~ | Done | Yes | `scripts/perf/idle-daemon.sh` measures daemon RSS. Rework Needed. |
-| PERF-05 | ~~Per-container overhead~~ | Done | Yes | `scripts/perf/per-container.sh` measures daemon RSS delta. Rework Needed. |
-| PERF-06 | ~~Build performance~~ | Done | Yes | `scripts/perf/build.sh` measures build duration. Rework Needed. |
-| PERF-07 | ~~CLI binary size~~ | Done | Yes | `scripts/perf/binary-size.sh` records release binary size. Rework Needed. |
-| PERF-08 | ~~AI inference latency (WASM)~~ | Done | Yes | `scripts/perf/ai-latency.sh` benchmarks decision latency. Rework Needed. |
+| PERF-01 | ~~Container startup time~~ | Partial | No | `scripts/perf/startup.sh` exists and measures latency but no optimization work done. Scripts measure only — no performance improvements implemented. |
+| PERF-02 | ~~Image pull throughput~~ | Partial | No | `scripts/perf/pull.sh` measures download throughput but no optimization work done. |
+| PERF-03 | ~~Idle memory (no daemon)~~ | Partial | No | `scripts/perf/idle-no-daemon.sh` reports RSS but no optimization work done. |
+| PERF-04 | ~~Idle memory (with daemon)~~ | Partial | No | `scripts/perf/idle-daemon.sh` measures daemon RSS but no optimization work done. |
+| PERF-05 | ~~Per-container overhead~~ | Partial | No | `scripts/perf/per-container.sh` measures RSS delta but no optimization work done. |
+| PERF-06 | ~~Build performance~~ | Partial | No | `scripts/perf/build.sh` measures duration but no optimization work done. |
+| PERF-07 | ~~CLI binary size~~ | Partial | No | `scripts/perf/binary-size.sh` records size but no optimization work done. |
+| PERF-08 | ~~AI inference latency (WASM)~~ | Partial | No | `scripts/perf/ai-latency.sh` benchmarks decision latency but AI engine is noop — no real inference to measure. |
 
 ### 4.2 Compatibility
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
@@ -185,7 +191,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |
 | COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | No | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |
 | COMPAT-08 | ~~x86_64, aarch64, riscv64~~ | Done | No | `scripts/build-targets.sh` builds release artifacts for all three targets; `ferro-desktop` crate added for host-side desktop integration scaffolding. |
-| COMPAT-09 | ~~Kubernetes CRI v1~~ | Done | Yes | CRI shim now returns real image IDs in ListImages; still minimal coverage. Rework Needed. |
+| COMPAT-09 | ~~Kubernetes CRI v1~~ | Partial | No | CRI shim (ferro-cri) implements only Version, Status, and basic ListImages. Missing: RunPodSandbox, StopPodSandbox, RemovePodSandbox, CreateContainer, StartContainer, StopContainer, RemoveContainer, ExecSync, PullImage, RemoveImage, and most other CRI operations. Minimal shim, not production-ready. |
 
 ### 4.3 Reliability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |

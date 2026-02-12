@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 use std::io::{Read, Write};
+use std::time::SystemTime;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -226,6 +227,12 @@ pub enum ComposeCommands {
     Up {
         #[arg(long)]
         profile: Vec<String>,
+    },
+    Watch {
+        #[arg(long)]
+        profile: Vec<String>,
+        #[arg(long, default_value = "2")]
+        interval: u64,
     },
     Down,
     Ps,
@@ -592,6 +599,35 @@ fn wait_for_container_exit(runtime: &ContainerRuntime, id: &str) -> Result<(), S
             _ => return Ok(()),
         }
     }
+}
+
+fn latest_mtime(root: &Path) -> Result<SystemTime, String> {
+    let mut latest = SystemTime::UNIX_EPOCH;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let entries = std::fs::read_dir(&path)
+            .map_err(|err| format!("watch: {err}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("watch: {err}"))?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".git" || name == "target" || name == ".ferrocrate" {
+                continue;
+            }
+            let meta = entry.metadata().map_err(|err| format!("watch: {err}"))?;
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime > latest {
+                        latest = mtime;
+                    }
+                }
+            }
+        }
+    }
+    Ok(latest)
 }
 
 fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::BindMount>, String> {
@@ -1385,6 +1421,33 @@ fn handle_compose(
                     project_dir,
                     &name,
                     service,
+                )?;
+            }
+        }
+        ComposeCommands::Watch { profile, interval } => {
+            let mut last_mtime = latest_mtime(project_dir)?;
+            loop {
+                handle_compose(
+                    runtime,
+                    store,
+                    volume_store,
+                    file,
+                    ComposeCommands::Up { profile: profile.clone() },
+                )?;
+                loop {
+                    std::thread::sleep(Duration::from_secs(interval));
+                    let current = latest_mtime(project_dir)?;
+                    if current > last_mtime {
+                        last_mtime = current;
+                        break;
+                    }
+                }
+                handle_compose(
+                    runtime,
+                    store,
+                    volume_store,
+                    file,
+                    ComposeCommands::Down,
                 )?;
             }
         }

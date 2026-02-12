@@ -129,7 +129,7 @@
 | CMP-04 | ~~Service scaling~~ | Done | `deploy.replicas` spawns service-N instances. |
 | CMP-05 | ~~.env support~~ | Done | `.env` loaded for interpolation; service env_file merged into env. |
 | CMP-06 | ~~Profiles~~ | Done | `compose up --profile` enables profiled services; default excludes profiled services. |
-| CMP-07 | Watch mode | Not Started | Not implemented. |
+| CMP-07 | ~~Watch mode~~ | Done | `compose watch` polls project dir and restarts services on changes. |
 
 ### 3.7 AI / Intelligence (ferro-mind + ruv)
 | ID | Requirement | Status | Evidence / Notes |

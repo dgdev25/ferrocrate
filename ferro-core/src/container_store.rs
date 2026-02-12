@@ -47,6 +47,8 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub ip_address: Option<String>,
     #[serde(default)]
+    pub ipv6_address: Option<String>,
+    #[serde(default)]
     pub ports: Vec<PortMappingRecord>,
 }
 
@@ -198,6 +200,7 @@ mod tests {
             status: "running".to_string(),
             netns: Some("ferro-c1".to_string()),
             ip_address: Some("10.0.0.2".to_string()),
+            ipv6_address: Some("fd00::2".to_string()),
             ports: vec![super::PortMappingRecord {
                 host_port: 8080,
                 container_port: 80,

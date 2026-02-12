@@ -1,7 +1,7 @@
 # FerroCrate PRD-Backed Roadmap (Rebuilt)
 
-**Source of truth:** `docs/product-requirements.md`  
-**Last Updated:** February 11, 2026  
+**Source of truth:** `docs/product-requirements.md`  \
+**Last Updated:** February 12, 2026  \
 **Status:** Audit + Re-scope (PRD-complete)
 
 ## Rules
@@ -16,10 +16,10 @@
 
 1. **Phase 1 — Core Parity (P0)**
    - CLM-01..10
-   - IMG-01/02/03/05/10
+   - IMG-01/02/03/05/06/08/10
    - STR-01/02/03/05/06
    - SEC-01/02/04/06
-   - CLI-01/04/05
+   - CLI-01/03/04/05
    - OBS-03/OBS-04
 
 2. **Phase 2 — Networking + Compose (P0/P1)**
@@ -28,17 +28,17 @@
    - COMPAT-05
 
 3. **Phase 3 — Build Pipeline + Dockerfile Compatibility**
-   - IMG-06/08/09
+   - IMG-07/09
    - COMPAT-06
 
-4. **Phase 4 — Kubernetes CRI**
-   - COMPAT-09
-
-5. **Phase 5 — Hardening + Non-Functional**
+4. **Phase 4 — Hardening + Non-Functional**
    - SEC-03/05/07/08/09/10
    - PERF-01..08
    - REL-01..05
    - OBS-01/02/05
+
+5. **Phase 5 — Kubernetes CRI**
+   - COMPAT-09
 
 6. **Phase 6 — AI / ruv Integrations**
    - AI-01..12
@@ -73,12 +73,12 @@
 | IMG-03 | ~~Content-addressable store (Blake3)~~ | Done | Blake3 CAS for blobs + configs with hardlink dedup during rootfs assembly and build outputs. |
 | IMG-04 | ~~Zstd compression for layers~~ | Done | Build/ferrofile emit zstd layers; pull/apply supports zstd; push uses zstd media type when present. |
 | IMG-05 | ~~Lazy image pulling~~ | Done | `pull --lazy` stores manifest/config; runtime fetches missing blobs on demand. |
-| IMG-06 | Dockerfile build | Partial | Supports FROM base images + COPY --from; adds RUN/ENV/LABEL/WORKDIR/USER/CMD/ENTRYPOINT, but below full directive parity. |
+| IMG-06 | Dockerfile build | Partial | Supports FROM + COPY --from + RUN/ENV/LABEL/WORKDIR/USER/CMD/ENTRYPOINT; below 95% directive parity. |
 | IMG-07 | ferrofile.toml build | Partial | Minimal [build] spec (context/dockerfile/tag) wired to Dockerfile build. |
 | IMG-08 | ~~Multi-stage builds~~ | Done | Basic multi-stage support with COPY --from between stages. |
 | IMG-09 | ~~Build cache~~ | Done | Dockerfile build cache keyed by Dockerfile + context hash + base digest stored in `images/build-cache.json`. |
 | IMG-10 | ~~Tag/list/remove/prune images~~ | Done | Tag/list done; remove/prune implemented. |
-| IMG-11 | CVE scanning | Not Started | Not implemented. |
+| IMG-11 | Image scanning for CVEs | Not Started | Scan command not implemented yet. |
 | IMG-12 | ~~ruvector dedup~~ | Done | Embedding-based dedup helper in `ferro-mind`. |
 
 ### 3.3 Networking
@@ -90,10 +90,10 @@
 | NET-04 | ~~Container-to-container DNS~~ | Done | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers. |
 | NET-05 | ~~Custom networks (subnets)~~ | Done | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME` or CLI flags. |
 | NET-06 | ~~eBPF + iptables/nftables fallback~~ | Done | eBPF mode falls back to iptables/nftables for port mappings. |
-| NET-07 | WireGuard overlay | Not Started | Not implemented. |
+| NET-07 | WireGuard overlay | Partial | `--network wireguard` config stubs in runtime; not validated on real host. |
 | NET-08 | ~~Port mapping~~ | Done | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
-| NET-09 | IPv6 | Not Started | Not implemented. |
-| NET-10 | Bandwidth limiting | Not Started | Not implemented. |
+| NET-09 | ~~IPv6~~ | Done | Bridge IPv6 CIDR + container IPv6 allocation via `FERROCRATE_BRIDGE_IPV6_CIDR`. |
+| NET-10 | Bandwidth limiting | Partial | `--net-limit`/`FERROCRATE_BANDWIDTH_LIMIT` applies `tc tbf`; not validated. |
 
 ### 3.4 Storage and Volumes
 | ID | Requirement | Status | Evidence / Notes |
@@ -115,10 +115,10 @@
 | SEC-04 | ~~Capability dropping~~ | Done | Drop all by default; CLI `--cap-add` allows explicit caps. |
 | SEC-05 | ~~Read-only rootfs for prod~~ | Done | CLI profile defaults to read-only for prod; override with --read-write. |
 | SEC-06 | ~~no-new-privileges~~ | Done | CLI --no-new-privileges enforced via prctl. |
-| SEC-07 | Image signature verification | Not Started | Not implemented. |
+| SEC-07 | Image signature verification | Partial | Cosign verification helper staged; not fully wired/validated. |
 | SEC-08 | Runtime security monitoring (eBPF) | Not Started | Not implemented. |
 | SEC-09 | Encrypted container communication | Not Started | Not implemented. |
-| SEC-10 | Audit logging | Not Started | Not implemented. |
+| SEC-10 | Audit logging | Partial | Audit event scaffolding present; not fully wired across runtime actions. |
 
 ### 3.6 Compose / Multi-Container
 | ID | Requirement | Status | Evidence / Notes |

@@ -155,7 +155,7 @@
 | CLI-03 | ~~Shell completion~~ | Done | `ferrocrate completion <bash|zsh|fish|powershell|elvish>` generates scripts. |
 | CLI-04 | ~~Colored, human-friendly output~~ | Done | Colored status + image refs for text output. |
 | CLI-05 | ~~JSON output mode~~ | Done | `--format json` supported for images/containers/logs/inspect/stats. |
-| CLI-06 | Migration tool | Not Started | Not implemented. |
+| CLI-06 | ~~Migration tool~~ | Done | `ferrocrate migrate docker-auth` writes `~/.ferrocrate/registry-auth.json`. |
 | CLI-07 | Interactive TUI | Not Started | Not implemented. |
 
 ---

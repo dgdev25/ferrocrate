@@ -9,6 +9,8 @@ use ferro_core::registry::{RegistryClient, parse_image_reference};
 use ferro_core::runtime::ContainerRuntime;
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
+use ferro_mind::ai::audit::AuditLogger;
+use ferro_mind::ai::explain::DecisionTrace;
 use ferro_core::volume_store::LocalVolumeStore;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
@@ -209,6 +211,14 @@ pub enum Commands {
         shell: String,
     },
     Tui,
+    AiAudit {
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
+    },
     Migrate {
         #[command(subcommand)]
         target: MigrateCommands,
@@ -396,6 +406,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
         } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
         Commands::Completion { shell } => handle_completion(&shell),
         Commands::Tui => handle_tui(&runtime),
+        Commands::AiAudit { action, summary, evidence } => {
+            handle_ai_audit(&action, &summary, &evidence)
+        }
         Commands::Migrate { target } => handle_migrate(target),
     }
 }
@@ -554,6 +567,22 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_secs(2));
     }
+    Ok(())
+}
+
+fn handle_ai_audit(action: &str, summary: &str, evidence: &[String]) -> Result<(), String> {
+    let logger = AuditLogger::from_env().ok_or_else(|| {
+        "ai-audit: FERROCRATE_AI_AUDIT_LOG not set or AI disabled".to_string()
+    })?;
+    let mut trace = DecisionTrace::new("manual", summary);
+    for entry in evidence {
+        if let Some((key, value)) = entry.split_once('=') {
+            trace = trace.with_evidence(key, value);
+        }
+    }
+    logger
+        .log(action, &trace)
+        .map_err(|err| format!("ai-audit: {err}"))?;
     Ok(())
 }
 

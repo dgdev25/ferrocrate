@@ -182,7 +182,7 @@
 | COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Yes | Basic pull/push; error parity not verified. Rework Needed. |
 | COMPAT-04 | Docker API v1.45+ | Partial | Yes | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. Rework Needed. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | No | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
-| COMPAT-06 | Dockerfile syntax | Partial | Yes | Multi-stage + base images supported; still below 95% coverage. Rework Needed. |
+| COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |
 | COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | No | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |
 | COMPAT-08 | ~~x86_64, aarch64, riscv64~~ | Done | No | `scripts/build-targets.sh` builds release artifacts for all three targets. |
 | COMPAT-09 | Kubernetes CRI v1 | Partial | Yes | `ferro-cri` gRPC shim with Runtime/Image service skeleton (Version/Status/ListImages). Rework Needed. |

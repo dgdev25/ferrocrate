@@ -1,7 +1,7 @@
 use crate::registry::{RegistryAuth, parse_image_reference};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -36,6 +36,18 @@ struct DockerAuthEntry {
     password: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct FerrocrateAuthFile {
+    auths: HashMap<String, FerrocrateAuthEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FerrocrateAuthEntry {
+    username: String,
+    password: String,
+}
+
+
 #[derive(Debug, Deserialize)]
 struct HelperResponse {
     #[serde(rename = "Username")]
@@ -51,6 +63,13 @@ pub fn resolve_registry_auth(image: &str) -> Result<Option<RegistryAuth>, Docker
 }
 
 pub fn resolve_auth_for_registry(registry: &str) -> Result<Option<RegistryAuth>, DockerAuthError> {
+    if let Some(auths) = load_ferrocrate_auths()? {
+        let target = normalize_registry_key(registry);
+        if let Some(entry) = auths.get(&target) {
+            return Ok(Some(entry.clone()));
+        }
+    }
+
     let config_path = docker_config_path();
     let Some(config_path) = config_path else {
         return Ok(None);
@@ -84,6 +103,82 @@ pub fn resolve_auth_for_registry(registry: &str) -> Result<Option<RegistryAuth>,
     }
 
     Ok(None)
+}
+
+pub fn export_docker_auths() -> Result<HashMap<String, RegistryAuth>, DockerAuthError> {
+    let config_path = docker_config_path();
+    let Some(config_path) = config_path else {
+        return Ok(HashMap::new());
+    };
+    if !config_path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let content = fs::read_to_string(&config_path)
+        .map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let config: DockerConfig = serde_json::from_str(&content)
+        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+
+    let mut out = HashMap::new();
+
+    if let Some(helpers) = &config.cred_helpers {
+        for (key, helper) in helpers {
+            let target = normalize_registry_key(key);
+            if let Ok(auth) = resolve_with_helper(helper, &target) {
+                out.insert(target, auth);
+            }
+        }
+    }
+
+    if let Some(auths) = &config.auths {
+        for (key, entry) in auths {
+            let target = normalize_registry_key(key);
+            if out.contains_key(&target) {
+                continue;
+            }
+            if let Ok(auth) = decode_auth_entry(&target, entry) {
+                out.insert(target, auth);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn write_ferrocrate_auth_file(
+    path: &std::path::Path,
+    auths: &HashMap<String, RegistryAuth>,
+) -> Result<(), DockerAuthError> {
+    let mut entries = HashMap::new();
+    for (registry, auth) in auths {
+        entries.insert(
+            registry.to_string(),
+            FerrocrateAuthEntry {
+                username: auth.username.clone(),
+                password: auth.password.clone(),
+            },
+        );
+    }
+    let file = FerrocrateAuthFile { auths: entries };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&file)
+        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+    fs::write(path, bytes).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    Ok(())
+}
+
+pub fn ferrocrate_auth_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("FERROCRATE_AUTH_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".ferrocrate")
+            .join("registry-auth.json"),
+    )
 }
 
 fn decode_auth_entry(registry: &str, entry: &DockerAuthEntry) -> Result<RegistryAuth, DockerAuthError> {
@@ -160,6 +255,30 @@ fn docker_config_path() -> Option<PathBuf> {
 
     let home = std::env::var("HOME").ok()?;
     Some(PathBuf::from(home).join(".docker").join("config.json"))
+}
+
+fn load_ferrocrate_auths() -> Result<Option<HashMap<String, RegistryAuth>>, DockerAuthError> {
+    let Some(path) = ferrocrate_auth_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let file: FerrocrateAuthFile = serde_json::from_str(&content)
+        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+    let mut out = HashMap::new();
+    for (registry, entry) in file.auths {
+        out.insert(
+            normalize_registry_key(&registry),
+            RegistryAuth {
+                username: entry.username,
+                password: entry.password,
+            },
+        );
+    }
+    Ok(Some(out))
 }
 
 fn normalize_registry_key(raw: &str) -> String {

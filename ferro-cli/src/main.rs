@@ -198,6 +198,18 @@ pub enum Commands {
     Completion {
         shell: String,
     },
+    Migrate {
+        #[command(subcommand)]
+        target: MigrateCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MigrateCommands {
+    DockerAuth {
+        #[arg(long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -363,6 +375,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             metrics_addr,
         } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
         Commands::Completion { shell } => handle_completion(&shell),
+        Commands::Migrate { target } => handle_migrate(target),
     }
 }
 
@@ -494,6 +507,29 @@ fn parse_shell(value: &str) -> Result<Shell, String> {
         "elvish" => Ok(Shell::Elvish),
         other => Err(format!("completion: unsupported shell {other}")),
     }
+}
+
+fn handle_migrate(target: MigrateCommands) -> Result<(), String> {
+    match target {
+        MigrateCommands::DockerAuth { output } => handle_migrate_docker_auth(output.as_deref()),
+    }
+}
+
+fn handle_migrate_docker_auth(output: Option<&str>) -> Result<(), String> {
+    let auths = ferro_core::docker_auth::export_docker_auths()
+        .map_err(|err| format!("migrate docker-auth: {err}"))?;
+    if auths.is_empty() {
+        return Err("migrate docker-auth: no entries found".to_string());
+    }
+    let path = if let Some(output) = output {
+        PathBuf::from(output)
+    } else {
+        ferro_core::docker_auth::ferrocrate_auth_path()
+            .ok_or_else(|| "migrate docker-auth: HOME not set".to_string())?
+    };
+    ferro_core::docker_auth::write_ferrocrate_auth_file(&path, &auths)
+        .map_err(|err| format!("migrate docker-auth: {err}"))?;
+    Ok(())
 }
 
 

@@ -1724,6 +1724,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            None,
         )?;
     }
     Ok(())
@@ -2205,6 +2206,7 @@ fn handle_docker_compat_connection(
                 None,
                 None,
                 None,
+                None,
             )?;
             http_response(204, &[], "text/plain")
         }
@@ -2258,7 +2260,7 @@ fn handle_docker_compat_connection(
         }
         ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
             let name = path.trim_start_matches("/images/").trim_end_matches("/json");
-            let reference = resolve_reference(&name.to_string(), &store)
+            let reference = resolve_reference(&store, name)
                 .map_err(|err| err.to_string())?
                 .ok_or_else(|| format!("docker: unknown image {name}"))?;
             let body = serde_json::json!({
@@ -2878,6 +2880,7 @@ mod tests {
             None,
             "no",
             false,
+            None,
             None,
             None,
             None,

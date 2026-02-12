@@ -28,7 +28,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1629,6 +1628,17 @@ fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, _prefix: u8) 
 
 fn bandwidth_limit() -> Option<String> {
     std::env::var("FERROCRATE_BANDWIDTH_LIMIT").ok()
+}
+
+fn setup_wireguard(
+    _netns_name: &str,
+    _container_id: &str,
+) -> Result<(Option<String>, Option<String>), RuntimeError> {
+    // TODO: WireGuard setup requires the `wg` command and proper configuration
+    // This is a stub implementation - WireGuard networking is not yet fully implemented
+    Err(RuntimeError::Network(
+        "wireguard networking is not yet implemented. Use --network-mode=bridge instead".to_string(),
+    ))
 }
 
 fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {

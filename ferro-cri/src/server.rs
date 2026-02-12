@@ -4,10 +4,10 @@ use crate::runtime::{
     Image, ListImagesRequest, ListImagesResponse, RuntimeCondition, RuntimeStatus, StatusRequest,
     StatusResponse, VersionRequest, VersionResponse,
 };
-use ferro_core::image_store::LocalImageStore;
-use std::sync::Arc;
+use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -22,11 +22,18 @@ pub enum CriError {
     Io(#[from] std::io::Error),
     #[error("transport error: {0}")]
     Transport(#[from] tonic::transport::Error),
+    #[error("image store error: {0}")]
+    ImageStore(#[from] ImageStoreError),
 }
 
-#[derive(Debug)]
 pub struct CriRuntime {
     store: Arc<LocalImageStore>,
+}
+
+impl std::fmt::Debug for CriRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CriRuntime").finish_non_exhaustive()
+    }
 }
 
 impl CriRuntime {
@@ -74,10 +81,8 @@ impl ImageService for CriRuntime {
         &self,
         _request: Request<ListImagesRequest>,
     ) -> Result<Response<ListImagesResponse>, Status> {
-        let images = self
-            .store
-            .list_references()
-            .map_err(|err| Status::internal(err.to_string()))?;
+        let images: Result<Vec<_>, ImageStoreError> = self.store.list_references();
+        let images = images.map_err(|err| Status::internal(err.to_string()))?;
         let entries = images
             .into_iter()
             .map(|record| Image { id: record.digest })
@@ -97,10 +102,9 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 
     let uds = UnixListener::bind(socket_path)?;
     let incoming = UnixListenerStream::new(uds);
-    let runtime_dir =
-        std::env::var("FERROCRATE_RUNTIME_DIR").unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
-    let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))
-        .map_err(CriError::Io)?;
+    let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
+        .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
+    let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))?;
     let store = Arc::new(store);
     let runtime = CriRuntime::new(store.clone());
 

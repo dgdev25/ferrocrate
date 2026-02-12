@@ -9,6 +9,7 @@ use crate::image_config::{
     working_dir_from_config,
 };
 use crate::image_fetch::{resolve_layer_paths_with_store, resolve_config_path_with_store};
+use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
 use crate::mac_profiles::generate_apparmor_profile;
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
@@ -159,6 +160,8 @@ impl ContainerRuntime {
         network_backend: &str,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
+        verify_image_signature(image)
+            .map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
         let mut config_json = None;
         if let Ok(Some(config_path)) = resolve_config_path_with_store(&self.runtime_dir, image, store)
         {

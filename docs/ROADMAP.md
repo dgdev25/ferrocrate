@@ -203,4 +203,4 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | OBS-02 | ~~OpenTelemetry trace export~~ | Done | Yes | Optional HTTP export via `FERROCRATE_OTEL_ENDPOINT` from observability logs. Rework Needed. |
 | OBS-03 | ~~Structured JSON logging~~ | Done | No | JSONL event log emitted under runtime logs. |
 | OBS-04 | ~~Resource usage stats~~ | Done | No | CLI stats reads cgroup v2 memory/cpu/pids counters. |
-| OBS-05 | AI decision audit log | Partial | Yes | `ferro-mind` audit logger writes decision traces to `FERROCRATE_AI_AUDIT_LOG`. Rework Needed. |
+| OBS-05 | ~~AI decision audit log~~ | Done | Yes | `ferrocrate ai-audit` writes DecisionTrace to audit log when enabled. Rework Needed. |

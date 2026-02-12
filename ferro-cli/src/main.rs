@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
+use clap_complete::{Shell, generate};
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
@@ -194,6 +195,9 @@ pub enum Commands {
         #[arg(long)]
         metrics_addr: Option<String>,
     },
+    Completion {
+        shell: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -358,6 +362,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             docker_compat,
             metrics_addr,
         } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
+        Commands::Completion { shell } => handle_completion(&shell),
     }
 }
 
@@ -472,6 +477,25 @@ fn handle_run(
     }
     Ok(())
 }
+
+fn handle_completion(shell: &str) -> Result<(), String> {
+    let shell = parse_shell(shell)?;
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "ferrocrate", &mut std::io::stdout());
+    Ok(())
+}
+
+fn parse_shell(value: &str) -> Result<Shell, String> {
+    match value.to_lowercase().as_str() {
+        "bash" => Ok(Shell::Bash),
+        "zsh" => Ok(Shell::Zsh),
+        "fish" => Ok(Shell::Fish),
+        "powershell" | "pwsh" => Ok(Shell::PowerShell),
+        "elvish" => Ok(Shell::Elvish),
+        other => Err(format!("completion: unsupported shell {other}")),
+    }
+}
+
 
 struct ScopedEnv {
     key: String,

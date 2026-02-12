@@ -179,7 +179,7 @@
 |---|---|---|---|---|
 | COMPAT-01 | ~~OCI Image Spec v1.1~~ | Done | Yes | Minimal OCI compliance script added; full compliance still needs verification. Rework Needed. |
 | COMPAT-02 | ~~OCI Runtime Spec v1.2~~ | Done | Yes | `scripts/perf/oci-runtime-compat.sh` validates run path; full parity not verified. Rework Needed. |
-| COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Yes | Basic pull/push; error parity not verified. Rework Needed. |
+| COMPAT-03 | ~~OCI Distribution Spec v1.1~~ | Done | Yes | `scripts/perf/oci-distribution-compat.sh` validates pull path; full parity not verified. Rework Needed. |
 | COMPAT-04 | Docker API v1.45+ | Partial | Yes | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. Rework Needed. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | No | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
 | COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |

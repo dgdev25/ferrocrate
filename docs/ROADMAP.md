@@ -166,7 +166,7 @@
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
 | PERF-01 | ~~Container startup time~~ | Done | Yes | `scripts/perf/startup.sh` measures run latency. Rework Needed. |
-| PERF-02 | Image pull throughput | Not Started | Yes | No benchmarks implemented. Rework Needed. |
+| PERF-02 | ~~Image pull throughput~~ | Done | Yes | `scripts/perf/pull.sh` measures download throughput. Rework Needed. |
 | PERF-03 | Idle memory (no daemon) | Not Started | Yes | No measurement harness. Rework Needed. |
 | PERF-04 | Idle memory (with daemon) | Not Started | Yes | No measurement harness. Rework Needed. |
 | PERF-05 | Per-container overhead | Not Started | Yes | No measurement harness. Rework Needed. |

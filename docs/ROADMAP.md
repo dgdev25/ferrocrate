@@ -116,7 +116,7 @@
 | SEC-05 | ~~Read-only rootfs for prod~~ | Done | CLI profile defaults to read-only for prod; override with --read-write. |
 | SEC-06 | ~~no-new-privileges~~ | Done | CLI --no-new-privileges enforced via prctl. |
 | SEC-07 | ~~Image signature verification~~ | Done | `FERROCRATE_SIGNATURE_VERIFY=1` uses cosign with `FERROCRATE_SIGNATURE_KEY`. |
-| SEC-08 | Runtime security monitoring (eBPF) | Not Started | Not implemented. |
+| SEC-08 | ~~Runtime security monitoring (eBPF)~~ | Done | Optional `FERROCRATE_EBPF_MONITOR=1` loads/attaches eBPF program via bpftool. |
 | SEC-09 | Encrypted container communication | Not Started | Not implemented. |
 | SEC-10 | ~~Audit logging~~ | Done | Audit JSONL emitted for run/exec/pause/resume/stop/kill/restart/remove actions. |
 

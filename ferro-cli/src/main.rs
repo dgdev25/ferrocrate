@@ -2000,6 +2000,28 @@ fn handle_docker_compat_connection(
             });
             http_response(200, body.to_string().as_bytes(), "application/json")
         }
+        ("GET", "/info") => {
+            let containers = runtime.list().map_err(|err| err.to_string())?;
+            let images = store.list_references().map_err(|err| err.to_string())?;
+            let running = containers.iter().filter(|c| c.status == "running").count();
+            let paused = containers.iter().filter(|c| c.status == "paused").count();
+            let stopped = containers
+                .iter()
+                .filter(|c| c.status == "exited" || c.status == "stopped")
+                .count();
+            let body = serde_json::json!({
+                "ID": "ferrocrate",
+                "Containers": containers.len(),
+                "ContainersRunning": running,
+                "ContainersPaused": paused,
+                "ContainersStopped": stopped,
+                "Images": images.len(),
+                "Driver": "overlayfs",
+                "OperatingSystem": std::env::consts::OS,
+                "Architecture": std::env::consts::ARCH,
+            });
+            http_response(200, body.to_string().as_bytes(), "application/json")
+        }
         ("GET", "/containers/json") => {
             let records = runtime.list().map_err(|err| err.to_string())?;
             let entries: Vec<serde_json::Value> = records
@@ -2108,10 +2130,27 @@ fn handle_docker_compat_connection(
                 .map_err(|err| err.to_string())?;
             http_response(204, &[], "text/plain")
         }
+        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/restart") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/restart");
+            runtime
+                .restart(id, Duration::from_secs(5))
+                .map_err(|err| err.to_string())?;
+            http_response(204, &[], "text/plain")
+        }
         ("POST", path) if path.starts_with("/containers/") && path.ends_with("/kill") => {
             let id = path.trim_start_matches("/containers/").trim_end_matches("/kill");
             runtime.kill(id).map_err(|err| err.to_string())?;
             http_response(204, &[], "text/plain")
+        }
+        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/wait") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/wait");
+            wait_for_container_exit(&runtime, id)?;
+            let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+            let body = serde_json::json!({
+                "StatusCode": record.last_exit_code.unwrap_or(0),
+                "Error": serde_json::Value::Null
+            });
+            http_response(200, body.to_string().as_bytes(), "application/json")
         }
         ("DELETE", path) if path.starts_with("/containers/") => {
             let id = path.trim_start_matches("/containers/");
@@ -2131,6 +2170,20 @@ fn handle_docker_compat_connection(
                 })
                 .collect();
             http_response(200, serde_json::to_string(&entries).unwrap().as_bytes(), "application/json")
+        }
+        ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
+            let name = path.trim_start_matches("/images/").trim_end_matches("/json");
+            let reference = resolve_reference(&name.to_string(), &store)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("docker: unknown image {name}"))?;
+            let body = serde_json::json!({
+                "Id": reference.digest,
+                "RepoTags": vec![reference.reference],
+                "Created": reference.created_at_unix,
+                "Size": 0,
+                "VirtualSize": 0
+            });
+            http_response(200, body.to_string().as_bytes(), "application/json")
         }
         ("POST", "/images/create") => {
             let from_image = query

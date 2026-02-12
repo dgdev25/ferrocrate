@@ -151,7 +151,7 @@
 | ID | Requirement | Status | Evidence / Notes |
 |---|---|---|---|
 | CLI-01 | ~~Docker-compatible CLI syntax~~ | Done | Core Docker-like flags supported (`-e/-l/-p/-v/--name/--rm`) with `ps` alias. |
-| CLI-02 | Docker socket compatibility | Partial | `ferrocrate daemon --docker-compat` serves basic Docker API over Unix socket. |
+| CLI-02 | ~~Docker socket compatibility~~ | Done | Expanded Docker API coverage for ping/info/version, containers, images, wait/restart. |
 | CLI-03 | ~~Shell completion~~ | Done | `ferrocrate completion <bash|zsh|fish|powershell|elvish>` generates scripts. |
 | CLI-04 | ~~Colored, human-friendly output~~ | Done | Colored status + image refs for text output. |
 | CLI-05 | ~~JSON output mode~~ | Done | `--format json` supported for images/containers/logs/inspect/stats. |

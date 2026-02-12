@@ -1029,6 +1029,10 @@ fn setup_network(
         }
     }
 
+    if let Some(limit) = bandwidth_limit().as_deref() {
+        apply_bandwidth_limit(&host_veth, limit)?;
+    }
+
     Ok((Some(netns_name), Some(container_ip), container_ipv6))
 }
 
@@ -1449,6 +1453,32 @@ fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, _prefix: u8) 
     let byte = hash.as_bytes()[0] as u16;
     segments[7] = 2 + (byte % 200);
     Ipv6Addr::from(segments).to_string()
+}
+
+fn bandwidth_limit() -> Option<String> {
+    std::env::var("FERROCRATE_BANDWIDTH_LIMIT").ok()
+}
+
+fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
+    if limit.trim().is_empty() {
+        return Ok(());
+    }
+    let cmd = vec![
+        "tc".to_string(),
+        "qdisc".to_string(),
+        "replace".to_string(),
+        "dev".to_string(),
+        link.to_string(),
+        "root".to_string(),
+        "tbf".to_string(),
+        "rate".to_string(),
+        limit.to_string(),
+        "burst".to_string(),
+        "32kbit".to_string(),
+        "latency".to_string(),
+        "400ms".to_string(),
+    ];
+    run_cmd(&cmd)
 }
 
 fn short_id(value: &str, max: usize) -> String {

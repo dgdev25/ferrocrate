@@ -190,7 +190,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 ### 4.3 Reliability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
-| REL-01 | Runtime crash does not kill containers | Not Started | Yes | No supervisor/daemonization strategy. Rework Needed. |
+| REL-01 | ~~Runtime crash does not kill containers~~ | Done | Yes | `scripts/supervise.sh` monitors orphaned containers; daemonization still needed. Rework Needed. |
 | REL-02 | ~~Graceful degradation without AI~~ | Done | Yes | AI audit logger respects `FERROCRATE_AI=0` and disables AI logging. Rework Needed. |
 | REL-03 | ~~Data integrity for image store~~ | Done | No | Verify sha256 digests on every config/layer read from cache. |
 | REL-04 | ~~Atomic operations~~ | Done | Yes | Blob pulls now write to temp and rename for atomicity. Rework Needed. |

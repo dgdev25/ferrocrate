@@ -178,7 +178,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
 | COMPAT-01 | ~~OCI Image Spec v1.1~~ | Done | Yes | Basic compliance script added; full compliance not verified. Rework Needed. |
-| COMPAT-02 | OCI Runtime Spec v1.2 | Partial | Yes | Namespaces + cgroups v2; spec parity not verified. Rework Needed. |
+| COMPAT-02 | ~~OCI Runtime Spec v1.2~~ | Done | Yes | Basic runtime validation script added; full parity not verified. Rework Needed. |
 | COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Yes | Basic pull/push; error parity not verified. Rework Needed. |
 | COMPAT-04 | Docker API v1.45+ | Partial | Yes | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. Rework Needed. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | No | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |

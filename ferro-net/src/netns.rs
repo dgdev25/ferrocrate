@@ -1,3 +1,4 @@
+use crate::validate::{validate_interface_name, ValidationError};
 use nix::sched::{setns, CloneFlags};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -9,29 +10,35 @@ pub enum NetnsError {
     Open(PathBuf, #[source] std::io::Error),
     #[error("failed to enter network namespace: {0}")]
     Setns(#[from] nix::Error),
+    #[error("validation error: {0}")]
+    Validation(#[from] ValidationError),
 }
 
 pub fn netns_path(name: &str) -> PathBuf {
     PathBuf::from("/var/run/netns").join(name)
 }
 
-pub fn build_ip_netns_add_cmd(name: &str) -> Vec<String> {
-    vec!["ip".into(), "netns".into(), "add".into(), name.into()]
+pub fn build_ip_netns_add_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(name)?;
+    Ok(vec!["ip".into(), "netns".into(), "add".into(), name.into()])
 }
 
-pub fn build_ip_netns_del_cmd(name: &str) -> Vec<String> {
-    vec!["ip".into(), "netns".into(), "del".into(), name.into()]
+pub fn build_ip_netns_del_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(name)?;
+    Ok(vec!["ip".into(), "netns".into(), "del".into(), name.into()])
 }
 
-pub fn build_ip_link_set_netns_cmd(link: &str, netns: &str) -> Vec<String> {
-    vec![
+pub fn build_ip_link_set_netns_cmd(link: &str, netns: &str) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(link)?;
+    validate_interface_name(netns)?;
+    Ok(vec![
         "ip".into(),
         "link".into(),
         "set".into(),
         link.into(),
         "netns".into(),
         netns.into(),
-    ]
+    ])
 }
 
 pub fn enter_netns(path: &Path) -> Result<(), NetnsError> {
@@ -53,16 +60,22 @@ mod tests {
     #[test]
     fn builds_ip_netns_commands() {
         assert_eq!(
-            build_ip_netns_add_cmd("c1"),
+            build_ip_netns_add_cmd("c1").unwrap(),
             vec!["ip", "netns", "add", "c1"]
         );
         assert_eq!(
-            build_ip_netns_del_cmd("c1"),
+            build_ip_netns_del_cmd("c1").unwrap(),
             vec!["ip", "netns", "del", "c1"]
         );
         assert_eq!(
-            build_ip_link_set_netns_cmd("veth0", "c1"),
+            build_ip_link_set_netns_cmd("veth0", "c1").unwrap(),
             vec!["ip", "link", "set", "veth0", "netns", "c1"]
         );
+    }
+
+    #[test]
+    fn rejects_invalid_netns_names() {
+        assert!(build_ip_netns_add_cmd("ns;rm -rf").is_err());
+        assert!(build_ip_netns_add_cmd("").is_err());
     }
 }

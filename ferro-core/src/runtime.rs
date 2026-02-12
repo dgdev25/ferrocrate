@@ -60,6 +60,8 @@ pub enum RuntimeError {
     Mount(#[from] MountError),
     #[error("mac profile error: {0}")]
     MacProfile(#[from] crate::mac_profiles::MacProfileError),
+    #[error("network validation error: {0}")]
+    NetworkValidation(#[from] ferro_net::ValidationError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
     #[error("command is required to run container")]
@@ -1032,7 +1034,7 @@ fn setup_network(
                 return Ok((None, None, None));
             }
             let netns_name = format!("ferro-{container_id}");
-            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
+            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
             run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
             return Ok((Some(netns_name), None, None));
         }
@@ -1049,7 +1051,7 @@ fn setup_network(
                 ));
             }
             let netns_name = format!("ferro-{container_id}");
-            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
+            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
             run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
             let (ipv4, ipv6) = setup_wireguard(&netns_name, container_id)?;
             return Ok((Some(netns_name), ipv4, ipv6));
@@ -1085,21 +1087,21 @@ fn setup_network(
     }
 
     let bridge_config = bridge_config()?;
-    run_cmd_allow_exists(&bridge::build_ip_link_add_bridge_cmd(&bridge_config.name))?;
+    run_cmd_allow_exists(&bridge::build_ip_link_add_bridge_cmd(&bridge_config.name)?)?;
     run_cmd_allow_exists(&bridge::build_ip_addr_add_bridge_cmd(
         &bridge_config.name,
         &bridge_config.cidr,
-    ))?;
+    )?)?;
     if let Some(ipv6_cidr) = bridge_config.ipv6_cidr.as_ref() {
         run_cmd_allow_exists(&bridge::build_ip_addr_add_ipv6_bridge_cmd(
             &bridge_config.name,
             ipv6_cidr,
-        ))?;
+        )?)?;
     }
-    run_cmd(&bridge::build_ip_link_set_up_cmd(&bridge_config.name))?;
+    run_cmd(&bridge::build_ip_link_set_up_cmd(&bridge_config.name)?)?;
 
     let netns_name = format!("ferro-{container_id}");
-    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
+    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
 
     let host_veth = format!("veth{}", short_id(container_id, 8));
     let host_veth = if host_veth.len() > 15 {
@@ -1116,16 +1118,16 @@ fn setup_network(
         host_addr: None,
         container_addr: None,
     };
-    run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config))?;
+    run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config)?)?;
     run_cmd(&bridge::build_ip_link_set_master_cmd(
         &host_veth,
         &bridge_config.name,
-    ))?;
-    run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth))?;
+    )?)?;
+    run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
     if ebpf_monitor_enabled() {
         setup_ebpf_monitor(&host_veth)?;
     }
-    run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name))?;
+    run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name)?)?;
 
     let container_ip = allocate_container_ip(container_id, &bridge_config.gateway)?;
     let container_ipv6 = if let Some((gateway, prefix)) =
@@ -1204,8 +1206,8 @@ fn setup_network(
                 run_cmd(&prerouting)?;
                 run_cmd(&forward)?;
             } else {
-                let prerouting = build_iptables_prerouting_cmd(&map, &container_ip);
-                let forward = build_iptables_forward_cmd(&map, &container_ip);
+                let prerouting = build_iptables_prerouting_cmd(&map, &container_ip)?;
+                let forward = build_iptables_forward_cmd(&map, &container_ip)?;
                 run_cmd(&prerouting)?;
                 run_cmd(&forward)?;
             }
@@ -1221,7 +1223,9 @@ fn setup_network(
 
 fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
     if let Some(netns_name) = record.netns.as_ref() {
-        let _ = run_cmd(&netns::build_ip_netns_del_cmd(netns_name));
+        if let Ok(cmd) = netns::build_ip_netns_del_cmd(netns_name) {
+            let _ = run_cmd(&cmd);
+        }
     }
     if let Some(container_ip) = record.ip_address.as_ref() {
         for mapping in &record.ports {
@@ -1230,12 +1234,14 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
                 container_port: mapping.container_port,
                 protocol: mapping.protocol.clone(),
             };
-            let mut prerouting = build_iptables_prerouting_cmd(&map, container_ip);
-            let mut forward = build_iptables_forward_cmd(&map, container_ip);
-            replace_iptables_action(&mut prerouting, "-D");
-            replace_iptables_action(&mut forward, "-D");
-            let _ = run_cmd(&prerouting);
-            let _ = run_cmd(&forward);
+            if let Ok(mut prerouting) = build_iptables_prerouting_cmd(&map, container_ip) {
+                if let Ok(mut forward) = build_iptables_forward_cmd(&map, container_ip) {
+                    replace_iptables_action(&mut prerouting, "-D");
+                    replace_iptables_action(&mut forward, "-D");
+                    let _ = run_cmd(&prerouting);
+                    let _ = run_cmd(&forward);
+                }
+            }
             let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
             let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
             let _ = run_cmd(&nft_prerouting);

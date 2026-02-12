@@ -7,7 +7,7 @@ use ferro_net::veth::{VethConfig, VethPair, build_ip_link_add_veth_cmd};
 #[test]
 fn network_config_builders_work() {
     assert_eq!(
-        build_ip_link_add_bridge_cmd("ferro0"),
+        build_ip_link_add_bridge_cmd("ferro0").unwrap(),
         vec!["ip", "link", "add", "ferro0", "type", "bridge"]
     );
 
@@ -19,7 +19,7 @@ fn network_config_builders_work() {
     assert!(resolv.contains("nameserver 1.1.1.1"));
 
     assert_eq!(
-        build_ip_netns_add_cmd("c1"),
+        build_ip_netns_add_cmd("c1").unwrap(),
         vec!["ip", "netns", "add", "c1"]
     );
 
@@ -33,7 +33,7 @@ fn network_config_builders_work() {
         container_addr: None,
     };
     assert_eq!(
-        build_ip_link_add_veth_cmd(&config),
+        build_ip_link_add_veth_cmd(&config).unwrap(),
         vec!["ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1"]
     );
 
@@ -43,10 +43,36 @@ fn network_config_builders_work() {
         protocol: "tcp".to_string(),
     };
     assert_eq!(
-        build_iptables_forward_cmd(&mapping, "10.0.0.2"),
+        build_iptables_forward_cmd(&mapping, "10.0.0.2").unwrap(),
         vec![
             "iptables", "-A", "FORWARD", "-p", "tcp", "-d", "10.0.0.2", "--dport", "80",
             "-j", "ACCEPT"
         ]
     );
+}
+
+#[test]
+fn network_validators_reject_invalid_input() {
+    // Shell injection in interface name
+    assert!(build_ip_link_add_bridge_cmd("eth0;rm -rf /").is_err());
+    // Empty interface name
+    assert!(build_ip_link_add_bridge_cmd("").is_err());
+    // Invalid netns name
+    assert!(build_ip_netns_add_cmd("ns$(whoami)").is_err());
+
+    // Invalid container port (0)
+    let mapping = PortMapping {
+        host_port: 8080,
+        container_port: 0, // Invalid
+        protocol: "tcp".to_string(),
+    };
+    assert!(build_iptables_forward_cmd(&mapping, "10.0.0.2").is_err());
+
+    // Invalid protocol
+    let mapping = PortMapping {
+        host_port: 8080,
+        container_port: 80,
+        protocol: "invalid".to_string(),
+    };
+    assert!(build_iptables_forward_cmd(&mapping, "10.0.0.2").is_err());
 }

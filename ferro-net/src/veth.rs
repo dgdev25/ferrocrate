@@ -1,3 +1,4 @@
+use crate::validate::{validate_cidr, validate_interface_name, ValidationError};
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,7 +15,9 @@ pub struct VethConfig {
     pub container_addr: Option<IpAddr>,
 }
 
-pub fn build_ip_link_add_veth_cmd(config: &VethConfig) -> Vec<String> {
+pub fn build_ip_link_add_veth_cmd(config: &VethConfig) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(&config.pair.host)?;
+    validate_interface_name(&config.pair.container)?;
     let mut cmd = vec![
         "ip".into(),
         "link".into(),
@@ -30,22 +33,26 @@ pub fn build_ip_link_add_veth_cmd(config: &VethConfig) -> Vec<String> {
         cmd.push("mtu".into());
         cmd.push(mtu.to_string());
     }
-    cmd
+    Ok(cmd)
 }
 
-pub fn build_ip_link_set_up_cmd(link: &str) -> Vec<String> {
-    vec!["ip".into(), "link".into(), "set".into(), link.into(), "up".into()]
+pub fn build_ip_link_set_up_cmd(link: &str) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(link)?;
+    Ok(vec!["ip".into(), "link".into(), "set".into(), link.into(), "up".into()])
 }
 
-pub fn build_ip_addr_add_cmd(link: &str, addr: IpAddr, cidr: u8) -> Vec<String> {
-    vec![
+pub fn build_ip_addr_add_cmd(link: &str, addr: IpAddr, cidr: u8) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(link)?;
+    let cidr_str = format!("{addr}/{cidr}");
+    validate_cidr(&cidr_str)?;
+    Ok(vec![
         "ip".into(),
         "addr".into(),
         "add".into(),
-        format!("{addr}/{cidr}"),
+        cidr_str,
         "dev".into(),
         link.into(),
-    ]
+    ])
 }
 
 #[cfg(test)]
@@ -66,7 +73,7 @@ mod tests {
         };
 
         assert_eq!(
-            build_ip_link_add_veth_cmd(&config),
+            build_ip_link_add_veth_cmd(&config).unwrap(),
             vec![
                 "ip", "link", "add", "veth-host", "type", "veth", "peer", "name",
                 "veth-cont", "mtu", "1500"
@@ -77,14 +84,28 @@ mod tests {
     #[test]
     fn builds_link_up_and_addr_commands() {
         assert_eq!(
-            build_ip_link_set_up_cmd("veth0"),
+            build_ip_link_set_up_cmd("veth0").unwrap(),
             vec!["ip", "link", "set", "veth0", "up"]
         );
 
-        let cmd = build_ip_addr_add_cmd("veth0", "10.0.0.2".parse::<IpAddr>().unwrap(), 24);
+        let cmd = build_ip_addr_add_cmd("veth0", "10.0.0.2".parse::<IpAddr>().unwrap(), 24).unwrap();
         assert_eq!(
             cmd,
             vec!["ip", "addr", "add", "10.0.0.2/24", "dev", "veth0"]
         );
+    }
+
+    #[test]
+    fn rejects_invalid_veth_names() {
+        let config = VethConfig {
+            pair: VethPair {
+                host: "veth;rm".to_string(),
+                container: "eth0".to_string(),
+            },
+            mtu: None,
+            host_addr: None,
+            container_addr: None,
+        };
+        assert!(build_ip_link_add_veth_cmd(&config).is_err());
     }
 }

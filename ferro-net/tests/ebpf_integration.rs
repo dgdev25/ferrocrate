@@ -84,10 +84,14 @@ fn ebpf_xdp_integration_smoke() {
     };
 
     if result.is_ok() {
-        result = run_vec(build_ip_netns_add_cmd(&netns));
+        result = build_ip_netns_add_cmd(&netns)
+            .map_err(|e| e.to_string())
+            .and_then(run_vec);
     }
     if result.is_ok() {
-        result = run_vec(build_ip_link_add_veth_cmd(&config));
+        result = build_ip_link_add_veth_cmd(&config)
+            .map_err(|e| e.to_string())
+            .and_then(run_vec);
     }
     if result.is_ok() {
         result = run_cmd("ip", &["link", "set", &veth_ns, "netns", &netns]);

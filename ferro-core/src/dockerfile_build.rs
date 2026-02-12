@@ -589,6 +589,7 @@ struct StageSpec {
     copy_paths: Vec<CopySpec>,
     healthcheck: Option<HealthcheckSpec>,
     env: Vec<String>,
+    args: HashMap<String, String>,
     labels: HashMap<String, String>,
     workdir: Option<String>,
     user: Option<String>,
@@ -627,6 +628,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 copy_paths: Vec::new(),
                 healthcheck: None,
                 env: Vec::new(),
+                args: HashMap::new(),
                 labels: HashMap::new(),
                 workdir: None,
                 user: None,
@@ -642,60 +644,61 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
         let stage = current.as_mut().ok_or_else(|| {
             DockerfileBuildError::Invalid("missing FROM instruction".to_string())
         })?;
+        let interpolated = interpolate_value(&value, &stage.env, &stage.args);
 
         match keyword.as_str() {
             "COPY" => {
-                if let Some(copy) = parse_copy_from(&value)? {
+                if let Some(copy) = parse_copy_from(&interpolated)? {
                     stage.copy_from.push(copy);
-                } else if let Some(copy) = parse_copy_spec(&value)? {
+                } else if let Some(copy) = parse_copy_spec(&interpolated)? {
                     stage.copy_paths.push(copy);
                 }
             }
             "ADD" => {
-                if let Some(copy) = parse_copy_spec(&value)? {
+                if let Some(copy) = parse_copy_spec(&interpolated)? {
                     stage.copy_paths.push(copy);
                 }
             }
             "RUN" => {
-                let run = parse_run(&value)?;
+                let run = parse_run(&interpolated)?;
                 stage.run.push(run);
             }
             "ARG" => {
-                let env = parse_arg(&value)?;
-                stage.env.extend(env);
+                let (name, value) = parse_arg(&interpolated)?;
+                stage.args.insert(name.clone(), value);
             }
             "ENV" => {
-                let env = parse_env(&value)?;
+                let env = parse_env(&interpolated)?;
                 stage.env.extend(env);
             }
             "LABEL" => {
-                let labels = parse_labels(&value)?;
+                let labels = parse_labels(&interpolated)?;
                 stage.labels.extend(labels);
             }
             "WORKDIR" => {
-                stage.workdir = Some(value.to_string());
+                stage.workdir = Some(interpolated.to_string());
             }
             "USER" => {
-                stage.user = Some(value.to_string());
+                stage.user = Some(interpolated.to_string());
             }
             "EXPOSE" => {
                 stage.exposed_ports.extend(
-                    value
+                    interpolated
                         .split_whitespace()
                         .map(|val| val.to_string())
                 );
             }
             "VOLUME" => {
-                stage.volumes.extend(parse_volume_paths(&value)?);
+                stage.volumes.extend(parse_volume_paths(&interpolated)?);
             }
             "ENTRYPOINT" => {
-                stage.entrypoint = Some(parse_exec_or_shell(&value)?);
+                stage.entrypoint = Some(parse_exec_or_shell(&interpolated)?);
             }
             "CMD" => {
-                stage.cmd = Some(parse_exec_or_shell(&value)?);
+                stage.cmd = Some(parse_exec_or_shell(&interpolated)?);
             }
             "HEALTHCHECK" => {
-                stage.healthcheck = parse_healthcheck(&value)?;
+                stage.healthcheck = parse_healthcheck(&interpolated)?;
             }
             "SHELL" | "STOPSIGNAL" | "MAINTAINER" | "ONBUILD" => {
                 // Accept but no-op for now to avoid failing common Dockerfiles.
@@ -792,18 +795,18 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
     Ok(Some(CopySpec { srcs, dest }))
 }
 
-fn parse_arg(value: &str) -> Result<Vec<String>, DockerfileBuildError> {
+fn parse_arg(value: &str) -> Result<(String, String), DockerfileBuildError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Ok(Vec::new());
+        return Err(DockerfileBuildError::Invalid(
+            "ARG requires a name".to_string(),
+        ));
     }
-    let mut out = Vec::new();
-    for part in trimmed.split_whitespace() {
-        if let Some((key, val)) = part.split_once('=') {
-            out.push(format!("{key}={val}"));
-        }
+    let part = trimmed.split_whitespace().next().unwrap_or(trimmed);
+    if let Some((key, val)) = part.split_once('=') {
+        return Ok((key.to_string(), val.to_string()));
     }
-    Ok(out)
+    Ok((part.to_string(), std::env::var(part).unwrap_or_default()))
 }
 
 fn parse_volume_paths(value: &str) -> Result<Vec<String>, DockerfileBuildError> {
@@ -815,6 +818,55 @@ fn parse_volume_paths(value: &str) -> Result<Vec<String>, DockerfileBuildError> 
         return parse_json_array(trimmed);
     }
     Ok(trimmed.split_whitespace().map(|s| s.to_string()).collect())
+}
+
+fn interpolate_value(value: &str, env: &[String], args: &HashMap<String, String>) -> String {
+    let mut map = HashMap::new();
+    for entry in env {
+        if let Some((key, val)) = entry.split_once('=') {
+            map.insert(key.to_string(), val.to_string());
+        }
+    }
+    for (key, val) in args {
+        map.entry(key.to_string()).or_insert_with(|| val.to_string());
+    }
+    let mut out = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            if let Some('{') = chars.peek().copied() {
+                chars.next();
+                let mut var = String::new();
+                while let Some(next) = chars.next() {
+                    if next == '}' {
+                        break;
+                    }
+                    var.push(next);
+                }
+                if let Some(val) = map.get(&var) {
+                    out.push_str(val);
+                }
+                continue;
+            }
+            let mut var = String::new();
+            while let Some(next) = chars.peek().copied() {
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    var.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !var.is_empty() {
+                if let Some(val) = map.get(&var) {
+                    out.push_str(val);
+                }
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[derive(Debug, Clone)]

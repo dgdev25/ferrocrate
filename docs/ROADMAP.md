@@ -117,7 +117,7 @@
 | SEC-06 | ~~no-new-privileges~~ | Done | CLI --no-new-privileges enforced via prctl. |
 | SEC-07 | ~~Image signature verification~~ | Done | `FERROCRATE_SIGNATURE_VERIFY=1` uses cosign with `FERROCRATE_SIGNATURE_KEY`. |
 | SEC-08 | ~~Runtime security monitoring (eBPF)~~ | Done | Optional `FERROCRATE_EBPF_MONITOR=1` loads/attaches eBPF program via bpftool. |
-| SEC-09 | Encrypted container communication | Not Started | Not implemented. |
+| SEC-09 | ~~Encrypted container communication~~ | Done | `--network encrypted` maps to WireGuard overlay mode. |
 | SEC-10 | ~~Audit logging~~ | Done | Audit JSONL emitted for run/exec/pause/resume/stop/kill/restart/remove actions. |
 
 ### 3.6 Compose / Multi-Container

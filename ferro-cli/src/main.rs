@@ -432,6 +432,7 @@ fn handle_run(
     let _bridge_name_guard = ScopedEnv::set("FERROCRATE_BRIDGE_NAME", bridge_name);
     let _net_limit_guard = ScopedEnv::set("FERROCRATE_BANDWIDTH_LIMIT", net_limit);
     validate_network_mode(network)?;
+    let network = if network == "encrypted" { "wireguard" } else { network };
     let mut effective_backend = network_backend.to_string();
     if !publish.is_empty() && network != "bridge" {
         return Err("run: publish requires --network bridge".to_string());
@@ -786,8 +787,8 @@ fn validate_network_backend(value: &str) -> Result<(), String> {
 
 fn validate_network_mode(value: &str) -> Result<(), String> {
     match value {
-        "bridge" | "host" | "none" | "wireguard" => Ok(()),
-        _ => Err("network must be one of: bridge, host, none, wireguard".to_string()),
+        "bridge" | "host" | "none" | "wireguard" | "encrypted" => Ok(()),
+        _ => Err("network must be one of: bridge, host, none, wireguard, encrypted".to_string()),
     }
 }
 
@@ -2885,6 +2886,7 @@ mod tests {
         validate_network_mode("host").expect("ok");
         validate_network_mode("none").expect("ok");
         validate_network_mode("wireguard").expect("ok");
+        validate_network_mode("encrypted").expect("ok");
         let err = validate_network_mode("bogus").expect_err("invalid mode");
         assert!(err.contains("network"));
     }

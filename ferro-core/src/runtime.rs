@@ -203,6 +203,7 @@ impl ContainerRuntime {
 
         let container_id = generate_container_id();
         let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
+        let exec_cmd = apply_selinux_if_enabled(&exec_cmd)?;
         let container_dir = self.runtime_dir.join("containers").join(&container_id);
         let log_dir = container_dir.join("logs");
         fs::create_dir_all(&log_dir)?;
@@ -1242,6 +1243,12 @@ fn apparmor_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn selinux_enabled() -> bool {
+    std::env::var("FERROCRATE_SELINUX")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn apply_apparmor_if_enabled(
     runtime_dir: &Path,
     container_id: &str,
@@ -1275,6 +1282,27 @@ fn apply_apparmor_if_enabled(
     wrapped.push("aa-exec".to_string());
     wrapped.push("-p".to_string());
     wrapped.push(profile_name);
+    wrapped.push("--".to_string());
+    wrapped.extend(cmd.iter().cloned());
+    Ok(wrapped)
+}
+
+fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError> {
+    if !selinux_enabled() {
+        return Ok(cmd.to_vec());
+    }
+    if cmd.is_empty() {
+        return Ok(cmd.to_vec());
+    }
+    if !command_available("runcon") {
+        return Ok(cmd.to_vec());
+    }
+    let selinux_type =
+        std::env::var("FERROCRATE_SELINUX_TYPE").unwrap_or_else(|_| "container_t".to_string());
+    let mut wrapped = Vec::new();
+    wrapped.push("runcon".to_string());
+    wrapped.push("-t".to_string());
+    wrapped.push(selinux_type);
     wrapped.push("--".to_string());
     wrapped.extend(cmd.iter().cloned());
     Ok(wrapped)

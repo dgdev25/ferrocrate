@@ -111,7 +111,7 @@
 |---|---|---|---|---|
 | SEC-01 | ~~Rootless by default~~ | Done | No | User namespaces + rootless runtime. |
 | SEC-02 | ~~Seccomp profiles~~ | Done | No | Default profile + parser, not enforced in runtime. |
-| SEC-03 | AppArmor/SELinux integration | Partial | Yes | AppArmor profile load + `aa-exec` when `FERROCRATE_APPARMOR=1`; SELinux not enforced. Rework Needed. |
+| SEC-03 | ~~AppArmor/SELinux integration~~ | Done | Yes | AppArmor via `aa-exec` and SELinux via `runcon` when enabled; policy enforcement still limited. Rework Needed. |
 | SEC-04 | ~~Capability dropping~~ | Done | No | Drop all by default; CLI `--cap-add` allows explicit caps. |
 | SEC-05 | ~~Read-only rootfs for prod~~ | Done | No | CLI profile defaults to read-only for prod; override with --read-write. |
 | SEC-06 | ~~no-new-privileges~~ | Done | No | CLI --no-new-privileges enforced via prctl. |

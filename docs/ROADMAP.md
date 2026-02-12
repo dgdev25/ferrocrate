@@ -156,7 +156,7 @@
 | CLI-04 | ~~Colored, human-friendly output~~ | Done | Colored status + image refs for text output. |
 | CLI-05 | ~~JSON output mode~~ | Done | `--format json` supported for images/containers/logs/inspect/stats. |
 | CLI-06 | ~~Migration tool~~ | Done | `ferrocrate migrate docker-auth` writes `~/.ferrocrate/registry-auth.json`. |
-| CLI-07 | Interactive TUI | Not Started | Not implemented. |
+| CLI-07 | ~~Interactive TUI~~ | Done | `ferrocrate tui` provides a refreshable terminal view of containers. |
 
 ---
 

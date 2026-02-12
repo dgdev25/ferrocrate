@@ -183,7 +183,7 @@
 | COMPAT-04 | Docker API v1.45+ | Partial | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
 | COMPAT-06 | Dockerfile syntax | Partial | Multi-stage + base images supported; still below 95% coverage. |
-| COMPAT-07 | Linux kernel 5.10+ | Not Started | No min-version checks. |
+| COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |
 | COMPAT-08 | x86_64, aarch64, riscv64 | Not Started | No multi-arch builds verified. |
 | COMPAT-09 | Kubernetes CRI v1 | Partial | `ferro-cri` gRPC shim with Runtime/Image service skeleton (Version/Status/ListImages). |
 

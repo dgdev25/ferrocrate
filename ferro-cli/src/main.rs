@@ -778,8 +778,8 @@ fn validate_network_backend(value: &str) -> Result<(), String> {
 
 fn validate_network_mode(value: &str) -> Result<(), String> {
     match value {
-        "bridge" | "host" | "none" => Ok(()),
-        _ => Err("network must be one of: bridge, host, none".to_string()),
+        "bridge" | "host" | "none" | "wireguard" => Ok(()),
+        _ => Err("network must be one of: bridge, host, none, wireguard".to_string()),
     }
 }
 
@@ -2814,6 +2814,7 @@ mod tests {
         validate_network_mode("bridge").expect("ok");
         validate_network_mode("host").expect("ok");
         validate_network_mode("none").expect("ok");
+        validate_network_mode("wireguard").expect("ok");
         let err = validate_network_mode("bogus").expect_err("invalid mode");
         assert!(err.contains("network"));
     }

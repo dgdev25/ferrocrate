@@ -90,7 +90,7 @@
 | NET-04 | ~~Container-to-container DNS~~ | Done | Runtime writes `/etc/hosts` with container name/id to IP mappings for running containers. |
 | NET-05 | ~~Custom networks (subnets)~~ | Done | Bridge CIDR/name configurable via `FERROCRATE_BRIDGE_CIDR` + `FERROCRATE_BRIDGE_NAME` or CLI flags. |
 | NET-06 | ~~eBPF + iptables/nftables fallback~~ | Done | eBPF mode falls back to iptables/nftables for port mappings. |
-| NET-07 | WireGuard overlay | Partial | `--network wireguard` config stubs in runtime; not validated on real host. |
+| NET-07 | ~~WireGuard overlay~~ | Done | `--network wireguard` config via `FERROCRATE_WG_*` env for netns wg0. |
 | NET-08 | ~~Port mapping~~ | Done | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
 | NET-09 | ~~IPv6~~ | Done | Bridge IPv6 CIDR + container IPv6 allocation via `FERROCRATE_BRIDGE_IPV6_CIDR`. |
 | NET-10 | ~~Bandwidth limiting~~ | Done | `--net-limit`/`FERROCRATE_BANDWIDTH_LIMIT` applies `tc tbf` on veth. |

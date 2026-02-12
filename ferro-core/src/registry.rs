@@ -220,8 +220,14 @@ impl RegistryClient {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(RegistryError::Io)?;
         }
-        let mut file = File::create(dest).map_err(RegistryError::Io)?;
+        let tmp_path = dest.with_extension(format!(
+            "tmp-{}",
+            std::process::id()
+        ));
+        let mut file = File::create(&tmp_path).map_err(RegistryError::Io)?;
         copy(&mut response, &mut file).map_err(RegistryError::Io)?;
+        file.sync_all().map_err(RegistryError::Io)?;
+        std::fs::rename(&tmp_path, dest).map_err(RegistryError::Io)?;
         Ok(())
     }
 

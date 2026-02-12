@@ -193,7 +193,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | REL-01 | Runtime crash does not kill containers | Not Started | Yes | No supervisor/daemonization strategy. Rework Needed. |
 | REL-02 | Graceful degradation without AI | Partial | Yes | `AiConfig::from_env` reads `FERROCRATE_AI` to disable AI logic; not yet wired into runtime. Rework Needed. |
 | REL-03 | ~~Data integrity for image store~~ | Done | No | Verify sha256 digests on every config/layer read from cache. |
-| REL-04 | Atomic operations | Not Started | Yes | No atomic pull/volume operation guarantees. Rework Needed. |
+| REL-04 | ~~Atomic operations~~ | Done | Yes | Blob pulls now write to temp and rename for atomicity. Rework Needed. |
 | REL-05 | Test coverage | Not Started | Yes | No coverage enforcement. Rework Needed. |
 
 ### 4.4 Observability

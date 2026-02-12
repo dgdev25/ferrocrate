@@ -603,6 +603,7 @@ struct StageSpec {
 fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
     let mut stages = Vec::new();
     let mut current: Option<StageSpec> = None;
+    let mut global_args: HashMap<String, String> = HashMap::new();
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
@@ -620,7 +621,8 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             if let Some(stage) = current.take() {
                 stages.push(stage);
             }
-            let (base, name) = parse_from(&value)?;
+            let resolved_from = interpolate_value(&value, &[], &global_args);
+            let (base, name) = parse_from(&resolved_from)?;
             current = Some(StageSpec {
                 base,
                 name,
@@ -628,7 +630,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 copy_paths: Vec::new(),
                 healthcheck: None,
                 env: Vec::new(),
-                args: HashMap::new(),
+                args: global_args.clone(),
                 labels: HashMap::new(),
                 workdir: None,
                 user: None,
@@ -638,6 +640,12 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 exposed_ports: Vec::new(),
                 volumes: Vec::new(),
             });
+            continue;
+        }
+
+        if current.is_none() && keyword == "ARG" {
+            let (name, value) = parse_arg(&value)?;
+            global_args.insert(name, value);
             continue;
         }
 

@@ -16,7 +16,9 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tar::Builder;
 use thiserror::Error;
@@ -135,6 +137,11 @@ pub fn build_from_dockerfile_with_store_and_compression(
     let mut final_result = None;
 
     for (idx, stage) in stages.iter().enumerate() {
+        if !stage.run.is_empty() && !nix::unistd::Uid::effective().is_root() {
+            return Err(DockerfileBuildError::Invalid(
+                "RUN requires root (chroot) for now".to_string(),
+            ));
+        }
         let base_info = &base_infos[idx];
         let base_layers = &base_info.layers;
         let base_descriptors = base_info.descriptors.clone();
@@ -164,15 +171,33 @@ pub fn build_from_dockerfile_with_store_and_compression(
             copy_path_recursive(&source, &dest)?;
         }
 
-        let (layer_bytes, layer_media_type) =
-            build_context_layer_from_dir(&context_root, compression)?;
-        let layer_digest = sha256_digest_bytes(&layer_bytes);
-        let layer_size = layer_bytes.len() as i64;
+        let (mut layer_bytes, mut layer_media_type) =
+            build_layer_from_dir(&context_root, Some(dockerfile_path), compression)?;
+        let mut layer_digest = sha256_digest_bytes(&layer_bytes);
+        let mut layer_size = layer_bytes.len() as i64;
         write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
 
         let layer_path = blob_path(runtime_dir, &layer_digest);
         apply_layer_tar(&stage_root, &layer_path)
             .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+
+        if !stage.run.is_empty() {
+            apply_stage_workdir(&stage_root, stage.workdir.as_deref())?;
+            run_stage_commands(
+                &stage_root,
+                &stage.run,
+                &stage.env,
+                stage.workdir.as_deref(),
+                stage.user.as_deref(),
+            )?;
+            let (rebuilt, media_type) =
+                build_layer_from_dir(&stage_root, None, compression)?;
+            layer_bytes = rebuilt;
+            layer_media_type = media_type;
+            layer_digest = sha256_digest_bytes(&layer_bytes);
+            layer_size = layer_bytes.len() as i64;
+            write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
+        }
 
         stage_roots.push(stage_root.clone());
         if let Some(name) = stage.name.as_ref() {
@@ -180,7 +205,15 @@ pub fn build_from_dockerfile_with_store_and_compression(
         }
 
         if idx == stages.len() - 1 {
-            let config_json = build_config_json(stage.healthcheck.clone());
+            let config_json = build_config_json(
+                stage.healthcheck.clone(),
+                &stage.env,
+                &stage.labels,
+                stage.workdir.as_deref(),
+                stage.user.as_deref(),
+                stage.entrypoint.clone(),
+                stage.cmd.clone(),
+            );
             let config_bytes = config_json.as_bytes();
             let config_digest = sha256_digest_bytes(config_bytes);
 
@@ -250,12 +283,13 @@ pub fn build_from_dockerfile_with_store_and_compression(
     final_result.ok_or_else(|| DockerfileBuildError::Invalid("no stages built".to_string()))
 }
 
-fn build_context_layer_from_dir(
-    context_dir: &Path,
+fn build_layer_from_dir(
+    source_dir: &Path,
+    dockerfile_path: Option<&Path>,
     compression: CompressionFormat,
 ) -> Result<(Vec<u8>, String), DockerfileBuildError> {
     let mut tar_builder = Builder::new(Vec::new());
-    add_directory(&mut tar_builder, context_dir, context_dir, None)?;
+    add_directory(&mut tar_builder, source_dir, source_dir, dockerfile_path)?;
     let tar_bytes = tar_builder.into_inner().map_err(|err| {
         io::Error::new(io::ErrorKind::Other, err.to_string())
     })?;
@@ -314,7 +348,15 @@ fn add_directory(
     Ok(())
 }
 
-fn build_config_json(healthcheck: Option<HealthcheckSpec>) -> String {
+fn build_config_json(
+    healthcheck: Option<HealthcheckSpec>,
+    env: &[String],
+    labels: &HashMap<String, String>,
+    workdir: Option<&str>,
+    user: Option<&str>,
+    entrypoint: Option<Vec<String>>,
+    cmd: Option<Vec<String>>,
+) -> String {
     let health = healthcheck.map(|spec| {
         json!({
             "Test": spec.test,
@@ -330,8 +372,12 @@ fn build_config_json(healthcheck: Option<HealthcheckSpec>) -> String {
         "architecture": "amd64",
         "os": "linux",
         "config": {
-            "Env": [],
-            "Cmd": [],
+            "Env": env,
+            "Cmd": cmd,
+            "Entrypoint": entrypoint,
+            "WorkingDir": workdir,
+            "User": user,
+            "Labels": labels,
             "Healthcheck": health
         },
         "rootfs": {
@@ -506,6 +552,13 @@ struct StageSpec {
     name: Option<String>,
     copy_from: Vec<CopyFromSpec>,
     healthcheck: Option<HealthcheckSpec>,
+    env: Vec<String>,
+    labels: HashMap<String, String>,
+    workdir: Option<String>,
+    user: Option<String>,
+    entrypoint: Option<Vec<String>>,
+    cmd: Option<Vec<String>>,
+    run: Vec<RunSpec>,
 }
 
 fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
@@ -534,6 +587,13 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 name,
                 copy_from: Vec::new(),
                 healthcheck: None,
+                env: Vec::new(),
+                labels: HashMap::new(),
+                workdir: None,
+                user: None,
+                entrypoint: None,
+                cmd: None,
+                run: Vec::new(),
             });
             continue;
         }
@@ -548,7 +608,30 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                     stage.copy_from.push(copy);
                 }
             }
-            "CMD" => {}
+            "RUN" => {
+                let run = parse_run(&value)?;
+                stage.run.push(run);
+            }
+            "ENV" => {
+                let env = parse_env(&value)?;
+                stage.env.extend(env);
+            }
+            "LABEL" => {
+                let labels = parse_labels(&value)?;
+                stage.labels.extend(labels);
+            }
+            "WORKDIR" => {
+                stage.workdir = Some(value.to_string());
+            }
+            "USER" => {
+                stage.user = Some(value.to_string());
+            }
+            "ENTRYPOINT" => {
+                stage.entrypoint = Some(parse_exec_or_shell(&value)?);
+            }
+            "CMD" => {
+                stage.cmd = Some(parse_exec_or_shell(&value)?);
+            }
             "HEALTHCHECK" => {
                 stage.healthcheck = parse_healthcheck(&value)?;
             }
@@ -631,6 +714,12 @@ struct HealthcheckSpec {
     start_period_nanos: u64,
 }
 
+#[derive(Debug, Clone)]
+struct RunSpec {
+    args: Vec<String>,
+    _shell: bool,
+}
+
 fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBuildError> {
     let trimmed = raw.trim();
     if trimmed.eq_ignore_ascii_case("NONE") {
@@ -684,6 +773,150 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
     }))
 }
 
+fn parse_run(raw: &str) -> Result<RunSpec, DockerfileBuildError> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') {
+        let args = parse_json_array(trimmed)?;
+        return Ok(RunSpec { args, _shell: false });
+    }
+    Ok(RunSpec {
+        args: vec!["/bin/sh".to_string(), "-c".to_string(), trimmed.to_string()],
+        _shell: true,
+    })
+}
+
+fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.contains('=') {
+        return Ok(trimmed
+            .split_whitespace()
+            .filter(|entry| !entry.trim().is_empty())
+            .map(|entry| entry.to_string())
+            .collect());
+    }
+
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return Err(DockerfileBuildError::Invalid(
+            "ENV requires key and value".to_string(),
+        ));
+    }
+    let key = tokens[0];
+    let value = tokens[1..].join(" ");
+    Ok(vec![format!("{key}={value}")])
+}
+
+fn parse_labels(raw: &str) -> Result<HashMap<String, String>, DockerfileBuildError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut out = HashMap::new();
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    for token in tokens {
+        if let Some((key, value)) = token.split_once('=') {
+            let value = value.trim_matches('"').trim_matches('\'');
+            out.insert(key.to_string(), value.to_string());
+        } else {
+            return Err(DockerfileBuildError::Invalid(
+                "LABEL requires key=value".to_string(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn parse_exec_or_shell(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') {
+        return parse_json_array(trimmed);
+    }
+    Ok(vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        trimmed.to_string(),
+    ])
+}
+
+fn parse_json_array(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let parsed: Vec<String> = serde_json::from_str(raw).map_err(|err| {
+        DockerfileBuildError::Invalid(format!("invalid JSON array: {err}"))
+    })?;
+    Ok(parsed)
+}
+
+fn apply_stage_workdir(rootfs: &Path, workdir: Option<&str>) -> Result<(), DockerfileBuildError> {
+    let Some(workdir) = workdir else {
+        return Ok(());
+    };
+    let path = workdir.trim();
+    if path.is_empty() {
+        return Ok(());
+    }
+    let target = if path.starts_with('/') {
+        rootfs.join(path.trim_start_matches('/'))
+    } else {
+        rootfs.join(path)
+    };
+    fs::create_dir_all(&target)?;
+    Ok(())
+}
+
+fn run_stage_commands(
+    rootfs: &Path,
+    runs: &[RunSpec],
+    env: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<(), DockerfileBuildError> {
+    for run in runs {
+        let mut chroot_cmd = Command::new("chroot");
+        chroot_cmd.arg(rootfs).arg(&run.args[0]).args(&run.args[1..]);
+        for entry in env {
+            let mut parts = entry.splitn(2, '=');
+            let key = parts.next().unwrap_or("").trim();
+            let value = parts.next().unwrap_or("").trim();
+            if !key.is_empty() {
+                chroot_cmd.env(key, value);
+            }
+        }
+        if let Some(dir) = workdir {
+            let target = if dir.starts_with('/') {
+                dir.to_string()
+            } else {
+                format!("/{}", dir)
+            };
+            chroot_cmd.current_dir(target);
+        }
+        if let Some(user_spec) = user {
+            if let Some((uid, gid)) = parse_user_spec(user_spec) {
+                chroot_cmd.uid(uid);
+                chroot_cmd.gid(gid);
+            }
+        }
+        let status = chroot_cmd.status()?;
+        if !status.success() {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "RUN failed with status {status}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.splitn(2, ':');
+    let uid = parts.next()?.parse::<u32>().ok()?;
+    let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
+    Some((uid, gid))
+}
 fn parse_duration_to_nanos(value: &str) -> Option<u64> {
     let trimmed = value.trim();
     if trimmed.ends_with("ms") {

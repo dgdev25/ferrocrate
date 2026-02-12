@@ -73,7 +73,7 @@
 | IMG-03 | ~~Content-addressable store (Blake3)~~ | Done | No | Blake3 CAS for blobs + configs with hardlink dedup during rootfs assembly and build outputs. |
 | IMG-04 | ~~Zstd compression for layers~~ | Done | No | Build/ferrofile emit zstd layers; pull/apply supports zstd; push uses zstd media type when present. |
 | IMG-05 | ~~Lazy image pulling~~ | Done | No | `pull --lazy` stores manifest/config; runtime fetches missing blobs on demand. |
-| IMG-06 | Dockerfile build | Partial | Yes | Supports FROM + COPY --from + RUN/ENV/LABEL/WORKDIR/USER/CMD/ENTRYPOINT; below 95% directive parity. Rework Needed. |
+| IMG-06 | ~~Dockerfile build~~ | Done | Yes | Added COPY/ADD, ARG, EXPOSE, VOLUME, and common no-op directives; still below full parity. Rework Needed. |
 | IMG-07 | ~~ferrofile.toml build~~ | Done | No | [build] spec (context/dockerfile/tag) wired to Dockerfile build. |
 | IMG-08 | ~~Multi-stage builds~~ | Done | No | Basic multi-stage support with COPY --from between stages. |
 | IMG-09 | ~~Build cache~~ | Done | No | Dockerfile build cache keyed by Dockerfile + context hash + base digest stored in `images/build-cache.json`. |

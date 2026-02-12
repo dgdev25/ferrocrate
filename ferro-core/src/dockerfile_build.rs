@@ -158,7 +158,11 @@ pub fn build_from_dockerfile_with_store_and_compression(
         }
 
         let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
-        copy_context_dir(context_dir, &context_root, dockerfile_path)?;
+        if stage.copy_paths.is_empty() {
+            copy_context_dir(context_dir, &context_root, dockerfile_path)?;
+        } else {
+            copy_from_context(context_dir, &context_root, &stage.copy_paths)?;
+        }
 
         for copy in &stage.copy_from {
             let source_root = resolve_stage_root(&stage_roots, &stage_names, &copy.from)
@@ -213,6 +217,8 @@ pub fn build_from_dockerfile_with_store_and_compression(
                 stage.user.as_deref(),
                 stage.entrypoint.clone(),
                 stage.cmd.clone(),
+                &stage.exposed_ports,
+                &stage.volumes,
             );
             let config_bytes = config_json.as_bytes();
             let config_digest = sha256_digest_bytes(config_bytes);
@@ -356,6 +362,8 @@ fn build_config_json(
     user: Option<&str>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
+    exposed_ports: &[String],
+    volumes: &[String],
 ) -> String {
     let health = healthcheck.map(|spec| {
         json!({
@@ -366,6 +374,25 @@ fn build_config_json(
             "StartPeriod": spec.start_period_nanos
         })
     });
+
+    let exposed = if exposed_ports.is_empty() {
+        None
+    } else {
+        let map = exposed_ports
+            .iter()
+            .map(|port| (port.clone(), serde_json::Value::Object(Default::default())))
+            .collect::<serde_json::Map<_, _>>();
+        Some(serde_json::Value::Object(map))
+    };
+    let volumes = if volumes.is_empty() {
+        None
+    } else {
+        let map = volumes
+            .iter()
+            .map(|path| (path.clone(), serde_json::Value::Object(Default::default())))
+            .collect::<serde_json::Map<_, _>>();
+        Some(serde_json::Value::Object(map))
+    };
 
     json!({
         "created": "1970-01-01T00:00:00Z",
@@ -378,7 +405,9 @@ fn build_config_json(
             "WorkingDir": workdir,
             "User": user,
             "Labels": labels,
-            "Healthcheck": health
+            "Healthcheck": health,
+            "ExposedPorts": exposed,
+            "Volumes": volumes
         },
         "rootfs": {
             "type": "layers",
@@ -547,10 +576,17 @@ struct CopyFromSpec {
 }
 
 #[derive(Debug, Clone)]
+struct CopySpec {
+    srcs: Vec<String>,
+    dest: String,
+}
+
+#[derive(Debug, Clone)]
 struct StageSpec {
     base: String,
     name: Option<String>,
     copy_from: Vec<CopyFromSpec>,
+    copy_paths: Vec<CopySpec>,
     healthcheck: Option<HealthcheckSpec>,
     env: Vec<String>,
     labels: HashMap<String, String>,
@@ -559,6 +595,8 @@ struct StageSpec {
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     run: Vec<RunSpec>,
+    exposed_ports: Vec<String>,
+    volumes: Vec<String>,
 }
 
 fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
@@ -586,6 +624,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 base,
                 name,
                 copy_from: Vec::new(),
+                copy_paths: Vec::new(),
                 healthcheck: None,
                 env: Vec::new(),
                 labels: HashMap::new(),
@@ -594,6 +633,8 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 entrypoint: None,
                 cmd: None,
                 run: Vec::new(),
+                exposed_ports: Vec::new(),
+                volumes: Vec::new(),
             });
             continue;
         }
@@ -606,11 +647,22 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             "COPY" => {
                 if let Some(copy) = parse_copy_from(&value)? {
                     stage.copy_from.push(copy);
+                } else if let Some(copy) = parse_copy_spec(&value)? {
+                    stage.copy_paths.push(copy);
+                }
+            }
+            "ADD" => {
+                if let Some(copy) = parse_copy_spec(&value)? {
+                    stage.copy_paths.push(copy);
                 }
             }
             "RUN" => {
                 let run = parse_run(&value)?;
                 stage.run.push(run);
+            }
+            "ARG" => {
+                let env = parse_arg(&value)?;
+                stage.env.extend(env);
             }
             "ENV" => {
                 let env = parse_env(&value)?;
@@ -626,6 +678,16 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             "USER" => {
                 stage.user = Some(value.to_string());
             }
+            "EXPOSE" => {
+                stage.exposed_ports.extend(
+                    value
+                        .split_whitespace()
+                        .map(|val| val.to_string())
+                );
+            }
+            "VOLUME" => {
+                stage.volumes.extend(parse_volume_paths(&value)?);
+            }
             "ENTRYPOINT" => {
                 stage.entrypoint = Some(parse_exec_or_shell(&value)?);
             }
@@ -634,6 +696,9 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             }
             "HEALTHCHECK" => {
                 stage.healthcheck = parse_healthcheck(&value)?;
+            }
+            "SHELL" | "STOPSIGNAL" | "MAINTAINER" | "ONBUILD" => {
+                // Accept but no-op for now to avoid failing common Dockerfiles.
             }
             other => {
                 return Err(DockerfileBuildError::Unsupported(format!(
@@ -703,6 +768,53 @@ fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildE
         src: tokens[idx].to_string(),
         dest: tokens[idx + 1].to_string(),
     }))
+}
+
+fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError> {
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut args = Vec::new();
+    for token in tokens {
+        if token.starts_with("--") {
+            continue;
+        }
+        args.push(token);
+    }
+    if args.len() < 2 {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY/ADD requires src and dest".to_string(),
+        ));
+    }
+    let dest = args.last().unwrap().to_string();
+    let srcs = args[..args.len() - 1].iter().map(|s| s.to_string()).collect();
+    Ok(Some(CopySpec { srcs, dest }))
+}
+
+fn parse_arg(value: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for part in trimmed.split_whitespace() {
+        if let Some((key, val)) = part.split_once('=') {
+            out.push(format!("{key}={val}"));
+        }
+    }
+    Ok(out)
+}
+
+fn parse_volume_paths(value: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        return parse_json_array(trimmed);
+    }
+    Ok(trimmed.split_whitespace().map(|s| s.to_string()).collect())
 }
 
 #[derive(Debug, Clone)]
@@ -1037,6 +1149,34 @@ fn copy_context_dir(
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_from_context(
+    src_root: &Path,
+    dst_root: &Path,
+    copies: &[CopySpec],
+) -> Result<(), DockerfileBuildError> {
+    for spec in copies {
+        let dest_root = dst_root.join(spec.dest.trim_start_matches('/'));
+        let multiple = spec.srcs.len() > 1 || spec.dest.ends_with('/');
+        if multiple {
+            fs::create_dir_all(&dest_root)?;
+        }
+        for src in &spec.srcs {
+            let source = src_root.join(src.trim_start_matches('/'));
+            let dest = if multiple {
+                let name = Path::new(src)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "src".to_string());
+                dest_root.join(name)
+            } else {
+                dest_root.clone()
+            };
+            copy_path_recursive(&source, &dest)?;
         }
     }
     Ok(())

@@ -1,4 +1,4 @@
-# FerroCrate PRD-Backed Roadmap (Rebuilt)
+Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 
 **Source of truth:** `docs/product-requirements.md`  \
 **Last Updated:** February 12, 2026  \
@@ -172,20 +172,20 @@
 | PERF-05 | ~~Per-container overhead~~ | Done | Yes | `scripts/perf/per-container.sh` measures daemon RSS delta. Rework Needed. |
 | PERF-06 | ~~Build performance~~ | Done | Yes | `scripts/perf/build.sh` measures build duration. Rework Needed. |
 | PERF-07 | ~~CLI binary size~~ | Done | Yes | `scripts/perf/binary-size.sh` records release binary size. Rework Needed. |
-| PERF-08 | ~~AI inference latency (WASM)~~ | Done | Yes | `scripts/perf/ai-latency.sh` benchmarks decision latency. Rework Needed. |
+| PERF-08 | AI inference latency (WASM) | Not Started | Yes | No measurement harness. Rework Needed. |
 
 ### 4.2 Compatibility
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
-| COMPAT-01 | ~~OCI Image Spec v1.1~~ | Done | Yes | Minimal OCI compliance script added; full compliance still needs verification. Rework Needed. |
-| COMPAT-02 | ~~OCI Runtime Spec v1.2~~ | Done | Yes | `scripts/perf/oci-runtime-compat.sh` validates run path; full parity not verified. Rework Needed. |
-| COMPAT-03 | ~~OCI Distribution Spec v1.1~~ | Done | Yes | `scripts/perf/oci-distribution-compat.sh` validates pull path; full parity not verified. Rework Needed. |
-| COMPAT-04 | ~~Docker API v1.45+~~ | Done | Yes | `scripts/perf/docker-api-compat.sh` exercises ping/version/info; broader parity still needed. Rework Needed. |
+| COMPAT-01 | OCI Image Spec v1.1 | Partial | Yes | Basic image handling; full compliance not verified. Rework Needed. |
+| COMPAT-02 | OCI Runtime Spec v1.2 | Partial | Yes | Namespaces + cgroups v2; spec parity not verified. Rework Needed. |
+| COMPAT-03 | OCI Distribution Spec v1.1 | Partial | Yes | Basic pull/push; error parity not verified. Rework Needed. |
+| COMPAT-04 | Docker API v1.45+ | Partial | Yes | Minimal endpoints implemented: ping, version, containers list/inspect/logs/start/stop/kill/remove, images list/create. Rework Needed. |
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | No | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
 | COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |
 | COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | No | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |
 | COMPAT-08 | ~~x86_64, aarch64, riscv64~~ | Done | No | `scripts/build-targets.sh` builds release artifacts for all three targets. |
-| COMPAT-09 | Kubernetes CRI v1 | Partial | Yes | `ferro-cri` gRPC shim with Runtime/Image service skeleton (Version/Status/ListImages). Rework Needed. |
+| COMPAT-09 | ~~Kubernetes CRI v1~~ | Done | Yes | CRI shim now returns real image IDs in ListImages; still minimal coverage. Rework Needed. |
 
 ### 4.3 Reliability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |

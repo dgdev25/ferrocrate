@@ -1,9 +1,11 @@
 use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
-    ListImagesRequest, ListImagesResponse, RuntimeCondition, RuntimeStatus, StatusRequest,
+    Image, ListImagesRequest, ListImagesResponse, RuntimeCondition, RuntimeStatus, StatusRequest,
     StatusResponse, VersionRequest, VersionResponse,
 };
+use ferro_core::image_store::LocalImageStore;
+use std::sync::Arc;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
@@ -22,8 +24,16 @@ pub enum CriError {
     Transport(#[from] tonic::transport::Error),
 }
 
-#[derive(Debug, Default)]
-pub struct CriRuntime;
+#[derive(Debug)]
+pub struct CriRuntime {
+    store: Arc<LocalImageStore>,
+}
+
+impl CriRuntime {
+    pub fn new(store: Arc<LocalImageStore>) -> Self {
+        Self { store }
+    }
+}
 
 #[tonic::async_trait]
 impl RuntimeService for CriRuntime {
@@ -64,7 +74,15 @@ impl ImageService for CriRuntime {
         &self,
         _request: Request<ListImagesRequest>,
     ) -> Result<Response<ListImagesResponse>, Status> {
-        Ok(Response::new(ListImagesResponse { images: Vec::new() }))
+        let images = self
+            .store
+            .list_references()
+            .map_err(|err| Status::internal(err.to_string()))?;
+        let entries = images
+            .into_iter()
+            .map(|record| Image { id: record.digest })
+            .collect();
+        Ok(Response::new(ListImagesResponse { images: entries }))
     }
 }
 
@@ -79,11 +97,16 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 
     let uds = UnixListener::bind(socket_path)?;
     let incoming = UnixListenerStream::new(uds);
-    let runtime = CriRuntime::default();
+    let runtime_dir =
+        std::env::var("FERROCRATE_RUNTIME_DIR").unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
+    let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))
+        .map_err(CriError::Io)?;
+    let store = Arc::new(store);
+    let runtime = CriRuntime::new(store.clone());
 
     tonic::transport::Server::builder()
         .add_service(RuntimeServiceServer::new(runtime))
-        .add_service(ImageServiceServer::new(CriRuntime::default()))
+        .add_service(ImageServiceServer::new(CriRuntime::new(store)))
         .serve_with_incoming(incoming)
         .await?;
 

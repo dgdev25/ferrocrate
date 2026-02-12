@@ -208,6 +208,7 @@ pub enum Commands {
     Completion {
         shell: String,
     },
+    Tui,
     Migrate {
         #[command(subcommand)]
         target: MigrateCommands,
@@ -394,6 +395,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             metrics_addr,
         } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
         Commands::Completion { shell } => handle_completion(&shell),
+        Commands::Tui => handle_tui(&runtime),
         Commands::Migrate { target } => handle_migrate(target),
     }
 }
@@ -517,6 +519,41 @@ fn handle_completion(shell: &str) -> Result<(), String> {
     let shell = parse_shell(shell)?;
     let mut cmd = Cli::command();
     generate(shell, &mut cmd, "ferrocrate", &mut std::io::stdout());
+    Ok(())
+}
+
+fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut input = String::new();
+        loop {
+            input.clear();
+            if std::io::stdin().read_line(&mut input).is_err() {
+                break;
+            }
+            if tx.send(input.trim().to_string()).is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        print!("\x1b[2J\x1b[H");
+        println!("FerroCrate TUI (press q + Enter to quit)");
+        println!("{:<20} {:<12} {:<20} {}", "CONTAINER", "STATUS", "IMAGE", "COMMAND");
+        let containers = runtime.list().map_err(|err| err.to_string())?;
+        for record in containers {
+            let name = record.name.unwrap_or(record.id);
+            let cmd = record.command.join(" ");
+            println!("{:<20} {:<12} {:<20} {}", name, record.status, record.image, cmd);
+        }
+        if let Ok(msg) = rx.try_recv() {
+            if msg.eq_ignore_ascii_case("q") {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
     Ok(())
 }
 

@@ -194,7 +194,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | REL-02 | ~~Graceful degradation without AI~~ | Done | Yes | AI audit logger respects `FERROCRATE_AI=0` and disables AI logging. Rework Needed. |
 | REL-03 | ~~Data integrity for image store~~ | Done | No | Verify sha256 digests on every config/layer read from cache. |
 | REL-04 | ~~Atomic operations~~ | Done | Yes | Blob pulls now write to temp and rename for atomicity. Rework Needed. |
-| REL-05 | Test coverage | Not Started | Yes | No coverage enforcement. Rework Needed. |
+| REL-05 | ~~Test coverage~~ | Done | Yes | `scripts/coverage.sh` enforces coverage via cargo-tarpaulin. Rework Needed. |
 
 ### 4.4 Observability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |

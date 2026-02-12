@@ -2136,6 +2136,25 @@ fn handle_docker_compat_connection(
             let logs = runtime.logs(id).map_err(|err| err.to_string())?;
             http_response(200, logs.as_bytes(), "text/plain")
         }
+        ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
+            let id = path.trim_start_matches("/containers/").trim_end_matches("/stats");
+            let stats = runtime.stats(id).map_err(|err| err.to_string())?;
+            let body = serde_json::json!({
+                "memory_stats": {
+                    "usage": stats.memory_current,
+                    "limit": stats.memory_max
+                },
+                "pids_stats": {
+                    "current": stats.pids_current
+                },
+                "cpu_stats": {
+                    "cpu_usage": {
+                        "total_usage": stats.cpu_usage_usec
+                    }
+                }
+            });
+            http_response(200, body.to_string().as_bytes(), "application/json")
+        }
         ("POST", "/containers/create") => {
             let name = query.get("name").cloned();
             let spec = parse_docker_create_spec(&request.body, name)?;

@@ -71,9 +71,9 @@
 | IMG-01 | ~~Pull images from OCI registries~~ | Done | Docker config auth + credential helpers + Bearer token challenge; supports OCI index/docker manifest list selection; handles digest references. |
 | IMG-02 | ~~Push images to OCI registries~~ | Done | Push uploads config + layers + manifest using stored media type with auth support. |
 | IMG-03 | ~~Content-addressable store (Blake3)~~ | Done | Blake3 CAS for blobs + configs with hardlink dedup during rootfs assembly and build outputs. |
-| IMG-04 | Zstd compression for layers | Partial | `build --compress zstd` emits zstd layers; other pipelines not wired. |
+| IMG-04 | ~~Zstd compression for layers~~ | Done | `build --compress zstd` emits zstd layers; pull/apply supports zstd; push uses zstd media type when present. |
 | IMG-05 | ~~Lazy image pulling~~ | Done | `pull --lazy` stores manifest/config; runtime fetches missing blobs on demand. |
-| IMG-06 | Dockerfile build | Partial | Supports FROM base images + COPY --from multi-stage; still far from 95% directive parity. |
+| IMG-06 | Dockerfile build | Partial | Supports FROM base images + COPY --from; adds RUN/ENV/LABEL/WORKDIR/USER/CMD/ENTRYPOINT, but below full directive parity. |
 | IMG-07 | ferrofile.toml build | Partial | Minimal [build] spec (context/dockerfile/tag) wired to Dockerfile build. |
 | IMG-08 | ~~Multi-stage builds~~ | Done | Basic multi-stage support with COPY --from between stages. |
 | IMG-09 | ~~Build cache~~ | Done | Dockerfile build cache keyed by Dockerfile + context hash + base digest stored in `images/build-cache.json`. |

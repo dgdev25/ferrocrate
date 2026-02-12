@@ -19,6 +19,7 @@ zstd = "0.13"
 toml = "0.8"
 sha2 = "0.10"
 ferro-net = { path = "../ferro-net" }
+rand = "0.9"
 
 [dev-dependencies]
 base64 = "0.22"

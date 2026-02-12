@@ -1,8 +1,10 @@
 use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
-    Image, ListImagesRequest, ListImagesResponse, RuntimeCondition, RuntimeStatus, StatusRequest,
-    StatusResponse, VersionRequest, VersionResponse,
+    Image, ImageStatusRequest, ImageStatusResponse, ListImagesRequest,
+    ListImagesResponse, PullImageRequest, PullImageResponse, RemoveImageRequest,
+    RemoveImageResponse, RuntimeCondition, RuntimeStatus, StatusRequest, StatusResponse,
+    VersionRequest, VersionResponse,
 };
 use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use std::fs;
@@ -85,9 +87,89 @@ impl ImageService for CriRuntime {
         let images = images.map_err(|err| Status::internal(err.to_string()))?;
         let entries = images
             .into_iter()
-            .map(|record| Image { id: record.digest })
+            .map(|record| {
+                // Extract tags from reference (e.g., "alpine:latest" -> ["alpine:latest"])
+                let repo_tags = if record.reference.starts_with("sha256:") {
+                    vec![] // Digest reference, no tags
+                } else {
+                    vec![record.reference.clone()]
+                };
+                Image {
+                    id: record.digest,
+                    repo_tags,
+                    repo_digests: vec![], // Not tracked in current store
+                    size: 0,              // Size not tracked in current store
+                    uid: String::new(),
+                    username: String::new(),
+                }
+            })
             .collect();
         Ok(Response::new(ListImagesResponse { images: entries }))
+    }
+
+    async fn image_status(
+        &self,
+        request: Request<ImageStatusRequest>,
+    ) -> Result<Response<ImageStatusResponse>, Status> {
+        let req = request.into_inner();
+        let image_spec = req.image.ok_or_else(|| {
+            Status::invalid_argument("image spec is required")
+        })?;
+
+        // Try to find image by reference or digest
+        let images = self.store.list_references()
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        let found = images.iter().find(|img| {
+            img.digest == image_spec.image || img.reference == image_spec.image
+        });
+
+        match found {
+            Some(record) => {
+                let repo_tags = if record.reference.starts_with("sha256:") {
+                    vec![]
+                } else {
+                    vec![record.reference.clone()]
+                };
+                Ok(Response::new(ImageStatusResponse {
+                    image: Some(Image {
+                        id: record.digest.clone(),
+                        repo_tags,
+                        repo_digests: vec![],
+                        size: 0,
+                        uid: String::new(),
+                        username: String::new(),
+                    }),
+                    info: Default::default(),
+                }))
+            }
+            None => Err(Status::not_found(format!(
+                "image {} not found",
+                image_spec.image
+            ))),
+        }
+    }
+
+    async fn pull_image(
+        &self,
+        _request: Request<PullImageRequest>,
+    ) -> Result<Response<PullImageResponse>, Status> {
+        // Image pulling requires integration with ferro-core runtime
+        // This is a placeholder that returns an error indicating the limitation
+        Err(Status::unimplemented(
+            "PullImage is not yet implemented. Use 'ferrocrate pull' CLI command instead."
+        ))
+    }
+
+    async fn remove_image(
+        &self,
+        _request: Request<RemoveImageRequest>,
+    ) -> Result<Response<RemoveImageResponse>, Status> {
+        // Image removal requires integration with ferro-core runtime
+        // This is a placeholder that returns an error indicating the limitation
+        Err(Status::unimplemented(
+            "RemoveImage is not yet implemented. Use 'ferrocrate rmi' CLI command instead."
+        ))
     }
 }
 

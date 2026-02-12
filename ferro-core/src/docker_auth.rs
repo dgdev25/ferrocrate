@@ -165,7 +165,16 @@ pub fn write_ferrocrate_auth_file(
     }
     let bytes = serde_json::to_vec_pretty(&file)
         .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
-    fs::write(path, bytes).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    fs::write(path, &bytes).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+
+    // Set restrictive permissions (0o600) on auth file to prevent credential exposure
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| DockerAuthError::Read(format!("failed to set permissions: {err}")))?;
+    }
+
     Ok(())
 }
 
@@ -264,6 +273,24 @@ fn load_ferrocrate_auths() -> Result<Option<HashMap<String, RegistryAuth>>, Dock
     if !path.exists() {
         return Ok(None);
     }
+
+    // Warn if auth file has overly permissive permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(&path) {
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                eprintln!(
+                    "WARNING: {} is accessible by other users (mode {:o}). Run: chmod 600 {}",
+                    path.display(),
+                    mode & 0o777,
+                    path.display()
+                );
+            }
+        }
+    }
+
     let content = fs::read_to_string(&path)
         .map_err(|err| DockerAuthError::Read(err.to_string()))?;
     let file: FerrocrateAuthFile = serde_json::from_str(&content)

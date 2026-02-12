@@ -9,6 +9,9 @@ service RuntimeService {
 
 service ImageService {
   rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc ImageStatus(ImageStatusRequest) returns (ImageStatusResponse);
+  rpc PullImage(PullImageRequest) returns (PullImageResponse);
+  rpc RemoveImage(RemoveImageRequest) returns (RemoveImageResponse);
 }
 
 message VersionRequest {
@@ -42,12 +45,49 @@ message RuntimeCondition {
   string message = 4;
 }
 
-message ListImagesRequest {}
+message ListImagesRequest {
+  string filter = 1;
+}
 
 message Image {
   string id = 1;
+  repeated string repo_tags = 2;
+  repeated string repo_digests = 3;
+  uint64 size = 4;
+  string uid = 5;
+  string username = 6;
 }
 
 message ListImagesResponse {
   repeated Image images = 1;
 }
+
+message ImageStatusRequest {
+  ImageSpec image = 1;
+  bool verbose = 2;
+}
+
+message ImageSpec {
+  string image = 1;
+}
+
+message ImageStatusResponse {
+  Image image = 1;
+  map<string, string> info = 2;
+}
+
+message PullImageRequest {
+  ImageSpec image = 1;
+  map<string, string> auth = 2;
+  string sandbox_config = 3;
+}
+
+message PullImageResponse {
+  string image_ref = 1;
+}
+
+message RemoveImageRequest {
+  ImageSpec image = 1;
+}
+
+message RemoveImageResponse {}

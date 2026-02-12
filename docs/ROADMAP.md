@@ -171,7 +171,7 @@
 | PERF-04 | ~~Idle memory (with daemon)~~ | Done | Yes | `scripts/perf/idle-daemon.sh` measures daemon RSS. Rework Needed. |
 | PERF-05 | ~~Per-container overhead~~ | Done | Yes | `scripts/perf/per-container.sh` measures daemon RSS delta. Rework Needed. |
 | PERF-06 | ~~Build performance~~ | Done | Yes | `scripts/perf/build.sh` measures build duration. Rework Needed. |
-| PERF-07 | CLI binary size | Not Started | Yes | No size checks enforced. Rework Needed. |
+| PERF-07 | ~~CLI binary size~~ | Done | Yes | `scripts/perf/binary-size.sh` records release binary size. Rework Needed. |
 | PERF-08 | AI inference latency (WASM) | Not Started | Yes | No measurement harness. Rework Needed. |
 
 ### 4.2 Compatibility

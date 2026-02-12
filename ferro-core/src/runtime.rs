@@ -18,6 +18,7 @@ use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
 use crate::registry::parse_image_reference;
 use ferro_net::bridge;
+use ferro_net::ebpf::{EbpfProgram, build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd};
 use ferro_net::netns;
 use ferro_net::nftables::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule_cmd};
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
@@ -1055,6 +1056,9 @@ fn setup_network(
         &bridge_config.name,
     ))?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth))?;
+    if ebpf_monitor_enabled() {
+        setup_ebpf_monitor(&host_veth)?;
+    }
     run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name))?;
 
     let container_ip = allocate_container_ip(container_id, &bridge_config.gateway)?;
@@ -1592,6 +1596,42 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
         "400ms".to_string(),
     ];
     run_cmd(&cmd)
+}
+
+fn ebpf_monitor_enabled() -> bool {
+    std::env::var("FERROCRATE_EBPF_MONITOR")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn setup_ebpf_monitor(iface: &str) -> Result<(), RuntimeError> {
+    if !command_available("bpftool") {
+        return Err(RuntimeError::Network(
+            "ebpf monitor requires bpftool".to_string(),
+        ));
+    }
+    let object_path = std::env::var("FERROCRATE_EBPF_OBJECT")
+        .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-monitor.o".to_string());
+    let section = std::env::var("FERROCRATE_EBPF_SECTION").unwrap_or_else(|_| "xdp".to_string());
+    let attach = std::env::var("FERROCRATE_EBPF_ATTACH").unwrap_or_else(|_| "xdp".to_string());
+    let pin_path = format!("/sys/fs/bpf/ferrocrate-{}", iface);
+    let program = EbpfProgram {
+        name: "ferrocrate_monitor".to_string(),
+        object_path,
+        section,
+    };
+    run_cmd(&build_bpftool_load_cmd(&program, &pin_path))?;
+    match attach.as_str() {
+        "xdp" => run_cmd(&build_xdp_attach_cmd(iface, &pin_path))?,
+        "tc-ingress" => run_cmd(&build_tc_attach_cmd(iface, &pin_path, "ingress"))?,
+        "tc-egress" => run_cmd(&build_tc_attach_cmd(iface, &pin_path, "egress"))?,
+        other => {
+            return Err(RuntimeError::Network(format!(
+                "invalid ebpf attach mode: {other}"
+            )))
+        }
+    }
+    Ok(())
 }
 
 fn short_id(value: &str, max: usize) -> String {

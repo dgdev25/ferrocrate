@@ -1,4 +1,5 @@
 use crate::ai::explain::DecisionTrace;
+use crate::ai::config::AiConfig;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -26,6 +27,10 @@ impl AuditLogger {
     }
 
     pub fn from_env() -> Option<Self> {
+        let config = AiConfig::from_env();
+        if !config.enabled {
+            return None;
+        }
         std::env::var("FERROCRATE_AI_AUDIT_LOG").ok().map(Self::new)
     }
 

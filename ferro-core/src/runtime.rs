@@ -25,7 +25,7 @@ use ferro_net::veth;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -227,7 +227,7 @@ impl ContainerRuntime {
         }
 
         let rootless = !nix::unistd::Uid::effective().is_root();
-        let (netns_name, container_ip) =
+        let (netns_name, container_ip, container_ipv6) =
             setup_network(&container_id, port_mappings, network_mode, network_backend)?;
         let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
@@ -295,6 +295,7 @@ impl ContainerRuntime {
             status: "running".to_string(),
             netns: netns_name.clone(),
             ip_address: container_ip.clone(),
+            ipv6_address: container_ipv6.clone(),
             ports: port_mappings
                 .iter()
                 .map(|mapping| crate::container_store::PortMappingRecord {
@@ -849,7 +850,7 @@ fn setup_network(
     port_mappings: &[crate::container_store::PortMappingRecord],
     network_mode: &str,
     network_backend: &str,
-) -> Result<(Option<String>, Option<String>), RuntimeError> {
+) -> Result<(Option<String>, Option<String>, Option<String>), RuntimeError> {
     match network_mode {
         "host" => {
             if !port_mappings.is_empty() {
@@ -857,7 +858,7 @@ fn setup_network(
                     "port mapping requires network bridge".to_string(),
                 ));
             }
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
         "none" => {
             if !port_mappings.is_empty() {
@@ -866,12 +867,12 @@ fn setup_network(
                 ));
             }
             if !nix::unistd::Uid::effective().is_root() {
-                return Ok((None, None));
+                return Ok((None, None, None));
             }
             let netns_name = format!("ferro-{container_id}");
             run_cmd(&netns::build_ip_netns_add_cmd(&netns_name))?;
             run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
-            return Ok((Some(netns_name), None));
+            return Ok((Some(netns_name), None, None));
         }
         "bridge" => {}
         _ => {
@@ -887,7 +888,7 @@ fn setup_network(
                 "port mapping requires root".to_string(),
             ));
         }
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
     let effective_backend = if network_backend == "ebpf" {
         "iptables"
@@ -909,6 +910,12 @@ fn setup_network(
         &bridge_config.name,
         &bridge_config.cidr,
     ))?;
+    if let Some(ipv6_cidr) = bridge_config.ipv6_cidr.as_ref() {
+        run_cmd_allow_exists(&bridge::build_ip_addr_add_ipv6_bridge_cmd(
+            &bridge_config.name,
+            ipv6_cidr,
+        ))?;
+    }
     run_cmd(&bridge::build_ip_link_set_up_cmd(&bridge_config.name))?;
 
     let netns_name = format!("ferro-{container_id}");
@@ -938,6 +945,13 @@ fn setup_network(
     run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name))?;
 
     let container_ip = allocate_container_ip(container_id, &bridge_config.gateway)?;
+    let container_ipv6 = if let Some((gateway, prefix)) =
+        bridge_config.ipv6_gateway.as_ref().zip(bridge_config.ipv6_prefix)
+    {
+        Some(allocate_container_ipv6(container_id, gateway, prefix))
+    } else {
+        None
+    };
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
     run_cmd(&ip_netns_exec(
         &netns_name,
@@ -950,6 +964,20 @@ fn setup_network(
             "eth0",
         ],
     ))?;
+    if let Some(ipv6) = container_ipv6.as_ref() {
+        run_cmd(&ip_netns_exec(
+            &netns_name,
+            &[
+                "ip",
+                "-6",
+                "addr",
+                "add",
+                &format!("{ipv6}/{}", bridge_config.ipv6_prefix.unwrap_or(64)),
+                "dev",
+                "eth0",
+            ],
+        ))?;
+    }
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
     run_cmd(&ip_netns_exec(
         &netns_name,
@@ -962,6 +990,20 @@ fn setup_network(
             &bridge_config.gateway,
         ],
     ))?;
+    if let Some(gateway) = bridge_config.ipv6_gateway.as_ref() {
+        run_cmd(&ip_netns_exec(
+            &netns_name,
+            &[
+                "ip",
+                "-6",
+                "route",
+                "add",
+                "default",
+                "via",
+                &gateway.to_string(),
+            ],
+        ))?;
+    }
 
     if !port_mappings.is_empty() {
         if effective_backend == "nftables" {
@@ -987,7 +1029,7 @@ fn setup_network(
         }
     }
 
-    Ok((Some(netns_name), Some(container_ip)))
+    Ok((Some(netns_name), Some(container_ip), container_ipv6))
 }
 
 fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
@@ -1230,14 +1272,17 @@ fn update_container_hosts(
         if record.status != "running" && record.status != "paused" {
             continue;
         }
-        let Some(ip) = record.ip_address.as_ref() else {
-            continue;
+        let mut add_entry = |ip: &Option<String>| {
+            if let Some(ip) = ip.as_ref() {
+                let names = entries.entry(ip.clone()).or_default();
+                names.insert(record.id.clone());
+                if let Some(name) = record.name.as_ref() {
+                    names.insert(name.clone());
+                }
+            }
         };
-        let names = entries.entry(ip.clone()).or_default();
-        names.insert(record.id.clone());
-        if let Some(name) = record.name.as_ref() {
-            names.insert(name.clone());
-        }
+        add_entry(&record.ip_address);
+        add_entry(&record.ipv6_address);
     }
 
     if entries.is_empty() {
@@ -1249,7 +1294,7 @@ fn update_container_hosts(
         if record.status != "running" && record.status != "paused" {
             continue;
         }
-        if record.ip_address.is_none() {
+        if record.ip_address.is_none() && record.ipv6_address.is_none() {
             continue;
         }
         let hosts_path = runtime_dir
@@ -1337,6 +1382,9 @@ struct BridgeConfig {
     cidr: String,
     gateway: String,
     prefix: u8,
+    ipv6_cidr: Option<String>,
+    ipv6_gateway: Option<Ipv6Addr>,
+    ipv6_prefix: Option<u8>,
 }
 
 fn bridge_config() -> Result<BridgeConfig, RuntimeError> {
@@ -1344,6 +1392,7 @@ fn bridge_config() -> Result<BridgeConfig, RuntimeError> {
         std::env::var("FERROCRATE_BRIDGE_NAME").unwrap_or_else(|_| "ferro0".to_string());
     let cidr =
         std::env::var("FERROCRATE_BRIDGE_CIDR").unwrap_or_else(|_| "10.0.0.1/24".to_string());
+    let ipv6_cidr = std::env::var("FERROCRATE_BRIDGE_IPV6_CIDR").ok();
     let mut parts = cidr.split('/');
     let gateway = parts
         .next()
@@ -1354,11 +1403,31 @@ fn bridge_config() -> Result<BridgeConfig, RuntimeError> {
         .ok_or_else(|| RuntimeError::Network("invalid bridge cidr".to_string()))?
         .parse::<u8>()
         .map_err(|_| RuntimeError::Network("invalid bridge cidr".to_string()))?;
+    let (ipv6_gateway, ipv6_prefix) = if let Some(cidr) = ipv6_cidr.as_deref() {
+        let mut parts = cidr.split('/');
+        let gateway = parts
+            .next()
+            .ok_or_else(|| RuntimeError::Network("invalid ipv6 cidr".to_string()))?;
+        let prefix = parts
+            .next()
+            .ok_or_else(|| RuntimeError::Network("invalid ipv6 cidr".to_string()))?
+            .parse::<u8>()
+            .map_err(|_| RuntimeError::Network("invalid ipv6 cidr".to_string()))?;
+        let gateway = gateway
+            .parse::<Ipv6Addr>()
+            .map_err(|_| RuntimeError::Network("invalid ipv6 gateway".to_string()))?;
+        (Some(gateway), Some(prefix))
+    } else {
+        (None, None)
+    };
     Ok(BridgeConfig {
         name,
         cidr,
         gateway,
         prefix,
+        ipv6_cidr,
+        ipv6_gateway,
+        ipv6_prefix,
     })
 }
 
@@ -1372,6 +1441,14 @@ fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, Ru
     let host = 2 + (byte % 200);
     octets[3] = host;
     Ok(Ipv4Addr::from(octets).to_string())
+}
+
+fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, _prefix: u8) -> String {
+    let mut segments = gateway.segments();
+    let hash = blake3::hash(container_id.as_bytes());
+    let byte = hash.as_bytes()[0] as u16;
+    segments[7] = 2 + (byte % 200);
+    Ipv6Addr::from(segments).to_string()
 }
 
 fn short_id(value: &str, max: usize) -> String {

@@ -93,7 +93,7 @@
 | NET-07 | WireGuard overlay | Partial | `--network wireguard` config stubs in runtime; not validated on real host. |
 | NET-08 | ~~Port mapping~~ | Done | `-p` uses iptables or nftables DNAT/forward rules depending on backend. |
 | NET-09 | ~~IPv6~~ | Done | Bridge IPv6 CIDR + container IPv6 allocation via `FERROCRATE_BRIDGE_IPV6_CIDR`. |
-| NET-10 | Bandwidth limiting | Partial | `--net-limit`/`FERROCRATE_BANDWIDTH_LIMIT` applies `tc tbf`; not validated. |
+| NET-10 | ~~Bandwidth limiting~~ | Done | `--net-limit`/`FERROCRATE_BANDWIDTH_LIMIT` applies `tc tbf` on veth. |
 
 ### 3.4 Storage and Volumes
 | ID | Requirement | Status | Evidence / Notes |

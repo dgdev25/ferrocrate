@@ -94,6 +94,8 @@ pub enum Commands {
         bridge_cidr: Option<String>,
         #[arg(long)]
         bridge_name: Option<String>,
+        #[arg(long = "net-limit")]
+        net_limit: Option<String>,
         #[arg(long)]
         memory_max: Option<u64>,
         #[arg(long)]
@@ -285,6 +287,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             rm,
             bridge_cidr,
             bridge_name,
+            net_limit,
             memory_max,
             cpu_quota,
             cpu_period,
@@ -321,6 +324,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 rm,
                 bridge_cidr.as_deref(),
                 bridge_name.as_deref(),
+                net_limit.as_deref(),
                 memory_max,
                 cpu_quota,
                 cpu_period,
@@ -410,6 +414,7 @@ fn handle_run(
     rm: bool,
     bridge_cidr: Option<&str>,
     bridge_name: Option<&str>,
+    net_limit: Option<&str>,
     memory_max: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
@@ -417,6 +422,7 @@ fn handle_run(
 ) -> Result<(), String> {
     let _bridge_cidr_guard = ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", bridge_cidr);
     let _bridge_name_guard = ScopedEnv::set("FERROCRATE_BRIDGE_NAME", bridge_name);
+    let _net_limit_guard = ScopedEnv::set("FERROCRATE_BANDWIDTH_LIMIT", net_limit);
     validate_network_mode(network)?;
     let mut effective_backend = network_backend.to_string();
     if !publish.is_empty() && network != "bridge" {

@@ -25,7 +25,8 @@ impl VectorMemory {
                 metadata: entry.metadata.clone(),
             });
         }
-        scored.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+        // Handle NaN gracefully - use Equal ordering for NaN comparisons
+        scored.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         scored
     }

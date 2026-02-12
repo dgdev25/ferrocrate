@@ -5,7 +5,7 @@ members = [
   "ferro-net",
   "ferro-mind",
   "ferro-compose",
-  "ferro-cli",
+  "ferro-cli", "ferro-desktop",
 ]
 resolver = "2"
 

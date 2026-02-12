@@ -184,7 +184,7 @@ Do not start ANY re# FerroCrate PRD-Backed Roadmap (Rebuilt)
 | COMPAT-05 | ~~docker-compose v3.x~~ | Done | No | Compose v3.x parsing + build + env/ports/volumes/dependencies covered. |
 | COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |
 | COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | No | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |
-| COMPAT-08 | ~~x86_64, aarch64, riscv64~~ | Done | No | `scripts/build-targets.sh` builds release artifacts for all three targets. |
+| COMPAT-08 | ~~x86_64, aarch64, riscv64~~ | Done | No | `scripts/build-targets.sh` builds release artifacts for all three targets; `ferro-desktop` crate added for host-side desktop integration scaffolding. |
 | COMPAT-09 | ~~Kubernetes CRI v1~~ | Done | Yes | CRI shim now returns real image IDs in ListImages; still minimal coverage. Rework Needed. |
 
 ### 4.3 Reliability

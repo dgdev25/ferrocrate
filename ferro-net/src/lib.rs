@@ -9,4 +9,7 @@ pub mod observability;
 pub mod packet_rules;
 pub mod portmap;
 pub mod rootless;
+pub mod validate;
 pub mod veth;
+
+pub use validate::ValidationError;

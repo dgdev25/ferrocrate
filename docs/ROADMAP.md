@@ -118,7 +118,7 @@
 | SEC-07 | Image signature verification | Partial | Cosign verification helper staged; not fully wired/validated. |
 | SEC-08 | Runtime security monitoring (eBPF) | Not Started | Not implemented. |
 | SEC-09 | Encrypted container communication | Not Started | Not implemented. |
-| SEC-10 | Audit logging | Partial | Audit event scaffolding present; not fully wired across runtime actions. |
+| SEC-10 | ~~Audit logging~~ | Done | Audit JSONL emitted for run/exec/pause/resume/stop/kill/restart/remove actions. |
 
 ### 3.6 Compose / Multi-Container
 | ID | Requirement | Status | Evidence / Notes |

@@ -11,7 +11,7 @@ use crate::image_config::{
 use crate::image_fetch::{resolve_layer_paths_with_store, resolve_config_path_with_store};
 use crate::image_store::LocalImageStore;
 use crate::mac_profiles::generate_apparmor_profile;
-use crate::observability::{log_event, make_event};
+use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::rootfs::construct_rootfs_with_dedup;
 use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
 use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
@@ -323,6 +323,17 @@ impl ContainerRuntime {
                 None,
             ),
         );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "run",
+                audit_actor().as_str(),
+                Some(&record.id),
+                Some(&record.image),
+                Some(&record.status),
+                None,
+            ),
+        );
 
         if let Some(config) = health {
             let store = self.store.clone_db();
@@ -345,6 +356,17 @@ impl ContainerRuntime {
             &self.runtime_dir,
             make_event(
                 "exec",
+                Some(&record.id),
+                Some(&record.image),
+                None,
+                None,
+            ),
+        );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "exec",
+                audit_actor().as_str(),
                 Some(&record.id),
                 Some(&record.image),
                 None,
@@ -403,6 +425,17 @@ impl ContainerRuntime {
             &self.runtime_dir,
             make_event("pause", Some(id), Some(&record.image), Some("paused"), None),
         );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "pause",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some("paused"),
+                None,
+            ),
+        );
         Ok(())
     }
 
@@ -420,6 +453,17 @@ impl ContainerRuntime {
             &self.runtime_dir,
             make_event("resume", Some(id), Some(&record.image), Some("running"), None),
         );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "resume",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some("running"),
+                None,
+            ),
+        );
         Ok(())
     }
 
@@ -434,6 +478,17 @@ impl ContainerRuntime {
             &self.runtime_dir,
             make_event("stop", Some(id), Some(&record.image), Some("stopped"), None),
         );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "stop",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some("stopped"),
+                None,
+            ),
+        );
         Ok(())
     }
 
@@ -447,6 +502,17 @@ impl ContainerRuntime {
         let _ = log_event(
             &self.runtime_dir,
             make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
+        );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "kill",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some("killed"),
+                None,
+            ),
         );
         Ok(())
     }
@@ -489,6 +555,17 @@ impl ContainerRuntime {
             &self.runtime_dir,
             make_event("restart", Some(id), Some(&record.image), Some("running"), None),
         );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "restart",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some("running"),
+                None,
+            ),
+        );
 
         if let Some(config) = record.health.clone() {
             let store = self.store.clone_db();
@@ -521,6 +598,17 @@ impl ContainerRuntime {
         let _ = log_event(
             &self.runtime_dir,
             make_event("remove", Some(id), Some(&record.image), Some("removed"), None),
+        );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "remove",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some("removed"),
+                None,
+            ),
         );
         Ok(())
     }
@@ -844,6 +932,10 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
     let uid = parts.next()?.parse::<u32>().ok()?;
     let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
     Some((uid, gid))
+}
+
+fn audit_actor() -> String {
+    std::env::var("FERROCRATE_AUDIT_ACTOR").unwrap_or_else(|_| "cli".to_string())
 }
 
 fn setup_network(

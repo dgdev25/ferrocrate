@@ -7,6 +7,8 @@ use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{RegistryClient, parse_image_reference};
 use ferro_core::runtime::ContainerRuntime;
+use ferro_core::rootfs::construct_rootfs_with_dedup;
+use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_core::volume_store::LocalVolumeStore;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
@@ -182,6 +184,11 @@ pub enum Commands {
     },
     Push {
         image: String,
+    },
+    Scan {
+        image: String,
+        #[arg(long, default_value = "auto")]
+        scanner: String,
     },
     Compose {
         #[arg(short, long)]
@@ -364,6 +371,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
+        Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner),
         Commands::Compose { file, command } => {
             handle_compose(
                 &runtime,
@@ -796,6 +804,10 @@ fn parse_entrypoint(value: &str) -> Result<Vec<String>, String> {
         return Err("run: entrypoint must not be empty".to_string());
     }
     Ok(trimmed.split_whitespace().map(|s| s.to_string()).collect())
+}
+
+fn command_exists(bin: &str) -> bool {
+    process::Command::new(bin).arg("--version").output().is_ok()
 }
 
 fn validate_compression(value: &str) -> Result<String, String> {
@@ -1279,6 +1291,64 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     println!("push: image={canonical}");
     Ok(())
+}
+
+fn handle_scan(store: &LocalImageStore, image: &str, scanner: &str) -> Result<(), String> {
+    ensure_image_present(store, image)?;
+    let runtime_dir = runtime_dir();
+    let layer_paths = resolve_layer_paths_with_store(&runtime_dir, image, store)
+        .map_err(|err| format!("scan: missing image layers: {err}"))?;
+    if layer_paths.is_empty() {
+        return Err("scan: image has no layers".to_string());
+    }
+    let temp = tempfile::tempdir().map_err(|err| format!("scan: {err}"))?;
+    let rootfs = temp.path().join("rootfs");
+    let cas_root = runtime_dir.join("images").join("file-cas").join("blake3");
+    construct_rootfs_with_dedup(&rootfs, &layer_paths, &cas_root)
+        .map_err(|err| format!("scan: {err}"))?;
+
+    let scanner = select_scanner(scanner)?;
+    let output = run_scanner(&scanner, &rootfs)?;
+    println!("{output}");
+    Ok(())
+}
+
+fn select_scanner(requested: &str) -> Result<String, String> {
+    match requested {
+        "auto" => {
+            if command_exists("trivy") {
+                Ok("trivy".to_string())
+            } else if command_exists("grype") {
+                Ok("grype".to_string())
+            } else {
+                Err("scan: install trivy or grype, or pass --scanner".to_string())
+            }
+        }
+        "trivy" | "grype" => Ok(requested.to_string()),
+        other => Err(format!("scan: unsupported scanner {other}")),
+    }
+}
+
+fn run_scanner(scanner: &str, rootfs: &Path) -> Result<String, String> {
+    let output = match scanner {
+        "trivy" => process::Command::new("trivy")
+            .args(["fs", "--quiet", "--format", "json"])
+            .arg(rootfs)
+            .output(),
+        "grype" => process::Command::new("grype")
+            .args(["dir:"])
+            .arg(rootfs)
+            .args(["--output", "json"])
+            .output(),
+        _ => return Err(format!("scan: unsupported scanner {scanner}")),
+    }
+    .map_err(|err| format!("scan: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("scan: scanner failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn handle_compose(

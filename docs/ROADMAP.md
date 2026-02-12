@@ -78,7 +78,7 @@
 | IMG-08 | ~~Multi-stage builds~~ | Done | Basic multi-stage support with COPY --from between stages. |
 | IMG-09 | ~~Build cache~~ | Done | Dockerfile build cache keyed by Dockerfile + context hash + base digest stored in `images/build-cache.json`. |
 | IMG-10 | ~~Tag/list/remove/prune images~~ | Done | Tag/list done; remove/prune implemented. |
-| IMG-11 | Image scanning for CVEs | Not Started | Scan command not implemented yet. |
+| IMG-11 | ~~Image scanning for CVEs~~ | Done | `ferrocrate scan <image> [--scanner trivy|grype]` scans extracted rootfs. |
 | IMG-12 | ~~ruvector dedup~~ | Done | Embedding-based dedup helper in `ferro-mind`. |
 
 ### 3.3 Networking

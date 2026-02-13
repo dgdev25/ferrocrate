@@ -129,10 +129,46 @@ impl LocalContainerStore {
         Ok(removed)
     }
 
+    /// Default page size for list operations
+    const DEFAULT_PAGE_SIZE: usize = 100;
+
+    /// List all containers with a default page size limit.
+    /// For large deployments, use list_paginated() instead.
     pub fn list(&self) -> Result<Vec<ContainerRecord>, ContainerStoreError> {
+        self.list_paginated(None, None)
+    }
+
+    /// List containers with pagination support.
+    ///
+    /// # Arguments
+    /// * `offset` - Number of containers to skip (default: 0)
+    /// * `limit` - Maximum number of containers to return (default: 100)
+    ///
+    /// # Security
+    /// Always applies a maximum limit to prevent OOM attacks from listing
+    /// millions of containers.
+    pub fn list_paginated(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ContainerRecord>, ContainerStoreError> {
+        let offset = offset.unwrap_or(0);
+        // Enforce maximum limit to prevent OOM
+        let limit = limit.unwrap_or(Self::DEFAULT_PAGE_SIZE).min(1000);
+        let effective_limit = offset + limit;
+
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(limit);
+        let mut count = 0;
+
         for entry in &tree {
+            if count >= effective_limit {
+                break;
+            }
+            count += 1;
+            if count <= offset {
+                continue;
+            }
             let (_, value) = entry?;
             let record = serde_json::from_slice::<ContainerRecord>(&value)
                 .map_err(ContainerStoreError::Decode)?;
@@ -155,14 +191,18 @@ impl LocalContainerStore {
     }
 }
 
+/// Get current Unix timestamp in seconds.
+///
+/// Returns the current time as seconds since Unix epoch.
+/// If system time is broken (clock going backwards), logs a warning and returns 0
+/// as an indicator of invalid time.
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_else(|e| {
-            // Log the error but return a safe fallback (current time estimate)
-            eprintln!("[warn] system time error, using fallback: {}", e);
-            // Return 0 as indicator of invalid time, callers should handle this
+            // Use proper logging instead of eprintln!
+            log::warn!("system time error in now_unix(), returning 0: {}", e);
             0
         })
 }

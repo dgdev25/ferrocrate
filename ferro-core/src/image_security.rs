@@ -11,8 +11,9 @@ pub fn verify_image_signature(image: &str) -> Result<(), String> {
         .or_else(|_| std::env::var("COSIGN_PUBLIC_KEY"))
         .map_err(|_| "signature verification requires FERROCRATE_SIGNATURE_KEY".to_string())?;
 
+    // Security: Use "--" delimiter to prevent flag injection from malicious image names
     let output = Command::new("cosign")
-        .args(["verify", "--key", &key, image])
+        .args(["verify", "--key", &key, "--", image])
         .output()
         .map_err(|err| format!("cosign: {err}"))?;
     if !output.status.success() {

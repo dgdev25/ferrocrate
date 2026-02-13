@@ -99,8 +99,7 @@ impl CreationRollback {
             let cgroup_path = self.cgroup_root.join(cgroup_name);
             if cgroup_path.exists() {
                 if let Err(e) = fs::remove_dir(&cgroup_path) {
-                    // Log error instead of silently discarding
-                    eprintln!("[rollback] failed to remove cgroup {}: {}", cgroup_name, e);
+                    log::warn!("[rollback] failed to remove cgroup {}: {}", cgroup_name, e);
                 }
             }
         }
@@ -110,7 +109,7 @@ impl CreationRollback {
             // Delete network namespace
             if let Ok(cmd) = netns::build_ip_netns_del_cmd(netns_name) {
                 if let Err(e) = run_cmd(&cmd) {
-                    eprintln!("[rollback] failed to delete netns {}: {:?}", netns_name, e);
+                    log::warn!("[rollback] failed to delete netns {}: {:?}", netns_name, e);
                 }
             }
         }
@@ -129,10 +128,10 @@ impl CreationRollback {
                         replace_iptables_action(&mut prerouting, "-D");
                         replace_iptables_action(&mut forward, "-D");
                         if let Err(e) = run_cmd(&prerouting) {
-                            eprintln!("[rollback] failed to delete iptables prerouting: {:?}", e);
+                            log::warn!("[rollback] failed to delete iptables prerouting: {:?}", e);
                         }
                         if let Err(e) = run_cmd(&forward) {
-                            eprintln!("[rollback] failed to delete iptables forward: {:?}", e);
+                            log::warn!("[rollback] failed to delete iptables forward: {:?}", e);
                         }
                     }
                 }
@@ -140,10 +139,10 @@ impl CreationRollback {
                 let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
                 let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
                 if let Err(e) = run_cmd(&nft_prerouting) {
-                    eprintln!("[rollback] failed to delete nft prerouting: {:?}", e);
+                    log::warn!("[rollback] failed to delete nft prerouting: {:?}", e);
                 }
                 if let Err(e) = run_cmd(&nft_forward) {
-                    eprintln!("[rollback] failed to delete nft forward: {:?}", e);
+                    log::warn!("[rollback] failed to delete nft forward: {:?}", e);
                 }
             }
         }
@@ -151,7 +150,7 @@ impl CreationRollback {
         // Rollback container directory
         if let Some(ref dir) = self.container_dir {
             if let Err(e) = fs::remove_dir_all(dir) {
-                eprintln!("[rollback] failed to remove container dir: {}", e);
+                log::warn!("[rollback] failed to remove container dir: {}", e);
             }
         }
 
@@ -162,7 +161,7 @@ impl CreationRollback {
 impl Drop for CreationRollback {
     fn drop(&mut self) {
         if !self.committed {
-            eprintln!("[rollback] container {} creation failed, cleaning up resources", self.container_id);
+            log::warn!("[rollback] container {} creation failed, cleaning up resources", self.container_id);
             self.rollback();
         }
     }
@@ -851,11 +850,11 @@ impl ContainerRuntime {
         }
         // Best-effort cleanup - log failures but don't fail the remove operation
         if let Err(e) = cleanup_network(&record) {
-            eprintln!("[cleanup] network cleanup failed for {id}: {e}");
+            log::warn!("[cleanup] network cleanup failed for {id}: {e}");
         }
         let container_dir = self.runtime_dir.join("containers").join(id);
         if let Err(e) = fs::remove_dir_all(&container_dir) {
-            eprintln!("[cleanup] failed to remove container dir for {id}: {e}");
+            log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
         }
         self.store.remove(id)?;
         if let Ok(containers) = self.store.list() {

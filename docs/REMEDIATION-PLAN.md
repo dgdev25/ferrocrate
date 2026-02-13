@@ -12,8 +12,8 @@
 |------|--------|-----------------|
 | Wave 1 | ✅ COMPLETE | 3/3 tasks |
 | Wave 2 | ✅ MOSTLY COMPLETE | 8/9 tasks (CLI split deferred) |
-| Wave 3 | ✅ COMPLETE | 4/4 tasks (rUv ecosystem + ONNX embeddings) |
-| Wave 4 | ❌ NOT STARTED | 0/2 tasks |
+| Wave 3 | ✅ COMPLETE | 4/4 tasks (rUv ecosystem + ONNX embeddings + executor wiring) |
+| Wave 4 | 🔄 IN PROGRESS | 0/2 tasks |
 | Wave 5 | ❌ NOT STARTED | 0/4 tasks |
 
 ---
@@ -702,7 +702,7 @@ message Image {
 
 ## Wave 3 — Infrastructure & Depth (After Wave 2)
 
-### Task 3.1: Implement ferro-net Execution Layer (Partial)
+### Task 3.1: Implement ferro-net Execution Layer ✅ COMPLETED
 
 **Depends on:** Task 2.2 (input validation)
 
@@ -717,11 +717,14 @@ message Image {
    - `Transaction` struct for atomic command sequences with rollback
    - 8 passing tests for executor functionality
 
-2. ✅ Updated `ferro-net/src/lib.rs` to export executor module
+2. ✅ Wired executor into network modules:
+   - `bridge.rs` — `create_bridge()`, `destroy_bridge()` with transaction support
+   - `veth.rs` — `create_veth_pair()`, `destroy_veth_pair()`, `assign_ip()` with transactions
+   - `netns.rs` — `create_netns()`, `destroy_netns()`, `move_to_netns()` execution functions
 
-**Remaining work:**
-- Wire executor into bridge.rs, veth.rs, netns.rs, etc.
-- Update runtime.rs to use ferro-net execution functions
+3. ✅ Updated `ferro-net/src/lib.rs` to export execution functions
+
+4. ✅ All 52 ferro-net tests pass
 
 **Original specification:**
 

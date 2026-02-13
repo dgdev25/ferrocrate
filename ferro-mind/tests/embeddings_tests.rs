@@ -1,11 +1,12 @@
 //! Tests for embedding providers
 
+// Re-exports from ruvector-core
 use ferro_mind::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
 
 #[cfg(feature = "onnx-embeddings")]
 use ferro_mind::ruv::embeddings::OnnxEmbedding;
 
-/// Test that HashEmbedding produces normalized vectors
+/// Test that HashEmbedding (from ruvector-core) produces normalized vectors
 #[test]
 fn test_hash_embedding_normalized() {
     let embedder = HashEmbedding::new(128);
@@ -55,7 +56,10 @@ fn test_hash_embedding_dimensions() {
 #[test]
 fn test_hash_embedding_name() {
     let embedder = HashEmbedding::new(128);
-    assert!(embedder.name().contains("placeholder"));
+    // ruvector-core uses "HashEmbedding" as name
+    let name = embedder.name();
+    assert!(name.contains("ash") || name.contains("Hash") || name.contains("hash"),
+        "Name should indicate it's a hash embedding, got: {}", name);
 }
 
 // ONNX embedding tests - only run with feature flag and when model files exist

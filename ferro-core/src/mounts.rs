@@ -21,10 +21,20 @@ pub enum MountError {
     Io(#[from] std::io::Error),
     #[error("mount error: {0}")]
     Mount(#[from] nix::Error),
+    #[error("invalid source path: {0}")]
+    InvalidSource(String),
 }
 
 pub fn apply_bind_mounts(rootfs: &Path, mounts: &[BindMount]) -> Result<(), MountError> {
     for mount_spec in mounts {
+        // Security: Canonicalize source path to resolve symlinks
+        // This prevents symlink-based attacks where an attacker could create
+        // a symlink to escape the rootfs
+        let source = mount_spec.source.canonicalize()
+            .map_err(|e| MountError::InvalidSource(
+                format!("failed to canonicalize source {:?}: {}", mount_spec.source, e)
+            ))?;
+
         let target = rootfs.join(&mount_spec.target);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -34,7 +44,7 @@ pub fn apply_bind_mounts(rootfs: &Path, mounts: &[BindMount]) -> Result<(), Moun
         }
 
         mount(
-            Some(&mount_spec.source),
+            Some(&source),
             &target,
             Some("bind"),
             MsFlags::MS_BIND,
@@ -43,7 +53,7 @@ pub fn apply_bind_mounts(rootfs: &Path, mounts: &[BindMount]) -> Result<(), Moun
 
         if mount_spec.read_only {
             mount(
-                Some(&mount_spec.source),
+                Some(&source),
                 &target,
                 Some("bind"),
                 MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,

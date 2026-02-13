@@ -23,6 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tar::Builder;
 use thiserror::Error;
 
+/// Maximum layer size (1GB) to prevent memory exhaustion attacks
+const MAX_LAYER_SIZE: usize = 1024 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum DockerfileBuildError {
     #[error("dockerfile not found: {0}")]
@@ -39,6 +42,8 @@ pub enum DockerfileBuildError {
     Invalid(String),
     #[error("compression error: {0}")]
     Compression(#[from] LayerCompressionError),
+    #[error("layer size exceeds maximum ({0} bytes)")]
+    LayerTooLarge(usize),
 }
 
 pub struct BuildResult {
@@ -299,6 +304,12 @@ fn build_layer_from_dir(
     let tar_bytes = tar_builder.into_inner().map_err(|err| {
         io::Error::new(io::ErrorKind::Other, err.to_string())
     })?;
+
+    // Security: Check layer size to prevent memory exhaustion
+    if tar_bytes.len() > MAX_LAYER_SIZE {
+        return Err(DockerfileBuildError::LayerTooLarge(tar_bytes.len()));
+    }
+
     match compression {
         CompressionFormat::Gzip => {
             let gzip_bytes = compress_bytes_gzip(&tar_bytes)?;

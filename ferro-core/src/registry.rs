@@ -57,14 +57,104 @@ pub enum RegistryError {
     ManifestParse(#[from] crate::image_manifest::ImageManifestParseError),
 }
 
+/// Configuration for registry client behavior
+#[derive(Debug, Clone)]
+pub struct RegistryClientConfig {
+    /// Request timeout in seconds (default: 30)
+    pub timeout_secs: u64,
+    /// Maximum retries for transient errors (default: 3)
+    pub max_retries: u32,
+    /// Initial backoff in milliseconds (default: 100)
+    pub initial_backoff_ms: u64,
+    /// Maximum backoff in milliseconds (default: 5000)
+    pub max_backoff_ms: u64,
+}
+
+impl Default for RegistryClientConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 30,
+            max_retries: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 5000,
+        }
+    }
+}
+
 pub struct RegistryClient {
     client: Client,
+    config: RegistryClientConfig,
 }
 
 impl RegistryClient {
     pub fn new() -> Result<Self, RegistryError> {
-        let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
-        Ok(Self { client })
+        Self::with_config(RegistryClientConfig::default())
+    }
+
+    /// Create a registry client with custom configuration for rate limiting and retries
+    pub fn with_config(config: RegistryClientConfig) -> Result<Self, RegistryError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .build()?;
+        Ok(Self { client, config })
+    }
+
+    /// Execute a request with retry logic and exponential backoff
+    fn send_with_retry(
+        &self,
+        request_builder: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response, RegistryError> {
+        let mut last_error: Option<RegistryError> = None;
+
+        for attempt in 0..=self.config.max_retries {
+            if attempt > 0 {
+                // Calculate exponential backoff with jitter
+                let backoff = std::cmp::min(
+                    self.config.initial_backoff_ms * (1 << (attempt - 1)),
+                    self.config.max_backoff_ms,
+                );
+                // Add 10% jitter
+                let jitter = (backoff as f64 * 0.1 * rand::random::<f64>()) as u64;
+                std::thread::sleep(Duration::from_millis(backoff + jitter));
+            }
+
+            // Clone the request for retry attempts
+            let response = match request_builder.try_clone() {
+                Some(req) => req.send(),
+                None => {
+                    return Err(RegistryError::InvalidReference(
+                        "request body cannot be retried - streaming bodies not supported".to_string()
+                    ));
+                }
+            };
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    // Retry on 429 (rate limited) and 5xx errors
+                    if status.as_u16() == 429 || status.as_u16() >= 500 {
+                        last_error = Some(RegistryError::HttpStatus {
+                            status: status.as_u16(),
+                            body: resp.text().unwrap_or_default(),
+                        });
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    // Retry on network errors
+                    if e.is_timeout() || e.is_connect() {
+                        last_error = Some(RegistryError::Request(e));
+                        continue;
+                    }
+                    return Err(RegistryError::Request(e));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            RegistryError::InvalidReference("max retries exceeded".to_string())
+        }))
     }
 
     /// Pull and parse OCI image manifest from registry using optional basic auth.
@@ -220,9 +310,10 @@ impl RegistryClient {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(RegistryError::Io)?;
         }
+        // Security: Use UUID-based temp file name to prevent symlink attacks
         let tmp_path = dest.with_extension(format!(
             "tmp-{}",
-            std::process::id()
+            uuid::Uuid::new_v4()
         ));
         let mut file = File::create(&tmp_path).map_err(RegistryError::Io)?;
         copy(&mut response, &mut file).map_err(RegistryError::Io)?;

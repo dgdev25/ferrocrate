@@ -24,6 +24,12 @@ pub fn build_nsenter_args(target_pid: u32, command: &[String]) -> Result<Vec<Str
         return Err(ContainerExecError::EmptyCommand);
     }
 
+    // Security: Validate command to prevent basic injection attacks
+    // The first element should be a binary name (not a path with special chars)
+    if command[0].contains('\0') || command[0].contains('|') || command[0].contains(';') {
+        return Err(ContainerExecError::EmptyCommand);
+    }
+
     let mut args = vec!["-t".to_string(), target_pid.to_string(), "-a".to_string()];
     args.extend(command.iter().cloned());
     Ok(args)
@@ -85,14 +91,21 @@ fn spawn_command(binary: &str, args: &[String]) -> Result<Child, ContainerExecEr
         .spawn()?)
 }
 
+/// Maximum output capture size (1MB) to prevent OOM attacks
+const MAX_OUTPUT_SIZE: u64 = 1024 * 1024;
+
 fn collect_output(mut child: Child, exit_code: i32) -> Result<ExecResult, ContainerExecError> {
+    use std::io::Read;
+
     let mut stdout = Vec::new();
     if let Some(mut out) = child.stdout.take() {
-        out.read_to_end(&mut stdout)?;
+        // Security: Limit output size to prevent OOM attacks
+        out.take(MAX_OUTPUT_SIZE).read_to_end(&mut stdout)?;
     }
     let mut stderr = Vec::new();
     if let Some(mut err) = child.stderr.take() {
-        err.read_to_end(&mut stderr)?;
+        // Security: Limit output size to prevent OOM attacks
+        err.take(MAX_OUTPUT_SIZE).read_to_end(&mut stderr)?;
     }
     Ok(ExecResult {
         exit_code,

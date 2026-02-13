@@ -1,6 +1,7 @@
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
     ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
+    PortMappingRecord,
 };
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
@@ -38,6 +39,122 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
+
+// ============================================================================
+// Atomic Operations Support (Task 4.1)
+// ============================================================================
+
+/// Tracks resources created during container creation for rollback on failure.
+///
+/// This struct implements a scope guard pattern - if not explicitly committed,
+/// it will roll back all tracked resources on drop.
+struct CreationRollback {
+    container_id: String,
+    container_dir: Option<PathBuf>,
+    netns_name: Option<String>,
+    container_ip: Option<String>,
+    port_mappings: Vec<PortMappingRecord>,
+    cgroup_name: Option<String>,
+    committed: bool,
+}
+
+impl CreationRollback {
+    fn new(container_id: &str) -> Self {
+        Self {
+            container_id: container_id.to_string(),
+            container_dir: None,
+            netns_name: None,
+            container_ip: None,
+            port_mappings: Vec::new(),
+            cgroup_name: None,
+            committed: false,
+        }
+    }
+
+    fn track_container_dir(&mut self, dir: PathBuf) {
+        self.container_dir = Some(dir);
+    }
+
+    fn track_network(&mut self, netns_name: Option<String>, container_ip: Option<String>, ports: Vec<PortMappingRecord>) {
+        self.netns_name = netns_name;
+        self.container_ip = container_ip;
+        self.port_mappings = ports;
+    }
+
+    fn track_cgroup(&mut self, name: String) {
+        self.cgroup_name = Some(name);
+    }
+
+    /// Commit the creation (prevent rollback).
+    fn commit(mut self) {
+        self.committed = true;
+    }
+
+    /// Explicitly roll back all tracked resources.
+    fn rollback(&mut self) {
+        // Rollback cgroup
+        if let Some(ref cgroup_name) = self.cgroup_name {
+            // Delete cgroup directory (cgroup v2)
+            let cgroup_path = PathBuf::from("/sys/fs/cgroup").join(cgroup_name);
+            if cgroup_path.exists() {
+                if let Err(e) = fs::remove_dir(&cgroup_path) {
+                    eprintln!("[rollback] failed to remove cgroup {}: {}", cgroup_name, e);
+                }
+            }
+        }
+
+        // Rollback network (iptables, nftables rules, netns)
+        if let Some(ref netns_name) = self.netns_name {
+            // Delete network namespace
+            if let Ok(cmd) = netns::build_ip_netns_del_cmd(netns_name) {
+                let _ = run_cmd(&cmd);
+            }
+        }
+
+        // Rollback iptables/nftables rules
+        if let Some(ref container_ip) = self.container_ip {
+            for mapping in &self.port_mappings {
+                let map = ferro_net::portmap::PortMapping {
+                    host_port: mapping.host_port,
+                    container_port: mapping.container_port,
+                    protocol: mapping.protocol.clone(),
+                };
+                // Delete iptables rules
+                if let Ok(mut prerouting) = build_iptables_prerouting_cmd(&map, container_ip) {
+                    if let Ok(mut forward) = build_iptables_forward_cmd(&map, container_ip) {
+                        replace_iptables_action(&mut prerouting, "-D");
+                        replace_iptables_action(&mut forward, "-D");
+                        let _ = run_cmd(&prerouting);
+                        let _ = run_cmd(&forward);
+                    }
+                }
+                // Delete nftables rules
+                let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
+                let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
+                let _ = run_cmd(&nft_prerouting);
+                let _ = run_cmd(&nft_forward);
+            }
+        }
+
+        // Rollback container directory
+        if let Some(ref dir) = self.container_dir {
+            if let Err(e) = fs::remove_dir_all(dir) {
+                eprintln!("[rollback] failed to remove container dir: {}", e);
+            }
+        }
+
+        self.committed = true; // Prevent double rollback
+    }
+}
+
+impl Drop for CreationRollback {
+    fn drop(&mut self) {
+        if !self.committed {
+            eprintln!("[rollback] container {} creation failed, cleaning up resources", self.container_id);
+            self.rollback();
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -209,11 +326,16 @@ impl ContainerRuntime {
             .or_else(|| config_json.as_deref().and_then(user_from_config));
 
         let container_id = generate_container_id();
+
+        // Create rollback guard for atomic operations (Task 4.1)
+        let mut rollback = CreationRollback::new(&container_id);
+
         let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
         let exec_cmd = apply_selinux_if_enabled(&exec_cmd)?;
         let container_dir = self.runtime_dir.join("containers").join(&container_id);
         let log_dir = container_dir.join("logs");
         fs::create_dir_all(&log_dir)?;
+        rollback.track_container_dir(container_dir.clone());
 
         let stdout_path = log_dir.join("stdout.log");
         let stderr_path = log_dir.join("stderr.log");
@@ -245,6 +367,12 @@ impl ContainerRuntime {
         let rootless = !nix::unistd::Uid::effective().is_root();
         let (netns_name, container_ip, container_ipv6) =
             setup_network(&container_id, port_mappings, network_mode, network_backend)?;
+        // Track network resources for rollback
+        rollback.track_network(
+            netns_name.clone(),
+            container_ip.clone(),
+            port_mappings.to_vec(),
+        );
         let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
 
@@ -268,17 +396,36 @@ impl ContainerRuntime {
             netns_name.as_deref(),
             unshare_netns,
             seccomp_profile.as_ref(),
-        )?;
+        ).map_err(|e| {
+            // Kill any partially spawned process on error
+            rollback.rollback();
+            e
+        })?;
 
         if use_slirp {
-            start_slirp4netns(child_id)?;
+            if let Err(e) = start_slirp4netns(child_id) {
+                // Kill the process and roll back
+                let _ = kill_pid(child_id);
+                rollback.rollback();
+                return Err(e);
+            }
         }
 
         if let Some(limits) = limits {
             let manager = CgroupV2Manager::new(&self.cgroup_root);
-            let group = manager.create_group(&format!("ferrocrate/{container_id}"))?;
-            manager.apply_limits(&group, limits)?;
-            manager.add_pid(&group, child_id)?;
+            let cgroup_name = format!("ferrocrate/{container_id}");
+            let group = manager.create_group(&cgroup_name)?;
+            rollback.track_cgroup(cgroup_name);
+            if let Err(e) = manager.apply_limits(&group, limits) {
+                let _ = kill_pid(child_id);
+                rollback.rollback();
+                return Err(RuntimeError::Cgroup(e));
+            }
+            if let Err(e) = manager.add_pid(&group, child_id) {
+                let _ = kill_pid(child_id);
+                rollback.rollback();
+                return Err(RuntimeError::Cgroup(e));
+            }
         }
 
         let health = if health.is_none() {
@@ -327,6 +474,10 @@ impl ContainerRuntime {
         };
 
         self.store.put(&record)?;
+
+        // Commit the creation - all resources are now tracked in the store
+        rollback.commit();
+
         if record.ip_address.is_some() {
             if let Ok(containers) = self.store.list() {
                 let _ = update_container_hosts(&self.runtime_dir, &containers);

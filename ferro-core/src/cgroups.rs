@@ -59,6 +59,31 @@ impl CgroupV2Manager {
     pub fn create_group(&self, name: &str) -> Result<PathBuf, CgroupError> {
         self.ensure_v2_available()?;
 
+        // Security: Validate cgroup name to prevent path traversal
+        // Allow subdirectories (e.g., "containers/test") but prevent escape
+        if name.is_empty() || name.starts_with('/') || name.contains("..") || name.contains('\0') {
+            return Err(CgroupError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid cgroup name: contains path traversal or invalid characters",
+            )));
+        }
+        // Reject backslashes and check each path segment
+        if name.contains('\\') {
+            return Err(CgroupError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid cgroup name: backslashes not allowed",
+            )));
+        }
+        // Validate each segment (between slashes) is non-empty and valid
+        for segment in name.split('/') {
+            if segment.is_empty() {
+                return Err(CgroupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid cgroup name: empty path segment",
+                )));
+            }
+        }
+
         let group_path = self.root.join(name);
         fs::create_dir_all(&group_path)?;
 

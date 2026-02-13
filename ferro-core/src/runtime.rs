@@ -55,11 +55,12 @@ struct CreationRollback {
     container_ip: Option<String>,
     port_mappings: Vec<PortMappingRecord>,
     cgroup_name: Option<String>,
+    cgroup_root: PathBuf,
     committed: bool,
 }
 
 impl CreationRollback {
-    fn new(container_id: &str) -> Self {
+    fn new(container_id: &str, cgroup_root: PathBuf) -> Self {
         Self {
             container_id: container_id.to_string(),
             container_dir: None,
@@ -67,6 +68,7 @@ impl CreationRollback {
             container_ip: None,
             port_mappings: Vec::new(),
             cgroup_name: None,
+            cgroup_root,
             committed: false,
         }
     }
@@ -92,12 +94,12 @@ impl CreationRollback {
 
     /// Explicitly roll back all tracked resources.
     fn rollback(&mut self) {
-        // Rollback cgroup
+        // Rollback cgroup - use configured cgroup_root, not hardcoded path
         if let Some(ref cgroup_name) = self.cgroup_name {
-            // Delete cgroup directory (cgroup v2)
-            let cgroup_path = PathBuf::from("/sys/fs/cgroup").join(cgroup_name);
+            let cgroup_path = self.cgroup_root.join(cgroup_name);
             if cgroup_path.exists() {
                 if let Err(e) = fs::remove_dir(&cgroup_path) {
+                    // Log error instead of silently discarding
                     eprintln!("[rollback] failed to remove cgroup {}: {}", cgroup_name, e);
                 }
             }
@@ -107,7 +109,9 @@ impl CreationRollback {
         if let Some(ref netns_name) = self.netns_name {
             // Delete network namespace
             if let Ok(cmd) = netns::build_ip_netns_del_cmd(netns_name) {
-                let _ = run_cmd(&cmd);
+                if let Err(e) = run_cmd(&cmd) {
+                    eprintln!("[rollback] failed to delete netns {}: {:?}", netns_name, e);
+                }
             }
         }
 
@@ -124,15 +128,23 @@ impl CreationRollback {
                     if let Ok(mut forward) = build_iptables_forward_cmd(&map, container_ip) {
                         replace_iptables_action(&mut prerouting, "-D");
                         replace_iptables_action(&mut forward, "-D");
-                        let _ = run_cmd(&prerouting);
-                        let _ = run_cmd(&forward);
+                        if let Err(e) = run_cmd(&prerouting) {
+                            eprintln!("[rollback] failed to delete iptables prerouting: {:?}", e);
+                        }
+                        if let Err(e) = run_cmd(&forward) {
+                            eprintln!("[rollback] failed to delete iptables forward: {:?}", e);
+                        }
                     }
                 }
                 // Delete nftables rules
                 let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
                 let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
-                let _ = run_cmd(&nft_prerouting);
-                let _ = run_cmd(&nft_forward);
+                if let Err(e) = run_cmd(&nft_prerouting) {
+                    eprintln!("[rollback] failed to delete nft prerouting: {:?}", e);
+                }
+                if let Err(e) = run_cmd(&nft_forward) {
+                    eprintln!("[rollback] failed to delete nft forward: {:?}", e);
+                }
             }
         }
 
@@ -331,7 +343,7 @@ impl ContainerRuntime {
         let container_id = generate_container_id();
 
         // Create rollback guard for atomic operations (Task 4.1)
-        let mut rollback = CreationRollback::new(&container_id);
+        let mut rollback = CreationRollback::new(&container_id, self.cgroup_root.clone());
 
         let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
         let exec_cmd = apply_selinux_if_enabled(&exec_cmd)?;

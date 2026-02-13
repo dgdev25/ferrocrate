@@ -158,8 +158,13 @@ impl LocalContainerStore {
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|e| {
+            // Log the error but return a safe fallback (current time estimate)
+            eprintln!("[warn] system time error, using fallback: {}", e);
+            // Return 0 as indicator of invalid time, callers should handle this
+            0
+        })
 }
 
 fn default_health_status() -> String {

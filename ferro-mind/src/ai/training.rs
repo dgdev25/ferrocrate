@@ -38,13 +38,18 @@ impl std::str::FromStr for ModelType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        // Security: Limit input length to prevent DoS and log injection
+        let truncated: String = s.chars().take(32).collect();
+        // Remove control characters to prevent log injection
+        let sanitized: String = truncated.chars().filter(|c| !c.is_control()).collect();
+
+        match sanitized.as_str() {
             "resource-predictor" => Ok(ModelType::ResourcePredictor),
             "anomaly-detector" => Ok(ModelType::AnomalyDetector),
             "restart-policy" => Ok(ModelType::RestartPolicy),
             _ => Err(format!(
-                "Unknown model type: {}. Valid: resource-predictor, anomaly-detector, restart-policy",
-                s
+                "Unknown model type: '{}'. Valid: resource-predictor, anomaly-detector, restart-policy",
+                sanitized
             )),
         }
     }

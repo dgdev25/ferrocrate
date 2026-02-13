@@ -1,53 +1,53 @@
 {
   "sessionStart": 1770820084880,
-  "compactCycles": 13,
+  "compactCycles": 17,
   "collector": {
-    "invocations": 205,
-    "totalLatencyMs": 335,
-    "fileEditsLogged": 146,
-    "commandsLogged": 59
+    "invocations": 346,
+    "totalLatencyMs": 634,
+    "fileEditsLogged": 222,
+    "commandsLogged": 124
   },
   "extractor": {
-    "invocations": 13,
-    "totalLatencyMs": 208,
-    "itemsClassified": 905,
-    "itemsPreserved": 381,
-    "noiseFiltered": 524,
+    "invocations": 17,
+    "totalLatencyMs": 359,
+    "itemsClassified": 1482,
+    "itemsPreserved": 501,
+    "noiseFiltered": 981,
     "typeCounts": {
-      "error": 26,
-      "goal": 118,
-      "decision": 23,
-      "read": 530,
-      "file_edit": 147,
-      "command": 57,
-      "marker": 4
+      "error": 64,
+      "goal": 209,
+      "decision": 50,
+      "read": 710,
+      "file_edit": 214,
+      "command": 225,
+      "marker": 10
     },
     "scoreDistribution": {
-      "min": 0.07100073046018993,
-      "max": 0.7247991234477721,
-      "avg": 0.3809
+      "min": 0.3153114186851211,
+      "max": 0.9882698961937717,
+      "avg": 0.5202
     },
     "lastTopScores": [
-      0.7248,
-      0.7,
-      0.6719,
-      0.6175,
-      0.6063,
-      0.5998,
-      0.5967,
-      0.5871,
-      0.5776,
-      0.5738
+      0.9883,
+      0.85,
+      0.789,
+      0.7076,
+      0.6984,
+      0.6795,
+      0.6618,
+      0.653,
+      0.6184,
+      0.6121
     ]
   },
   "restorer": {
-    "invocations": 13,
-    "totalLatencyMs": 6,
-    "totalCharsInjected": 32169,
-    "totalTokensInjected": 8047
+    "invocations": 16,
+    "totalLatencyMs": 9,
+    "totalCharsInjected": 40578,
+    "totalTokensInjected": 10151
   },
   "tokenBudget": {
-    "totalInjected": 8047,
-    "estimatedWastePrevented": 32500
+    "totalInjected": 10151,
+    "estimatedWastePrevented": 42500
   }
 }

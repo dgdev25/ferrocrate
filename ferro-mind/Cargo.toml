@@ -7,3 +7,9 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+# rUv ecosystem integration (Task 3.3)
+ruvector-core = "2.0"  # HNSW indexing with O(log n) search
+ruv-fann = "0.2"       # Neural networks for anomaly detection
+
+parking_lot = "0.12"   # Required for ruvector-core RwLock interop

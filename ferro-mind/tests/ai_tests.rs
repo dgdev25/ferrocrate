@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 #[test]
 fn vector_memory_insert_and_search() {
-    let mut memory = VectorMemory::default();
+    let mut memory = VectorMemory::with_dimensions(3);
 
     // Insert some vectors
     memory.insert(VectorEntry {
@@ -66,7 +66,7 @@ fn vector_memory_nan_handling_does_not_panic() {
 
 #[test]
 fn vector_memory_cosine_distance() {
-    let mut memory = VectorMemory::default();
+    let mut memory = VectorMemory::with_dimensions(3);
 
     memory.insert(VectorEntry {
         id: Some(VectorId::from("a")),

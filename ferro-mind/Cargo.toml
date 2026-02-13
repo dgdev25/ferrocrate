@@ -12,4 +12,15 @@ thiserror = "2"
 ruvector-core = "2.0"  # HNSW indexing with O(log n) search
 ruv-fann = "0.2"       # Neural networks for anomaly detection
 
+# ONNX inference for real embeddings (Task 3.3g)
+tract-onnx = "0.21"
+tract-core = "0.21"
+
+# Tokenizer for text preprocessing
+tokenizers = "0.21"
+
 parking_lot = "0.12"   # Required for ruvector-core RwLock interop
+
+[features]
+default = []
+onnx-embeddings = []  # Enable ONNX-based embeddings

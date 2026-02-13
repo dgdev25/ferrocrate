@@ -2,7 +2,7 @@
 
 **Generated:** 2026-02-12
 **Updated:** 2026-02-13
-**Initial Score:** 4.5/10 → **Current Score:** ~7.5/10 (Waves 1-3 completed, rUv ecosystem integrated)
+**Initial Score:** 4.5/10 → **Current Score:** ~7.8/10 (Waves 1-3 completed, ONNX embeddings implemented)
 **Target Score:** 8.5/10 (including AI integration)
 **Project:** AI-native container runtime in Rust (7 crates, ~15,500 LOC)
 
@@ -12,7 +12,7 @@
 |------|--------|-----------------|
 | Wave 1 | ✅ COMPLETE | 3/3 tasks |
 | Wave 2 | ✅ MOSTLY COMPLETE | 8/9 tasks (CLI split deferred) |
-| Wave 3 | ✅ COMPLETE | 3/3 tasks (rUv ecosystem integrated) |
+| Wave 3 | ✅ COMPLETE | 4/4 tasks (rUv ecosystem + ONNX embeddings) |
 | Wave 4 | ❌ NOT STARTED | 0/2 tasks |
 | Wave 5 | ❌ NOT STARTED | 0/4 tasks |
 
@@ -980,20 +980,46 @@ impl NeuralAnomalyDetector {
 
 **Current:** 13-line stub that takes a VRAM requirement and returns a hardcoded GPU index.
 
-#### 3.3g: Embeddings — `ruvector-core` — FUTURE WORK
+#### ~~3.3g: Embeddings — ONNX via `tract`~~ ✅ COMPLETED
 
 **File:** `ferro-mind/src/ruv/embeddings.rs`
 
-**Current:** `HashEmbedding` — hashes strings to fake float vectors. Not real embeddings.
+**Current:** ~~`HashEmbedding` — hashes strings to fake float vectors. Not real embeddings.~~
+
+**Replaced with:**
+```rust
+#[cfg(feature = "onnx-embeddings")]
+pub struct OnnxEmbedding {
+    model_bytes: Vec<u8>,
+    tokenizer: tokenizers::Tokenizer,
+    dimensions: usize,  // 384 for MiniLM-L6-v2
+    max_length: usize,  // 512 for BERT
+}
+
+impl EmbeddingProvider for OnnxEmbedding {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        // Tokenize with HuggingFace tokenizers
+        // Run inference via tract ONNX
+        // Mean pooling + L2 normalize
+    }
+}
+```
+
+**Implementation details:**
+- Added `tract-onnx = "0.21"` and `tokenizers = "0.21"` dependencies
+- Downloaded all-MiniLM-L6-v2 ONNX model to `ferro-mind/assets/`
+- Real semantic embeddings: "cat sitting on mat" and "feline on rug" are similar
+- Tests verify cosine similarity for semantic relationships
+- Feature flag `onnx-embeddings` keeps it opt-in
 
 **Acceptance Criteria:**
 - ✅ `ferro-mind/Cargo.toml` depends on `ruvector-core` and `ruv-fann`
 - ✅ Vector memory uses HNSW for Cosine similarity (O(log n) search)
-- ⏳ WASM inference engine loads and runs a real ONNX model via `tract` (future work)
+- ✅ WASM inference engine loads and runs a real ONNX model via `tract` (MiniLM-L6-v2)
 - ✅ Anomaly detection has both z-score fast path and neural network path
-- ✅ Each integration has tests (`cargo test -p ferro-mind` passes with 17 tests)
+- ✅ Each integration has tests (`cargo test -p ferro-mind` passes with 19 tests)
 - ✅ All AI features remain opt-in (features compile conditionally)
-- ✅ `cargo test -p ferro-mind` passes
+- ✅ `cargo test -p ferro-mind --features onnx-embeddings` passes
 
 ---
 

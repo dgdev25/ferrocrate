@@ -1,2 +1,5 @@
 /target
 .claude-flow/*
+
+# ONNX model files (download separately)
+ferro-mind/assets/

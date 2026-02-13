@@ -14,4 +14,10 @@ pub enum RuvError {
     InvalidInput(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Inference error: {0}")]
+    InferenceError(String),
+    #[error("Shape error: {0}")]
+    ShapeError(String),
+    #[error("Model error: {0}")]
+    ModelError(String),
 }

@@ -15,6 +15,10 @@ ruv-fann = "0.2"       # Neural networks for anomaly detection
 
 parking_lot = "0.12"   # Required for ruvector-core RwLock interop
 
+# Training pipeline dependencies (Task 5.4)
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+
 # ONNX inference for semantic embeddings (optional, 90MB model required)
 tract-onnx = { version = "0.21", optional = true }
 tract-core = { version = "0.21", optional = true }
@@ -23,3 +27,6 @@ tokenizers = { version = "0.21", optional = true }
 [features]
 default = []
 onnx-embeddings = ["dep:tract-onnx", "dep:tract-core", "dep:tokenizers"]
+
+[dev-dependencies]
+tempfile = "3"

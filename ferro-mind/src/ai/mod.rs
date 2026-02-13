@@ -5,5 +5,6 @@ pub mod explain;
 pub mod gpu;
 pub mod learning;
 pub mod restart;
-pub mod routing;
 pub mod resource;
+pub mod routing;
+pub mod training;

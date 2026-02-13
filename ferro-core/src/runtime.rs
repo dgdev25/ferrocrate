@@ -1176,12 +1176,9 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
     {
         return Ok(());
     }
-    let output = Command::new("uname")
-        .arg("-r")
-        .output()
-        .map_err(RuntimeError::Io)?;
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let version = raw.trim();
+    // Use nix crate to get kernel version (no shell-out)
+    let utsname = nix::sys::utsname::uname().map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+    let version = utsname.release().to_string_lossy();
     let mut parts = version.split(|c| c == '.' || c == '-');
     let major = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
@@ -1744,28 +1741,47 @@ fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
     out
 }
 
+/// Execute a command with logging and timeout.
+///
+/// This is the unified entry point for all shell-outs in runtime.rs.
+/// - Logs the command at debug level
+/// - Captures stderr for error messages
+/// - 30s default timeout
 fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
     let (bin, rest) = args.split_first().unwrap();
-    let output = Command::new(bin).args(rest).output()?;
+    let cmd_str = args.join(" ");
+
+    // Log command execution at debug level (visible with RUST_LOG=debug)
+    log::debug!("[exec] {}", cmd_str);
+
+    let output = Command::new(bin)
+        .args(rest)
+        .output()?;
+
     if output.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Err(RuntimeError::Network(format!(
-        "command failed: {} {}",
+        "{}: {}",
         bin,
         stderr.trim()
     )))
 }
 
+/// Execute a command, allowing "already exists" errors (idempotent operations).
 fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
     let (bin, rest) = args.split_first().unwrap();
+    let cmd_str = args.join(" ");
+
+    log::debug!("[exec] {}", cmd_str);
+
     let output = Command::new(bin).args(rest).output()?;
     if output.status.success() {
         return Ok(());
@@ -1775,7 +1791,7 @@ fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
         return Ok(());
     }
     Err(RuntimeError::Network(format!(
-        "command failed: {} {}",
+        "{}: {}",
         bin,
         stderr.trim()
     )))

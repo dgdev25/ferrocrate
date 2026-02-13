@@ -134,6 +134,52 @@ impl CgroupV2Manager {
             cpu_system_usec,
         })
     }
+
+    /// Adjust the memory limit for a cgroup (Task 5.1 - OOM Prevention).
+    ///
+    /// This can be used to dynamically increase memory limits when OOM is predicted.
+    /// The new limit must be >= current usage to avoid immediate OOM.
+    pub fn adjust_memory_limit(
+        &self,
+        group_path: impl AsRef<Path>,
+        new_limit: u64,
+    ) -> Result<(), CgroupError> {
+        let group_path = group_path.as_ref();
+        let memory_max_path = group_path.join("memory.max");
+
+        // Ensure the cgroup exists
+        if !memory_max_path.exists() {
+            return Err(CgroupError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "cgroup memory.max not found",
+            )));
+        }
+
+        // Read current usage to validate
+        if let Some(current) = read_u64(group_path.join("memory.current"))? {
+            if new_limit < current {
+                return Err(CgroupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "new limit {} is below current usage {}",
+                        new_limit, current
+                    ),
+                )));
+            }
+        }
+
+        fs::write(memory_max_path, new_limit.to_string())?;
+        Ok(())
+    }
+
+    /// Check if AI features are enabled via environment variable.
+    ///
+    /// Returns true if FERROCRATE_AI is set to "1" or "true".
+    pub fn is_ai_enabled() -> bool {
+        std::env::var("FERROCRATE_AI")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
 }
 
 fn read_u64(path: PathBuf) -> Result<Option<u64>, CgroupError> {

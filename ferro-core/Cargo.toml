@@ -19,6 +19,7 @@ zstd = "0.13"
 toml = "0.8"
 sha2 = "0.10"
 ferro-net = { path = "../ferro-net" }
+ferro-mind = { path = "../ferro-mind" }
 rand = "0.9"
 libseccomp = "0.3"
 log = "0.4"

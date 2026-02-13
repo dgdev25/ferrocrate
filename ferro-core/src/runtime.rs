@@ -199,6 +199,8 @@ pub struct ContainerRuntime {
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
     health_cancel: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Cancellation tokens for resource monitor threads (Task 5.1)
+    resource_cancel: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl ContainerRuntime {
@@ -213,6 +215,7 @@ impl ContainerRuntime {
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
             health_cancel: std::sync::Mutex::new(HashMap::new()),
+            resource_cancel: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -518,6 +521,21 @@ impl ContainerRuntime {
                 run_health_checks(store, id, pid, config, cancel);
             });
         }
+
+        // Task 5.1: Start resource monitor for OOM prediction if AI is enabled
+        if is_ai_enabled() {
+            let store = self.store.clone_db();
+            let id = record.id.clone();
+            let cgroup_root = self.cgroup_root.clone();
+            let memory_limit = limits.and_then(|l| l.memory_max).unwrap_or(0);
+            let cancel = Arc::new(AtomicBool::new(false));
+            if let Ok(mut map) = self.resource_cancel.lock() {
+                map.insert(id.clone(), cancel.clone());
+            }
+            thread::spawn(move || {
+                run_resource_monitor(store, id, cgroup_root, memory_limit, cancel);
+            });
+        }
         Ok(record)
     }
 
@@ -649,6 +667,12 @@ impl ContainerRuntime {
                 cancel.store(true, Ordering::Relaxed);
             }
         }
+        // Signal resource monitor thread to stop (Task 5.1)
+        if let Ok(mut map) = self.resource_cancel.lock() {
+            if let Some(cancel) = map.remove(id) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
 
         let record = self
             .store
@@ -767,12 +791,38 @@ impl ContainerRuntime {
                 run_health_checks(store, id, pid, config, cancel);
             });
         }
+
+        // Task 5.1: Start resource monitor for OOM prediction if AI is enabled
+        if is_ai_enabled() {
+            let store = self.store.clone_db();
+            let id = record.id.clone();
+            let cgroup_root = self.cgroup_root.clone();
+            // Read memory limit from cgroup for restarted containers
+            let cgroup_path = cgroup_root.join("ferrocrate").join(&id);
+            let memory_limit = ferro_mind::ai::resource::read_cgroup_metrics(&cgroup_path)
+                .ok()
+                .and_then(|m| if m.memory_max > 0 { Some(m.memory_max) } else { None })
+                .unwrap_or(0);
+            let cancel = Arc::new(AtomicBool::new(false));
+            if let Ok(mut map) = self.resource_cancel.lock() {
+                map.insert(id.clone(), cancel.clone());
+            }
+            thread::spawn(move || {
+                run_resource_monitor(store, id, cgroup_root, memory_limit, cancel);
+            });
+        }
         Ok(())
     }
 
     pub fn remove(&self, id: &str) -> Result<(), RuntimeError> {
         // Clean up health check cancellation token if present
         if let Ok(mut map) = self.health_cancel.lock() {
+            if let Some(cancel) = map.remove(id) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        // Clean up resource monitor cancellation token (Task 5.1)
+        if let Ok(mut map) = self.resource_cancel.lock() {
             if let Some(cancel) = map.remove(id) {
                 cancel.store(true, Ordering::Relaxed);
             }
@@ -2088,6 +2138,165 @@ fn run_health_checks(
         // Cancellation-aware interval sleep
         let deadline = std::time::Instant::now() + Duration::from_secs(config.interval_secs);
         while std::time::Instant::now() < deadline {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+// ============================================================================
+// AI Resource Monitoring (Task 5.1 - Predictive OOM Prevention)
+// ============================================================================
+
+/// Check if AI features are enabled via environment variable.
+///
+/// Returns true if FERROCRATE_AI is set to "1" or "true".
+/// When disabled, no AI-related threads are spawned for zero overhead.
+fn is_ai_enabled() -> bool {
+    std::env::var("FERROCRATE_AI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Resource monitor thread for predictive OOM prevention (Task 5.1).
+///
+/// This function runs in a background thread, periodically reading cgroup v2
+/// metrics and using the ResourcePredictor to predict OOM conditions.
+///
+/// # Arguments
+/// * `store` - Container store for checking container existence
+/// * `id` - Container ID to monitor
+/// * `cgroup_root` - Path to cgroup v2 mount (typically /sys/fs/cgroup)
+/// * `memory_limit` - Memory limit in bytes (0 = no limit)
+/// * `cancel` - Cancellation token for graceful shutdown
+///
+/// # Behavior
+/// - Samples metrics every 30 seconds
+/// - Logs OOM predictions to stderr when detected
+/// - Writes predictions to audit log with DecisionTrace
+/// - Progressive rollout: v0.1 observe only, v0.2 suggestions, v0.3 auto-adjust
+fn run_resource_monitor(
+    store: sled::Db,
+    id: String,
+    cgroup_root: PathBuf,
+    memory_limit: u64,
+    cancel: Arc<AtomicBool>,
+) {
+    use std::time::Instant;
+
+    // No limit = nothing to predict
+    if memory_limit == 0 {
+        return;
+    }
+
+    // Initialize predictor with memory limit
+    let mut predictor = ferro_mind::ai::resource::ResourcePredictor::new(60)
+        .with_memory_limit(memory_limit);
+
+    let sample_interval = Duration::from_secs(30);
+    let oom_horizon = Duration::from_secs(1200); // 20 minutes
+
+    loop {
+        // Check for explicit cancellation
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Check if container still exists
+        let tree = match store.open_tree("containers") {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        if !tree.contains_key(&id).unwrap_or(false) {
+            return; // Container removed
+        }
+
+        // Read cgroup metrics
+        let cgroup_path = cgroup_root.join("ferrocrate").join(&id);
+        if let Ok(metrics) = ferro_mind::ai::resource::read_cgroup_metrics(&cgroup_path) {
+            // Create sample with current metrics
+            let sample = ferro_mind::ai::resource::ResourceSample {
+                cpu_percent: 0.0, // CPU percentage requires delta calculation
+                memory_bytes: metrics.memory_current,
+                pids_count: metrics.pids_current,
+                timestamp: Instant::now(),
+            };
+
+            predictor.push(sample);
+
+            // Predict OOM
+            if let Some(prediction) = predictor.predict_oom(oom_horizon) {
+                let minutes = prediction.time_to_oom.as_secs() / 60;
+                let current_mb = prediction.current_memory as f64 / 1024.0 / 1024.0;
+                let limit_mb = prediction.memory_limit as f64 / 1024.0 / 1024.0;
+                let confidence_pct = prediction.confidence * 100.0;
+
+                // v0.1: Log to stderr (observe only)
+                eprintln!(
+                    "[ai] container {}: memory projected to exceed limit ({:.1}MB/{:.1}MB) in ~{}min (confidence: {:.0}%)",
+                    id, current_mb, limit_mb, minutes, confidence_pct
+                );
+
+                // Log to audit log for AI explainability (AI-11)
+                let _ = log_audit_event(
+                    &PathBuf::from(std::env::var("FERROCRATE_RUNTIME_DIR")
+                        .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string())),
+                    make_audit_event(
+                        "ai_oom_prediction",
+                        "ferrocrate-ai",
+                        Some(&id),
+                        None,
+                        None,
+                        Some(&format!(
+                            "current_memory={} memory_limit={} time_to_oom_secs={} confidence={:.2}",
+                            prediction.current_memory, prediction.memory_limit,
+                            prediction.time_to_oom.as_secs(), prediction.confidence
+                        )),
+                    ),
+                );
+
+                // v0.2: FERROCRATE_AI_SUGGEST=1 — print suggestions
+                if std::env::var("FERROCRATE_AI_SUGGEST")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    eprintln!(
+                        "[ai] suggestion: consider increasing memory limit with 'ferrocrate update --memory {}M {}'",
+                        (limit_mb * 1.5) as u64, id
+                    );
+                }
+
+                // v0.3: FERROCRATE_AI_ACT=1 — auto-adjust cgroup limit (opt-in)
+                if std::env::var("FERROCRATE_AI_ACT")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    let manager = CgroupV2Manager::new(&cgroup_root);
+                    let new_limit = (memory_limit as f64 * 1.25) as u64; // 25% increase
+                    let ceiling = std::env::var("FERROCRATE_AI_ACT_MEMORY_CEILING")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(u64::MAX);
+
+                    let adjusted_limit = new_limit.min(ceiling);
+                    match manager.adjust_memory_limit(&cgroup_path, adjusted_limit) {
+                        Ok(()) => {
+                            eprintln!("[ai] container {}: increased memory limit to {}MB", id, adjusted_limit / 1024 / 1024);
+                            predictor.set_memory_limit(adjusted_limit);
+                        }
+                        Err(e) => {
+                            eprintln!("[ai] container {}: failed to adjust memory limit: {}", id, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cancellation-aware sleep
+        let sleep_start = std::time::Instant::now();
+        while std::time::Instant::now().duration_since(sleep_start) < sample_interval {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }

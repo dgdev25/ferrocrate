@@ -1,3 +1,4 @@
+use crate::executor::{ExecError, exec_cmd};
 use crate::validate::{validate_interface_name, ValidationError};
 use nix::sched::{setns, CloneFlags};
 use std::fs::File;
@@ -12,11 +13,17 @@ pub enum NetnsError {
     Setns(#[from] nix::Error),
     #[error("validation error: {0}")]
     Validation(#[from] ValidationError),
+    #[error("execution error: {0}")]
+    Exec(#[from] ExecError),
 }
 
 pub fn netns_path(name: &str) -> PathBuf {
     PathBuf::from("/var/run/netns").join(name)
 }
+
+// ============================================================================
+// Command builders (validation + command construction)
+// ============================================================================
 
 pub fn build_ip_netns_add_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
     validate_interface_name(name)?;
@@ -41,6 +48,26 @@ pub fn build_ip_link_set_netns_cmd(link: &str, netns: &str) -> Result<Vec<String
     ])
 }
 
+// ============================================================================
+// Execution functions
+// ============================================================================
+
+/// Create a network namespace.
+pub fn create_netns(name: &str) -> Result<(), NetnsError> {
+    exec_cmd(&build_ip_netns_add_cmd(name)?).map_err(NetnsError::from)
+}
+
+/// Delete a network namespace.
+pub fn destroy_netns(name: &str) -> Result<(), NetnsError> {
+    exec_cmd(&build_ip_netns_del_cmd(name)?).map_err(NetnsError::from)
+}
+
+/// Move a network interface into a namespace.
+pub fn move_to_netns(link: &str, netns: &str) -> Result<(), NetnsError> {
+    exec_cmd(&build_ip_link_set_netns_cmd(link, netns)?).map_err(NetnsError::from)
+}
+
+/// Enter a network namespace by path (direct syscall, no shell-out).
 pub fn enter_netns(path: &Path) -> Result<(), NetnsError> {
     let file = File::open(path).map_err(|err| NetnsError::Open(path.to_path_buf(), err))?;
     setns(file, CloneFlags::CLONE_NEWNET)?;

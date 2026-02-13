@@ -1,3 +1,4 @@
+use crate::executor::{ExecError, Transaction};
 use crate::validate::{validate_cidr, validate_interface_name, ValidationError};
 use std::net::IpAddr;
 
@@ -14,6 +15,10 @@ pub struct VethConfig {
     pub host_addr: Option<IpAddr>,
     pub container_addr: Option<IpAddr>,
 }
+
+// ============================================================================
+// Command builders (validation + command construction)
+// ============================================================================
 
 pub fn build_ip_link_add_veth_cmd(config: &VethConfig) -> Result<Vec<String>, ValidationError> {
     validate_interface_name(&config.pair.host)?;
@@ -36,9 +41,19 @@ pub fn build_ip_link_add_veth_cmd(config: &VethConfig) -> Result<Vec<String>, Va
     Ok(cmd)
 }
 
+pub fn build_ip_link_del_cmd(link: &str) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(link)?;
+    Ok(vec!["ip".into(), "link".into(), "del".into(), link.into()])
+}
+
 pub fn build_ip_link_set_up_cmd(link: &str) -> Result<Vec<String>, ValidationError> {
     validate_interface_name(link)?;
     Ok(vec!["ip".into(), "link".into(), "set".into(), link.into(), "up".into()])
+}
+
+pub fn build_ip_link_set_down_cmd(link: &str) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(link)?;
+    Ok(vec!["ip".into(), "link".into(), "set".into(), link.into(), "down".into()])
 }
 
 pub fn build_ip_addr_add_cmd(link: &str, addr: IpAddr, cidr: u8) -> Result<Vec<String>, ValidationError> {
@@ -53,6 +68,94 @@ pub fn build_ip_addr_add_cmd(link: &str, addr: IpAddr, cidr: u8) -> Result<Vec<S
         "dev".into(),
         link.into(),
     ])
+}
+
+pub fn build_ip_addr_del_cmd(link: &str, addr: IpAddr, cidr: u8) -> Result<Vec<String>, ValidationError> {
+    validate_interface_name(link)?;
+    let cidr_str = format!("{addr}/{cidr}");
+    validate_cidr(&cidr_str)?;
+    Ok(vec![
+        "ip".into(),
+        "addr".into(),
+        "del".into(),
+        cidr_str,
+        "dev".into(),
+        link.into(),
+    ])
+}
+
+// ============================================================================
+// Execution functions (with transaction support for atomic operations)
+// ============================================================================
+
+/// Create a veth pair (atomic with rollback).
+///
+/// Creates both ends of the veth pair and optionally assigns addresses.
+pub fn create_veth_pair(config: &VethConfig) -> Result<(), ExecError> {
+    let mut txn = Transaction::new();
+
+    // Step 1: Create the veth pair
+    txn.add(
+        build_ip_link_add_veth_cmd(config).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth config validation: {}", e),
+            stderr: String::new(),
+        })?,
+        // Deleting one end of the pair removes both
+        build_ip_link_del_cmd(&config.pair.host).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth rollback validation: {}", e),
+            stderr: String::new(),
+        })?,
+    )?;
+
+    // Step 2: Bring up host end
+    txn.add(
+        build_ip_link_set_up_cmd(&config.pair.host).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth host up validation: {}", e),
+            stderr: String::new(),
+        })?,
+        Vec::new(), // No rollback needed for link state
+    )?;
+
+    // Step 3: Bring up container end
+    txn.add(
+        build_ip_link_set_up_cmd(&config.pair.container).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth container up validation: {}", e),
+            stderr: String::new(),
+        })?,
+        Vec::new(), // No rollback needed for link state
+    )?;
+
+    txn.commit();
+    Ok(())
+}
+
+/// Destroy a veth pair by deleting one end.
+pub fn destroy_veth_pair(name: &str) -> Result<(), ExecError> {
+    // Bring down first (best effort)
+    let _ = crate::executor::exec_cmd(
+        &build_ip_link_set_down_cmd(name).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth down validation: {}", e),
+            stderr: String::new(),
+        })?,
+    );
+
+    // Delete (removes both ends)
+    crate::executor::exec_cmd(
+        &build_ip_link_del_cmd(name).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth del validation: {}", e),
+            stderr: String::new(),
+        })?,
+    )
+}
+
+/// Assign an IP address to a veth interface.
+pub fn assign_ip(link: &str, addr: IpAddr, cidr: u8) -> Result<(), ExecError> {
+    crate::executor::exec_cmd(
+        &build_ip_addr_add_cmd(link, addr, cidr).map_err(|e| ExecError::CommandFailed {
+            cmd: format!("veth addr validation: {}", e),
+            stderr: String::new(),
+        })?,
+    )
 }
 
 #[cfg(test)]

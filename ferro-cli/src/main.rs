@@ -12,6 +12,7 @@ use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
+    handle_community_download_command, handle_community_list_command, handle_community_publish_command,
     handle_export_command, handle_export_rvf_command, handle_import_command,
     handle_rvf_branch_command, handle_rvf_lineage_command, handle_rvf_stats_command,
     handle_stats_command,
@@ -286,6 +287,8 @@ pub enum AiCommands {
         models_dir: Option<String>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
     Export {
         #[arg(long = "model-type")]
@@ -294,6 +297,8 @@ pub enum AiCommands {
         output: String,
         #[arg(long = "models-dir")]
         models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
     Import {
         #[arg(long = "model-type")]
@@ -302,6 +307,8 @@ pub enum AiCommands {
         input: String,
         #[arg(long = "models-dir")]
         models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
     Stats {
         /// Path to a .rvf model file (optional)
@@ -321,6 +328,52 @@ pub enum AiCommands {
     },
     Lineage {
         path: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    Migrate {
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    Community {
+        #[command(subcommand)]
+        command: AiCommunityCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AiCommunityCommands {
+    List {
+        #[arg(long = "marketplace-dir")]
+        marketplace_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    Publish {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        tags: Vec<String>,
+        #[arg(long = "marketplace-dir")]
+        marketplace_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    Download {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long = "marketplace-dir")]
+        marketplace_dir: Option<String>,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
@@ -482,6 +535,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             data_dir,
             models_dir,
             output,
+            format,
         } => {
             let data_dir_path = data_dir.as_deref().map(Path::new);
             let models_dir_path = models_dir.as_deref().map(Path::new);
@@ -504,6 +558,20 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                         .map_err(|err| format!("ai train: {err}"))?;
                 }
             }
+            if format == "json" {
+                let out = serde_json::json!({
+                    "model_type": result.model_type.to_string(),
+                    "version": result.version,
+                    "samples_used": result.samples_used,
+                    "duration_ms": result.duration.as_millis(),
+                    "loss": result.loss,
+                    "model_path": result.model_path,
+                });
+                let text = serde_json::to_string_pretty(&out)
+                    .map_err(|err| format!("ai train: {err}"))?;
+                println!("{text}");
+                return Ok(());
+            }
             println!(
                 "ai train: model_type={} version={} samples={} loss={:?} path={}",
                 result.model_type,
@@ -518,6 +586,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             model_type,
             output,
             models_dir,
+            format,
         } => {
             let output_path = PathBuf::from(output);
             let models_dir_path = models_dir.as_deref().map(Path::new);
@@ -532,6 +601,17 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 handle_export_command(&model_type, &output_path, models_dir_path)
                     .map_err(|err| format!("ai export: {err}"))?
             };
+            if format == "json" {
+                let out = serde_json::json!({
+                    "model_type": model_type,
+                    "output": exported,
+                    "format": if is_rvf { "rvf" } else { "native" },
+                });
+                let text = serde_json::to_string_pretty(&out)
+                    .map_err(|err| format!("ai export: {err}"))?;
+                println!("{text}");
+                return Ok(());
+            }
             println!("ai export: wrote {}", exported.display());
             Ok(())
         }
@@ -539,11 +619,18 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             model_type,
             input,
             models_dir,
+            format,
         } => {
             let input_path = PathBuf::from(input);
             let models_dir_path = models_dir.as_deref().map(Path::new);
             let version = handle_import_command(&model_type, &input_path, models_dir_path)
                 .map_err(|err| format!("ai import: {err}"))?;
+            if format == "json" {
+                let text = serde_json::to_string_pretty(&version)
+                    .map_err(|err| format!("ai import: {err}"))?;
+                println!("{text}");
+                return Ok(());
+            }
             println!(
                 "ai import: model_type={} version={} path={}",
                 version.model_type,
@@ -638,6 +725,140 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             println!("  lineage_depth={}", lineage.lineage_depth);
             println!("  is_root={}", lineage.is_root);
             Ok(())
+        }
+        AiCommands::Migrate {
+            source,
+            target,
+            force,
+        } => {
+            let source = source
+                .map(PathBuf::from)
+                .unwrap_or_else(|| runtime_dir().join("models"));
+            let target = target
+                .map(PathBuf::from)
+                .unwrap_or_else(|| runtime_dir().join("models-rvf"));
+            std::fs::create_dir_all(&target).map_err(|err| format!("ai migrate: {err}"))?;
+            for model_type in ["resource-predictor", "anomaly-detector", "restart-policy"] {
+                let out = target.join(format!("{model_type}.rvf"));
+                if out.exists() {
+                    if force {
+                        std::fs::remove_file(&out).map_err(|err| format!("ai migrate: {err}"))?;
+                    } else {
+                        return Err(format!(
+                            "ai migrate: target exists (use --force): {}",
+                            out.display()
+                        ));
+                    }
+                }
+                match handle_export_rvf_command(model_type, &out, None, Some(&source)) {
+                    Ok(_) => {
+                        println!("ai migrate: exported {model_type} -> {}", out.display());
+                    }
+                    Err(err) => {
+                        eprintln!("ai migrate: skipped {model_type}: {err}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        AiCommands::Community { command } => {
+            let default_marketplace = PathBuf::from(".ferrocrate").join("community");
+            match command {
+                AiCommunityCommands::List {
+                    marketplace_dir,
+                    format,
+                } => {
+                    let marketplace = marketplace_dir
+                        .map(PathBuf::from)
+                        .unwrap_or(default_marketplace);
+                    let entries = handle_community_list_command(&marketplace)
+                        .map_err(|err| format!("ai community list: {err}"))?;
+                    if format == "json" {
+                        let out = serde_json::to_string_pretty(&entries)
+                            .map_err(|err| format!("ai community list: {err}"))?;
+                        println!("{out}");
+                        return Ok(());
+                    }
+                    println!("ai community list: {}", marketplace.display());
+                    if entries.is_empty() {
+                        println!("  <no models>");
+                    } else {
+                        for entry in entries {
+                            println!(
+                                "  {} size={}B lineage_depth={} tags={}",
+                                entry.name,
+                                entry.size_bytes,
+                                entry.lineage_depth,
+                                if entry.tags.is_empty() {
+                                    "<none>".to_string()
+                                } else {
+                                    entry.tags.join(",")
+                                }
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                AiCommunityCommands::Publish {
+                    input,
+                    name,
+                    description,
+                    tags,
+                    marketplace_dir,
+                    format,
+                } => {
+                    let marketplace = marketplace_dir
+                        .map(PathBuf::from)
+                        .unwrap_or(default_marketplace);
+                    let description = description.unwrap_or_else(|| "Community shared model".to_string());
+                    let out = handle_community_publish_command(
+                        Path::new(&input),
+                        &name,
+                        &description,
+                        &tags,
+                        &marketplace,
+                    )
+                    .map_err(|err| format!("ai community publish: {err}"))?;
+                    if format == "json" {
+                        let payload = serde_json::json!({
+                            "name": name,
+                            "artifact": out,
+                            "marketplace_dir": marketplace,
+                        });
+                        let text = serde_json::to_string_pretty(&payload)
+                            .map_err(|err| format!("ai community publish: {err}"))?;
+                        println!("{text}");
+                        return Ok(());
+                    }
+                    println!("ai community publish: {} -> {}", name, out.display());
+                    Ok(())
+                }
+                AiCommunityCommands::Download {
+                    name,
+                    output,
+                    marketplace_dir,
+                    format,
+                } => {
+                    let marketplace = marketplace_dir
+                        .map(PathBuf::from)
+                        .unwrap_or(default_marketplace);
+                    let out = handle_community_download_command(&name, Path::new(&output), &marketplace)
+                        .map_err(|err| format!("ai community download: {err}"))?;
+                    if format == "json" {
+                        let payload = serde_json::json!({
+                            "name": name,
+                            "output": out,
+                            "marketplace_dir": marketplace,
+                        });
+                        let text = serde_json::to_string_pretty(&payload)
+                            .map_err(|err| format!("ai community download: {err}"))?;
+                        println!("{text}");
+                        return Ok(());
+                    }
+                    println!("ai community download: {} -> {}", name, out.display());
+                    Ok(())
+                }
+            }
         }
     }
 }

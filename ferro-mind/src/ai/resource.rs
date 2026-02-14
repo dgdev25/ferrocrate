@@ -5,8 +5,15 @@
 //! 2. Analyzing memory growth trends
 //! 3. Predicting when memory will exceed limits
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+#[cfg(feature = "rvf-persistence")]
+use std::path::Path;
+
+#[cfg(feature = "rvf-persistence")]
+use crate::ai::learning::vector_memory::VectorMemory;
+#[cfg(feature = "rvf-persistence")]
+use crate::ruv::types::{DistanceMetric, VectorEntry, VectorId};
 
 /// A single resource sample from cgroup v2 metrics.
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +55,6 @@ pub struct OomPrediction {
 }
 
 /// Resource predictor with trend analysis.
-#[derive(Debug)]
 pub struct ResourcePredictor {
     /// Window of recent samples
     window: VecDeque<ResourceSample>,
@@ -58,6 +64,9 @@ pub struct ResourcePredictor {
     memory_limit: u64,
     /// Minimum samples needed for prediction
     min_samples: usize,
+    /// Optional persistent similarity memory for cross-session learning
+    #[cfg(feature = "rvf-persistence")]
+    memory: Option<VectorMemory>,
 }
 
 impl Default for ResourcePredictor {
@@ -77,7 +86,18 @@ impl ResourcePredictor {
             max_len: max_len.max(3), // Need at least 3 samples for trend
             memory_limit: 0,
             min_samples: 3,
+            #[cfg(feature = "rvf-persistence")]
+            memory: None,
         }
+    }
+
+    /// Create a predictor with RVF-backed persistence in `data_dir`.
+    #[cfg(feature = "rvf-persistence")]
+    pub fn persistent(max_len: usize, data_dir: &Path) -> Result<Self, String> {
+        let mut predictor = Self::new(max_len);
+        let memory_path = data_dir.join("resource-patterns.rvf");
+        predictor.memory = Some(VectorMemory::with_backend(&memory_path, 3)?);
+        Ok(predictor)
     }
 
     /// Set the memory limit for OOM prediction.
@@ -91,6 +111,20 @@ impl ResourcePredictor {
         self.window.push_back(sample);
         if self.window.len() > self.max_len {
             self.window.pop_front();
+        }
+
+        #[cfg(feature = "rvf-persistence")]
+        if let Some(memory) = self.memory.as_mut() {
+            let mut metadata = HashMap::new();
+            metadata.insert("cpu_percent".to_string(), serde_json::json!(sample.cpu_percent));
+            metadata.insert("memory_bytes".to_string(), serde_json::json!(sample.memory_bytes));
+            metadata.insert("pids_count".to_string(), serde_json::json!(sample.pids_count));
+            let id = format!("sample-{:?}", sample.timestamp);
+            memory.insert(VectorEntry {
+                id: Some(VectorId::from(id)),
+                vector: Self::sample_vector(&sample),
+                metadata: Some(metadata),
+            });
         }
     }
 
@@ -140,11 +174,35 @@ impl ResourcePredictor {
             growth_rates.iter().sum::<f64>() / growth_rates.len() as f64
         };
 
-        Some(ResourcePrediction {
+        let mut prediction = ResourcePrediction {
             cpu_percent: avg_cpu,
             memory_bytes: avg_mem,
             memory_growth_rate: avg_growth_rate,
-        })
+        };
+
+        #[cfg(feature = "rvf-persistence")]
+        if let Some(memory) = self.memory.as_ref() {
+            if let Some(latest) = self.window.back() {
+                let neighbors = memory.search(&Self::sample_vector(latest), 3, DistanceMetric::Cosine);
+                if !neighbors.is_empty() {
+                    let mut mem_sum = prediction.memory_bytes as f64;
+                    let mut cpu_sum = prediction.cpu_percent as f64;
+                    let mut count = 1.0;
+                    for neighbor in neighbors {
+                        let Some(meta) = neighbor.metadata else { continue };
+                        let Some(mem) = meta.get("memory_bytes").and_then(|v| v.as_u64()) else { continue };
+                        let Some(cpu) = meta.get("cpu_percent").and_then(|v| v.as_f64()) else { continue };
+                        mem_sum += mem as f64;
+                        cpu_sum += cpu;
+                        count += 1.0;
+                    }
+                    prediction.memory_bytes = (mem_sum / count) as u64;
+                    prediction.cpu_percent = (cpu_sum / count) as f32;
+                }
+            }
+        }
+
+        Some(prediction)
     }
 
     /// Predict when OOM will occur based on current memory growth trend.
@@ -290,6 +348,14 @@ impl ResourcePredictor {
     /// Set the memory limit at runtime.
     pub fn set_memory_limit(&mut self, limit: u64) {
         self.memory_limit = limit;
+    }
+
+    fn sample_vector(sample: &ResourceSample) -> Vec<f32> {
+        vec![
+            sample.cpu_percent / 100.0,
+            sample.memory_bytes as f32,
+            sample.pids_count as f32,
+        ]
     }
 }
 

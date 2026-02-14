@@ -13,7 +13,8 @@ use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
     handle_export_command, handle_export_rvf_command, handle_import_command,
-    handle_rvf_stats_command, handle_stats_command,
+    handle_rvf_branch_command, handle_rvf_lineage_command, handle_rvf_stats_command,
+    handle_stats_command,
     handle_train_command,
 };
 use ferro_core::volume_store::LocalVolumeStore;
@@ -309,6 +310,19 @@ pub enum AiCommands {
         model_type: Option<String>,
         #[arg(long = "models-dir")]
         models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    Branch {
+        source: String,
+        target: String,
+        #[arg(long)]
+        force: bool,
+    },
+    Lineage {
+        path: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
     },
 }
 
@@ -542,11 +556,18 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             path,
             model_type,
             models_dir,
+            format,
         } => {
             let models_dir_path = models_dir.as_deref().map(Path::new);
             if let Some(path) = path {
                 let rvf = handle_rvf_stats_command(Path::new(&path))
                     .map_err(|err| format!("ai stats: {err}"))?;
+                if format == "json" {
+                    let out = serde_json::to_string_pretty(&rvf)
+                        .map_err(|err| format!("ai stats: {err}"))?;
+                    println!("{out}");
+                    return Ok(());
+                }
                 println!("ai stats: rvf={}", rvf.path.display());
                 println!("  dimensions={}", rvf.dimensions);
                 println!("  total_vectors={}", rvf.total_vectors);
@@ -567,6 +588,12 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 .ok_or_else(|| "ai stats: provide --model-type <type> or ai stats <file.rvf>".to_string())?;
             let stats = handle_stats_command(&model_type, models_dir_path)
                 .map_err(|err| format!("ai stats: {err}"))?;
+            if format == "json" {
+                let out = serde_json::to_string_pretty(&stats)
+                    .map_err(|err| format!("ai stats: {err}"))?;
+                println!("{out}");
+                return Ok(());
+            }
             println!("ai stats: model_type={}", stats.model_type);
             println!("  versions={}", stats.versions);
             println!("  total_samples={}", stats.total_samples);
@@ -583,6 +610,33 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 "  last_trained_at={}",
                 stats.last_trained_at.unwrap_or_else(|| "<none>".to_string())
             );
+            Ok(())
+        }
+        AiCommands::Branch { source, target, force } => {
+            let source = PathBuf::from(source);
+            let target = PathBuf::from(target);
+            if force && target.exists() {
+                std::fs::remove_file(&target).map_err(|err| format!("ai branch: {err}"))?;
+            }
+            let out = handle_rvf_branch_command(&source, &target)
+                .map_err(|err| format!("ai branch: {err}"))?;
+            println!("ai branch: wrote {}", out.display());
+            Ok(())
+        }
+        AiCommands::Lineage { path, format } => {
+            let lineage = handle_rvf_lineage_command(Path::new(&path))
+                .map_err(|err| format!("ai lineage: {err}"))?;
+            if format == "json" {
+                let out = serde_json::to_string_pretty(&lineage)
+                    .map_err(|err| format!("ai lineage: {err}"))?;
+                println!("{out}");
+                return Ok(());
+            }
+            println!("ai lineage: rvf={}", lineage.path.display());
+            println!("  file_id={}", lineage.file_id_hex);
+            println!("  parent_id={}", lineage.parent_id_hex);
+            println!("  lineage_depth={}", lineage.lineage_depth);
+            println!("  is_root={}", lineage.is_root);
             Ok(())
         }
     }

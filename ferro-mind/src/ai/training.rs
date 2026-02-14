@@ -166,6 +166,16 @@ pub struct RvfFileStats {
     pub lineage_depth: u32,
 }
 
+/// Lineage metadata for a single RVF file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RvfLineage {
+    pub path: PathBuf,
+    pub file_id_hex: String,
+    pub parent_id_hex: String,
+    pub lineage_depth: u32,
+    pub is_root: bool,
+}
+
 /// Error type for training operations
 #[derive(Debug, thiserror::Error)]
 pub enum TrainingError {
@@ -696,6 +706,50 @@ pub fn handle_rvf_stats_command(path: &Path) -> Result<RvfFileStats, TrainingErr
 }
 
 #[cfg(feature = "rvf-persistence")]
+pub fn handle_rvf_branch_command(source: &Path, target: &Path) -> Result<PathBuf, TrainingError> {
+    if !source.exists() {
+        return Err(TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("source file not found: {}", source.display()),
+        )));
+    }
+    if target.exists() {
+        return Err(TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("target already exists: {}", target.display()),
+        )));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let store = RvfStore::open_readonly(source)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    let child = store
+        .branch(target)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    child
+        .close()
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    Ok(target.to_path_buf())
+}
+
+#[cfg(feature = "rvf-persistence")]
+pub fn handle_rvf_lineage_command(path: &Path) -> Result<RvfLineage, TrainingError> {
+    let store = RvfStore::open_readonly(path)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    let parent = bytes_to_hex(store.parent_id());
+    let is_root = parent.chars().all(|ch| ch == '0');
+    Ok(RvfLineage {
+        path: path.to_path_buf(),
+        file_id_hex: bytes_to_hex(store.file_id()),
+        parent_id_hex: parent,
+        lineage_depth: store.lineage_depth(),
+        is_root,
+    })
+}
+
+#[cfg(feature = "rvf-persistence")]
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -794,6 +848,20 @@ pub fn handle_export_rvf_command(
         .close()
         .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
     Ok(output.to_path_buf())
+}
+
+#[cfg(not(feature = "rvf-persistence"))]
+pub fn handle_rvf_branch_command(_source: &Path, _target: &Path) -> Result<PathBuf, TrainingError> {
+    Err(TrainingError::TrainingFailed(
+        "rvf-persistence feature is not enabled".to_string(),
+    ))
+}
+
+#[cfg(not(feature = "rvf-persistence"))]
+pub fn handle_rvf_lineage_command(_path: &Path) -> Result<RvfLineage, TrainingError> {
+    Err(TrainingError::TrainingFailed(
+        "rvf-persistence feature is not enabled".to_string(),
+    ))
 }
 
 #[cfg(feature = "rvf-persistence")]

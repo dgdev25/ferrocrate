@@ -207,7 +207,8 @@ mod tests {
     #[test]
     fn test_hash_embedding_produces_normalized_vector() {
         let embedder = HashEmbedding::new(128);
-        let embedding = embedder.embed("hello world").unwrap();
+        let embedding = embedder.embed("hello world")
+            .expect("embed should succeed with valid input");
 
         assert_eq!(embedding.len(), 128);
 
@@ -218,8 +219,10 @@ mod tests {
     #[test]
     fn test_hash_embedding_consistency() {
         let embedder = HashEmbedding::new(64);
-        let e1 = embedder.embed("test string").unwrap();
-        let e2 = embedder.embed("test string").unwrap();
+        let e1 = embedder.embed("test string")
+            .expect("embed should succeed");
+        let e2 = embedder.embed("test string")
+            .expect("embed should succeed");
 
         assert_eq!(e1, e2);
     }
@@ -227,8 +230,10 @@ mod tests {
     #[test]
     fn test_hash_embedding_different_inputs() {
         let embedder = HashEmbedding::new(64);
-        let e1 = embedder.embed("hello").unwrap();
-        let e2 = embedder.embed("world").unwrap();
+        let e1 = embedder.embed("hello")
+            .expect("embed should succeed");
+        let e2 = embedder.embed("world")
+            .expect("embed should succeed");
 
         assert_ne!(e1, e2);
     }

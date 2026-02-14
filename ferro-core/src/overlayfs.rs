@@ -2,7 +2,8 @@ use nix::errno::Errno;
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,8 @@ pub enum OverlayFsError {
     FuseOverlayBinaryMissing,
     #[error("fuse-overlayfs mount failed with status {status}: {stderr}")]
     FuseOverlayFailed { status: i32, stderr: String },
+    #[error("fuse-overlayfs command timed out after {0:?}")]
+    Timeout(Duration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,23 +82,33 @@ impl OverlayFsManager {
         }
     }
 
+    // SEC-05: Default timeout for fuse-overlayfs mount (30 seconds)
+    const FUSE_OVERLAY_TIMEOUT: Duration = Duration::from_secs(30);
+
     fn mount_with_fuse_overlayfs(config: &OverlayMountConfig) -> Result<(), OverlayFsError> {
         validate_config(config)?;
-        fs::create_dir_all(&config.upperdir)?;
-        fs::create_dir_all(&config.workdir)?;
-        fs::create_dir_all(&config.merged_dir)?;
+
+        // SEC-04: Canonicalize and validate all paths before use
+        let upperdir = config.upperdir.canonicalize()
+            .map_err(|e| OverlayFsError::Io(e))?;
+        let workdir = config.workdir.canonicalize()
+            .map_err(|e| OverlayFsError::Io(e))?;
+        let merged_dir = config.merged_dir.canonicalize()
+            .map_err(|e| OverlayFsError::Io(e))?;
+
+        // Check for null bytes in paths
+        check_path_null_bytes(&upperdir)?;
+        check_path_null_bytes(&workdir)?;
+        check_path_null_bytes(&merged_dir)?;
+
+        fs::create_dir_all(&upperdir)?;
+        fs::create_dir_all(&workdir)?;
+        fs::create_dir_all(&merged_dir)?;
 
         let args = build_fuse_overlayfs_args(config);
-        let output = Command::new("fuse-overlayfs")
-            .args(args)
-            .output()
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    OverlayFsError::FuseOverlayBinaryMissing
-                } else {
-                    OverlayFsError::Io(err)
-                }
-            })?;
+
+        // SEC-05: Execute fuse-overlayfs with timeout to prevent hanging
+        let output = Self::execute_fuse_command_with_timeout("fuse-overlayfs", &args, Self::FUSE_OVERLAY_TIMEOUT)?;
 
         if !output.status.success() {
             return Err(OverlayFsError::FuseOverlayFailed {
@@ -105,6 +118,65 @@ impl OverlayFsManager {
         }
 
         Ok(())
+    }
+
+    /// SEC-05: Execute fuse-overlayfs command with timeout to prevent blocking indefinitely
+    fn execute_fuse_command_with_timeout(
+        binary: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<std::process::Output, OverlayFsError> {
+        let mut child = Command::new(binary)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    OverlayFsError::FuseOverlayBinaryMissing
+                } else {
+                    OverlayFsError::Io(e)
+                }
+            })?;
+
+        let start = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().map_err(|e| OverlayFsError::Io(e))? {
+                // Process completed - collect output
+                let mut stdout = child.stdout.take().ok_or_else(|| {
+                    OverlayFsError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "failed to capture stdout",
+                    ))
+                })?;
+                let mut stderr = child.stderr.take().ok_or_else(|| {
+                    OverlayFsError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "failed to capture stderr",
+                    ))
+                })?;
+
+                use std::io::Read;
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+                stdout.read_to_end(&mut stdout_buf).map_err(|e| OverlayFsError::Io(e))?;
+                stderr.read_to_end(&mut stderr_buf).map_err(|e| OverlayFsError::Io(e))?;
+
+                return Ok(std::process::Output {
+                    status,
+                    stdout: stdout_buf,
+                    stderr: stderr_buf,
+                });
+            }
+
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(OverlayFsError::Timeout(timeout));
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -130,6 +202,14 @@ pub fn build_fuse_overlayfs_args(config: &OverlayMountConfig) -> Vec<String> {
         build_mount_options(config),
         config.merged_dir.display().to_string(),
     ]
+}
+
+/// SEC-04: Check for null bytes in path to prevent injection
+fn check_path_null_bytes(path: &Path) -> Result<(), OverlayFsError> {
+    if path.to_str().map_or(false, |s| s.contains('\0')) {
+        return Err(OverlayFsError::InvalidConfig("path contains null byte"));
+    }
+    Ok(())
 }
 
 fn validate_config(config: &OverlayMountConfig) -> Result<(), OverlayFsError> {

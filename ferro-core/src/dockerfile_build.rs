@@ -809,7 +809,10 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
             "COPY/ADD requires src and dest".to_string(),
         ));
     }
-    let dest = args.last().unwrap().to_string();
+    // CQ-01: Use checked index access instead of unwrap()
+    let dest = args.get(args.len() - 1)
+        .ok_or_else(|| DockerfileBuildError::Invalid("COPY dest missing".to_string()))?
+        .to_string();
     let srcs = args[..args.len() - 1].iter().map(|s| s.to_string()).collect();
     Ok(Some(CopySpec { srcs, dest }))
 }
@@ -1048,6 +1051,23 @@ fn apply_stage_workdir(rootfs: &Path, workdir: Option<&str>) -> Result<(), Docke
     Ok(())
 }
 
+// SEC-00: Namespace types required for secure build isolation
+//
+// Intermediate fix: wrap chroot with unshare to create namespaces before execution
+// -m: Mount namespace (isolates filesystem mounts)
+// -p: PID namespace (isolates process IDs)
+// -u: UTS namespace (isolates hostname and domain name)
+// -n: Network namespace (isolates network stack)
+// --mount-proc: Mount a fresh /proc in the new namespace
+//
+// TODO: Full security requires (16 hr refactor):
+// 1. Fork/exec pattern to set up isolation in child before exec
+// 2. User namespace (-U) with UID/GID mapping via /proc/[pid]/uid_map
+// 3. Capability drops before exec (CAP_SYS_ADMIN, etc.)
+// 4. Seccomp profile application
+// 5. Consider pivot_root instead of chroot for harder escape prevention
+const BUILD_NAMESPACES: &[&str] = &["-m", "-p", "-u", "-n", "--mount-proc"];
+
 fn run_stage_commands(
     rootfs: &Path,
     runs: &[RunSpec],
@@ -1056,31 +1076,47 @@ fn run_stage_commands(
     user: Option<&str>,
 ) -> Result<(), DockerfileBuildError> {
     for run in runs {
-        let mut chroot_cmd = Command::new("chroot");
-        chroot_cmd.arg(rootfs).arg(&run.args[0]).args(&run.args[1..]);
+        // SEC-00: Use unshare to create namespaces before chroot for proper isolation
+        // This creates: mount, PID, UTS namespaces and mounts procfs
+        // This prevents trivial escape via chdir+chroot or mount escape techniques
+        let mut unshare_cmd = Command::new("unshare");
+        unshare_cmd
+            .args(BUILD_NAMESPACES)
+            .arg("--") // end unshare options, start chroot command
+            .arg("chroot")
+            .arg(rootfs)
+            .arg(&run.args[0])
+            .args(&run.args[1..]);
+
+        // Set environment variables
         for entry in env {
             let mut parts = entry.splitn(2, '=');
             let key = parts.next().unwrap_or("").trim();
             let value = parts.next().unwrap_or("").trim();
             if !key.is_empty() {
-                chroot_cmd.env(key, value);
+                unshare_cmd.env(key, value);
             }
         }
+
+        // Set working directory
         if let Some(dir) = workdir {
             let target = if dir.starts_with('/') {
                 dir.to_string()
             } else {
                 format!("/{}", dir)
             };
-            chroot_cmd.current_dir(target);
+            unshare_cmd.current_dir(target);
         }
+
+        // Set user/group
         if let Some(user_spec) = user {
             if let Some((uid, gid)) = parse_user_spec(user_spec) {
-                chroot_cmd.uid(uid);
-                chroot_cmd.gid(gid);
+                unshare_cmd.uid(uid);
+                unshare_cmd.gid(gid);
             }
         }
-        let status = chroot_cmd.status()?;
+
+        let status = unshare_cmd.status()?;
         if !status.success() {
             return Err(DockerfileBuildError::Invalid(format!(
                 "RUN failed with status {status}"

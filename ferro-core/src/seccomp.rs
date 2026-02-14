@@ -5,7 +5,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum SeccompError {
     #[error("invalid seccomp profile JSON: {0}")]
-    InvalidJson(#[from] serde_json::Error),
+    InvalidJson(String),
     #[error("failed to apply seccomp profile: {0}")]
     Apply(#[from] libseccomp::error::SeccompError),
     #[error("unknown syscall action: {0}")]
@@ -26,6 +26,64 @@ pub struct SeccompProfile {
     pub syscalls: Vec<SyscallRule>,
 }
 
+impl SeccompProfile {
+    /// SEC-06: Validate semantic correctness of seccomp profile
+    pub fn validate(&self) -> Result<(), SeccompError> {
+        // Validate default_action is a known SCMP_ACT_* constant
+        if parse_action(&self.default_action).is_err() {
+            return Err(SeccompError::UnknownAction(self.default_action.clone()));
+        }
+
+        // Validate architectures are known SCMP_ARCH_* constants
+        for arch in &self.architectures {
+            match arch.as_str() {
+                "SCMP_ARCH_X86_64" | "SCMP_ARCH_X86" | "SCMP_ARCH_X32"
+                | "SCMP_ARCH_ARM" | "SCMP_ARCH_AARCH64"
+                | "SCMP_ARCH_MIPS" | "SCMP_ARCH_MIPS64"
+                | "SCMP_ARCH_PPC" | "SCMP_ARCH_PPC64" | "SCMP_ARCH_PPC64LE"
+                | "SCMP_ARCH_S390X" => {}
+                _ => return Err(SeccompError::UnknownArch(arch.clone())),
+            }
+        }
+
+        // Validate each syscall rule
+        for rule in &self.syscalls {
+            // Validate action
+            parse_action(&rule.action)?;
+
+            // Validate args[].index values are in range 0..5
+            if let Some(args) = &rule.args {
+                for arg in args {
+                    if arg.index > 5 {
+                        return Err(SeccompError::InvalidJson(
+                            format!("arg index {} out of range 0..5", arg.index)
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Check for contradictory rules (same syscall with both ALLOW and KILL)
+        let mut syscall_actions: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for rule in &self.syscalls {
+            for name in &rule.names {
+                if let Some(existing) = syscall_actions.get(name.as_str()) {
+                    let is_kill = *existing == "SCMP_ACT_KILL" || *existing == "SCMP_ACT_KILL_PROCESS";
+                    let new_kill = rule.action == "SCMP_ACT_KILL" || rule.action == "SCMP_ACT_KILL_PROCESS";
+                    if (is_kill && rule.action == "SCMP_ACT_ALLOW") || (new_kill && *existing == "SCMP_ACT_ALLOW") {
+                        return Err(SeccompError::InvalidJson(
+                            format!("contradictory rules for syscall {}: both KILL and ALLOW", name)
+                        ));
+                    }
+                }
+                syscall_actions.insert(name.as_str(), &rule.action);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyscallRule {
     pub names: Vec<String>,
@@ -43,7 +101,11 @@ pub struct SyscallArg {
 }
 
 pub fn parse_seccomp_profile(json: &str) -> Result<SeccompProfile, SeccompError> {
-    Ok(serde_json::from_str(json)?)
+    let profile: SeccompProfile = serde_json::from_str(json)
+        .map_err(|e| SeccompError::InvalidJson(format!("{}", e)))?;
+    // SEC-06: Validate semantic correctness immediately after parsing
+    profile.validate()?;
+    Ok(profile)
 }
 
 pub fn default_seccomp_profile_json() -> &'static str {

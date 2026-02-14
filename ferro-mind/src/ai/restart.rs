@@ -4,6 +4,7 @@
 //! Uses exponential backoff with learned adjustments based on failure patterns.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 /// Signal indicating why a restart decision is needed
@@ -81,7 +82,7 @@ pub struct AdaptiveRestartPolicy {
     /// Time window to observe restart success (seconds)
     observation_window_secs: u64,
     /// History of restart events
-    restart_history: Vec<RestartRecord>,
+    restart_history: VecDeque<RestartRecord>,
     /// Detected crash pattern
     detected_pattern: CrashPattern,
     /// Pattern confidence (0.0 - 1.0)
@@ -99,7 +100,7 @@ impl AdaptiveRestartPolicy {
             base_backoff_secs: 1,
             max_backoff_secs: 300, // 5 minutes max
             observation_window_secs: 300, // 5 minutes to observe success
-            restart_history: Vec::with_capacity(50),
+            restart_history: VecDeque::with_capacity(50),
             detected_pattern: CrashPattern::Unknown,
             pattern_confidence: 0.0,
             backoff_adjustment: 1.0,
@@ -177,7 +178,7 @@ impl AdaptiveRestartPolicy {
 
     /// Record a restart event
     pub fn record_restart(&mut self, exit_code: i32, uptime_before_crash_secs: u64) {
-        self.restart_history.push(RestartRecord {
+        self.restart_history.push_back(RestartRecord {
             timestamp: Instant::now(),
             exit_code,
             uptime_before_crash_secs,
@@ -187,7 +188,7 @@ impl AdaptiveRestartPolicy {
 
         // Keep history bounded
         if self.restart_history.len() > 50 {
-            self.restart_history.remove(0);
+            self.restart_history.pop_front();
         }
 
         // Update pattern detection
@@ -196,7 +197,7 @@ impl AdaptiveRestartPolicy {
 
     /// Record the outcome of a restart
     pub fn record_outcome(&mut self, outcome: RestartOutcome) {
-        if let Some(last) = self.restart_history.last_mut() {
+        if let Some(last) = self.restart_history.back_mut() {
             let elapsed = last.timestamp.elapsed().as_secs();
             last.outcome = Some(outcome);
             last.time_to_outcome_secs = Some(elapsed);

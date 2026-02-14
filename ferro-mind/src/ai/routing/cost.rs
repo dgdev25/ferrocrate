@@ -17,5 +17,9 @@ pub fn choose_provider<'a>(
     providers
         .iter()
         .filter(|p| p.quality >= policy.min_quality)
-        .min_by(|a, b| a.cost_per_1k_tokens.partial_cmp(&b.cost_per_1k_tokens).unwrap())
+        .min_by(|a, b| {
+            // CQ-01: Handle NaN values - treat as equal to avoid panic
+            a.cost_per_1k_tokens.partial_cmp(&b.cost_per_1k_tokens)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }

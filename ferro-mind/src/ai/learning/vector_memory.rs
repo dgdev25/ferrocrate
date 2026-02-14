@@ -7,6 +7,11 @@ use crate::ruv::types::{DistanceMetric, SearchResult, VectorEntry, VectorId};
 use ruvector_core::{VectorDB, types::{DbOptions, HnswConfig, SearchQuery}};
 use std::sync::Arc;
 use parking_lot::RwLock;
+#[cfg(feature = "rvf-persistence")]
+use std::path::Path;
+
+#[cfg(feature = "rvf-persistence")]
+use crate::ai::learning::rvf_store::{RvfStore, stable_id};
 
 /// Vector Memory backed by ruvector-core with HNSW indexing
 ///
@@ -17,6 +22,8 @@ pub struct VectorMemory {
     db: Arc<RwLock<Option<VectorDB>>>,
     entries: Vec<VectorEntry>,  // Fallback storage for when db not initialized
     default_dimensions: usize,
+    #[cfg(feature = "rvf-persistence")]
+    rvf: Option<RvfStore>,
 }
 
 impl Default for VectorMemory {
@@ -25,6 +32,8 @@ impl Default for VectorMemory {
             db: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: 384,  // Default embedding dimension
+            #[cfg(feature = "rvf-persistence")]
+            rvf: None,
         }
     }
 }
@@ -36,7 +45,21 @@ impl VectorMemory {
             db: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: dimensions,
+            #[cfg(feature = "rvf-persistence")]
+            rvf: None,
         }
+    }
+
+    /// Create a persistent vector memory backed by RVF.
+    #[cfg(feature = "rvf-persistence")]
+    pub fn persistent(path: &Path, dimensions: usize) -> Result<Self, String> {
+        let rvf = RvfStore::open_or_create(path, dimensions).map_err(|err| err.to_string())?;
+        Ok(Self {
+            db: Arc::new(RwLock::new(None)),
+            entries: Vec::new(),
+            default_dimensions: dimensions,
+            rvf: Some(rvf),
+        })
     }
 
     /// Initialize the HNSW-backed database
@@ -58,6 +81,17 @@ impl VectorMemory {
 
     /// Insert a vector entry into memory
     pub fn insert(&mut self, entry: VectorEntry) {
+        #[cfg(feature = "rvf-persistence")]
+        if let Some(rvf) = self.rvf.as_mut() {
+            if rvf
+                .insert(entry.id.as_deref(), &entry.vector)
+                .is_ok()
+            {
+                self.entries.push(entry);
+            }
+            return;
+        }
+
         let dimensions = if entry.vector.is_empty() {
             self.default_dimensions
         } else {
@@ -95,6 +129,31 @@ impl VectorMemory {
     /// Uses O(log n) approximate nearest neighbor search for Cosine similarity.
     /// Falls back to brute-force O(n) for other distance metrics.
     pub fn search(&self, query: &[f32], k: usize, metric: DistanceMetric) -> Vec<SearchResult> {
+        #[cfg(feature = "rvf-persistence")]
+        if let Some(rvf) = self.rvf.as_ref() {
+            if metric == DistanceMetric::Cosine {
+                if let Ok(results) = rvf.search(query, k) {
+                    return results
+                        .into_iter()
+                        .map(|mut result| {
+                            if let Ok(id_num) = result.id.parse::<u64>() {
+                                if let Some(entry) = self.entries.iter().find(|entry| {
+                                    stable_id(entry.id.as_deref(), &entry.vector) == id_num
+                                }) {
+                                    result.id = entry
+                                        .id
+                                        .clone()
+                                        .unwrap_or_else(|| result.id.clone());
+                                    result.metadata = entry.metadata.clone();
+                                }
+                            }
+                            result
+                        })
+                        .collect();
+                }
+            }
+        }
+
         // HNSW is only configured for Cosine similarity - use brute-force for other metrics
         if metric == DistanceMetric::Cosine {
             // Try HNSW search first for Cosine similarity
@@ -150,6 +209,10 @@ impl VectorMemory {
 
     /// Get the number of stored vectors
     pub fn len(&self) -> usize {
+        #[cfg(feature = "rvf-persistence")]
+        if let Some(rvf) = self.rvf.as_ref() {
+            return rvf.len();
+        }
         self.entries.len()
     }
 
@@ -198,5 +261,28 @@ mod tests {
         let memory = VectorMemory::default();
         let results = memory.search(&[1.0, 2.0, 3.0], 5, DistanceMetric::Euclidean);
         assert!(results.is_empty());
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn persistent_memory_survives_reopen() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("vmem.rvf");
+
+        {
+            let mut memory = VectorMemory::persistent(&path, 3).expect("create");
+            memory.insert(VectorEntry {
+                id: Some(VectorId::from("vec1")),
+                vector: vec![1.0, 0.0, 0.0],
+                metadata: Some(HashMap::new()),
+            });
+            assert_eq!(memory.len(), 1);
+        }
+
+        {
+            let memory = VectorMemory::persistent(&path, 3).expect("reopen");
+            let results = memory.search(&[1.0, 0.0, 0.0], 1, DistanceMetric::Cosine);
+            assert_eq!(results.len(), 1);
+        }
     }
 }

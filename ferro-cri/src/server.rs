@@ -198,3 +198,451 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{ImageSpec, ListImagesRequest, ImageStatusRequest, PullImageRequest, RemoveImageRequest};
+    use std::sync::Mutex;
+    use tonic::Request;
+
+    // Mutex to prevent environment variable pollution between tests
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Helper to create a test runtime with a temporary image store
+    async fn create_test_runtime() -> CriRuntime {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        CriRuntime::new(Arc::new(store))
+    }
+
+    // Helper to populate test store with sample images
+    async fn populate_test_store(store: &LocalImageStore) {
+        store
+            .put_reference(
+                "alpine:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#,
+            )
+            .expect("put alpine");
+
+        store
+            .put_reference(
+                "ghcr.io/test/app:v1.0",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2}"#,
+            )
+            .expect("put test app");
+
+        store
+            .put_reference(
+                "digest-only",
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2}"#,
+            )
+            .expect("put digest reference");
+    }
+
+    #[tokio::test]
+    async fn version_returns_correct_runtime_info() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(VersionRequest::default());
+
+        let response = runtime.version(request).await
+            .expect("version should succeed");
+
+        let inner = response.into_inner();
+        assert_eq!(inner.version, "v1");
+        assert_eq!(inner.runtime_name, "ferrocrate");
+        assert!(!inner.runtime_version.is_empty());
+        assert_eq!(inner.runtime_api_version, "v1");
+    }
+
+    #[tokio::test]
+    async fn status_returns_runtime_ready_condition() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(StatusRequest {
+            verbose: false,
+        });
+
+        let response = runtime.status(request).await
+            .expect("status should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.status.is_some());
+
+        let status = inner.status.unwrap();
+        assert_eq!(status.conditions.len(), 1);
+
+        let condition = &status.conditions[0];
+        assert_eq!(condition.r#type, "RuntimeReady");
+        assert!(condition.status);
+        assert_eq!(condition.reason, "Ready");
+        assert_eq!(condition.message, "FerroCrate CRI shim is ready");
+    }
+
+    #[tokio::test]
+    async fn status_returns_runtime_ready_condition_with_verbose() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(StatusRequest {
+            verbose: true,
+        });
+
+        let response = runtime.status(request).await
+            .expect("status should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.status.is_some());
+        // Verbose flag should still return the same status
+        assert_eq!(inner.status.unwrap().conditions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_images_returns_empty_list_when_store_empty() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(ListImagesRequest::default());
+
+        let response = runtime.list_images(request).await
+            .expect("list_images should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_images_returns_all_stored_images() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ListImagesRequest::default());
+
+        let response = runtime.list_images(request).await
+            .expect("list_images should succeed");
+
+        let inner = response.into_inner();
+        assert_eq!(inner.images.len(), 3);
+
+        // Verify alpine:latest appears with tag
+        let alpine = &inner.images[0];
+        assert_eq!(alpine.id, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(alpine.repo_tags, vec!["alpine:latest"]);
+        assert_eq!(alpine.size, 0);
+
+        // Verify digest-only reference (sorted alphabetically: digest-only comes before ghcr.io)
+        let digest_only = &inner.images[1];
+        assert!(digest_only.id.starts_with("sha256:cccccccc") && digest_only.id.len() == 71);
+        assert_eq!(digest_only.repo_tags, vec!["digest-only"]); // Has tag because reference doesn't start with "sha256:"
+
+        // Verify ghcr.io/test/app:v1.0 appears with tag
+        let test_app = &inner.images[2];
+        assert_eq!(test_app.id, "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(test_app.repo_tags, vec!["ghcr.io/test/app:v1.0"]);
+    }
+
+    #[tokio::test]
+    async fn list_images_handles_filter_parameter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+
+        let runtime = CriRuntime::new(Arc::new(store));
+
+        // Filter parameter is currently ignored - just verify it doesn't error
+        let request = Request::new(ListImagesRequest {
+            filter: "alpine".to_string(),
+        });
+
+        let response = runtime.list_images(request).await
+            .expect("list_images with filter should succeed");
+
+        let inner = response.into_inner();
+        // Current implementation doesn't actually filter
+        assert!(!inner.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn image_status_returns_not_found_for_missing_image() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(ImageStatusRequest {
+            image: Some(ImageSpec {
+                image: "nonexistent:latest".to_string(),
+            }),
+            verbose: false,
+        });
+
+        let result = runtime.image_status(request).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(err.message().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn image_status_returns_invalid_argument_for_missing_image_spec() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(ImageStatusRequest {
+            image: None, // Missing image spec
+            verbose: false,
+        });
+
+        let result = runtime.image_status(request).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("image spec is required"));
+    }
+
+    #[tokio::test]
+    async fn image_status_finds_image_by_reference() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ImageStatusRequest {
+            image: Some(ImageSpec {
+                image: "alpine:latest".to_string(),
+            }),
+            verbose: false,
+        });
+
+        let response = runtime.image_status(request).await
+            .expect("image_status should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.image.is_some());
+
+        let image = inner.image.unwrap();
+        assert_eq!(image.id, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(image.repo_tags, vec!["alpine:latest"]);
+        assert_eq!(image.size, 0);
+    }
+
+    #[tokio::test]
+    async fn image_status_finds_image_by_digest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ImageStatusRequest {
+            image: Some(ImageSpec {
+                image: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            }),
+            verbose: false,
+        });
+
+        let response = runtime.image_status(request).await
+            .expect("image_status should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.image.is_some());
+
+        let image = inner.image.unwrap();
+        assert_eq!(image.id, "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(image.repo_tags, vec!["ghcr.io/test/app:v1.0"]);
+    }
+
+    #[tokio::test]
+    async fn image_status_returns_no_tags_for_digest_reference() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ImageStatusRequest {
+            image: Some(ImageSpec {
+                image: "digest-only".to_string(),
+            }),
+            verbose: false,
+        });
+
+        let response = runtime.image_status(request).await
+            .expect("image_status should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.image.is_some());
+
+        let image = inner.image.unwrap();
+        assert_eq!(image.id, "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        assert_eq!(image.repo_tags, vec!["digest-only"]); // Has tag because reference doesn't start with "sha256:"
+        assert!(image.repo_digests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pull_image_returns_unimplemented_error() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(PullImageRequest {
+            image: Some(ImageSpec {
+                image: "alpine:latest".to_string(),
+            }),
+            auth: Default::default(),
+            sandbox_config: String::new(),
+        });
+
+        let result = runtime.pull_image(request).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("PullImage is not yet implemented"));
+        assert!(err.message().contains("ferrocrate pull"));
+    }
+
+    #[tokio::test]
+    async fn remove_image_returns_unimplemented_error() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(RemoveImageRequest {
+            image: Some(ImageSpec {
+                image: "alpine:latest".to_string(),
+            }),
+        });
+
+        let result = runtime.remove_image(request).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("RemoveImage is not yet implemented"));
+        assert!(err.message().contains("ferrocrate rmi"));
+    }
+
+    #[tokio::test]
+    async fn cri_runtime_debug_impl_is_non_exhaustive() {
+        let runtime = create_test_runtime().await;
+        let debug_str = format!("{:?}", runtime);
+        // Debug output should contain struct name
+        assert!(debug_str.contains("CriRuntime"));
+        // Should be marked as non_exhaustive
+        assert!(debug_str.contains(".."));
+    }
+
+    #[tokio::test]
+    async fn cri_runtime_new_with_arc_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        let arc_store = Arc::new(store);
+
+        let runtime = CriRuntime::new(arc_store.clone());
+        let request = Request::new(VersionRequest::default());
+
+        // Verify runtime works with Arc store
+        let response = runtime.version(request).await
+            .expect("version should succeed");
+        assert_eq!(response.into_inner().runtime_name, "ferrocrate");
+    }
+
+    #[tokio::test]
+    async fn list_images_with_digest_references_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+
+        // Only add digest-based references
+        store
+            .put_reference(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2}"#,
+            )
+            .expect("put digest");
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ListImagesRequest::default());
+
+        let response = runtime.list_images(request).await
+            .expect("list_images should succeed");
+
+        let inner = response.into_inner();
+        assert_eq!(inner.images.len(), 1);
+        // Digest references have empty repo_tags
+        assert!(inner.images[0].repo_tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn image_status_with_verbose_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ImageStatusRequest {
+            image: Some(ImageSpec {
+                image: "alpine:latest".to_string(),
+            }),
+            verbose: true, // Verbose flag
+        });
+
+        let response = runtime.image_status(request).await
+            .expect("image_status should succeed");
+
+        let inner = response.into_inner();
+        assert!(inner.image.is_some());
+        // Verbose flag is currently ignored but should not error
+        assert!(inner.info.is_empty()); // No info populated yet
+    }
+
+    #[tokio::test]
+    async fn list_images_returns_images_sorted_by_reference() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+
+        // Add images in non-alphabetical order
+        store
+            .put_reference(
+                "zebra:latest",
+                "sha256:zzzz",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2}"#,
+            )
+            .expect("put zebra");
+
+        store
+            .put_reference(
+                "alpine:latest",
+                "sha256:aaaa",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2}"#,
+            )
+            .expect("put alpine");
+
+        store
+            .put_reference(
+                "mongo:latest",
+                "sha256:mmmm",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2}"#,
+            )
+            .expect("put mongo");
+
+        let runtime = CriRuntime::new(Arc::new(store));
+        let request = Request::new(ListImagesRequest::default());
+
+        let response = runtime.list_images(request).await
+            .expect("list_images should succeed");
+
+        let inner = response.into_inner();
+        // Images should be sorted by reference (from store.list_references)
+        assert_eq!(inner.images.len(), 3);
+        assert_eq!(inner.images[0].repo_tags[0], "alpine:latest");
+        assert_eq!(inner.images[1].repo_tags[0], "mongo:latest");
+        assert_eq!(inner.images[2].repo_tags[0], "zebra:latest");
+    }
+}

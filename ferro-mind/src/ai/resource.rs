@@ -5,6 +5,7 @@
 //! 2. Analyzing memory growth trends
 //! 3. Predicting when memory will exceed limits
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// A single resource sample from cgroup v2 metrics.
@@ -50,7 +51,7 @@ pub struct OomPrediction {
 #[derive(Debug)]
 pub struct ResourcePredictor {
     /// Window of recent samples
-    window: Vec<ResourceSample>,
+    window: VecDeque<ResourceSample>,
     /// Maximum samples to keep
     max_len: usize,
     /// Memory limit for OOM prediction (0 = no limit)
@@ -72,7 +73,7 @@ impl ResourcePredictor {
     /// 30 minutes of history for trend analysis.
     pub fn new(max_len: usize) -> Self {
         Self {
-            window: Vec::new(),
+            window: VecDeque::new(),
             max_len: max_len.max(3), // Need at least 3 samples for trend
             memory_limit: 0,
             min_samples: 3,
@@ -87,9 +88,9 @@ impl ResourcePredictor {
 
     /// Add a new sample to the prediction window.
     pub fn push(&mut self, sample: ResourceSample) {
-        self.window.push(sample);
+        self.window.push_back(sample);
         if self.window.len() > self.max_len {
-            self.window.remove(0);
+            self.window.pop_front();
         }
     }
 
@@ -161,7 +162,7 @@ impl ResourcePredictor {
             return None;
         }
 
-        let latest = self.window.last()?;
+        let latest = self.window.back()?;
         let current_memory = latest.memory_bytes;
 
         // Already at or over limit
@@ -210,8 +211,9 @@ impl ResourcePredictor {
             return 0.0;
         }
 
-        let first = self.window.first().unwrap();
-        let last = self.window.last().unwrap();
+        // CQ-01: Safe to unwrap because we check len() >= 2 above
+        let first = self.window.front().expect("window should have first element");
+        let last = self.window.back().expect("window should have last element");
 
         let time_diff = last.timestamp.duration_since(first.timestamp).as_secs_f64();
         if time_diff <= 0.0 {
@@ -234,6 +236,8 @@ impl ResourcePredictor {
         // Calculate variance in growth rate
         let growth_rates: Vec<f64> = self
             .window
+            .iter()
+            .collect::<Vec<_>>()
             .windows(2)
             .filter_map(|w| {
                 let time_diff = w[1].timestamp.duration_since(w[0].timestamp).as_secs_f64();
@@ -275,7 +279,7 @@ impl ResourcePredictor {
 
     /// Get the latest memory sample.
     pub fn latest_memory(&self) -> Option<u64> {
-        self.window.last().map(|s| s.memory_bytes)
+        self.window.back().map(|s| s.memory_bytes)
     }
 
     /// Get the memory limit.

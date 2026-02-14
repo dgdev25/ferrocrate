@@ -191,6 +191,26 @@ fn parse_subid_line(line: &str) -> Result<(String, u32, u32), RootlessError> {
         return Err(RootlessError::InvalidSubIdLine(line.to_string()));
     }
 
+    // SEC-07: Prevent integer overflow - validate ranges are reasonable
+    // start should be well below u32::MAX to prevent overflow in start + count
+    if start > u32::MAX - 1_000_000 {
+        return Err(RootlessError::InvalidSubIdLine(
+            format!("start value {} is too large", start)
+        ));
+    }
+    // count should be reasonably bounded (max ~1M subuids)
+    if count > 1_000_000 {
+        return Err(RootlessError::InvalidSubIdLine(
+            format!("count value {} is too large", count)
+        ));
+    }
+    // Verify start + count doesn't overflow
+    if start.checked_add(count).is_none() {
+        return Err(RootlessError::InvalidSubIdLine(
+            format!("start + count would overflow: {} + {}", start, count)
+        ));
+    }
+
     Ok((name.to_string(), start, count))
 }
 

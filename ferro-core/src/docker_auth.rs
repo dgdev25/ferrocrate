@@ -4,9 +4,37 @@ use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use thiserror::Error;
+
+// SEC-02: Scoped environment variable guard for safe test environment manipulation
+struct ScopedEnvVar {
+    key: String,
+    _old_value: Option<String>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &str, value: &str) -> Self {
+        let old_value = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self {
+            key: key.to_string(),
+            _old_value: old_value,
+        }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match &self._old_value {
+            Some(old) => std::env::set_var(&self.key, old),
+            None => std::env::remove_var(&self.key),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum DockerAuthError {
@@ -18,6 +46,8 @@ pub enum DockerAuthError {
     InvalidAuth(String),
     #[error("credential helper error: {0}")]
     Helper(String),
+    #[error("credential helper timed out after {0:?}")]
+    Timeout(Duration),
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,23 +255,14 @@ fn resolve_helper(config: &DockerConfig, registry: &str) -> Option<String> {
     config.creds_store.clone()
 }
 
+// SEC-05: Default timeout for credential helpers (10 seconds)
+const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, DockerAuthError> {
     let helper_bin = format!("docker-credential-{helper}");
-    let output = Command::new(&helper_bin)
-        .arg("get")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                stdin.write_all(registry.as_bytes())?;
-                stdin.write_all(b"\n")?;
-            }
-            child.wait_with_output()
-        })
-        .map_err(|err| DockerAuthError::Helper(err.to_string()))?;
+
+    // SEC-05: Execute credential helper with timeout to prevent blocking indefinitely
+    let output = execute_helper_with_timeout(&helper_bin, registry)?;
 
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).to_string();
@@ -254,6 +275,66 @@ fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, Doc
         username: resp.username,
         password: resp.secret,
     })
+}
+
+/// SEC-05: Execute credential helper with timeout to prevent blocking indefinitely
+fn execute_helper_with_timeout(
+    helper_bin: &str,
+    registry: &str,
+) -> Result<std::process::Output, DockerAuthError> {
+    let mut child = Command::new(helper_bin)
+        .arg("get")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
+
+    // Write registry to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(registry.as_bytes())
+            .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
+        stdin.write_all(b"\n")
+            .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
+    }
+
+    // Wait for completion with timeout
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()
+            .map_err(|e| DockerAuthError::Helper(e.to_string()))?
+        {
+            // Process completed - collect output
+            let mut stdout = child.stdout.take().ok_or_else(|| {
+                DockerAuthError::Helper("failed to capture stdout".to_string())
+            })?;
+            let mut stderr = child.stderr.take().ok_or_else(|| {
+                DockerAuthError::Helper("failed to capture stderr".to_string())
+            })?;
+
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            stdout.read_to_end(&mut stdout_buf)
+                .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
+            stderr.read_to_end(&mut stderr_buf)
+                .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
+
+            return Ok(std::process::Output {
+                status,
+                stdout: stdout_buf,
+                stderr: stderr_buf,
+            });
+        }
+
+        if start.elapsed() >= HELPER_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(DockerAuthError::Timeout(HELPER_TIMEOUT));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn docker_config_path() -> Option<PathBuf> {
@@ -333,7 +414,7 @@ fn normalize_registry_key(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DockerAuthError, normalize_registry_key, resolve_auth_for_registry};
+    use super::{DockerAuthError, normalize_registry_key, resolve_auth_for_registry, ScopedEnvVar};
     use std::fs;
     use std::sync::Mutex;
     use std::os::unix::fs::PermissionsExt;
@@ -363,7 +444,7 @@ mod tests {
         )
         .expect("write config");
 
-        unsafe { std::env::set_var("DOCKER_CONFIG", dir.path()); }
+        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
         let auth = resolve_auth_for_registry("registry-1.docker.io")
             .expect("auth resolves")
             .expect("auth present");
@@ -375,8 +456,6 @@ mod tests {
             .expect("auth present");
         assert_eq!(gh.username, "writer");
         assert_eq!(gh.password, "secret");
-
-        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
     }
 
     #[test]
@@ -394,14 +473,12 @@ mod tests {
         )
         .expect("write config");
 
-        unsafe { std::env::set_var("DOCKER_CONFIG", dir.path()); }
+        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
         let auth = resolve_auth_for_registry("registry.example.com")
             .expect("auth resolves")
             .expect("auth present");
         assert_eq!(auth.username, "alice");
         assert_eq!(auth.password, "token123");
-
-        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
     }
 
     #[test]
@@ -433,26 +510,24 @@ mod tests {
 
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        unsafe { std::env::set_var("PATH", &new_path); }
-        unsafe { std::env::set_var("DOCKER_CONFIG", dir.path()); }
+
+        // SEC-02: Use scoped environment guards for proper cleanup even on panic
+        let _path_guard = ScopedEnvVar::set("PATH", &new_path);
+        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
 
         let auth = resolve_auth_for_registry("ghcr.io")
             .expect("auth resolves")
             .expect("auth present");
         assert_eq!(auth.username, "helper");
         assert_eq!(auth.password, "token");
-
-        unsafe { std::env::set_var("PATH", old_path); }
-        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
     }
 
     #[test]
     fn returns_none_when_config_missing() {
         let _guard = DOCKER_ENV_LOCK.lock().expect("lock env");
-        unsafe { std::env::set_var("DOCKER_CONFIG", "/tmp/ferrocrate-missing-config"); }
+        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", "/tmp/ferrocrate-missing-config");
         let auth = resolve_auth_for_registry("ghcr.io").expect("ok");
         assert!(auth.is_none());
-        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
     }
 
     #[test]
@@ -462,14 +537,12 @@ mod tests {
         let config_path = dir.path().join("config.json");
         fs::write(&config_path, r#"{"auths": {"ghcr.io": {"auth": "broken"}}}"#)
             .expect("write config");
-        unsafe { std::env::set_var("DOCKER_CONFIG", dir.path()); }
+        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
 
         let err = resolve_auth_for_registry("ghcr.io").expect_err("should error");
         match err {
             DockerAuthError::InvalidAuth(registry) => assert_eq!(registry, "ghcr.io"),
             other => panic!("unexpected error: {other:?}"),
         }
-
-        unsafe { std::env::remove_var("DOCKER_CONFIG"); }
     }
 }

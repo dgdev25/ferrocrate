@@ -882,6 +882,7 @@ dependencies = [
  "protoc-bin-vendored",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -908,6 +909,8 @@ dependencies = [
  "parking_lot 0.12.5",
  "ruv-fann",
  "ruvector-core",
+ "rvf-runtime",
+ "rvf-types",
  "serde",
  "serde_json",
  "tempfile",
@@ -2936,6 +2939,21 @@ dependencies = [
  "tracing",
  "uuid",
 ]
+
+[[package]]
+name = "rvf-runtime"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24f2739c383cf86d35fc8edc97009c3f1311abbb21b92e7729339fab8d7d4620"
+dependencies = [
+ "rvf-types",
+]
+
+[[package]]
+name = "rvf-types"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a650cb7329774b8eaf764b02ee187adab7e31640a69a4efe33abcb3fc86a5170"
 
 [[package]]
 name = "ryu"

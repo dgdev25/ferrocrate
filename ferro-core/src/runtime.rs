@@ -37,7 +37,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 // ============================================================================
@@ -136,13 +136,15 @@ impl CreationRollback {
                     }
                 }
                 // Delete nftables rules
-                let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
-                let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
-                if let Err(e) = run_cmd(&nft_prerouting) {
-                    log::warn!("[rollback] failed to delete nft prerouting: {:?}", e);
+                if let Ok(nft_prerouting) = build_nft_prerouting_delete_cmd(&map, container_ip) {
+                    if let Err(e) = run_cmd(&nft_prerouting) {
+                        log::warn!("[rollback] failed to delete nft prerouting: {:?}", e);
+                    }
                 }
-                if let Err(e) = run_cmd(&nft_forward) {
-                    log::warn!("[rollback] failed to delete nft forward: {:?}", e);
+                if let Ok(nft_forward) = build_nft_forward_delete_cmd(&map, container_ip) {
+                    if let Err(e) = run_cmd(&nft_forward) {
+                        log::warn!("[rollback] failed to delete nft forward: {:?}", e);
+                    }
                 }
             }
         }
@@ -195,6 +197,8 @@ pub enum RuntimeError {
     ContainerNotFound(String),
     #[error("command is required to run container")]
     MissingCommand,
+    #[error("invalid command: {0}")]
+    InvalidCommand(String),
     #[error("invalid container state: {0}")]
     InvalidState(String),
     #[error("image not found in store: {0}")]
@@ -203,6 +207,14 @@ pub enum RuntimeError {
     Network(String),
     #[error("kernel version error: {0}")]
     Kernel(String),
+    #[error("external command timed out after {0:?}")]
+    Timeout(Duration),
+}
+
+// CQ-02: Extract shared command parsing helper to fix duplication
+fn parse_cmd_args(cmd: &[String]) -> Result<(&String, &[String]), RuntimeError> {
+    cmd.split_first()
+        .ok_or_else(|| RuntimeError::InvalidCommand("empty command".into()))
 }
 
 pub struct ContainerRuntime {
@@ -1443,8 +1455,8 @@ fn setup_network(
                 protocol: mapping.protocol.clone(),
             };
             if effective_backend == "nftables" {
-                let prerouting = build_nft_prerouting_cmd(&map, &container_ip);
-                let forward = build_nft_forward_cmd(&map, &container_ip);
+                let prerouting = build_nft_prerouting_cmd(&map, &container_ip)?;
+                let forward = build_nft_forward_cmd(&map, &container_ip)?;
                 run_cmd(&prerouting)?;
                 run_cmd(&forward)?;
             } else {
@@ -1484,10 +1496,12 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
                     let _ = run_cmd(&forward);
                 }
             }
-            let nft_prerouting = build_nft_prerouting_delete_cmd(&map, container_ip);
-            let nft_forward = build_nft_forward_delete_cmd(&map, container_ip);
-            let _ = run_cmd(&nft_prerouting);
-            let _ = run_cmd(&nft_forward);
+            if let Ok(nft_prerouting) = build_nft_prerouting_delete_cmd(&map, container_ip) {
+                let _ = run_cmd(&nft_prerouting);
+            }
+            if let Ok(nft_forward) = build_nft_forward_delete_cmd(&map, container_ip) {
+                let _ = run_cmd(&nft_forward);
+            }
         }
     }
     Ok(())
@@ -1504,11 +1518,14 @@ fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
         tap_name,
         cidr: "10.0.2.0/24".to_string(),
     };
-    let cmd = build_slirp4netns_cmd(pid, &config);
+    let cmd = match build_slirp4netns_cmd(pid, &config) {
+        Ok(c) => c,
+        Err(e) => return Err(RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("slirp4netns config: {}", e)))),
+    };
     if cmd.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = cmd.split_first().unwrap();
+    let (bin, rest) = parse_cmd_args(&cmd)?;
     Command::new(bin)
         .args(rest)
         .stdout(Stdio::null())
@@ -1535,6 +1552,63 @@ fn selinux_enabled() -> bool {
         .unwrap_or(false)
 }
 
+// SEC-05: Default timeout for external commands (10 seconds)
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// SEC-05: Execute command with timeout to prevent blocking indefinitely
+fn execute_with_timeout(
+    binary: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output, RuntimeError> {
+    use std::process::{Child, Command, Stdio};
+    use std::io::Read;
+
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()?
+        {
+            // Process completed - collect output
+            let mut stdout = child.stdout.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "failed to capture stdout")
+            })?;
+            let mut stderr = child.stderr.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "failed to capture stderr")
+            })?;
+
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            stdout.read_to_end(&mut stdout_buf)?;
+            stderr.read_to_end(&mut stderr_buf)?;
+
+            return Ok(std::process::Output {
+                status,
+                stdout: stdout_buf,
+                stderr: stderr_buf,
+            });
+        }
+
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RuntimeError::Timeout(timeout));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn command_available(bin: &str) -> bool {
+    // SEC-05: Use timeout to prevent hanging on --version check
+    execute_with_timeout(bin, &["--version"], Duration::from_secs(2)).is_ok()
+}
+
 fn apply_apparmor_if_enabled(
     runtime_dir: &Path,
     container_id: &str,
@@ -1556,10 +1630,8 @@ fn apply_apparmor_if_enabled(
     let profile_path = profile_dir.join(format!("{profile_name}.profile"));
     fs::write(&profile_path, profile)?;
 
-    let output = Command::new("apparmor_parser")
-        .arg("-r")
-        .arg(&profile_path)
-        .output()?;
+    // SEC-05: Execute apparmor_parser with timeout to prevent blocking indefinitely
+    let output = execute_with_timeout("apparmor_parser", &["-r", &profile_path.to_string_lossy()], Duration::from_secs(10))?;
     if !output.status.success() {
         return Ok(cmd.to_vec());
     }
@@ -1592,10 +1664,6 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
     wrapped.push("--".to_string());
     wrapped.extend(cmd.iter().cloned());
     Ok(wrapped)
-}
-
-fn command_available(bin: &str) -> bool {
-    Command::new(bin).arg("--version").output().is_ok()
 }
 
 fn ensure_nftables_chains() -> Result<(), RuntimeError> {
@@ -1661,29 +1729,33 @@ fn ensure_nftables_chains() -> Result<(), RuntimeError> {
 fn build_nft_prerouting_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, RuntimeError> {
     build_nft_add_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip))
+        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft prerouting: {}", e))))
 }
 
 fn build_nft_forward_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, RuntimeError> {
     build_nft_add_rule_cmd(&build_nft_forward_rule(mapping, container_ip))
+        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft forward: {}", e))))
 }
 
 fn build_nft_prerouting_delete_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, RuntimeError> {
     build_nft_delete_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip))
+        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft prerouting delete: {}", e))))
 }
 
 fn build_nft_forward_delete_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, RuntimeError> {
     build_nft_delete_rule_cmd(&build_nft_forward_rule(mapping, container_ip))
+        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft forward delete: {}", e))))
 }
 
 fn build_nft_prerouting_rule(
@@ -1812,7 +1884,7 @@ fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = args.split_first().unwrap();
+    let (bin, rest) = parse_cmd_args(&args)?;
     let cmd_str = args.join(" ");
 
     // Log command execution at debug level (visible with RUST_LOG=debug)
@@ -1838,7 +1910,7 @@ fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = args.split_first().unwrap();
+    let (bin, rest) = parse_cmd_args(&args)?;
     let cmd_str = args.join(" ");
 
     log::debug!("[exec] {}", cmd_str);

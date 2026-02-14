@@ -101,7 +101,8 @@ mod tests {
     fn batch_distances_respects_dimension() {
         let query = vec![1.0, 2.0];
         let vectors = vec![vec![1.0, 2.0], vec![2.0, 3.0]];
-        let res = batch_distances(&query, &vectors, DistanceMetric::Euclidean).unwrap();
+        let res = batch_distances(&query, &vectors, DistanceMetric::Euclidean)
+            .expect("batch_distances should succeed with valid input");
         assert_eq!(res.len(), 2);
     }
 }

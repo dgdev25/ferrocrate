@@ -11,6 +11,11 @@ use ferro_core::rootfs::construct_rootfs_with_dedup;
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
+use ferro_mind::ai::training::{
+    handle_export_command, handle_export_rvf_command, handle_import_command,
+    handle_rvf_stats_command, handle_stats_command,
+    handle_train_command,
+};
 use ferro_core::volume_store::LocalVolumeStore;
 use ferro_compose::compose::{
     ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
@@ -211,6 +216,10 @@ pub enum Commands {
         shell: String,
     },
     Tui,
+    Ai {
+        #[command(subcommand)]
+        command: AiCommands,
+    },
     AiAudit {
         #[arg(long)]
         action: String,
@@ -263,6 +272,44 @@ pub enum VolumeCommands {
     Restore { name: String, path: String },
     Ls,
     Rm { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AiCommands {
+    Train {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long = "data-dir")]
+        data_dir: Option<String>,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+        #[arg(long)]
+        output: Option<String>,
+    },
+    Export {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+    },
+    Import {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long)]
+        input: String,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+    },
+    Stats {
+        /// Path to a .rvf model file (optional)
+        path: Option<String>,
+        #[arg(long = "model-type")]
+        model_type: Option<String>,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+    },
 }
 
 fn main() {
@@ -406,10 +453,138 @@ fn dispatch(command: Commands) -> Result<(), String> {
         } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
         Commands::Completion { shell } => handle_completion(&shell),
         Commands::Tui => handle_tui(&runtime),
+        Commands::Ai { command } => handle_ai(command),
         Commands::AiAudit { action, summary, evidence } => {
             handle_ai_audit(&action, &summary, &evidence)
         }
         Commands::Migrate { target } => handle_migrate(target),
+    }
+}
+
+fn handle_ai(command: AiCommands) -> Result<(), String> {
+    match command {
+        AiCommands::Train {
+            model_type,
+            data_dir,
+            models_dir,
+            output,
+        } => {
+            let data_dir_path = data_dir.as_deref().map(Path::new);
+            let models_dir_path = models_dir.as_deref().map(Path::new);
+            let result = handle_train_command(&model_type, data_dir_path, models_dir_path)
+                .map_err(|err| format!("ai train: {err}"))?;
+            if let Some(output) = output {
+                let output_path = PathBuf::from(output);
+                let is_rvf = output_path
+                    .extension()
+                    .map(|ext| ext.eq_ignore_ascii_case("rvf"))
+                    .unwrap_or(false);
+                if is_rvf {
+                    handle_export_rvf_command(&model_type, &output_path, data_dir_path, models_dir_path)
+                        .map_err(|err| format!("ai train: {err}"))?;
+                } else {
+                    if let Some(parent) = output_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|err| format!("ai train: {err}"))?;
+                    }
+                    std::fs::copy(&result.model_path, &output_path)
+                        .map_err(|err| format!("ai train: {err}"))?;
+                }
+            }
+            println!(
+                "ai train: model_type={} version={} samples={} loss={:?} path={}",
+                result.model_type,
+                result.version,
+                result.samples_used,
+                result.loss,
+                result.model_path.display()
+            );
+            Ok(())
+        }
+        AiCommands::Export {
+            model_type,
+            output,
+            models_dir,
+        } => {
+            let output_path = PathBuf::from(output);
+            let models_dir_path = models_dir.as_deref().map(Path::new);
+            let is_rvf = output_path
+                .extension()
+                .map(|ext| ext.eq_ignore_ascii_case("rvf"))
+                .unwrap_or(false);
+            let exported = if is_rvf {
+                handle_export_rvf_command(&model_type, &output_path, None, models_dir_path)
+                    .map_err(|err| format!("ai export: {err}"))?
+            } else {
+                handle_export_command(&model_type, &output_path, models_dir_path)
+                    .map_err(|err| format!("ai export: {err}"))?
+            };
+            println!("ai export: wrote {}", exported.display());
+            Ok(())
+        }
+        AiCommands::Import {
+            model_type,
+            input,
+            models_dir,
+        } => {
+            let input_path = PathBuf::from(input);
+            let models_dir_path = models_dir.as_deref().map(Path::new);
+            let version = handle_import_command(&model_type, &input_path, models_dir_path)
+                .map_err(|err| format!("ai import: {err}"))?;
+            println!(
+                "ai import: model_type={} version={} path={}",
+                version.model_type,
+                version.version,
+                version.path.display()
+            );
+            Ok(())
+        }
+        AiCommands::Stats {
+            path,
+            model_type,
+            models_dir,
+        } => {
+            let models_dir_path = models_dir.as_deref().map(Path::new);
+            if let Some(path) = path {
+                let rvf = handle_rvf_stats_command(Path::new(&path))
+                    .map_err(|err| format!("ai stats: {err}"))?;
+                println!("ai stats: rvf={}", rvf.path.display());
+                println!("  dimensions={}", rvf.dimensions);
+                println!("  total_vectors={}", rvf.total_vectors);
+                println!("  total_segments={}", rvf.total_segments);
+                println!("  file_size={}", rvf.file_size);
+                println!("  epoch={}", rvf.epoch);
+                println!("  profile_id={}", rvf.profile_id);
+                println!("  compaction_state={}", rvf.compaction_state);
+                println!("  dead_space_ratio={:.4}", rvf.dead_space_ratio);
+                println!("  read_only={}", rvf.read_only);
+                println!("  file_id={}", rvf.file_id_hex);
+                println!("  parent_id={}", rvf.parent_id_hex);
+                println!("  lineage_depth={}", rvf.lineage_depth);
+                return Ok(());
+            }
+
+            let model_type = model_type
+                .ok_or_else(|| "ai stats: provide --model-type <type> or ai stats <file.rvf>".to_string())?;
+            let stats = handle_stats_command(&model_type, models_dir_path)
+                .map_err(|err| format!("ai stats: {err}"))?;
+            println!("ai stats: model_type={}", stats.model_type);
+            println!("  versions={}", stats.versions);
+            println!("  total_samples={}", stats.total_samples);
+            println!("  active_version={:?}", stats.active_version);
+            println!(
+                "  active_path={}",
+                stats
+                    .active_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            );
+            println!(
+                "  last_trained_at={}",
+                stats.last_trained_at.unwrap_or_else(|| "<none>".to_string())
+            );
+            Ok(())
+        }
     }
 }
 
@@ -1324,7 +1499,7 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
         .collect::<Vec<_>>();
     match matches.len() {
         0 => Err(format!("container not found: {container}")),
-        1 => Ok(matches.remove(0)),
+        1 => Ok(matches.into_iter().next().unwrap()),
         _ => Err(format!("container name is not unique: {container}")),
     }
 }

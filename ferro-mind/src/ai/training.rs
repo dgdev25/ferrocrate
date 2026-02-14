@@ -5,13 +5,23 @@
 //! - Online learning via background process (opt-in)
 //! - Model versioning and rollback support
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "rvf-persistence")]
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
+#[cfg(feature = "rvf-persistence")]
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(feature = "rvf-persistence")]
+use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
+#[cfg(feature = "rvf-persistence")]
+use rvf_runtime::{RvfOptions, RvfStore};
+#[cfg(feature = "rvf-persistence")]
+use rvf_runtime::options::DistanceMetric as RvfDistanceMetric;
 
 /// Model types that can be trained
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,6 +137,35 @@ pub struct TrainingResult {
     pub model_path: PathBuf,
 }
 
+/// Summary stats for a model family.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelStats {
+    pub model_type: String,
+    pub versions: usize,
+    pub total_samples: usize,
+    pub active_version: Option<u32>,
+    pub active_path: Option<PathBuf>,
+    pub last_trained_at: Option<String>,
+}
+
+/// Stats for a direct RVF file inspection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RvfFileStats {
+    pub path: PathBuf,
+    pub dimensions: u16,
+    pub total_vectors: u64,
+    pub total_segments: u32,
+    pub file_size: u64,
+    pub epoch: u32,
+    pub profile_id: u8,
+    pub compaction_state: String,
+    pub dead_space_ratio: f64,
+    pub read_only: bool,
+    pub file_id_hex: String,
+    pub parent_id_hex: String,
+    pub lineage_depth: u32,
+}
+
 /// Error type for training operations
 #[derive(Debug, thiserror::Error)]
 pub enum TrainingError {
@@ -193,7 +232,7 @@ pub struct RestartSample {
 /// Model training pipeline
 pub struct TrainingPipeline {
     config: TrainingConfig,
-    versions: HashMap<ModelType, Vec<ModelVersion>>,
+    versions: HashMap<ModelType, VecDeque<ModelVersion>>,
     online_running: Arc<AtomicBool>,
 }
 
@@ -230,7 +269,7 @@ impl TrainingPipeline {
     }
 
     /// Load versions for a specific model type
-    fn load_versions_for_model(&self, model_type: ModelType) -> Result<Vec<ModelVersion>, TrainingError> {
+    fn load_versions_for_model(&self, model_type: ModelType) -> Result<VecDeque<ModelVersion>, TrainingError> {
         let versions_file = self.config.models_dir
             .join(model_type.to_string())
             .join("versions.json");
@@ -239,9 +278,9 @@ impl TrainingPipeline {
             let file = File::open(&versions_file)?;
             let reader = BufReader::new(file);
             let versions: Vec<ModelVersion> = serde_json::from_reader(reader)?;
-            Ok(versions)
+            Ok(versions.into_iter().collect())
         } else {
-            Ok(Vec::new())
+            Ok(VecDeque::new())
         }
     }
 
@@ -310,15 +349,16 @@ impl TrainingPipeline {
             for v in versions.iter_mut() {
                 v.active = false;
             }
-            versions.push(model_version);
+            versions.push_back(model_version);
 
             // Prune old versions
             while versions.len() > self.config.max_versions {
-                let removed = versions.remove(0);
+                // CQ-01: Safe to unwrap because we check len() > max_versions >= 1
+                let removed = versions.pop_front().expect("versions should not be empty");
                 let _ = fs::remove_file(&removed.path);
             }
         } else {
-            self.versions.insert(model_type, vec![model_version]);
+            self.versions.insert(model_type, VecDeque::from(vec![model_version]));
         }
 
         self.save_versions(model_type)?;
@@ -381,7 +421,14 @@ impl TrainingPipeline {
         model_type: ModelType,
         samples: &[Vec<u8>],
     ) -> Result<(), TrainingError> {
-        fs::create_dir_all(path.parent().unwrap())?;
+        // CQ-01: Handle paths without parent directory
+        let parent = path.parent().ok_or_else(|| {
+            TrainingError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path has no parent directory",
+            ))
+        })?;
+        fs::create_dir_all(parent)?;
 
         // Placeholder: save metadata about model
         let metadata = serde_json::json!({
@@ -400,7 +447,7 @@ impl TrainingPipeline {
     fn get_next_version(&self, model_type: ModelType) -> u32 {
         self.versions
             .get(&model_type)
-            .and_then(|v| v.last().map(|last| last.version + 1))
+            .and_then(|v| v.back().map(|last| last.version + 1))
             .unwrap_or(1)
     }
 
@@ -419,7 +466,9 @@ impl TrainingPipeline {
 
         // Now perform the mutation
         if let Some(target_idx) = rollback_idx {
-            let versions = self.versions.get_mut(&model_type).unwrap();
+            // CQ-01: Use expect with context instead of unwrap()
+            let versions = self.versions.get_mut(&model_type)
+                .expect("versions should exist (checked above)");
 
             // Deactivate all and activate target
             for v in versions.iter_mut() {
@@ -516,6 +565,255 @@ pub fn handle_train_command(
 
     let mut pipeline = TrainingPipeline::new(config)?;
     pipeline.train(model_type)
+}
+
+/// Export active model version to a target file path.
+pub fn handle_export_command(
+    model_type: &str,
+    output: &Path,
+    models_dir: Option<&Path>,
+) -> Result<PathBuf, TrainingError> {
+    let model_type: ModelType = model_type.parse()?;
+    let mut config = TrainingConfig::default();
+    if let Some(dir) = models_dir {
+        config.models_dir = dir.to_path_buf();
+    }
+
+    let pipeline = TrainingPipeline::new(config)?;
+    let active = pipeline
+        .get_active_version(model_type)
+        .ok_or_else(|| TrainingError::ModelNotFound(model_type.to_string()))?;
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&active.path, output)?;
+    Ok(output.to_path_buf())
+}
+
+/// Import a model artifact as a new version.
+pub fn handle_import_command(
+    model_type: &str,
+    input: &Path,
+    models_dir: Option<&Path>,
+) -> Result<ModelVersion, TrainingError> {
+    let model_type: ModelType = model_type.parse()?;
+    if !input.exists() {
+        return Err(TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("input file not found: {}", input.display()),
+        )));
+    }
+
+    let mut config = TrainingConfig::default();
+    if let Some(dir) = models_dir {
+        config.models_dir = dir.to_path_buf();
+    }
+
+    let mut pipeline = TrainingPipeline::new(config)?;
+    let version = pipeline.get_next_version(model_type);
+    let model_path = pipeline
+        .config
+        .models_dir
+        .join(model_type.to_string())
+        .join(format!("model_v{}.bin", version));
+    if let Some(parent) = model_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(input, &model_path)?;
+
+    if let Some(versions) = pipeline.versions.get_mut(&model_type) {
+        for v in versions.iter_mut() {
+            v.active = false;
+        }
+    }
+
+    let imported = ModelVersion {
+        model_type: model_type.to_string(),
+        version,
+        trained_at: chrono::Utc::now().to_rfc3339(),
+        samples_count: 0,
+        loss: None,
+        path: model_path,
+        active: true,
+    };
+
+    pipeline
+        .versions
+        .entry(model_type)
+        .or_default()
+        .push_back(imported.clone());
+    pipeline.save_versions(model_type)?;
+
+    Ok(imported)
+}
+
+/// Return version stats for a model family.
+pub fn handle_stats_command(
+    model_type: &str,
+    models_dir: Option<&Path>,
+) -> Result<ModelStats, TrainingError> {
+    let model_type: ModelType = model_type.parse()?;
+    let mut config = TrainingConfig::default();
+    if let Some(dir) = models_dir {
+        config.models_dir = dir.to_path_buf();
+    }
+
+    let pipeline = TrainingPipeline::new(config)?;
+    let versions = pipeline.list_versions(model_type);
+    let active = pipeline.get_active_version(model_type);
+
+    Ok(ModelStats {
+        model_type: model_type.to_string(),
+        versions: versions.len(),
+        total_samples: versions.iter().map(|v| v.samples_count).sum(),
+        active_version: active.map(|v| v.version),
+        active_path: active.map(|v| v.path.clone()),
+        last_trained_at: versions.last().map(|v| v.trained_at.clone()),
+    })
+}
+
+#[cfg(feature = "rvf-persistence")]
+pub fn handle_rvf_stats_command(path: &Path) -> Result<RvfFileStats, TrainingError> {
+    let store = RvfStore::open_readonly(path)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    let status = store.status();
+    Ok(RvfFileStats {
+        path: path.to_path_buf(),
+        dimensions: store.dimension(),
+        total_vectors: status.total_vectors,
+        total_segments: status.total_segments,
+        file_size: status.file_size,
+        epoch: status.current_epoch,
+        profile_id: status.profile_id,
+        compaction_state: format!("{:?}", status.compaction_state),
+        dead_space_ratio: status.dead_space_ratio,
+        read_only: status.read_only,
+        file_id_hex: bytes_to_hex(store.file_id()),
+        parent_id_hex: bytes_to_hex(store.parent_id()),
+        lineage_depth: store.lineage_depth(),
+    })
+}
+
+#[cfg(feature = "rvf-persistence")]
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+/// Export model family data as a real RVF vector store artifact.
+#[cfg(feature = "rvf-persistence")]
+pub fn handle_export_rvf_command(
+    model_type: &str,
+    output: &Path,
+    data_dir: Option<&Path>,
+    models_dir: Option<&Path>,
+) -> Result<PathBuf, TrainingError> {
+    let model_type: ModelType = model_type.parse()?;
+    let mut config = TrainingConfig::default();
+    if let Some(dir) = models_dir {
+        config.models_dir = dir.to_path_buf();
+    }
+    if let Some(dir) = data_dir {
+        config.data_dir = dir.to_path_buf();
+    }
+
+    let pipeline = TrainingPipeline::new(config.clone())?;
+    let active = pipeline
+        .get_active_version(model_type)
+        .ok_or_else(|| TrainingError::ModelNotFound(model_type.to_string()))?;
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if output.exists() {
+        fs::remove_file(output)?;
+    }
+
+    let mut store = RvfStore::create(
+        output,
+        RvfOptions {
+            dimension: 384,
+            metric: RvfDistanceMetric::Cosine,
+            ..Default::default()
+        },
+    )
+    .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+
+    let embedder = HashEmbedding::new(384);
+    let mut vectors: Vec<Vec<f32>> = Vec::new();
+    let mut ids: Vec<u64> = Vec::new();
+
+    let model_payload = fs::read_to_string(&active.path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "model_type": active.model_type,
+            "version": active.version,
+            "trained_at": active.trained_at,
+            "samples_count": active.samples_count,
+            "loss": active.loss
+        })
+        .to_string()
+    });
+    let vec = embedder
+        .embed(&model_payload)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    vectors.push(vec);
+    ids.push(hash_to_u64(&format!("model:{}:{}", active.model_type, active.version)));
+
+    let sample_dir = config.data_dir.join(model_type.to_string());
+    if sample_dir.exists() {
+        for entry in fs::read_dir(&sample_dir)? {
+            let path = entry?.path();
+            if !path.extension().map(|ext| ext == "json").unwrap_or(false) {
+                continue;
+            }
+            let sample = fs::read_to_string(&path)?;
+            let emb = embedder
+                .embed(&sample)
+                .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+            vectors.push(emb);
+            ids.push(hash_to_u64(&path.to_string_lossy()));
+        }
+    }
+
+    if vectors.is_empty() {
+        return Err(TrainingError::TrainingFailed(
+            "no vectors available for RVF export".to_string(),
+        ));
+    }
+
+    let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
+    store
+        .ingest_batch(&refs, &ids, None)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    store
+        .close()
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    Ok(output.to_path_buf())
+}
+
+#[cfg(feature = "rvf-persistence")]
+fn hash_to_u64(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// Export RVF fallback when feature is disabled.
+#[cfg(not(feature = "rvf-persistence"))]
+pub fn handle_export_rvf_command(
+    _model_type: &str,
+    _output: &Path,
+    _data_dir: Option<&Path>,
+    _models_dir: Option<&Path>,
+) -> Result<PathBuf, TrainingError> {
+    Err(TrainingError::TrainingFailed(
+        "rvf-persistence feature is not enabled".to_string(),
+    ))
 }
 
 #[cfg(test)]

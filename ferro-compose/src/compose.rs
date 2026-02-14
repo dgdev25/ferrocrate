@@ -146,7 +146,9 @@ services:
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("compose.yaml");
         write_compose(&path);
-        let found = find_compose_file(Some(path.to_str().unwrap())).expect("found");
+        // CQ-01: Use expect with context instead of bare unwrap()
+        let found = find_compose_file(Some(path.to_str()
+            .expect("compose file path should be valid UTF-8"))).expect("found");
         assert_eq!(found, path);
     }
 

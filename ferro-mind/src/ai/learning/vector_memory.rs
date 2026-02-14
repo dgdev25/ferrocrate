@@ -50,6 +50,20 @@ impl VectorMemory {
         }
     }
 
+    /// Create vector memory using backend selection from `FERROCRATE_AI_BACKEND`.
+    ///
+    /// Supported values:
+    /// - `rvf` (requires `rvf-persistence`)
+    /// - `legacy` (in-memory)
+    #[cfg(feature = "rvf-persistence")]
+    pub fn with_backend(path: &Path, dimensions: usize) -> Result<Self, String> {
+        let backend = std::env::var("FERROCRATE_AI_BACKEND").unwrap_or_else(|_| "rvf".to_string());
+        if backend.eq_ignore_ascii_case("legacy") {
+            return Ok(Self::with_dimensions(dimensions));
+        }
+        Self::persistent(path, dimensions)
+    }
+
     /// Create a persistent vector memory backed by RVF.
     #[cfg(feature = "rvf-persistence")]
     pub fn persistent(path: &Path, dimensions: usize) -> Result<Self, String> {
@@ -218,7 +232,7 @@ impl VectorMemory {
 
     /// Check if memory is empty
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 }
 
@@ -283,6 +297,64 @@ mod tests {
             let memory = VectorMemory::persistent(&path, 3).expect("reopen");
             let results = memory.search(&[1.0, 0.0, 0.0], 1, DistanceMetric::Cosine);
             assert_eq!(results.len(), 1);
+            assert!(!memory.is_empty());
         }
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn backend_selector_respects_legacy_env() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("backend.rvf");
+        unsafe { std::env::set_var("FERROCRATE_AI_BACKEND", "legacy"); }
+        let mut memory = VectorMemory::with_backend(&path, 3).expect("backend");
+        memory.insert(VectorEntry {
+            id: Some(VectorId::from("legacy")),
+            vector: vec![0.0, 0.0, 1.0],
+            metadata: Some(HashMap::new()),
+        });
+        let results = memory.search(&[0.0, 0.0, 1.0], 1, DistanceMetric::Cosine);
+        assert_eq!(results.len(), 1);
+        unsafe { std::env::remove_var("FERROCRATE_AI_BACKEND"); }
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn non_cosine_metric_falls_back_to_bruteforce() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("fallback.rvf");
+        let mut memory = VectorMemory::persistent(&path, 3).expect("create");
+        memory.insert(VectorEntry {
+            id: Some(VectorId::from("a")),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: Some(HashMap::new()),
+        });
+        memory.insert(VectorEntry {
+            id: Some(VectorId::from("b")),
+            vector: vec![0.0, 1.0, 0.0],
+            metadata: Some(HashMap::new()),
+        });
+        let results = memory.search(&[0.9, 0.0, 0.0], 1, DistanceMetric::Euclidean);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id.as_str(), "a");
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn is_empty_reflects_persistent_data() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("empty-check.rvf");
+        {
+            let mut memory = VectorMemory::persistent(&path, 3).expect("create");
+            assert!(memory.is_empty());
+            memory.insert(VectorEntry {
+                id: Some(VectorId::from("vec1")),
+                vector: vec![1.0, 0.0, 0.0],
+                metadata: Some(HashMap::new()),
+            });
+            assert!(!memory.is_empty());
+        }
+        let reopened = VectorMemory::persistent(&path, 3).expect("reopen");
+        assert!(!reopened.is_empty());
     }
 }

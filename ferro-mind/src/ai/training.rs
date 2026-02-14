@@ -176,6 +176,19 @@ pub struct RvfLineage {
     pub is_root: bool,
 }
 
+/// Marketplace metadata for a shared community model.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CommunityModel {
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub artifact: PathBuf,
+    pub size_bytes: u64,
+    pub published_at: String,
+    pub file_id_hex: String,
+    pub lineage_depth: u32,
+}
+
 /// Error type for training operations
 #[derive(Debug, thiserror::Error)]
 pub enum TrainingError {
@@ -683,6 +696,88 @@ pub fn handle_stats_command(
     })
 }
 
+/// List models available in a local community marketplace index.
+pub fn handle_community_list_command(
+    marketplace_dir: &Path,
+) -> Result<Vec<CommunityModel>, TrainingError> {
+    let index = marketplace_dir.join("index.json");
+    if !index.exists() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(index)?;
+    let reader = BufReader::new(file);
+    let entries: Vec<CommunityModel> = serde_json::from_reader(reader)?;
+    Ok(entries)
+}
+
+/// Publish an RVF model into the local community marketplace.
+pub fn handle_community_publish_command(
+    input: &Path,
+    name: &str,
+    description: &str,
+    tags: &[String],
+    marketplace_dir: &Path,
+) -> Result<PathBuf, TrainingError> {
+    if !input.exists() {
+        return Err(TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("input file not found: {}", input.display()),
+        )));
+    }
+    let models_dir = marketplace_dir.join("models");
+    fs::create_dir_all(&models_dir)?;
+    let artifact = models_dir.join(format!("{name}.rvf"));
+    fs::copy(input, &artifact)?;
+
+    let mut entries = handle_community_list_command(marketplace_dir)?;
+    entries.retain(|entry| entry.name != name);
+
+    #[cfg(feature = "rvf-persistence")]
+    let (file_id_hex, lineage_depth) = {
+        let store = RvfStore::open_readonly(&artifact)
+            .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+        (bytes_to_hex(store.file_id()), store.lineage_depth())
+    };
+    #[cfg(not(feature = "rvf-persistence"))]
+    let (file_id_hex, lineage_depth) = (String::new(), 0);
+
+    let size_bytes = fs::metadata(&artifact)?.len();
+    entries.push(CommunityModel {
+        name: name.to_string(),
+        description: description.to_string(),
+        tags: tags.to_vec(),
+        artifact: artifact.clone(),
+        size_bytes,
+        published_at: chrono::Utc::now().to_rfc3339(),
+        file_id_hex,
+        lineage_depth,
+    });
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let index = marketplace_dir.join("index.json");
+    let file = File::create(index)?;
+    serde_json::to_writer_pretty(BufWriter::new(file), &entries)?;
+    Ok(artifact)
+}
+
+/// Download (copy) a model from the local community marketplace.
+pub fn handle_community_download_command(
+    name: &str,
+    output: &Path,
+    marketplace_dir: &Path,
+) -> Result<PathBuf, TrainingError> {
+    let entries = handle_community_list_command(marketplace_dir)?;
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| TrainingError::ModelNotFound(name.to_string()))?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(entry.artifact, output)?;
+    Ok(output.to_path_buf())
+}
+
 #[cfg(feature = "rvf-persistence")]
 pub fn handle_rvf_stats_command(path: &Path) -> Result<RvfFileStats, TrainingError> {
     let store = RvfStore::open_readonly(path)
@@ -1048,5 +1143,48 @@ mod tests {
         assert!(!pipeline.is_online_learning());
 
         // Note: online learning requires config.online_learning = true
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn community_publish_and_download_roundtrip() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let market = temp.path().join("community");
+        let source = temp.path().join("source.rvf");
+
+        // Create minimal RVF artifact.
+        {
+            let mut store = RvfStore::create(
+                &source,
+                RvfOptions {
+                    dimension: 3,
+                    metric: RvfDistanceMetric::Cosine,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let vectors: Vec<&[f32]> = vec![&[1.0, 0.0, 0.0]];
+            let ids: Vec<u64> = vec![1];
+            store.ingest_batch(&vectors, &ids, None).unwrap();
+            store.close().unwrap();
+        }
+
+        let out = handle_community_publish_command(
+            &source,
+            "demo",
+            "demo model",
+            &["test".to_string()],
+            &market,
+        )
+        .unwrap();
+        assert!(out.exists());
+
+        let list = handle_community_list_command(&market).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "demo");
+
+        let downloaded = temp.path().join("downloaded.rvf");
+        handle_community_download_command("demo", &downloaded, &market).unwrap();
+        assert!(downloaded.exists());
     }
 }

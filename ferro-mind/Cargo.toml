@@ -29,9 +29,10 @@ rvf-runtime = { version = "0.1", optional = true }
 rvf-types = { version = "0.1", optional = true }
 
 [features]
-default = []
+default = ["rvf-persistence"]
 onnx-embeddings = ["dep:tract-onnx", "dep:tract-core", "dep:tokenizers"]
 rvf-persistence = ["dep:rvf-runtime", "dep:rvf-types"]
+legacy-memory = []
 
 [dev-dependencies]
 tempfile = "3"

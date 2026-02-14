@@ -1,0 +1,10 @@
+{"sample":1,"cpu_percent":10.0,"memory_bytes":104857600}
+{"sample":2,"cpu_percent":12.0,"memory_bytes":106954752}
+{"sample":3,"cpu_percent":14.0,"memory_bytes":109051904}
+{"sample":4,"cpu_percent":15.0,"memory_bytes":111149056}
+{"sample":5,"cpu_percent":16.0,"memory_bytes":113246208}
+{"sample":6,"cpu_percent":17.0,"memory_bytes":115343360}
+{"sample":7,"cpu_percent":18.0,"memory_bytes":117440512}
+{"sample":8,"cpu_percent":20.0,"memory_bytes":119537664}
+{"sample":9,"cpu_percent":22.0,"memory_bytes":121634816}
+{"sample":10,"cpu_percent":24.0,"memory_bytes":123731968}

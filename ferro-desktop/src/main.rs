@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -117,6 +118,8 @@ enum VmCommands {
         fs_backend: String,
         #[arg(long)]
         virtiofs_socket_path: Option<String>,
+        #[arg(long)]
+        hyperv_switch: Option<String>,
         #[arg(long, default_value_t = 2222)]
         ssh_port: u16,
         #[arg(long, default_value_t = 4288)]
@@ -141,6 +144,23 @@ enum VmCommands {
         #[arg(long)]
         forward_state_file: Option<String>,
     },
+    UpdateCheck {
+        #[arg(long)]
+        manifest_path: String,
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    ApplyChannelUpdate {
+        #[arg(long)]
+        manifest_path: String,
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        #[arg(long, default_value_t = false)]
+        no_backup: bool,
+    },
+    RollbackImage,
     UpdateImage {
         #[arg(long)]
         image_path: String,
@@ -205,13 +225,17 @@ struct ForwardEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct VmConfig {
     backend: String,
+    #[serde(default = "default_vm_name")]
     vm_name: String,
     cpus: u8,
     memory_mb: u32,
     disk_path: String,
     host_share_path: String,
     fs_backend: String,
+    #[serde(default)]
     virtiofs_socket_path: Option<String>,
+    #[serde(default)]
+    hyperv_switch: Option<String>,
     ssh_port: u16,
     api_port: u16,
 }
@@ -221,7 +245,25 @@ struct VmState {
     config: VmConfig,
     pid: Option<u32>,
     status: String,
+    #[serde(default)]
+    current_version: Option<String>,
     last_error: Option<String>,
+}
+
+fn default_vm_name() -> String {
+    "FerroCrateDesktopVM".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChannelManifest {
+    channels: std::collections::BTreeMap<String, ChannelRelease>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChannelRelease {
+    version: String,
+    image_path: String,
+    sha256: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -752,6 +794,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             host_share_path,
             fs_backend,
             virtiofs_socket_path,
+            hyperv_switch,
             ssh_port,
             api_port,
         } => {
@@ -791,11 +834,13 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     host_share_path,
                     fs_backend,
                     virtiofs_socket_path,
+                    hyperv_switch,
                     ssh_port,
                     api_port,
                 },
                 pid: None,
                 status: "initialized".to_string(),
+                current_version: None,
                 last_error: None,
             };
             save_vm_state(&state_path, &state)?;
@@ -913,7 +958,18 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
         }
         VmCommands::Status { json } => {
             let mut state = load_vm_state(&state_path)?;
-            if let Some(pid) = state.pid {
+            if state.config.backend == "hyperv" {
+                let running = hyperv_vm_running(&state.config).unwrap_or(false);
+                state.status = if running {
+                    "running".to_string()
+                } else {
+                    "stopped".to_string()
+                };
+                if !running {
+                    state.pid = None;
+                }
+                save_vm_state(&state_path, &state)?;
+            } else if let Some(pid) = state.pid {
                 if !pid_alive(pid) {
                     state.pid = None;
                     state.status = "stopped".to_string();
@@ -927,8 +983,11 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                 if let Some(pid) = state.pid {
                     println!("vm: pid={pid}");
                 }
+                if let Some(version) = state.current_version.as_deref() {
+                    println!("vm: version={version}");
+                }
                 println!(
-                    "vm: name={} backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={}",
+                    "vm: name={} backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={} hyperv_switch={}",
                     state.config.vm_name,
                     state.config.backend,
                     state.config.cpus,
@@ -942,7 +1001,8 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                         .config
                         .virtiofs_socket_path
                         .as_deref()
-                        .unwrap_or("-")
+                        .unwrap_or("-"),
+                    state.config.hyperv_switch.as_deref().unwrap_or("-")
                 );
             }
             Ok(())
@@ -977,48 +1037,72 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             );
             Ok(())
         }
+        VmCommands::UpdateCheck {
+            manifest_path,
+            channel,
+            json,
+        } => {
+            let state = load_vm_state(&state_path)?;
+            let manifest = load_channel_manifest(Path::new(&manifest_path))?;
+            let release = manifest.channels.get(&channel).ok_or_else(|| {
+                DesktopError::Invalid(format!("channel not found in manifest: {channel}"))
+            })?;
+            let needs_update = state
+                .current_version
+                .as_ref()
+                .map(|v| v != &release.version)
+                .unwrap_or(true);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "channel": channel,
+                        "current_version": state.current_version,
+                        "latest_version": release.version,
+                        "image_path": release.image_path,
+                        "sha256": release.sha256,
+                        "needs_update": needs_update
+                    }))?
+                );
+            } else {
+                println!(
+                    "vm: channel={} current={} latest={} needs_update={}",
+                    channel,
+                    state.current_version.as_deref().unwrap_or("unknown"),
+                    release.version,
+                    needs_update
+                );
+            }
+            Ok(())
+        }
+        VmCommands::ApplyChannelUpdate {
+            manifest_path,
+            channel,
+            no_backup,
+        } => {
+            let manifest = load_channel_manifest(Path::new(&manifest_path))?;
+            let release = manifest.channels.get(&channel).ok_or_else(|| {
+                DesktopError::Invalid(format!("channel not found in manifest: {channel}"))
+            })?;
+            apply_vm_image_update(
+                &state_path,
+                Path::new(&release.image_path),
+                release.sha256.as_deref(),
+                no_backup,
+                Some(release.version.clone()),
+            )
+        }
+        VmCommands::RollbackImage => rollback_vm_image_update(&state_path),
         VmCommands::UpdateImage {
             image_path,
             no_backup,
-        } => {
-            let mut state = load_vm_state(&state_path)?;
-            let new_image = PathBuf::from(&image_path);
-            if !new_image.exists() {
-                return Err(DesktopError::Invalid(format!(
-                    "image path does not exist: {}",
-                    new_image.display()
-                )));
-            }
-            if let Some(pid) = state.pid {
-                if pid_alive(pid) {
-                    return Err(DesktopError::Invalid(
-                        "refusing VM image update while vm is running; stop vm first".to_string(),
-                    ));
-                }
-            }
-            let current_disk = PathBuf::from(&state.config.disk_path);
-            if !current_disk.exists() {
-                return Err(DesktopError::Invalid(format!(
-                    "current vm disk path does not exist: {}",
-                    current_disk.display()
-                )));
-            }
-
-            if !no_backup {
-                let backup_path = current_disk.with_extension("qcow2.bak");
-                fs::copy(&current_disk, &backup_path)?;
-            }
-            fs::copy(&new_image, &current_disk)?;
-            state.status = "initialized".to_string();
-            state.last_error = None;
-            save_vm_state(&state_path, &state)?;
-            println!(
-                "vm: image updated from {} to {}",
-                new_image.display(),
-                current_disk.display()
-            );
-            Ok(())
-        }
+        } => apply_vm_image_update(
+            &state_path,
+            Path::new(&image_path),
+            None,
+            no_backup,
+            None,
+        ),
     }
 }
 
@@ -1167,6 +1251,129 @@ fn save_vm_state(path: &Path, state: &VmState) -> Result<(), DesktopError> {
     Ok(())
 }
 
+fn load_channel_manifest(path: &Path) -> Result<ChannelManifest, DesktopError> {
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Err(DesktopError::Invalid(format!(
+            "channel manifest is empty: {}",
+            path.display()
+        )));
+    }
+    Ok(serde_json::from_slice::<ChannelManifest>(&bytes)?)
+}
+
+fn sha256_file(path: &Path) -> Result<String, DesktopError> {
+    let bytes = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn apply_vm_image_update(
+    state_path: &Path,
+    new_image: &Path,
+    expected_sha256: Option<&str>,
+    no_backup: bool,
+    new_version: Option<String>,
+) -> Result<(), DesktopError> {
+    let mut state = load_vm_state(state_path)?;
+    if !new_image.exists() {
+        return Err(DesktopError::Invalid(format!(
+            "image path does not exist: {}",
+            new_image.display()
+        )));
+    }
+    if state.config.backend == "hyperv" {
+        let running = hyperv_vm_running(&state.config).unwrap_or(false);
+        if running {
+            return Err(DesktopError::Invalid(
+                "refusing VM image update while hyperv vm is running; stop vm first".to_string(),
+            ));
+        }
+    } else if let Some(pid) = state.pid {
+        if pid_alive(pid) {
+            return Err(DesktopError::Invalid(
+                "refusing VM image update while vm is running; stop vm first".to_string(),
+            ));
+        }
+    }
+    let current_disk = PathBuf::from(&state.config.disk_path);
+    if !current_disk.exists() {
+        return Err(DesktopError::Invalid(format!(
+            "current vm disk path does not exist: {}",
+            current_disk.display()
+        )));
+    }
+
+    if let Some(expected) = expected_sha256 {
+        let actual = sha256_file(new_image)?;
+        if actual != expected.to_ascii_lowercase() {
+            return Err(DesktopError::Invalid(format!(
+                "image checksum mismatch: expected={expected} actual={actual}"
+            )));
+        }
+    }
+
+    if !no_backup {
+        let backup_path = backup_path_for_disk(&current_disk);
+        fs::copy(&current_disk, &backup_path)?;
+    }
+    fs::copy(new_image, &current_disk)?;
+    state.status = "initialized".to_string();
+    if let Some(version) = new_version {
+        state.current_version = Some(version);
+    }
+    state.last_error = None;
+    save_vm_state(state_path, &state)?;
+    println!(
+        "vm: image updated from {} to {}",
+        new_image.display(),
+        current_disk.display()
+    );
+    Ok(())
+}
+
+fn rollback_vm_image_update(state_path: &Path) -> Result<(), DesktopError> {
+    let mut state = load_vm_state(state_path)?;
+    let current_disk = PathBuf::from(&state.config.disk_path);
+    let backup_path = backup_path_for_disk(&current_disk);
+    if !backup_path.exists() {
+        return Err(DesktopError::Invalid(format!(
+            "backup image not found: {}",
+            backup_path.display()
+        )));
+    }
+    if state.config.backend == "hyperv" {
+        if hyperv_vm_running(&state.config).unwrap_or(false) {
+            return Err(DesktopError::Invalid(
+                "refusing rollback while hyperv vm is running; stop vm first".to_string(),
+            ));
+        }
+    } else if let Some(pid) = state.pid {
+        if pid_alive(pid) {
+            return Err(DesktopError::Invalid(
+                "refusing rollback while vm is running; stop vm first".to_string(),
+            ));
+        }
+    }
+    fs::copy(&backup_path, &current_disk)?;
+    state.status = "initialized".to_string();
+    state.last_error = None;
+    save_vm_state(state_path, &state)?;
+    println!(
+        "vm: rollback applied from {} to {}",
+        backup_path.display(),
+        current_disk.display()
+    );
+    Ok(())
+}
+
+fn backup_path_for_disk(disk: &Path) -> PathBuf {
+    let mut s = disk.as_os_str().to_string_lossy().to_string();
+    s.push_str(".bak");
+    PathBuf::from(s)
+}
+
 fn start_virtiofs_daemon(config: &VmConfig) -> Result<(), DesktopError> {
     let socket_path = config.virtiofs_socket_path.as_deref().ok_or_else(|| {
         DesktopError::Invalid("virtiofs backend requires virtiofs_socket_path".to_string())
@@ -1193,12 +1400,21 @@ fn start_virtiofs_daemon(config: &VmConfig) -> Result<(), DesktopError> {
 fn start_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
     #[cfg(windows)]
     {
+        if hyperv_vm_running(config)? {
+            return Ok(());
+        }
+        let switch_clause = if let Some(sw) = config.hyperv_switch.as_deref() {
+            format!(" -SwitchName '{}'", sw)
+        } else {
+            String::new()
+        };
         let script = format!(
-            "$name = '{name}'; if (-not (Get-VM -Name $name -ErrorAction SilentlyContinue)) {{ New-VM -Name $name -Generation 2 -MemoryStartupBytes {mem}MB -VHDPath '{vhd}' | Out-Null; Set-VMProcessor -VMName $name -Count {cpus}; }}; Start-VM -Name $name | Out-Null",
+            "$name = '{name}'; if (-not (Get-VM -Name $name -ErrorAction SilentlyContinue)) {{ New-VM -Name $name -Generation 2 -MemoryStartupBytes {mem}MB -VHDPath '{vhd}'{switch_clause} | Out-Null; Set-VMProcessor -VMName $name -Count {cpus}; }}; Start-VM -Name $name | Out-Null",
             name = config.vm_name,
             mem = config.memory_mb,
             vhd = config.disk_path,
-            cpus = config.cpus
+            cpus = config.cpus,
+            switch_clause = switch_clause
         );
         let status = Command::new("powershell.exe")
             .args(["-NoProfile", "-Command", &script])
@@ -1217,6 +1433,35 @@ fn start_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
         Err(DesktopError::Invalid(
             "hyperv backend is only supported on Windows hosts".to_string(),
         ))
+    }
+}
+
+fn hyperv_vm_running(config: &VmConfig) -> Result<bool, DesktopError> {
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "$name = '{name}'; $vm = Get-VM -Name $name -ErrorAction SilentlyContinue; if ($null -eq $vm) {{ exit 2 }}; if ($vm.State -eq 'Running') {{ exit 0 }} else {{ exit 1 }}",
+            name = config.vm_name
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .status()?;
+        let code = status.code().unwrap_or(1);
+        if code == 0 {
+            return Ok(true);
+        }
+        if code == 1 || code == 2 {
+            return Ok(false);
+        }
+        Err(DesktopError::Invalid(format!(
+            "failed to query Hyper-V vm state {}",
+            config.vm_name
+        )))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = config;
+        Ok(false)
     }
 }
 
@@ -1470,7 +1715,8 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
 #[cfg(test)]
 mod tests {
     use super::{
-        build_vm_command, gather_phase0_check, load_forward_entries, load_vm_state, run_request,
+        backup_path_for_disk, build_vm_command, gather_phase0_check, load_channel_manifest,
+        load_forward_entries, load_vm_state, run_request,
         save_forward_entries, save_vm_state, upsert_forward_entry, validate_daemon_addr,
         render_macos_launch_agent_plist, render_windows_service_script, ExecRequest,
         ForwardEntry, VmConfig, VmState,
@@ -1572,11 +1818,13 @@ mod tests {
                 host_share_path: ".".to_string(),
                 fs_backend: "9p".to_string(),
                 virtiofs_socket_path: None,
+                hyperv_switch: None,
                 ssh_port: 2222,
                 api_port: 4288,
             },
             pid: None,
             status: "initialized".to_string(),
+            current_version: None,
             last_error: None,
         };
         save_vm_state(&path, &state).expect("save vm state");
@@ -1595,6 +1843,7 @@ mod tests {
             host_share_path: ".".to_string(),
             fs_backend: "9p".to_string(),
             virtiofs_socket_path: None,
+            hyperv_switch: None,
             ssh_port: 2222,
             api_port: 4288,
         };
@@ -1613,6 +1862,7 @@ mod tests {
             host_share_path: ".".to_string(),
             fs_backend: "9p".to_string(),
             virtiofs_socket_path: None,
+            hyperv_switch: None,
             ssh_port: 2222,
             api_port: 4288,
         };
@@ -1658,5 +1908,25 @@ mod tests {
         assert!(script.contains("$serviceName = \"FerroDesktop\""));
         assert!(script.contains("daemon --addr 127.0.0.1:4288"));
         assert!(script.contains("sc.exe create $serviceName"));
+    }
+
+    #[test]
+    fn loads_channel_manifest_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = PathBuf::from(temp.path()).join("channels.json");
+        std::fs::write(
+            &path,
+            r#"{"channels":{"stable":{"version":"1.0.0","image_path":"/tmp/a.qcow2","sha256":"abc"}}}"#,
+        )
+        .expect("write");
+        let manifest = load_channel_manifest(&path).expect("manifest");
+        let stable = manifest.channels.get("stable").expect("stable");
+        assert_eq!(stable.version, "1.0.0");
+    }
+
+    #[test]
+    fn backup_path_suffix_is_appended() {
+        let path = backup_path_for_disk(PathBuf::from("/tmp/disk.qcow2").as_path());
+        assert_eq!(path.to_string_lossy(), "/tmp/disk.qcow2.bak");
     }
 }

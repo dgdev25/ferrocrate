@@ -1,10 +1,10 @@
-$ErrorActionPreference = "Stop"
-
 param(
   [string]$BinaryPath = ".\\target\\release\\ferro-desktop.exe",
   [string]$OutputDir = ".\\dist\\windows",
   [string]$ProductVersion = "0.1.0"
 )
+
+$ErrorActionPreference = "Stop"
 
 if (!(Test-Path $BinaryPath)) {
   throw "Missing binary: $BinaryPath"

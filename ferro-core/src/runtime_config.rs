@@ -1,16 +1,24 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RuntimeConfigParseError {
     #[error("invalid OCI runtime config JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
+    #[error("unsupported OCI runtime version: {0}")]
+    InvalidOciVersion(String),
+    #[error("missing required section: {0}")]
+    MissingRequiredField(&'static str),
+    #[error("invalid field: {0}")]
+    InvalidField(String),
 }
 
 /// Parse an OCI Runtime Spec `config.json` document.
 pub fn parse_runtime_config(json: &str) -> Result<RuntimeConfig, RuntimeConfigParseError> {
-    Ok(serde_json::from_str(json)?)
+    let cfg: RuntimeConfig = serde_json::from_str(json)?;
+    cfg.validate()?;
+    Ok(cfg)
 }
 
 /// Minimal-but-extensible representation of OCI Runtime Spec v1.2 `config.json`.
@@ -26,6 +34,113 @@ pub struct RuntimeConfig {
     pub linux: Option<Linux>,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
+}
+
+impl RuntimeConfig {
+    pub fn validate(&self) -> Result<(), RuntimeConfigParseError> {
+        if !(self.oci_version.starts_with("1.0")
+            || self.oci_version.starts_with("1.1")
+            || self.oci_version.starts_with("1.2"))
+        {
+            return Err(RuntimeConfigParseError::InvalidOciVersion(
+                self.oci_version.clone(),
+            ));
+        }
+        let process = self
+            .process
+            .as_ref()
+            .ok_or(RuntimeConfigParseError::MissingRequiredField("process"))?;
+        if process.args.is_empty() {
+            return Err(RuntimeConfigParseError::InvalidField(
+                "process.args must not be empty".to_string(),
+            ));
+        }
+        if let Some(cwd) = process.cwd.as_deref() {
+            if !cwd.starts_with('/') {
+                return Err(RuntimeConfigParseError::InvalidField(
+                    "process.cwd must be absolute".to_string(),
+                ));
+            }
+        }
+        let root = self
+            .root
+            .as_ref()
+            .ok_or(RuntimeConfigParseError::MissingRequiredField("root"))?;
+        if root.path.trim().is_empty() {
+            return Err(RuntimeConfigParseError::InvalidField(
+                "root.path must not be empty".to_string(),
+            ));
+        }
+        let mut seen_mounts = HashSet::new();
+        for mount in &self.mounts {
+            if !mount.destination.starts_with('/') {
+                return Err(RuntimeConfigParseError::InvalidField(format!(
+                    "mount destination must be absolute: {}",
+                    mount.destination
+                )));
+            }
+            if !seen_mounts.insert(mount.destination.as_str()) {
+                return Err(RuntimeConfigParseError::InvalidField(format!(
+                    "duplicate mount destination: {}",
+                    mount.destination
+                )));
+            }
+        }
+        if let Some(linux) = self.linux.as_ref() {
+            let mut ns_types = HashSet::new();
+            for ns in &linux.namespaces {
+                let kind = ns.namespace_type.as_str();
+                let valid = matches!(
+                    kind,
+                    "pid" | "network" | "mount" | "ipc" | "uts" | "user" | "cgroup" | "time"
+                );
+                if !valid {
+                    return Err(RuntimeConfigParseError::InvalidField(format!(
+                        "unsupported linux namespace type: {kind}"
+                    )));
+                }
+                if !ns_types.insert(kind) {
+                    return Err(RuntimeConfigParseError::InvalidField(format!(
+                        "duplicate linux namespace type: {kind}"
+                    )));
+                }
+            }
+            for map in linux.uid_mappings.iter().chain(linux.gid_mappings.iter()) {
+                if map.size == 0 {
+                    return Err(RuntimeConfigParseError::InvalidField(
+                        "id mapping size must be > 0".to_string(),
+                    ));
+                }
+            }
+            if let Some(resources) = linux.resources.as_ref() {
+                if let Some(memory) = resources.memory.as_ref() {
+                    if memory.limit.map(|v| v < 0).unwrap_or(false)
+                        || memory.reservation.map(|v| v < 0).unwrap_or(false)
+                        || memory.swap.map(|v| v < 0).unwrap_or(false)
+                    {
+                        return Err(RuntimeConfigParseError::InvalidField(
+                            "linux.resources.memory values must be >= 0".to_string(),
+                        ));
+                    }
+                }
+                if let Some(cpu) = resources.cpu.as_ref() {
+                    if cpu.quota.map(|v| v < 0).unwrap_or(false) {
+                        return Err(RuntimeConfigParseError::InvalidField(
+                            "linux.resources.cpu.quota must be >= 0".to_string(),
+                        ));
+                    }
+                }
+                if let Some(pids) = resources.pids.as_ref() {
+                    if pids.limit <= 0 {
+                        return Err(RuntimeConfigParseError::InvalidField(
+                            "linux.resources.pids.limit must be > 0".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -209,5 +324,49 @@ mod tests {
         let invalid = r#"{"ociVersion": "1.2.0", "process": {"args": [}}"#;
         let result = parse_runtime_config(invalid);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_missing_required_sections() {
+        let invalid = r#"{"ociVersion":"1.2.0"}"#;
+        let err = parse_runtime_config(invalid).expect_err("missing process/root");
+        assert!(err.to_string().contains("missing required section"));
+    }
+
+    #[test]
+    fn rejects_relative_cwd_and_duplicate_mounts() {
+        let invalid = r#"
+        {
+          "ociVersion":"1.2.0",
+          "process":{"args":["/bin/sh"],"cwd":"tmp"},
+          "root":{"path":"rootfs"},
+          "mounts":[
+            {"destination":"/proc","type":"proc","source":"proc"},
+            {"destination":"/proc","type":"proc","source":"proc"}
+          ]
+        }
+        "#;
+        let err = parse_runtime_config(invalid).expect_err("invalid fields");
+        assert!(err.to_string().contains("process.cwd"));
+    }
+
+    #[test]
+    fn rejects_invalid_namespace_and_resource_limits() {
+        let invalid = r#"
+        {
+          "ociVersion":"1.2.0",
+          "process":{"args":["/bin/sh"],"cwd":"/"},
+          "root":{"path":"rootfs"},
+          "linux":{
+            "namespaces":[{"type":"unknown"}],
+            "resources":{"pids":{"limit":0}}
+          }
+        }
+        "#;
+        let err = parse_runtime_config(invalid).expect_err("invalid linux fields");
+        assert!(
+            err.to_string().contains("unsupported linux namespace type")
+                || err.to_string().contains("pids.limit")
+        );
     }
 }

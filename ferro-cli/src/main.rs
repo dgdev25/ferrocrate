@@ -15,6 +15,7 @@ use ferro_mind::ai::training::{
     handle_community_download_command, handle_community_list_command, handle_community_publish_command,
     handle_export_command, handle_export_rvf_command, handle_import_command,
     handle_rvf_branch_command, handle_rvf_lineage_command, handle_rvf_stats_command,
+    handle_rvf_verify_command,
     handle_stats_command,
     handle_train_command,
 };
@@ -28,7 +29,7 @@ use ferro_compose::{
     Environment as ComposeEnvironment,
     Service as ComposeService,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process;
@@ -116,6 +117,8 @@ pub enum Commands {
         cpu_period: Option<u64>,
         #[arg(long)]
         pids_max: Option<u64>,
+        #[arg(long = "ai-model")]
+        ai_model: Option<String>,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
@@ -221,6 +224,66 @@ pub enum Commands {
     Ai {
         #[command(subcommand)]
         command: AiCommands,
+    },
+    AiTrain {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long = "data-dir")]
+        data_dir: Option<String>,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    AiExport {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    AiImport {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long)]
+        input: String,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    AiStats {
+        path: Option<String>,
+        #[arg(long = "model-type")]
+        model_type: Option<String>,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    AiBranch {
+        source: String,
+        target: String,
+        #[arg(long)]
+        force: bool,
+    },
+    AiLineage {
+        path: String,
+        #[arg(long = "parent-file")]
+        parent_file: Option<String>,
+        #[arg(long)]
+        verify: bool,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
     },
     AiAudit {
         #[arg(long)]
@@ -328,6 +391,10 @@ pub enum AiCommands {
     },
     Lineage {
         path: String,
+        #[arg(long = "parent-file")]
+        parent_file: Option<String>,
+        #[arg(long)]
+        verify: bool,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
@@ -379,6 +446,17 @@ pub enum AiCommunityCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommands {
+    Set {
+        key: String,
+        value: String,
+    },
+    Get {
+        key: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(err) = dispatch(cli.command) {
@@ -389,10 +467,19 @@ fn main() {
 
 fn dispatch(command: Commands) -> Result<(), String> {
     let runtime_dir = runtime_dir();
+    if let Commands::Daemon {
+        ref socket,
+        docker_compat,
+        ref metrics_addr,
+    } = command
+    {
+        let image_store = LocalImageStore::open(runtime_dir.join("images"))
+            .map_err(|err| err.to_string())?;
+        return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
+    }
+
     let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
     let image_store = LocalImageStore::open(runtime_dir.join("images"))
-        .map_err(|err| err.to_string())?;
-    let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
         .map_err(|err| err.to_string())?;
 
     match command {
@@ -431,7 +518,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             cpu_quota,
             cpu_period,
             pids_max,
+            ai_model,
         } => {
+            let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                .map_err(|err| err.to_string())?;
             handle_run(
                 &runtime,
                 &image_store,
@@ -468,6 +558,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cpu_quota,
                 cpu_period,
                 pids_max,
+                ai_model.as_deref(),
             )
         }
         Commands::Build {
@@ -505,6 +596,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Push { image } => handle_push(&image_store, &image),
         Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner),
         Commands::Compose { file, command } => {
+            let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                .map_err(|err| err.to_string())?;
             handle_compose(
                 &runtime,
                 &image_store,
@@ -514,13 +607,70 @@ fn dispatch(command: Commands) -> Result<(), String> {
             )
         }
         Commands::Daemon {
-            socket,
-            docker_compat,
-            metrics_addr,
-        } => run_daemon(&runtime, &image_store, &socket, docker_compat, metrics_addr.as_deref()),
+            ..
+        } => unreachable!("daemon command handled before runtime initialization"),
         Commands::Completion { shell } => handle_completion(&shell),
         Commands::Tui => handle_tui(&runtime),
         Commands::Ai { command } => handle_ai(command),
+        Commands::AiTrain { model_type, data_dir, models_dir, output, format } => handle_ai(
+            AiCommands::Train {
+                model_type,
+                data_dir,
+                models_dir,
+                output,
+                format,
+            },
+        ),
+        Commands::AiExport { model_type, output, models_dir, format } => handle_ai(
+            AiCommands::Export {
+                model_type,
+                output,
+                models_dir,
+                format,
+            },
+        ),
+        Commands::AiImport { model_type, input, models_dir, format } => handle_ai(
+            AiCommands::Import {
+                model_type,
+                input,
+                models_dir,
+                format,
+            },
+        ),
+        Commands::AiStats {
+            path,
+            model_type,
+            models_dir,
+            format,
+        } => handle_ai(
+            AiCommands::Stats {
+                path,
+                model_type,
+                models_dir,
+                format,
+            },
+        ),
+        Commands::AiBranch { source, target, force } => handle_ai(
+            AiCommands::Branch {
+                source,
+                target,
+                force,
+            },
+        ),
+        Commands::AiLineage {
+            path,
+            parent_file,
+            verify,
+            format,
+        } => handle_ai(
+            AiCommands::Lineage {
+                path,
+                parent_file,
+                verify,
+                format,
+            },
+        ),
+        Commands::Config { command } => handle_config(command),
         Commands::AiAudit { action, summary, evidence } => {
             handle_ai_audit(&action, &summary, &evidence)
         }
@@ -529,6 +679,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
 }
 
 fn handle_ai(command: AiCommands) -> Result<(), String> {
+    let configured_backend = configured_ai_backend();
+    let _backend_guard = ScopedEnv::set("FERROCRATE_AI_BACKEND", configured_backend.as_deref());
     match command {
         AiCommands::Train {
             model_type,
@@ -710,11 +862,39 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             println!("ai branch: wrote {}", out.display());
             Ok(())
         }
-        AiCommands::Lineage { path, format } => {
+        AiCommands::Lineage {
+            path,
+            parent_file,
+            verify,
+            format,
+        } => {
             let lineage = handle_rvf_lineage_command(Path::new(&path))
                 .map_err(|err| format!("ai lineage: {err}"))?;
+            let verification = if verify {
+                let report = handle_rvf_verify_command(
+                    Path::new(&path),
+                    parent_file.as_deref().map(Path::new),
+                )
+                .map_err(|err| format!("ai lineage: {err}"))?;
+                if !report.verified {
+                    return Err("ai lineage: verification failed".to_string());
+                }
+                Some(report)
+            } else {
+                None
+            };
             if format == "json" {
-                let out = serde_json::to_string_pretty(&lineage)
+                let payload = if let Some(report) = verification {
+                    serde_json::json!({
+                        "lineage": lineage,
+                        "verification": report,
+                    })
+                } else {
+                    serde_json::json!({
+                        "lineage": lineage,
+                    })
+                };
+                let out = serde_json::to_string_pretty(&payload)
                     .map_err(|err| format!("ai lineage: {err}"))?;
                 println!("{out}");
                 return Ok(());
@@ -724,6 +904,14 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             println!("  parent_id={}", lineage.parent_id_hex);
             println!("  lineage_depth={}", lineage.lineage_depth);
             println!("  is_root={}", lineage.is_root);
+            if verify {
+                println!("  verified=true");
+                if let Some(report) = verification {
+                    if let Some(parent_match) = report.parent_match {
+                        println!("  parent_match={parent_match}");
+                    }
+                }
+            }
             Ok(())
         }
         AiCommands::Migrate {
@@ -899,10 +1087,14 @@ fn handle_run(
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
     pids_max: Option<u64>,
+    ai_model: Option<&str>,
 ) -> Result<(), String> {
     let _bridge_cidr_guard = ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", bridge_cidr);
     let _bridge_name_guard = ScopedEnv::set("FERROCRATE_BRIDGE_NAME", bridge_name);
     let _net_limit_guard = ScopedEnv::set("FERROCRATE_BANDWIDTH_LIMIT", net_limit);
+    let configured_backend = configured_ai_backend();
+    let _backend_guard = ScopedEnv::set("FERROCRATE_AI_BACKEND", configured_backend.as_deref());
+    let _model_guard = ScopedEnv::set("FERROCRATE_AI_MODEL", ai_model);
     validate_network_mode(network)?;
     let network = if network == "encrypted" { "wireguard" } else { network };
     let mut effective_backend = network_backend.to_string();
@@ -1051,6 +1243,82 @@ fn handle_migrate(target: MigrateCommands) -> Result<(), String> {
     match target {
         MigrateCommands::DockerAuth { output } => handle_migrate_docker_auth(output.as_deref()),
     }
+}
+
+fn handle_config(command: ConfigCommands) -> Result<(), String> {
+    match command {
+        ConfigCommands::Set { key, value } => {
+            let mut config = load_cli_config()?;
+            match key.as_str() {
+                "ai.backend" => {
+                    let normalized = value.to_lowercase();
+                    if normalized != "rvf" && normalized != "legacy" {
+                        return Err("config set: ai.backend must be 'rvf' or 'legacy'".to_string());
+                    }
+                    config.ai_backend = Some(normalized);
+                }
+                _ => {
+                    return Err(format!(
+                        "config set: unsupported key '{}'. supported: ai.backend",
+                        key
+                    ))
+                }
+            }
+            save_cli_config(&config)?;
+            Ok(())
+        }
+        ConfigCommands::Get { key } => {
+            let config = load_cli_config()?;
+            match key.as_str() {
+                "ai.backend" => {
+                    if let Some(value) = config.ai_backend {
+                        println!("{value}");
+                    } else {
+                        println!("<unset>");
+                    }
+                    Ok(())
+                }
+                _ => Err(format!(
+                    "config get: unsupported key '{}'. supported: ai.backend",
+                    key
+                )),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CliConfig {
+    ai_backend: Option<String>,
+}
+
+fn config_path() -> PathBuf {
+    runtime_dir().join("config.json")
+}
+
+fn load_cli_config() -> Result<CliConfig, String> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(CliConfig::default());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|err| format!("config: {err}"))?;
+    serde_json::from_str(&raw).map_err(|err| format!("config: {err}"))
+}
+
+fn save_cli_config(config: &CliConfig) -> Result<(), String> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("config: {err}"))?;
+    }
+    let raw = serde_json::to_string_pretty(config).map_err(|err| format!("config: {err}"))?;
+    std::fs::write(&path, raw).map_err(|err| format!("config: {err}"))
+}
+
+fn configured_ai_backend() -> Option<String> {
+    if std::env::var("FERROCRATE_AI_BACKEND").is_ok() {
+        return None;
+    }
+    load_cli_config().ok().and_then(|cfg| cfg.ai_backend)
 }
 
 fn handle_migrate_docker_auth(output: Option<&str>) -> Result<(), String> {
@@ -2175,6 +2443,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            None,
         )?;
     }
     Ok(())
@@ -2372,13 +2641,11 @@ struct DockerCompatState {
 }
 
 fn run_daemon(
-    runtime: &ContainerRuntime,
     store: &LocalImageStore,
     socket: &str,
     docker_compat: bool,
     metrics_addr: Option<&str>,
 ) -> Result<(), String> {
-    let _ = (runtime, store);
     if !docker_compat {
         return Err("daemon: --docker-compat is required".to_string());
     }
@@ -2500,11 +2767,13 @@ fn handle_docker_compat_connection(
     volume_store: Arc<LocalVolumeStore>,
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
-    let request = read_http_request(&mut stream)?;
-    let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
+    let response_result: Result<Vec<u8>, String> = (|| {
+        let request = read_http_request(&mut stream)?;
+        let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
 
-    let (path, query) = split_path_query(&request.path);
-    let response = match (request.method.as_str(), path.as_str()) {
+        let (path, query) = split_path_query(&request.path);
+        let path = normalize_docker_api_path(&path);
+        let response = match (request.method.as_str(), path.as_str()) {
         ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
         ("GET", "/version") => {
             let body = serde_json::json!({
@@ -2662,6 +2931,7 @@ fn handle_docker_compat_connection(
                 None,
                 None,
                 None,
+                None,
             )?;
             http_response(204, &[], "text/plain")
         }
@@ -2740,11 +3010,73 @@ fn handle_docker_compat_connection(
             ensure_image_present(&store, &reference)?;
             http_response(200, b"{}", "application/json")
         }
-        _ => http_response(404, b"{\"message\":\"not found\"}", "application/json"),
+        _ => docker_error_response(404, "not found"),
     };
 
+        Ok(response)
+    })();
+
+    let response = match response_result {
+        Ok(response) => response,
+        Err(err) => docker_error_response(docker_status_for_error(&err), &err),
+    };
     stream.write_all(&response).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
+    let body = serde_json::json!({
+        "message": message
+    })
+    .to_string();
+    http_response(status, body.as_bytes(), "application/json")
+}
+
+fn docker_status_for_error(err: &str) -> u16 {
+    let lowered = err.to_lowercase();
+    if lowered.contains("not found") || lowered.contains("unknown image") || lowered.contains("unknown container") {
+        return 404;
+    }
+    if lowered.contains("invalid")
+        || lowered.contains("missing")
+        || lowered.contains("unsupported")
+        || lowered.contains("too large")
+        || lowered.contains("bad request")
+    {
+        return 400;
+    }
+    500
+}
+
+fn normalize_docker_api_path(path: &str) -> String {
+    if !path.starts_with("/v") {
+        return path.to_string();
+    }
+
+    let mut parts = path.splitn(3, '/');
+    let first = parts.next().unwrap_or_default();
+    let version = parts.next().unwrap_or_default();
+    let rest = parts.next();
+    if first != "" {
+        return path.to_string();
+    }
+    if version.len() < 2 || !version.starts_with('v') {
+        return path.to_string();
+    }
+
+    let version_body = &version[1..];
+    let valid = version_body
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || ch == '.')
+        && version_body.chars().any(|ch| ch.is_ascii_digit());
+    if !valid {
+        return path.to_string();
+    }
+
+    match rest {
+        Some(rest) if !rest.is_empty() => format!("/{rest}"),
+        _ => "/".to_string(),
+    }
 }
 
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
@@ -2815,6 +3147,7 @@ fn port_bindings_to_publish(
     Ok(out)
 }
 
+#[derive(Debug)]
 struct HttpRequest {
     method: String,
     path: String,
@@ -2822,11 +3155,14 @@ struct HttpRequest {
 }
 
 fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
+    const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+    const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+
     let mut buffer = Vec::new();
     let mut header_end = None;
     let mut temp = [0u8; 4096];
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| err.to_string())?;
     loop {
         let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
@@ -2838,7 +3174,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
             header_end = Some(pos + 4);
             break;
         }
-        if buffer.len() > 1024 * 1024 {
+        if buffer.len() > MAX_HTTP_HEADER_BYTES {
             return Err("docker: request too large".to_string());
         }
     }
@@ -2847,24 +3183,56 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     let mut lines = header_str.lines();
     let request_line = lines.next().ok_or_else(|| "docker: invalid request".to_string())?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
+    let method = parts.next().ok_or_else(|| "docker: invalid request".to_string())?.to_string();
+    let path = parts.next().ok_or_else(|| "docker: invalid request".to_string())?.to_string();
+    let http_version = parts.next().ok_or_else(|| "docker: invalid request".to_string())?;
+    if parts.next().is_some() {
+        return Err("docker: invalid request".to_string());
+    }
+    if http_version != "HTTP/1.1" && http_version != "HTTP/1.0" {
+        return Err("docker: unsupported http version".to_string());
+    }
+    if method.is_empty() || !method.chars().all(|ch| ch.is_ascii_uppercase()) {
+        return Err("docker: invalid request method".to_string());
+    }
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err("docker: invalid request path".to_string());
+    }
+
     let mut content_length = 0usize;
     for line in lines {
+        if line.contains('\0') {
+            return Err("docker: invalid request header".to_string());
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
         if let Some((key, value)) = line.split_once(':') {
             if key.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                content_length = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "docker: invalid content-length".to_string())?;
             }
+        } else {
+            return Err("docker: invalid request header".to_string());
         }
+    }
+    if content_length > MAX_HTTP_BODY_BYTES {
+        return Err("docker: request too large".to_string());
     }
     let mut body = buffer[header_end..].to_vec();
     while body.len() < content_length {
         let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
         if read == 0 {
-            break;
+            return Err("docker: incomplete request body".to_string());
         }
         body.extend_from_slice(&temp[..read]);
+        if body.len() > MAX_HTTP_BODY_BYTES {
+            return Err("docker: request too large".to_string());
+        }
     }
+    body.truncate(content_length);
     Ok(HttpRequest { method, path, body })
 }
 
@@ -2929,19 +3297,22 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, ComposeCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
+        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
         handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pause, handle_pull,
         handle_push, handle_rmi, handle_run, handle_stats, handle_stop, handle_kill, handle_rm, handle_restart,
         handle_unpause, build_limits, handle_volume,
         build_health_config, effective_readonly, parse_bind_mounts, parse_capabilities,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy, parse_publish,
         parse_tmpfs_mounts,
+        normalize_docker_api_path, read_http_request,
         validate_network_backend, validate_network_mode,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
     use ferro_core::runtime::ContainerRuntime;
     use ferro_core::volume_store::LocalVolumeStore;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream as StdUnixStream;
 
     #[test]
     fn parses_run_command() {
@@ -2977,6 +3348,7 @@ mod tests {
                 cap_add,
                 name,
                 profile,
+                ai_model,
                 ..
             } => {
                 assert_eq!(image, "alpine:latest");
@@ -3004,6 +3376,7 @@ mod tests {
                 assert!(health_start_period.is_none());
                 assert_eq!(restart_policy, "no");
                 assert_eq!(profile, "dev");
+                assert!(ai_model.is_none());
                 assert!(memory_max.is_none());
                 assert!(cpu_quota.is_none());
                 assert!(cpu_period.is_none());
@@ -3083,6 +3456,105 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_ai_train_alias_command() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "ai-train",
+            "--model-type",
+            "resource-predictor",
+            "--format",
+            "json",
+        ]);
+        match cli.command {
+            Commands::AiTrain {
+                model_type,
+                data_dir,
+                models_dir,
+                output,
+                format,
+            } => {
+                assert_eq!(model_type, "resource-predictor");
+                assert!(data_dir.is_none());
+                assert!(models_dir.is_none());
+                assert!(output.is_none());
+                assert_eq!(format, "json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_lineage_verify_flag() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "ai",
+            "lineage",
+            "model.rvf",
+            "--verify",
+            "--parent-file",
+            "parent.rvf",
+        ]);
+        match cli.command {
+            Commands::Ai {
+                command: AiCommands::Lineage { path, parent_file, verify, .. },
+            } => {
+                assert_eq!(path, "model.rvf");
+                assert!(verify);
+                assert_eq!(parent_file.as_deref(), Some("parent.rvf"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_config_set() {
+        let cli = Cli::parse_from(["ferrocrate", "config", "set", "ai.backend", "legacy"]);
+        match cli.command {
+            Commands::Config {
+                command: ConfigCommands::Set { key, value },
+            } => {
+                assert_eq!(key, "ai.backend");
+                assert_eq!(value, "legacy");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalizes_docker_versioned_paths() {
+        assert_eq!(normalize_docker_api_path("/v1.45/containers/json"), "/containers/json");
+        assert_eq!(normalize_docker_api_path("/v1.24/_ping"), "/_ping");
+        assert_eq!(normalize_docker_api_path("/containers/json"), "/containers/json");
+        assert_eq!(normalize_docker_api_path("/vbad/containers/json"), "/vbad/containers/json");
+    }
+
+    #[test]
+    fn read_http_request_rejects_bad_content_length() {
+        let (mut writer, mut reader) = StdUnixStream::pair().expect("pair");
+        writer
+            .write_all(
+                b"POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: not-a-number\r\n\r\n",
+            )
+            .expect("write");
+        drop(writer);
+        let err = read_http_request(&mut reader).expect_err("invalid content-length");
+        assert!(err.contains("invalid content-length"));
+    }
+
+    #[test]
+    fn read_http_request_rejects_incomplete_body() {
+        let (mut writer, mut reader) = StdUnixStream::pair().expect("pair");
+        writer
+            .write_all(
+                b"POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: 5\r\n\r\n{}",
+            )
+            .expect("write");
+        drop(writer);
+        let err = read_http_request(&mut reader).expect_err("incomplete body");
+        assert!(err.contains("incomplete request body"));
     }
 
     #[test]
@@ -3336,6 +3808,7 @@ mod tests {
             None,
             "no",
             false,
+            None,
             None,
             None,
             None,

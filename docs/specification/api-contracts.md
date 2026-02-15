@@ -4,6 +4,13 @@
 
 This document defines the API contracts for FerroCrate, including Docker socket compatibility and native REST endpoints. FerroCrate implements Docker API v1.45+ compatibility for seamless tool integration while providing enhanced native APIs for FerroCrate-specific features.
 
+### Current Implementation Status (as of February 15, 2026)
+
+- Docker socket compatibility (`ferro-cli daemon --docker-compat`) is implemented for core system, container, and image endpoints.
+- Docker version-prefixed routes (for example `/v1.45/...`) are normalized and handled by the same handlers as unversioned routes.
+- Native REST endpoints under `/api/v1/...` in this document are planned contract targets and are not currently exposed by `ferro-cli daemon`.
+- CRI gRPC (`ferro-cri`) currently implements runtime version/status plus image list/status/pull/remove methods; broader CRI runtime/container methods remain planned.
+
 ---
 
 ## 1. API Architecture

@@ -7,6 +7,9 @@ fn iptables_rule_builder_compat() {
         chain: "PREROUTING".to_string(),
         args: vec!["-p".to_string(), "tcp".to_string(), "--dport".to_string(), "443".to_string()],
     };
-    let cmd = build_iptables_cmd(&rule);
-    assert_eq!(cmd, vec!["iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "443"]);
+    let cmd = build_iptables_cmd(&rule).expect("build iptables command");
+    assert_eq!(
+        cmd,
+        vec!["iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "443"]
+    );
 }

@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn builds_slirp4netns_cmd_with_edge_values() {
         let config = RootlessNetConfig {
-            tap_name: "tap-long-name-01".to_string(),
+            tap_name: "tap-long-name1".to_string(),
             cidr: "192.168.0.0/16".to_string(),
         };
         let cmd = build_slirp4netns_cmd(9999, &config).unwrap();
@@ -67,7 +67,7 @@ mod tests {
             cmd,
             vec![
                 "slirp4netns", "--configure", "--mtu=65520", "--cidr", "192.168.0.0/16",
-                "9999", "tap-long-name-01"
+                "9999", "tap-long-name1"
             ]
         );
     }

@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **28**
-- Partial tasks: **15**
+- Total remaining tasks: **27**
+- Partial tasks: **14**
 - Rework-needed tasks: **13**
 
 ---
@@ -67,7 +67,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~PERF-02 - Convert pull-throughput measurement to enforced SLO and optimization closure~~
 - [x] ~~PERF-03 - Convert idle-memory (no daemon) measurement to enforced SLO and optimization closure~~
 - [x] ~~PERF-04 - Convert idle-memory (daemon) measurement to enforced SLO and optimization closure~~
-- [ ] PERF-05 - Convert per-container overhead measurement to enforced SLO and optimization closure
+- [x] ~~PERF-05 - Convert per-container overhead measurement to enforced SLO and optimization closure~~
 - [ ] PERF-06 - Convert build-performance measurement to enforced SLO and optimization closure
 - [ ] PERF-07 - Convert CLI binary size measurement to enforced SLO and optimization closure
 - [ ] PERF-08 - Convert AI latency measurement to enforced SLO and optimization closure

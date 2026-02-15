@@ -546,6 +546,29 @@ pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryErro
         ("registry-1.docker.io".to_string(), parts.join("/"))
     };
 
+    if !is_valid_repository(&repository) {
+        return Err(RegistryError::InvalidReference(format!(
+            "invalid repository name: {repository}"
+        )));
+    }
+
+    match separator {
+        ReferenceSeparator::Tag => {
+            if !is_valid_tag(&reference) {
+                return Err(RegistryError::InvalidReference(format!(
+                    "invalid tag: {reference}"
+                )));
+            }
+        }
+        ReferenceSeparator::Digest => {
+            if !is_valid_digest(&reference) {
+                return Err(RegistryError::InvalidReference(format!(
+                    "invalid digest: {reference}"
+                )));
+            }
+        }
+    }
+
     Ok(ImageReference {
         registry,
         repository,
@@ -584,6 +607,49 @@ fn split_reference(input: &str) -> (String, String, ReferenceSeparator) {
 
 fn is_registry_component(component: &str) -> bool {
     component.contains('.') || component.contains(':') || component == "localhost"
+}
+
+fn is_valid_repository(repo: &str) -> bool {
+    if repo.is_empty() {
+        return false;
+    }
+    repo.split('/').all(is_valid_repo_component)
+}
+
+fn is_valid_repo_component(component: &str) -> bool {
+    if component.is_empty() {
+        return false;
+    }
+    let mut chars = component.chars();
+    let first = chars.next().unwrap_or_default();
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    let last = component.chars().last().unwrap_or_default();
+    if !last.is_ascii_lowercase() && !last.is_ascii_digit() {
+        return false;
+    }
+    component.chars().all(|ch| {
+        ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-'
+    })
+}
+
+fn is_valid_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 128
+        && tag
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
+}
+
+fn is_valid_digest(digest: &str) -> bool {
+    let Some((algo, value)) = digest.split_once(':') else {
+        return false;
+    };
+    if algo != "sha256" || value.len() != 64 {
+        return false;
+    }
+    value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn manifest_url(image_ref: &ImageReference) -> String {
@@ -697,12 +763,29 @@ mod tests {
 
     #[test]
     fn parses_image_reference_with_digest() {
-        let parsed = parse_image_reference("registry-1.docker.io/library/alpine@sha256:deadbeef")
+        let parsed = parse_image_reference(
+            "registry-1.docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
             .expect("should parse");
         assert_eq!(parsed.registry, "registry-1.docker.io");
         assert_eq!(parsed.repository, "library/alpine");
-        assert_eq!(parsed.reference, "sha256:deadbeef");
+        assert_eq!(
+            parsed.reference,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(parsed.separator, ReferenceSeparator::Digest);
+    }
+
+    #[test]
+    fn rejects_invalid_repository_tag_and_digest_references() {
+        let err = parse_image_reference("ghcr.io/Acme/app:latest").expect_err("invalid repo");
+        assert!(err.to_string().contains("invalid repository"));
+
+        let err = parse_image_reference("ghcr.io/acme/app:bad tag").expect_err("invalid tag");
+        assert!(err.to_string().contains("invalid tag"));
+
+        let err = parse_image_reference("ghcr.io/acme/app@sha256:deadbeef").expect_err("invalid digest");
+        assert!(err.to_string().contains("invalid digest"));
     }
 
     #[test]

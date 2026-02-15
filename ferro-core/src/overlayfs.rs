@@ -2,7 +2,7 @@ use nix::errno::Errno;
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -90,11 +90,11 @@ impl OverlayFsManager {
 
         // SEC-04: Canonicalize and validate all paths before use
         let upperdir = config.upperdir.canonicalize()
-            .map_err(|e| OverlayFsError::Io(e))?;
+            .map_err(OverlayFsError::Io)?;
         let workdir = config.workdir.canonicalize()
-            .map_err(|e| OverlayFsError::Io(e))?;
+            .map_err(OverlayFsError::Io)?;
         let merged_dir = config.merged_dir.canonicalize()
-            .map_err(|e| OverlayFsError::Io(e))?;
+            .map_err(OverlayFsError::Io)?;
 
         // Check for null bytes in paths
         check_path_null_bytes(&upperdir)?;
@@ -141,17 +141,15 @@ impl OverlayFsManager {
 
         let start = Instant::now();
         loop {
-            if let Some(status) = child.try_wait().map_err(|e| OverlayFsError::Io(e))? {
+            if let Some(status) = child.try_wait().map_err(OverlayFsError::Io)? {
                 // Process completed - collect output
                 let mut stdout = child.stdout.take().ok_or_else(|| {
-                    OverlayFsError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    OverlayFsError::Io(std::io::Error::other(
                         "failed to capture stdout",
                     ))
                 })?;
                 let mut stderr = child.stderr.take().ok_or_else(|| {
-                    OverlayFsError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    OverlayFsError::Io(std::io::Error::other(
                         "failed to capture stderr",
                     ))
                 })?;
@@ -159,8 +157,8 @@ impl OverlayFsManager {
                 use std::io::Read;
                 let mut stdout_buf = Vec::new();
                 let mut stderr_buf = Vec::new();
-                stdout.read_to_end(&mut stdout_buf).map_err(|e| OverlayFsError::Io(e))?;
-                stderr.read_to_end(&mut stderr_buf).map_err(|e| OverlayFsError::Io(e))?;
+                stdout.read_to_end(&mut stdout_buf).map_err(OverlayFsError::Io)?;
+                stderr.read_to_end(&mut stderr_buf).map_err(OverlayFsError::Io)?;
 
                 return Ok(std::process::Output {
                     status,
@@ -206,7 +204,7 @@ pub fn build_fuse_overlayfs_args(config: &OverlayMountConfig) -> Vec<String> {
 
 /// SEC-04: Check for null bytes in path to prevent injection
 fn check_path_null_bytes(path: &Path) -> Result<(), OverlayFsError> {
-    if path.to_str().map_or(false, |s| s.contains('\0')) {
+    if path.to_str().is_some_and(|s| s.contains('\0')) {
         return Err(OverlayFsError::InvalidConfig("path contains null byte"));
     }
     Ok(())

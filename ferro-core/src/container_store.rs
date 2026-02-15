@@ -63,18 +63,15 @@ pub struct PortMappingRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum RestartPolicy {
+    #[default]
     No,
     OnFailure,
     Always,
     UnlessStopped,
 }
 
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        RestartPolicy::No
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthConfig {

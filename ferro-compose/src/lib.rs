@@ -179,19 +179,17 @@ fn interpolate_variables(content: &str, env: &HashMap<String, String>) -> Compos
                 if next == '}' {
                     break;
                 }
-                if next == ':' {
-                    if chars.peek() == Some(&'-') {
-                        chars.next();
-                        let mut fallback = String::new();
-                        while let Some(fch) = chars.next() {
-                            if fch == '}' {
-                                break;
-                            }
-                            fallback.push(fch);
+                if next == ':' && chars.peek() == Some(&'-') {
+                    chars.next();
+                    let mut fallback = String::new();
+                    for fch in chars.by_ref() {
+                        if fch == '}' {
+                            break;
                         }
-                        default = Some(fallback);
-                        break;
+                        fallback.push(fch);
                     }
+                    default = Some(fallback);
+                    break;
                 }
                 var.push(next);
             }

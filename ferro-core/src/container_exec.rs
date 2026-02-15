@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -98,12 +97,12 @@ fn collect_output(mut child: Child, exit_code: i32) -> Result<ExecResult, Contai
     use std::io::Read;
 
     let mut stdout = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
+    if let Some(out) = child.stdout.take() {
         // Security: Limit output size to prevent OOM attacks
         out.take(MAX_OUTPUT_SIZE).read_to_end(&mut stdout)?;
     }
     let mut stderr = Vec::new();
-    if let Some(mut err) = child.stderr.take() {
+    if let Some(err) = child.stderr.take() {
         // Security: Limit output size to prevent OOM attacks
         err.take(MAX_OUTPUT_SIZE).read_to_end(&mut stderr)?;
     }

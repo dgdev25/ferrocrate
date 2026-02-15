@@ -10,8 +10,8 @@ thiserror = "2"
 
 # rUv ecosystem integration (Task 3.3)
 # Uses ruvector-core for lightweight HashEmbedding by default
-ruvector-core = { version = "2.0", default-features = false, features = ["simd", "parallel"] }
-ruv-fann = "0.2"       # Neural networks for anomaly detection
+ruvector-core = { version = "2.0.3", default-features = false, features = ["simd", "parallel"] }
+ruv-fann = { version = "0.2.0", default-features = false, features = ["std", "parallel"] }  # Neural networks for anomaly detection without binary serialization
 
 parking_lot = "0.12"   # Required for ruvector-core RwLock interop
 
@@ -19,18 +19,12 @@ parking_lot = "0.12"   # Required for ruvector-core RwLock interop
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 
-# ONNX inference for semantic embeddings (optional, 90MB model required)
-tract-onnx = { version = "0.21", optional = true }
-tract-core = { version = "0.21", optional = true }
-tokenizers = { version = "0.21", optional = true }
-
 # RVF persistence layer (optional)
 rvf-runtime = { version = "0.1", optional = true }
 rvf-types = { version = "0.1", optional = true }
 
 [features]
 default = ["rvf-persistence"]
-onnx-embeddings = ["dep:tract-onnx", "dep:tract-core", "dep:tokenizers"]
 rvf-persistence = ["dep:rvf-runtime", "dep:rvf-types"]
 legacy-memory = []
 

@@ -173,11 +173,21 @@ impl ManagedProcess {
 #[cfg(test)]
 mod tests {
     use super::{ManagedProcess, ProcessState, kill_pid, stop_pid};
+    use std::path::Path;
     use std::time::Duration;
+
+    fn shell_path() -> &'static str {
+        if Path::new("/bin/sh").exists() {
+            "/bin/sh"
+        } else {
+            "/usr/bin/sh"
+        }
+    }
 
     #[test]
     fn starts_and_waits_for_process() {
-        let mut proc = ManagedProcess::start("sh", &["-c", "exit 0"]).expect("process starts");
+        let mut proc =
+            ManagedProcess::start(shell_path(), &["-c", "exit 0"]).expect("process starts");
         let status = proc.wait().expect("process exits");
         assert!(status.success());
         assert_eq!(proc.state(), ProcessState::Exited);
@@ -185,7 +195,8 @@ mod tests {
 
     #[test]
     fn pauses_resumes_and_stops_process() {
-        let mut proc = ManagedProcess::start("sh", &["-c", "sleep 5"]).expect("process starts");
+        let mut proc =
+            ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
 
         proc.pause().expect("pause succeeds");
         assert_eq!(proc.state(), ProcessState::Paused);
@@ -200,13 +211,13 @@ mod tests {
 
     #[test]
     fn stop_pid_terminates_process() {
-        let proc = ManagedProcess::start("sh", &["-c", "sleep 5"]).expect("process starts");
+        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
         stop_pid(proc.pid(), Duration::from_millis(100)).expect("stop pid");
     }
 
     #[test]
     fn kill_pid_terminates_process() {
-        let proc = ManagedProcess::start("sh", &["-c", "sleep 5"]).expect("process starts");
+        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
         kill_pid(proc.pid()).expect("kill pid");
     }
 }

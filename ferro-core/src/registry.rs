@@ -83,6 +83,7 @@ impl Default for RegistryClientConfig {
 
 pub struct RegistryClient {
     client: Client,
+    #[allow(dead_code)]
     config: RegistryClientConfig,
 }
 
@@ -100,6 +101,7 @@ impl RegistryClient {
     }
 
     /// Execute a request with retry logic and exponential backoff
+    #[allow(dead_code)]
     fn send_with_retry(
         &self,
         request_builder: reqwest::blocking::RequestBuilder,

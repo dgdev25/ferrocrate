@@ -31,9 +31,9 @@ fn kernel_version() -> Option<(u32, u32, u32)> {
     if !current.is_empty() {
         parts.push(current);
     }
-    let major = parts.get(0)?.parse().ok()?;
-    let minor = parts.get(1).unwrap_or(&"0".to_string()).parse().ok()?;
-    let patch = parts.get(2).unwrap_or(&"0".to_string()).parse().ok()?;
+    let major = parts.first()?.parse().ok()?;
+    let minor = parts.get(1).map_or("0", String::as_str).parse().ok()?;
+    let patch = parts.get(2).map_or("0", String::as_str).parse().ok()?;
     Some((major, minor, patch))
 }
 

@@ -304,6 +304,7 @@ impl ContainerRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         image: &str,
@@ -351,6 +352,7 @@ impl ContainerRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_with_store(
         &self,
         store: &LocalImageStore,
@@ -488,10 +490,9 @@ impl ContainerRuntime {
             unshare_netns,
             seccomp_profile.as_ref(),
         )
-        .map_err(|e| {
+        .inspect_err(|_e| {
             // Kill any partially spawned process on error
             rollback.rollback();
-            e
         })?;
 
         if use_slirp {
@@ -1010,24 +1011,11 @@ fn generate_container_id() -> String {
     hex
 }
 
-fn stream_to_file_with_options<R: std::io::Read>(
-    mut reader: R,
-    path: &Path,
-    append: bool,
-) -> Result<(), std::io::Error> {
-    let mut file = if append {
-        OpenOptions::new().create(true).append(true).open(path)?
-    } else {
-        fs::File::create(path)?
-    };
-    std::io::copy(&mut reader, &mut file)?;
-    Ok(())
-}
-
 fn process_exists(pid: u32) -> bool {
     fs::metadata(format!("/proc/{pid}")).is_ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_process_with_logs(
     cmd: &[String],
     env: &[String],
@@ -1058,15 +1046,13 @@ fn spawn_process_with_logs(
         unshare_netns,
         seccomp_profile,
     )?;
-    let (child_id, child, join_handles) =
-        spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
+    let (child_id, child) = spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
     let stdout_path = stdout_path.to_path_buf();
     let stderr_path = stderr_path.to_path_buf();
     let rootfs_dir = rootfs_dir.clone();
-    let no_new_privs = no_new_privs;
     let caps_for_restart = capabilities.clone();
     let workdir = workdir.map(|val| val.to_string());
     let user = user.map(|val| val.to_string());
@@ -1075,7 +1061,6 @@ fn spawn_process_with_logs(
     thread::spawn(move || {
         supervise_child(
             child,
-            join_handles,
             store,
             container_id,
             cmd_owned,
@@ -1097,6 +1082,7 @@ fn spawn_process_with_logs(
     Ok(child_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_command(
     cmd: &[String],
     env: &[String],
@@ -1139,10 +1125,29 @@ fn build_command(
             chroot_cmd.arg(&cmd[0]);
             chroot_cmd.args(&cmd[1..]);
             chroot_cmd
+        } else if command_available("bwrap") {
+            let mut bwrap_cmd = Command::new("bwrap");
+            let root_cmd = resolve_rootfs_command(rootfs, &cmd[0]);
+            bwrap_cmd
+                .arg("--bind")
+                .arg(rootfs)
+                .arg("/")
+                .arg("--proc")
+                .arg("/proc")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--chdir")
+                .arg("/")
+                .arg("--setenv")
+                .arg("PATH")
+                .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+            bwrap_cmd.arg(root_cmd);
+            bwrap_cmd.args(&cmd[1..]);
+            bwrap_cmd
         } else {
-            let mut host_cmd = Command::new(&cmd[0]);
-            host_cmd.args(&cmd[1..]);
-            host_cmd
+            return Err(RuntimeError::InvalidCommand(
+                "rootfs execution requires root (chroot) or bubblewrap (bwrap)".to_string(),
+            ));
         }
     } else {
         let mut host_cmd = Command::new(&cmd[0]);
@@ -1192,22 +1197,29 @@ fn build_command(
     let seccomp_strict = seccomp_strict_mode();
     unsafe {
         command.pre_exec(move || {
-            if nix::unistd::Uid::effective().is_root() {
+            let is_root = nix::unistd::Uid::effective().is_root();
+            if is_root {
                 if caps.is_empty() {
                     drop_all_capabilities().map_err(|err| {
-                        std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+                        std::io::Error::other(err.to_string())
                     })?;
                 } else {
                     set_capabilities(&caps).map_err(|err| {
-                        std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+                        std::io::Error::other(err.to_string())
                     })?;
                 }
             }
             // Apply seccomp profile AFTER capability drops (seccomp is last sandboxing step)
             if let Some(profile) = &seccomp {
-                if let Err(err) = apply_seccomp_profile(profile) {
-                    if nix::unistd::Uid::effective().is_root() || seccomp_strict {
-                        return Err(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()));
+                if !is_root && !seccomp_strict {
+                    eprintln!(
+                        "[seccomp] non-root mode: skipping seccomp apply (set FERROCRATE_SECCOMP_STRICT=1 to enforce fail-closed)"
+                    );
+                } else if let Err(err) = apply_seccomp_profile(profile) {
+                    if is_root || seccomp_strict {
+                        return Err(std::io::Error::other(
+                            err.to_string(),
+                        ));
                     }
                     eprintln!(
                         "[seccomp] non-root seccomp apply failed; continuing without seccomp (set FERROCRATE_SECCOMP_STRICT=1 to fail-closed): {}",
@@ -1222,36 +1234,68 @@ fn build_command(
     Ok(command)
 }
 
+fn resolve_rootfs_command(rootfs: &Path, cmd: &str) -> String {
+    if cmd.contains('/') {
+        return cmd.to_string();
+    }
+    let search_dirs = [
+        "usr/local/sbin",
+        "usr/local/bin",
+        "usr/sbin",
+        "usr/bin",
+        "sbin",
+        "bin",
+    ];
+    for dir in search_dirs {
+        let candidate = rootfs.join(dir).join(cmd);
+        if candidate.exists() {
+            return format!("/{}", [dir, cmd].join("/"));
+        }
+    }
+    cmd.to_string()
+}
+
 fn spawn_child_with_logs(
     mut command: Command,
     stdout_path: &Path,
     stderr_path: &Path,
     append: bool,
-) -> Result<(u32, Child, Vec<thread::JoinHandle<()>>), RuntimeError> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+) -> Result<(u32, Child), RuntimeError> {
+    let stdout_file = if append {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(stdout_path)?
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(stdout_path)?
+    };
+    let stderr_file = if append {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(stderr_path)?
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(stderr_path)?
+    };
+    let child = command
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
         .spawn()?;
-    let mut join_handles = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        let out_path = stdout_path.to_path_buf();
-        join_handles.push(thread::spawn(move || {
-            let _ = stream_to_file_with_options(stdout, &out_path, append);
-        }));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        let err_path = stderr_path.to_path_buf();
-        join_handles.push(thread::spawn(move || {
-            let _ = stream_to_file_with_options(stderr, &err_path, append);
-        }));
-    }
     let child_id = child.id();
-    Ok((child_id, child, join_handles))
+    Ok((child_id, child))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn supervise_child(
     mut child: Child,
-    mut join_handles: Vec<thread::JoinHandle<()>>,
     store: sled::Db,
     container_id: String,
     cmd: Vec<String>,
@@ -1270,9 +1314,6 @@ fn supervise_child(
 ) {
     loop {
         let status = child.wait();
-        for handle in join_handles.drain(..) {
-            let _ = handle.join();
-        }
         let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let current_status = match update_exit(&store, &container_id, exit_code) {
             Ok(status) => status,
@@ -1299,16 +1340,15 @@ fn supervise_child(
             Ok(cmd) => cmd,
             Err(_) => break,
         };
-        let (pid, new_child, new_handles) =
-            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append) {
-                Ok(tuple) => tuple,
-                Err(_) => break,
-            };
+        let (pid, new_child) = match spawn_child_with_logs(command, &stdout_path, &stderr_path, append)
+        {
+            Ok(tuple) => tuple,
+            Err(_) => break,
+        };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             eprintln!("[supervisor] failed to update pid status for {container_id}: {e}");
         }
         child = new_child;
-        join_handles = new_handles;
     }
 }
 
@@ -1376,7 +1416,7 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
     let utsname =
         nix::sys::utsname::uname().map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
     let version = utsname.release().to_string_lossy();
-    let mut parts = version.split(|c| c == '.' || c == '-');
+    let mut parts = version.split(['.', '-']);
     let major = parts
         .next()
         .and_then(|v| v.parse::<u32>().ok())
@@ -1393,12 +1433,14 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
     Ok(())
 }
 
+type NetworkSetup = (Option<String>, Option<String>, Option<String>);
+
 fn setup_network(
     container_id: &str,
     port_mappings: &[crate::container_store::PortMappingRecord],
     network_mode: &str,
     network_backend: &str,
-) -> Result<(Option<String>, Option<String>, Option<String>), RuntimeError> {
+) -> Result<NetworkSetup, RuntimeError> {
     match network_mode {
         "host" => {
             if !port_mappings.is_empty() {
@@ -1771,9 +1813,6 @@ fn validate_selinux_type(selinux_type: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-// SEC-05: Default timeout for external commands (10 seconds)
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// SEC-05: Execute command with timeout to prevent blocking indefinitely
 fn execute_with_timeout(
     binary: &str,
@@ -1781,7 +1820,7 @@ fn execute_with_timeout(
     timeout: Duration,
 ) -> Result<std::process::Output, RuntimeError> {
     use std::io::Read;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Command, Stdio};
 
     let mut child = Command::new(binary)
         .args(args)
@@ -1794,10 +1833,10 @@ fn execute_with_timeout(
         if let Some(status) = child.try_wait()? {
             // Process completed - collect output
             let mut stdout = child.stdout.take().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to capture stdout")
+                std::io::Error::other("failed to capture stdout")
             })?;
             let mut stderr = child.stderr.take().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to capture stderr")
+                std::io::Error::other("failed to capture stderr")
             })?;
 
             let mut stdout_buf = Vec::new();
@@ -1867,11 +1906,12 @@ fn apply_apparmor_if_enabled(
         return Ok(cmd.to_vec());
     }
 
-    let mut wrapped = Vec::new();
-    wrapped.push("aa-exec".to_string());
-    wrapped.push("-p".to_string());
-    wrapped.push(profile_name);
-    wrapped.push("--".to_string());
+    let mut wrapped = vec![
+        "aa-exec".to_string(),
+        "-p".to_string(),
+        profile_name,
+        "--".to_string(),
+    ];
     wrapped.extend(cmd.iter().cloned());
     Ok(wrapped)
 }
@@ -1893,11 +1933,12 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
     let selinux_type =
         std::env::var("FERROCRATE_SELINUX_TYPE").unwrap_or_else(|_| "container_t".to_string());
     validate_selinux_type(&selinux_type)?;
-    let mut wrapped = Vec::new();
-    wrapped.push("runcon".to_string());
-    wrapped.push("-t".to_string());
-    wrapped.push(selinux_type);
-    wrapped.push("--".to_string());
+    let mut wrapped = vec![
+        "runcon".to_string(),
+        "-t".to_string(),
+        selinux_type,
+        "--".to_string(),
+    ];
     wrapped.extend(cmd.iter().cloned());
     Ok(wrapped)
 }
@@ -2150,7 +2191,7 @@ fn render_hosts(entries: &BTreeMap<String, BTreeSet<String>>) -> String {
     lines.join("\n") + "\n"
 }
 
-fn replace_iptables_action(cmd: &mut Vec<String>, replacement: &str) {
+fn replace_iptables_action(cmd: &mut [String], replacement: &str) {
     for entry in cmd.iter_mut() {
         if entry == "-A" {
             *entry = replacement.to_string();
@@ -2180,7 +2221,7 @@ fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = parse_cmd_args(&args)?;
+    let (bin, rest) = parse_cmd_args(args)?;
     let cmd_str = args.join(" ");
 
     // Log command execution at debug level (visible with RUST_LOG=debug)
@@ -2200,7 +2241,7 @@ fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = parse_cmd_args(&args)?;
+    let (bin, rest) = parse_cmd_args(args)?;
     let cmd_str = args.join(" ");
 
     log::debug!("[exec] {}", cmd_str);

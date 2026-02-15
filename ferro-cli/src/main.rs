@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use ferro_compose::compose::{
@@ -47,6 +49,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     Run {
@@ -1172,6 +1175,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_run(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
@@ -1341,10 +1345,7 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
     loop {
         print!("\x1b[2J\x1b[H");
         println!("FerroCrate TUI (press q + Enter to quit)");
-        println!(
-            "{:<20} {:<12} {:<20} {}",
-            "CONTAINER", "STATUS", "IMAGE", "COMMAND"
-        );
+        println!("{:<20} {:<12} {:<20} COMMAND", "CONTAINER", "STATUS", "IMAGE");
         let containers = runtime.list().map_err(|err| err.to_string())?;
         for record in containers {
             let name = record.name.unwrap_or(record.id);
@@ -3037,6 +3038,8 @@ fn run_daemon(
     docker_compat: bool,
     metrics_addr: Option<&str>,
 ) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
     if !docker_compat {
         return Err("daemon: --docker-compat is required".to_string());
     }
@@ -3045,10 +3048,19 @@ fn run_daemon(
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     if socket_path.exists() {
+        let md = std::fs::symlink_metadata(socket_path).map_err(|err| err.to_string())?;
+        if !md.file_type().is_socket() {
+            return Err(format!(
+                "daemon: refusing to remove non-socket path {}",
+                socket_path.display()
+            ));
+        }
         std::fs::remove_file(socket_path).map_err(|err| err.to_string())?;
     }
 
     let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+        .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
     let runtime_dir = runtime_dir();
     let runtime_dir = Arc::new(runtime_dir);
     let store = Arc::new(store.clone());
@@ -3538,7 +3550,7 @@ fn normalize_docker_api_path(path: &str) -> String {
     let first = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or_default();
     let rest = parts.next();
-    if first != "" {
+    if !first.is_empty() {
         return path.to_string();
     }
     if version.len() < 2 || !version.starts_with('v') {
@@ -3621,7 +3633,6 @@ fn port_bindings_to_publish(
     for (container_spec, host_bindings) in bindings {
         let (container_port, proto) = container_spec
             .split_once('/')
-            .map(|(port, proto)| (port, proto))
             .unwrap_or((container_spec.as_str(), "tcp"));
         for binding in host_bindings {
             let Some(host_port) = binding.host_port else {

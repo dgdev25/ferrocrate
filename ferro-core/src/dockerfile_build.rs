@@ -7,18 +7,22 @@ use crate::image_manifest::parse_image_manifest;
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::{canonicalize_reference, resolve_reference};
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
+use crate::capabilities::drop_all_capabilities;
 use crate::layer_compression::{
     CompressionFormat, LayerCompressionError, compress_bytes_gzip, compress_bytes_zstd,
 };
+use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use serde_json::json;
+use std::ffi::CString;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tar::Builder;
 use thiserror::Error;
@@ -143,11 +147,6 @@ pub fn build_from_dockerfile_with_store_and_compression(
     let ignore_patterns = load_dockerignore_patterns(context_dir)?;
 
     for (idx, stage) in stages.iter().enumerate() {
-        if !stage.run.is_empty() && !nix::unistd::Uid::effective().is_root() {
-            return Err(DockerfileBuildError::Invalid(
-                "RUN requires root (chroot) for now".to_string(),
-            ));
-        }
         let base_info = &base_infos[idx];
         let base_layers = &base_info.layers;
         let base_descriptors = base_info.descriptors.clone();
@@ -264,7 +263,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
                 annotations: Default::default(),
             };
             let manifest_json = serde_json::to_string(&manifest).map_err(|err| {
-                io::Error::new(io::ErrorKind::Other, err.to_string())
+                io::Error::other(err.to_string())
             })?;
 
             let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
@@ -309,7 +308,7 @@ fn build_layer_from_dir(
     let mut tar_builder = Builder::new(Vec::new());
     add_directory(&mut tar_builder, source_dir, source_dir, dockerfile_path)?;
     let tar_bytes = tar_builder.into_inner().map_err(|err| {
-        io::Error::new(io::ErrorKind::Other, err.to_string())
+        io::Error::other(err.to_string())
     })?;
 
     // Security: Check layer size to prevent memory exhaustion
@@ -366,12 +365,13 @@ fn add_directory(
         } else if file_type.is_file() {
             builder
                 .append_path_with_name(&entry_path, &relative)
-                .map_err(|err| DockerfileBuildError::Io(err))?;
+                .map_err(DockerfileBuildError::Io)?;
         }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_config_json(
     healthcheck: Option<HealthcheckSpec>,
     env: &[String],
@@ -488,7 +488,7 @@ fn load_build_cache(
     }
     let bytes = fs::read(&path)?;
     let cache = serde_json::from_slice::<HashMap<String, BuildCacheEntry>>(&bytes)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(cache)
 }
 
@@ -501,7 +501,7 @@ fn save_build_cache(
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec(cache)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
     fs::write(&path, bytes)?;
     Ok(())
 }
@@ -646,7 +646,7 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
     } else {
         pattern
             .split('*')
-            .last()
+            .next_back()
             .map(|tail| tail.is_empty() || value.ends_with(tail))
             .unwrap_or(false)
     }
@@ -906,7 +906,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         ));
     }
     // CQ-01: Use checked index access instead of unwrap()
-    let dest = args.get(args.len() - 1)
+    let dest = args.last()
         .ok_or_else(|| DockerfileBuildError::Invalid("COPY dest missing".to_string()))?
         .to_string();
     let srcs = args[..args.len() - 1].iter().map(|s| s.to_string()).collect();
@@ -955,7 +955,7 @@ fn interpolate_value(value: &str, env: &[String], args: &HashMap<String, String>
             if let Some('{') = chars.peek().copied() {
                 chars.next();
                 let mut var = String::new();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if next == '}' {
                         break;
                     }
@@ -1157,23 +1157,6 @@ fn apply_stage_workdir(rootfs: &Path, workdir: Option<&str>) -> Result<(), Docke
     Ok(())
 }
 
-// SEC-00: Namespace types required for secure build isolation
-//
-// Intermediate fix: wrap chroot with unshare to create namespaces before execution
-// -m: Mount namespace (isolates filesystem mounts)
-// -p: PID namespace (isolates process IDs)
-// -u: UTS namespace (isolates hostname and domain name)
-// -n: Network namespace (isolates network stack)
-// --mount-proc: Mount a fresh /proc in the new namespace
-//
-// TODO: Full security requires (16 hr refactor):
-// 1. Fork/exec pattern to set up isolation in child before exec
-// 2. User namespace (-U) with UID/GID mapping via /proc/[pid]/uid_map
-// 3. Capability drops before exec (CAP_SYS_ADMIN, etc.)
-// 4. Seccomp profile application
-// 5. Consider pivot_root instead of chroot for harder escape prevention
-const BUILD_NAMESPACES: &[&str] = &["-m", "-p", "-u", "-n", "--mount-proc"];
-
 fn run_stage_commands(
     rootfs: &Path,
     runs: &[RunSpec],
@@ -1181,18 +1164,16 @@ fn run_stage_commands(
     workdir: Option<&str>,
     user: Option<&str>,
 ) -> Result<(), DockerfileBuildError> {
+    let seccomp_profile = load_build_seccomp_profile()?;
     for run in runs {
-        // SEC-00: Use unshare to create namespaces before chroot for proper isolation
-        // This creates: mount, PID, UTS namespaces and mounts procfs
-        // This prevents trivial escape via chdir+chroot or mount escape techniques
-        let mut unshare_cmd = Command::new("unshare");
-        unshare_cmd
-            .args(BUILD_NAMESPACES)
-            .arg("--") // end unshare options, start chroot command
-            .arg("chroot")
-            .arg(rootfs)
-            .arg(&run.args[0])
-            .args(&run.args[1..]);
+        if run.args.is_empty() {
+            return Err(DockerfileBuildError::Invalid(
+                "RUN instruction produced empty command".to_string(),
+            ));
+        }
+        let mut cmd = Command::new(&run.args[0]);
+        cmd.args(&run.args[1..]);
+        cmd.stdin(Stdio::null());
 
         // Set environment variables
         for entry in env {
@@ -1200,29 +1181,33 @@ fn run_stage_commands(
             let key = parts.next().unwrap_or("").trim();
             let value = parts.next().unwrap_or("").trim();
             if !key.is_empty() {
-                unshare_cmd.env(key, value);
+                cmd.env(key, value);
             }
         }
 
-        // Set working directory
-        if let Some(dir) = workdir {
-            let target = if dir.starts_with('/') {
-                dir.to_string()
-            } else {
-                format!("/{}", dir)
-            };
-            unshare_cmd.current_dir(target);
+        let rootfs = rootfs.to_path_buf();
+        let workdir = workdir.map(|v| v.to_string());
+        let run_user = user.map(|v| v.to_string());
+        let seccomp = seccomp_profile.clone();
+        // SAFETY: pre_exec runs in the child process between fork and exec to install
+        // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
+        unsafe {
+            cmd.pre_exec(move || {
+                setup_build_namespace()?;
+                apply_user_namespace_map()?;
+                enter_build_rootfs(&rootfs, workdir.as_deref())?;
+                apply_build_identity(run_user.as_deref())?;
+                set_no_new_privileges()?;
+                drop_all_capabilities().map_err(|err| io::Error::other(err.to_string()))?;
+                if let Some(profile) = &seccomp {
+                    apply_seccomp_profile(profile)
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                }
+                Ok(())
+            });
         }
 
-        // Set user/group
-        if let Some(user_spec) = user {
-            if let Some((uid, gid)) = parse_user_spec(user_spec) {
-                unshare_cmd.uid(uid);
-                unshare_cmd.gid(gid);
-            }
-        }
-
-        let status = unshare_cmd.status()?;
+        let status = cmd.status()?;
         if !status.success() {
             return Err(DockerfileBuildError::Invalid(format!(
                 "RUN failed with status {status}"
@@ -1241,6 +1226,88 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
     let uid = parts.next()?.parse::<u32>().ok()?;
     let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
     Some((uid, gid))
+}
+
+fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuildError> {
+    let enabled = std::env::var("FERROCRATE_BUILD_SECCOMP")
+        .map(|val| val != "0")
+        .unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+    default_seccomp_profile()
+        .map(Some)
+        .map_err(|err| DockerfileBuildError::Invalid(format!("build seccomp profile: {err}")))
+}
+
+fn setup_build_namespace() -> io::Result<()> {
+    use nix::sched::{CloneFlags, unshare};
+    unshare(
+        CloneFlags::CLONE_NEWUSER
+            | CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWNET,
+    )
+    .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn apply_user_namespace_map() -> io::Result<()> {
+    let host_uid = nix::unistd::Uid::current().as_raw();
+    let host_gid = nix::unistd::Gid::current().as_raw();
+    // Kernel requires setgroups to be disabled before writing gid_map in userns.
+    if let Err(err) = fs::write("/proc/self/setgroups", "deny") {
+        if err.kind() != io::ErrorKind::NotFound {
+            return Err(io::Error::other(format!("setgroups: {err}")));
+        }
+    }
+    fs::write("/proc/self/uid_map", format!("0 {host_uid} 1"))
+        .map_err(|err| io::Error::other(format!("uid_map: {err}")))?;
+    fs::write("/proc/self/gid_map", format!("0 {host_gid} 1"))
+        .map_err(|err| io::Error::other(format!("gid_map: {err}")))
+}
+
+fn enter_build_rootfs(rootfs: &Path, workdir: Option<&str>) -> io::Result<()> {
+    let path = CString::new(rootfs.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rootfs path contains NUL"))?;
+    let rc = unsafe { nix::libc::chroot(path.as_ptr()) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let target = match workdir {
+        Some(dir) if !dir.trim().is_empty() => {
+            if dir.starts_with('/') {
+                dir.to_string()
+            } else {
+                format!("/{}", dir)
+            }
+        }
+        _ => "/".to_string(),
+    };
+    std::env::set_current_dir(target)
+}
+
+fn apply_build_identity(user: Option<&str>) -> io::Result<()> {
+    let (uid, gid) = match user.and_then(parse_user_spec) {
+        Some((uid, gid)) => (uid, gid),
+        None => (0, 0),
+    };
+    if uid != 0 || gid != 0 {
+        return Err(io::Error::other(
+            "build sandbox currently supports only root (0:0) inside user namespace",
+        ));
+    }
+    nix::unistd::setgid(nix::unistd::Gid::from_raw(gid))
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    nix::unistd::setuid(nix::unistd::Uid::from_raw(uid))
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn set_no_new_privileges() -> io::Result<()> {
+    let rc = unsafe { nix::libc::prctl(nix::libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 fn parse_duration_to_nanos(value: &str) -> Option<u64> {
     let trimmed = value.trim();

@@ -23,7 +23,7 @@ impl DaemonHarness {
         let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
         let socket_path = runtime_dir.path().join("docker.sock");
 
-        let child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "daemon",
@@ -48,6 +48,8 @@ impl DaemonHarness {
             thread::sleep(Duration::from_millis(25));
         }
 
+        let _ = child.kill();
+        let _ = child.wait();
         panic!("daemon socket did not become ready: {}", socket_path.display());
     }
 

@@ -1,4 +1,5 @@
 #![allow(clippy::items_after_test_module)]
+#![allow(missing_docs)]
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -16,7 +17,9 @@ use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{parse_image_reference, RegistryClient};
+#[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
+#[cfg(target_os = "linux")]
 use ferro_core::runtime::ContainerRuntime;
 use ferro_core::volume_store::LocalVolumeStore;
 use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
@@ -24,16 +27,20 @@ use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
     handle_community_download_command, handle_community_list_command,
-    handle_community_publish_command, handle_export_command, handle_export_rvf_command,
-    handle_import_command, handle_rvf_branch_command, handle_rvf_lineage_command,
-    handle_rvf_stats_command, handle_rvf_verify_command, handle_stats_command,
-    handle_train_command,
+    handle_community_publish_command, handle_export_command, handle_import_command,
+    handle_stats_command, handle_train_command,
+};
+#[cfg(target_os = "linux")]
+use ferro_mind::ai::training::{
+    handle_export_rvf_command, handle_rvf_branch_command, handle_rvf_lineage_command,
+    handle_rvf_stats_command, handle_rvf_verify_command,
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -52,6 +59,7 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[cfg(target_os = "linux")]
     Run {
         image: String,
         #[arg(long)]
@@ -123,6 +131,7 @@ pub enum Commands {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
+    #[cfg(target_os = "linux")]
     Build {
         dockerfile: Option<String>,
         #[arg(long)]
@@ -140,56 +149,69 @@ pub enum Commands {
         image: String,
     },
     ImagePrune,
+    #[cfg(target_os = "linux")]
     Volume {
         #[command(subcommand)]
         command: VolumeCommands,
     },
+    #[cfg(target_os = "linux")]
     Network {
         #[command(subcommand)]
         command: NetworkCommands,
     },
+    #[cfg(target_os = "linux")]
     #[command(alias = "ps")]
     Containers {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Logs {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Stats {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Inspect {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Pause {
         container: String,
     },
+    #[cfg(target_os = "linux")]
     Unpause {
         container: String,
     },
+    #[cfg(target_os = "linux")]
     Stop {
         container: String,
         #[arg(long, default_value = "10")]
         timeout: u64,
     },
+    #[cfg(target_os = "linux")]
     Kill {
         container: String,
     },
+    #[cfg(target_os = "linux")]
     Rm {
         container: String,
     },
+    #[cfg(target_os = "linux")]
     Restart {
         container: String,
         #[arg(long, default_value = "10")]
         timeout: u64,
     },
+    #[cfg(target_os = "linux")]
     Exec {
         container: String,
         #[arg(trailing_var_arg = true)]
@@ -203,17 +225,20 @@ pub enum Commands {
     Push {
         image: String,
     },
+    #[cfg(target_os = "linux")]
     Scan {
         image: String,
         #[arg(long, default_value = "auto")]
         scanner: String,
     },
+    #[cfg(target_os = "linux")]
     Compose {
         #[arg(short, long)]
         file: Option<String>,
         #[command(subcommand)]
         command: ComposeCommands,
     },
+    #[cfg(target_os = "linux")]
     Daemon {
         #[arg(long, default_value = "/var/run/ferrocrate.sock")]
         socket: String,
@@ -225,6 +250,7 @@ pub enum Commands {
     Completion {
         shell: String,
     },
+    #[cfg(target_os = "linux")]
     Tui,
     Ai {
         #[command(subcommand)]
@@ -271,12 +297,14 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     AiBranch {
         source: String,
         target: String,
         #[arg(long)]
         force: bool,
     },
+    #[cfg(target_os = "linux")]
     AiLineage {
         path: String,
         #[arg(long = "parent-file")]
@@ -421,12 +449,14 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Branch {
         source: String,
         target: String,
         #[arg(long)]
         force: bool,
     },
+    #[cfg(target_os = "linux")]
     Lineage {
         path: String,
         #[arg(long = "parent-file")]
@@ -436,6 +466,7 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Migrate {
         #[arg(long)]
         source: Option<String>,
@@ -565,17 +596,7 @@ fn maybe_windows_desktop_forward(_raw_args: &[String]) -> Result<bool, String> {
 }
 
 fn dispatch(command: Commands) -> Result<(), String> {
-    let runtime_dir = runtime_dir();
-    if let Commands::Daemon {
-        ref socket,
-        docker_compat,
-        ref metrics_addr,
-    } = command
-    {
-        let image_store =
-            LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
-        return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
-    }
+    // Handle platform-agnostic commands that don't need runtime
     if let Commands::AiAudit {
         ref action,
         ref summary,
@@ -585,11 +606,28 @@ fn dispatch(command: Commands) -> Result<(), String> {
         return handle_ai_audit(action, summary, evidence);
     }
 
-    let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
-    let image_store =
-        LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
+    #[cfg(target_os = "linux")]
+    {
+        let runtime_dir = runtime_dir();
 
-    match command {
+        // Handle Daemon command
+        if let Commands::Daemon {
+            ref socket,
+            docker_compat,
+            ref metrics_addr,
+        } = command
+        {
+            let image_store =
+                LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
+            return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
+        }
+
+        let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
+        let image_store =
+            LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
+
+        match command {
+        #[cfg(target_os = "linux")]
         Commands::Run {
             image,
             cmd,
@@ -669,6 +707,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 ai_model.as_deref(),
             )
         }
+        #[cfg(target_os = "linux")]
         Commands::Build {
             dockerfile,
             ferrofile,
@@ -685,21 +724,35 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Rmi { image } => handle_rmi(&image_store, &image),
         Commands::ImagePrune => handle_image_prune(&image_store),
         Commands::Volume { command } => handle_volume(&runtime_dir, command),
+        #[cfg(target_os = "linux")]
         Commands::Network { command } => handle_network(&runtime_dir, &runtime, command),
+        #[cfg(target_os = "linux")]
         Commands::Containers { format } => handle_containers(&runtime, &format),
+        #[cfg(target_os = "linux")]
         Commands::Logs { container, format } => handle_logs(&runtime, &container, &format),
+        #[cfg(target_os = "linux")]
         Commands::Inspect { container, format } => handle_inspect(&runtime, &container, &format),
+        #[cfg(target_os = "linux")]
         Commands::Stats { container, format } => handle_stats(&runtime, &container, &format),
+        #[cfg(target_os = "linux")]
         Commands::Pause { container } => handle_pause(&runtime, &container),
+        #[cfg(target_os = "linux")]
         Commands::Unpause { container } => handle_unpause(&runtime, &container),
+        #[cfg(target_os = "linux")]
         Commands::Stop { container, timeout } => handle_stop(&runtime, &container, timeout),
+        #[cfg(target_os = "linux")]
         Commands::Kill { container } => handle_kill(&runtime, &container),
+        #[cfg(target_os = "linux")]
         Commands::Rm { container } => handle_rm(&runtime, &container),
+        #[cfg(target_os = "linux")]
         Commands::Restart { container, timeout } => handle_restart(&runtime, &container, timeout),
+        #[cfg(target_os = "linux")]
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
+        #[cfg(target_os = "linux")]
         Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner),
+        #[cfg(target_os = "linux")]
         Commands::Compose { file, command } => {
             let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                 .map_err(|err| err.to_string())?;
@@ -714,6 +767,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Daemon { .. } => {
             unreachable!("daemon command handled before runtime initialization")
         }
+        #[cfg(target_os = "linux")]
         Commands::Completion { shell } => handle_completion(&shell),
         Commands::Tui => handle_tui(&runtime),
         Commands::Ai { command } => handle_ai(command),
@@ -790,6 +844,80 @@ fn dispatch(command: Commands) -> Result<(), String> {
             evidence,
         } => handle_ai_audit(&action, &summary, &evidence),
         Commands::Migrate { target } => handle_migrate(target),
+        }
+    }
+
+    // Non-Linux: only handle platform-agnostic commands
+    #[cfg(not(target_os = "linux"))]
+    {
+        let image_store_path = std::env::var("FERROCRATE_IMAGE_STORE")
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                format!("{}/.ferrocrate/images", home)
+            });
+        let image_store = LocalImageStore::open(image_store_path).map_err(|err| err.to_string())?;
+
+        match command {
+            Commands::Images { format } => handle_images(&image_store, &format),
+            Commands::Rmi { image } => handle_rmi(&image_store, &image),
+            Commands::ImagePrune => handle_image_prune(&image_store),
+            Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
+            Commands::Push { image } => handle_push(&image_store, &image),
+            Commands::Ai { command } => handle_ai(command),
+            Commands::AiTrain {
+                model_type,
+                data_dir,
+                models_dir,
+                output,
+                format,
+            } => handle_ai(AiCommands::Train {
+                model_type,
+                data_dir,
+                models_dir,
+                output,
+                format,
+            }),
+            Commands::AiExport {
+                model_type,
+                output,
+                models_dir,
+                format,
+            } => handle_ai(AiCommands::Export {
+                model_type,
+                output,
+                models_dir,
+                format,
+            }),
+            Commands::AiImport {
+                model_type,
+                input,
+                models_dir,
+                format,
+            } => handle_ai(AiCommands::Import {
+                model_type,
+                input,
+                models_dir,
+                format,
+            }),
+            Commands::AiStats {
+                path,
+                model_type,
+                models_dir,
+                format,
+            } => handle_ai(AiCommands::Stats {
+                path,
+                model_type,
+                models_dir,
+                format,
+            }),
+            Commands::Config { command } => handle_config(command),
+            Commands::AiAudit {
+                action,
+                summary,
+                evidence,
+            } => handle_ai_audit(&action, &summary, &evidence),
+            _ => Err("This command is not supported on this platform".to_string()),
+        }
     }
 }
 
@@ -870,19 +998,31 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 .map_err(|err| format!("ai train: {err}"))?;
             if let Some(output) = output {
                 let output_path = PathBuf::from(output);
-                let is_rvf = output_path
-                    .extension()
-                    .map(|ext| ext.eq_ignore_ascii_case("rvf"))
-                    .unwrap_or(false);
-                if is_rvf {
-                    handle_export_rvf_command(
-                        &model_type,
-                        &output_path,
-                        data_dir_path,
-                        models_dir_path,
-                    )
-                    .map_err(|err| format!("ai train: {err}"))?;
-                } else {
+                #[cfg(target_os = "linux")]
+                {
+                    let is_rvf = output_path
+                        .extension()
+                        .map(|ext| ext.eq_ignore_ascii_case("rvf"))
+                        .unwrap_or(false);
+                    if is_rvf {
+                        handle_export_rvf_command(
+                            &model_type,
+                            &output_path,
+                            data_dir_path,
+                            models_dir_path,
+                        )
+                        .map_err(|err| format!("ai train: {err}"))?;
+                    } else {
+                        if let Some(parent) = output_path.parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|err| format!("ai train: {err}"))?;
+                        }
+                        std::fs::copy(&result.model_path, &output_path)
+                            .map_err(|err| format!("ai train: {err}"))?;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
                     if let Some(parent) = output_path.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|err| format!("ai train: {err}"))?;
@@ -927,10 +1067,18 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 .extension()
                 .map(|ext| ext.eq_ignore_ascii_case("rvf"))
                 .unwrap_or(false);
-            let exported = if is_rvf {
-                handle_export_rvf_command(&model_type, &output_path, None, models_dir_path)
-                    .map_err(|err| format!("ai export: {err}"))?
-            } else {
+            #[cfg(target_os = "linux")]
+            let exported = {
+                if is_rvf {
+                    handle_export_rvf_command(&model_type, &output_path, None, models_dir_path)
+                        .map_err(|err| format!("ai export: {err}"))?
+                } else {
+                    handle_export_command(&model_type, &output_path, models_dir_path)
+                        .map_err(|err| format!("ai export: {err}"))?
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let exported = {
                 handle_export_command(&model_type, &output_path, models_dir_path)
                     .map_err(|err| format!("ai export: {err}"))?
             };
@@ -979,6 +1127,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             format,
         } => {
             let models_dir_path = models_dir.as_deref().map(Path::new);
+            #[cfg(target_os = "linux")]
             if let Some(path) = path {
                 let rvf = handle_rvf_stats_command(Path::new(&path))
                     .map_err(|err| format!("ai stats: {err}"))?;
@@ -1035,6 +1184,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             );
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         AiCommands::Branch {
             source,
             target,
@@ -1050,6 +1200,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             println!("ai branch: wrote {}", out.display());
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         AiCommands::Lineage {
             path,
             parent_file,
@@ -1102,6 +1253,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             }
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         AiCommands::Migrate {
             source,
             target,
@@ -1242,6 +1394,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "linux")]
 fn handle_run(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
@@ -1393,6 +1546,7 @@ fn handle_completion(shell: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
@@ -1597,6 +1751,7 @@ impl Drop for ScopedEnv {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_container_exit(runtime: &ContainerRuntime, id: &str) -> Result<(), String> {
     loop {
         let record = runtime.inspect(id).map_err(|err| err.to_string())?;
@@ -1637,6 +1792,7 @@ fn latest_mtime(root: &Path) -> Result<SystemTime, String> {
     Ok(latest)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::BindMount>, String> {
     let mut out = Vec::new();
     for entry in bind_mounts {
@@ -1656,6 +1812,7 @@ fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::B
     Ok(out)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_volume_mounts(
     volume_store: &LocalVolumeStore,
     volumes: &[String],
@@ -1721,6 +1878,7 @@ fn parse_publish(
     Ok(out)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_tmpfs_mounts(
     tmpfs_mounts: &[String],
 ) -> Result<Vec<ferro_core::mounts::TmpfsMount>, String> {
@@ -1780,6 +1938,7 @@ fn build_limits(
     }))
 }
 
+#[cfg(target_os = "linux")]
 fn handle_build(
     store: &LocalImageStore,
     dockerfile: Option<&str>,
@@ -1917,6 +2076,7 @@ fn handle_image_prune(store: &LocalImageStore) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), String> {
     let records = runtime.list().map_err(|err| err.to_string())?;
     if format == "json" {
@@ -1941,6 +2101,7 @@ fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_logs(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
@@ -1960,6 +2121,7 @@ fn handle_logs(runtime: &ContainerRuntime, container: &str, format: &str) -> Res
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_inspect(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("inspect: container is required".to_string());
@@ -1988,6 +2150,7 @@ struct StatsOutput {
     stats: ferro_core::cgroups::CgroupStats,
 }
 
+#[cfg(target_os = "linux")]
 fn handle_stats(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("stats: container is required".to_string());
@@ -2016,6 +2179,7 @@ fn handle_stats(runtime: &ContainerRuntime, container: &str, format: &str) -> Re
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_pause(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("pause: container is required".to_string());
@@ -2026,6 +2190,7 @@ fn handle_pause(runtime: &ContainerRuntime, container: &str) -> Result<(), Strin
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_unpause(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("unpause: container is required".to_string());
@@ -2036,6 +2201,7 @@ fn handle_unpause(runtime: &ContainerRuntime, container: &str) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("stop: container is required".to_string());
@@ -2048,6 +2214,7 @@ fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Res
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_kill(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("kill: container is required".to_string());
@@ -2058,6 +2225,7 @@ fn handle_kill(runtime: &ContainerRuntime, container: &str) -> Result<(), String
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_rm(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("rm: container is required".to_string());
@@ -2068,6 +2236,7 @@ fn handle_rm(runtime: &ContainerRuntime, container: &str) -> Result<(), String> 
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("restart: container is required".to_string());
@@ -2276,6 +2445,7 @@ fn resolve_named_network(runtime_dir: &Path, name: &str) -> Result<NetworkRecord
         .ok_or_else(|| format!("network: not found {name}"))
 }
 
+#[cfg(target_os = "linux")]
 fn handle_network(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
@@ -2435,6 +2605,7 @@ fn parse_restart_policy(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_capabilities(entries: &[String]) -> Result<Vec<caps::Capability>, String> {
     let mut out = Vec::new();
     for entry in entries {
@@ -2455,6 +2626,7 @@ fn parse_capabilities(entries: &[String]) -> Result<Vec<caps::Capability>, Strin
     Ok(out)
 }
 
+#[cfg(target_os = "linux")]
 fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
@@ -2475,6 +2647,7 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<String, String> {
     if runtime.inspect(container).is_ok() {
         return Ok(container.to_string());
@@ -2554,6 +2727,7 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_scan(store: &LocalImageStore, image: &str, scanner: &str) -> Result<(), String> {
     ensure_image_present(store, image)?;
     let runtime_dir = runtime_dir();
@@ -2612,6 +2786,7 @@ fn run_scanner(scanner: &str, rootfs: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn handle_compose(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
@@ -2725,6 +2900,7 @@ fn build_compose_enabled_set(
     Ok(enabled)
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_compose_dependencies(
     runtime: &ContainerRuntime,
     depends_on: &ComposeDependsOn,
@@ -2753,6 +2929,7 @@ fn wait_for_compose_dependencies(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
     let id = resolve_container_id(runtime, service)?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -2778,6 +2955,7 @@ fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_compose_service(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
@@ -2877,6 +3055,7 @@ fn run_compose_service(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn build_compose_image(
     store: &LocalImageStore,
     project_dir: &Path,
@@ -3098,6 +3277,7 @@ struct DockerCompatState {
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
 }
 
+#[cfg(target_os = "linux")]
 fn run_daemon(
     store: &LocalImageStore,
     socket: &str,
@@ -3161,6 +3341,7 @@ fn run_daemon(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn start_metrics_server(
     runtime_dir: Arc<PathBuf>,
     store: Arc<LocalImageStore>,
@@ -3195,6 +3376,7 @@ fn start_metrics_server(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn build_metrics(runtime_dir: &Path, store: &LocalImageStore, started_at: Instant) -> String {
     let containers = match ContainerRuntime::new(runtime_dir) {
         Ok(runtime) => runtime.list().unwrap_or_default(),
@@ -3229,6 +3411,7 @@ ferrocrate_uptime_seconds {}\\n",
     )
 }
 
+#[cfg(target_os = "linux")]
 fn handle_docker_compat_connection(
     mut stream: UnixStream,
     runtime_dir: Arc<PathBuf>,

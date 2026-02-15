@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
@@ -19,7 +20,9 @@ use crate::mounts::{
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
 use crate::registry::parse_image_reference;
+#[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
+#[cfg(target_os = "linux")]
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use ferro_net::bridge;
 use ferro_net::ebpf::{
@@ -37,6 +40,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

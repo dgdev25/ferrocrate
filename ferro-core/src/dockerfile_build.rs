@@ -6,11 +6,14 @@ use crate::image_fetch::{pull_image_with_store, resolve_layer_paths_with_store};
 use crate::image_manifest::parse_image_manifest;
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::{canonicalize_reference, resolve_reference};
+#[cfg(target_os = "linux")]
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
+#[cfg(target_os = "linux")]
 use crate::capabilities::drop_all_capabilities;
 use crate::layer_compression::{
     CompressionFormat, LayerCompressionError, compress_bytes_gzip, compress_bytes_zstd,
 };
+#[cfg(target_os = "linux")]
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,7 +22,9 @@ use std::ffi::CString;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

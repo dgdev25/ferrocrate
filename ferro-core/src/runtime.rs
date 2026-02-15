@@ -247,13 +247,61 @@ impl ContainerRuntime {
         let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup"));
-        Ok(Self {
+        let runtime = Self {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
             health_cancel: std::sync::Mutex::new(HashMap::new()),
             resource_cancel: std::sync::Mutex::new(HashMap::new()),
-        })
+        };
+        runtime.reconcile_persisted_state()?;
+        Ok(runtime)
+    }
+
+    fn reconcile_persisted_state(&self) -> Result<(), RuntimeError> {
+        let records = self.store.list()?;
+        for mut record in records {
+            if record.status != "running" && record.status != "paused" {
+                continue;
+            }
+            if process_exists(record.pid) {
+                continue;
+            }
+
+            log::warn!(
+                "[reconcile] container {} had stale {} pid {}, marking exited",
+                record.id,
+                record.status,
+                record.pid
+            );
+            record.status = "exited".to_string();
+            if record.last_exit_code.is_none() {
+                record.last_exit_code = Some(-1);
+            }
+            self.store.put(&record)?;
+            let _ = log_event(
+                &self.runtime_dir,
+                make_event(
+                    "reconcile",
+                    Some(&record.id),
+                    Some(&record.image),
+                    Some("exited"),
+                    Some("stale pid not running"),
+                ),
+            );
+            let _ = log_audit_event(
+                &self.runtime_dir,
+                make_audit_event(
+                    "reconcile",
+                    audit_actor().as_str(),
+                    Some(&record.id),
+                    Some(&record.image),
+                    Some("exited"),
+                    Some("stale pid not running"),
+                ),
+            );
+        }
+        Ok(())
     }
 
     pub fn run(
@@ -974,6 +1022,10 @@ fn stream_to_file_with_options<R: std::io::Read>(
     };
     std::io::copy(&mut reader, &mut file)?;
     Ok(())
+}
+
+fn process_exists(pid: u32) -> bool {
+    fs::metadata(format!("/proc/{pid}")).is_ok()
 }
 
 fn spawn_process_with_logs(
@@ -3353,6 +3405,96 @@ mod tests {
             .find(|c| c.id == record.id)
             .expect("record");
         assert_ne!(updated.pid, record.pid);
+    }
+
+    #[test]
+    fn startup_reconcile_marks_stale_running_pid_exited() {
+        let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
+                .expect("store");
+
+        let record = ContainerRecord {
+            id: "stale-running".to_string(),
+            name: None,
+            pid: 999_999,
+            image: "alpine:latest".to_string(),
+            command: vec!["sleep".to_string(), "1".to_string()],
+            workdir: None,
+            user: None,
+            env: Vec::new(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            capabilities: Vec::new(),
+            health: None,
+            health_status: "none".to_string(),
+            health_failures: 0,
+            health_checked_at_unix: None,
+            restart_policy: RestartPolicy::No,
+            last_exit_code: None,
+            created_at_unix: now_unix(),
+            stdout_path: "stdout.log".to_string(),
+            stderr_path: "stderr.log".to_string(),
+            status: "running".to_string(),
+            netns: None,
+            network_name: None,
+            ip_address: None,
+            ipv6_address: None,
+            ports: Vec::new(),
+        };
+        store.put(&record).expect("seed stale record");
+        drop(store);
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let reconciled = runtime.inspect("stale-running").expect("inspect");
+        assert_eq!(reconciled.status, "exited");
+        assert_eq!(reconciled.last_exit_code, Some(-1));
+    }
+
+    #[test]
+    fn startup_reconcile_keeps_live_running_pid() {
+        let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
+                .expect("store");
+
+        let record = ContainerRecord {
+            id: "live-running".to_string(),
+            name: None,
+            pid: std::process::id(),
+            image: "alpine:latest".to_string(),
+            command: vec!["sleep".to_string(), "1".to_string()],
+            workdir: None,
+            user: None,
+            env: Vec::new(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            capabilities: Vec::new(),
+            health: None,
+            health_status: "none".to_string(),
+            health_failures: 0,
+            health_checked_at_unix: None,
+            restart_policy: RestartPolicy::No,
+            last_exit_code: None,
+            created_at_unix: now_unix(),
+            stdout_path: "stdout.log".to_string(),
+            stderr_path: "stderr.log".to_string(),
+            status: "running".to_string(),
+            netns: None,
+            network_name: None,
+            ip_address: None,
+            ipv6_address: None,
+            ports: Vec::new(),
+        };
+        store.put(&record).expect("seed live record");
+        drop(store);
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let reconciled = runtime.inspect("live-running").expect("inspect");
+        assert_eq!(reconciled.status, "running");
+        assert_eq!(reconciled.last_exit_code, None);
     }
 
     #[test]

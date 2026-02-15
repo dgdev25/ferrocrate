@@ -23,7 +23,8 @@ use crate::rootfs::construct_rootfs_with_dedup;
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use ferro_net::bridge;
 use ferro_net::ebpf::{
-    build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, EbpfProgram,
+    build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
+    EbpfProgram, SecurityMonitorConfig,
 };
 use ferro_net::netns;
 use ferro_net::nftables::{build_nft_add_rule_cmd, build_nft_delete_rule_cmd, NftRule};
@@ -452,6 +453,13 @@ impl ContainerRuntime {
                 return Err(e);
             }
         }
+        if security_ebpf_monitor_enabled() {
+            if let Err(e) = setup_security_ebpf_monitor(&container_id) {
+                let _ = kill_pid(child_id);
+                rollback.rollback();
+                return Err(e);
+            }
+        }
 
         if let Some(limits) = limits {
             let manager = CgroupV2Manager::new(&self.cgroup_root);
@@ -807,6 +815,9 @@ impl ContainerRuntime {
             false,
             seccomp_profile.as_ref(),
         )?;
+        if security_ebpf_monitor_enabled() {
+            setup_security_ebpf_monitor(&record.id)?;
+        }
 
         record.pid = child_id;
         record.status = "running".to_string();
@@ -2457,6 +2468,61 @@ fn setup_ebpf_monitor(iface: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+fn security_ebpf_monitor_enabled() -> bool {
+    std::env::var("FERROCRATE_EBPF_SECURITY_MONITOR")
+        .or_else(|_| std::env::var("FERROCRATE_SECURITY_EBPF_MONITOR"))
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn security_ebpf_events() -> Vec<String> {
+    std::env::var("FERROCRATE_EBPF_SECURITY_EVENTS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|events| !events.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                "execve".to_string(),
+                "connect".to_string(),
+                "open".to_string(),
+                "ptrace".to_string(),
+                "mount".to_string(),
+                "unshare".to_string(),
+            ]
+        })
+}
+
+fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
+    if !command_available("bpftool") {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor requires bpftool".to_string(),
+        ));
+    }
+    let object_path = std::env::var("FERROCRATE_EBPF_SECURITY_OBJECT")
+        .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-security.o".to_string());
+    let pin_root = std::env::var("FERROCRATE_EBPF_SECURITY_PIN_ROOT")
+        .unwrap_or_else(|_| format!("/sys/fs/bpf/ferrocrate-security-{container_id}"));
+    let config = SecurityMonitorConfig {
+        object_path,
+        pin_root,
+        events: security_ebpf_events(),
+    };
+    let installed =
+        install_security_monitor(&config).map_err(|err| RuntimeError::Network(err.to_string()))?;
+    log::info!(
+        "security ebpf monitor active for container {} events={:?}",
+        container_id,
+        installed
+    );
+    Ok(())
+}
+
 fn short_id(value: &str, max: usize) -> String {
     value
         .chars()
@@ -3429,6 +3495,28 @@ mod tests {
         assert!(profile.is_none());
         unsafe {
             std::env::remove_var("FERROCRATE_SECCOMP");
+        }
+    }
+
+    #[test]
+    fn security_ebpf_events_default_and_env_override() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_EBPF_SECURITY_EVENTS");
+        }
+        assert_eq!(
+            super::security_ebpf_events(),
+            vec!["execve", "connect", "open", "ptrace", "mount", "unshare"]
+        );
+        unsafe {
+            std::env::set_var("FERROCRATE_EBPF_SECURITY_EVENTS", "execve,connect, open");
+        }
+        assert_eq!(
+            super::security_ebpf_events(),
+            vec!["execve", "connect", "open"]
+        );
+        unsafe {
+            std::env::remove_var("FERROCRATE_EBPF_SECURITY_EVENTS");
         }
     }
 

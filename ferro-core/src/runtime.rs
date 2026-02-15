@@ -1384,12 +1384,7 @@ fn setup_network(
         }
         return Ok((None, None, None));
     }
-    let effective_backend = if network_backend == "ebpf" {
-        eprintln!("WARNING: eBPF network backend is not yet implemented, falling back to iptables");
-        "iptables"
-    } else {
-        network_backend
-    };
+    let effective_backend = resolve_network_backend(network_backend, container_id)?;
     if !port_mappings.is_empty()
         && effective_backend != "iptables"
         && effective_backend != "nftables"
@@ -2136,6 +2131,30 @@ fn selected_network_name(network_mode: &str) -> Option<String> {
         "wireguard" => Some("wireguard".to_string()),
         _ => None,
     }
+}
+
+fn ebpf_strict_mode() -> bool {
+    std::env::var("FERROCRATE_EBPF_STRICT")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn resolve_network_backend(requested: &str, container_id: &str) -> Result<String, RuntimeError> {
+    if requested != "ebpf" {
+        return Ok(requested.to_string());
+    }
+    let reason = "ebpf data path is not implemented in runtime network setup";
+    if ebpf_strict_mode() {
+        return Err(RuntimeError::Network(format!(
+            "ebpf backend requested for {container_id} but unavailable: {reason}"
+        )));
+    }
+    let message = format!(
+        "eBPF backend requested for {container_id}; falling back to iptables ({reason}). Set FERROCRATE_EBPF_STRICT=1 to fail instead."
+    );
+    eprintln!("WARNING: {message}");
+    log::warn!("{message}");
+    Ok("iptables".to_string())
 }
 
 fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, _prefix: u8) -> String {
@@ -3014,6 +3033,30 @@ mod tests {
         unsafe {
             std::env::remove_var("FERROCRATE_DNS_SERVERS");
             std::env::remove_var("FERROCRATE_DNS_SEARCH");
+        }
+    }
+
+    #[test]
+    fn ebpf_backend_falls_back_to_iptables_by_default() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_EBPF_STRICT");
+        }
+        let backend = super::resolve_network_backend("ebpf", "c1").expect("fallback backend");
+        assert_eq!(backend, "iptables");
+    }
+
+    #[test]
+    fn ebpf_backend_strict_mode_fails() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::set_var("FERROCRATE_EBPF_STRICT", "1");
+        }
+        let err = super::resolve_network_backend("ebpf", "c1").expect_err("strict failure");
+        let message = err.to_string();
+        assert!(message.contains("ebpf backend requested"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_EBPF_STRICT");
         }
     }
 

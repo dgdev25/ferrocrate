@@ -7,7 +7,13 @@ set -euo pipefail
 
 OUT_IMAGE="${1:-./tmp/ferrocrate-desktop.qcow2}"
 SIZE_GB="${2:-20}"
-BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-amd64.img}"
+ARCH_NAME="$(uname -m)"
+case "$ARCH_NAME" in
+  arm64|aarch64) ARCH_TAG="arm64" ;;
+  x86_64|amd64) ARCH_TAG="amd64" ;;
+  *) echo "unsupported architecture: $ARCH_NAME" >&2; exit 1 ;;
+esac
+BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-${ARCH_TAG}.img}"
 CACHE_DIR="${CACHE_DIR:-./tmp/vm-cache}"
 BASE_IMAGE="${CACHE_DIR}/base-cloudimg.qcow2"
 BASE_IMAGE_SHA256="${BASE_IMAGE_SHA256:-}"
@@ -24,16 +30,23 @@ require() {
 
 require curl
 require qemu-img
-require sha256sum
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256SUM_BIN="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  SHA256SUM_BIN="shasum -a 256"
+else
+  echo "missing required tool: sha256sum (or shasum -a 256)" >&2
+  exit 1
+fi
 
 if [[ ! -f "$BASE_IMAGE" ]]; then
   echo "Downloading base cloud image..."
-  curl -L "$BASE_IMAGE_URL" -o "$BASE_IMAGE"
+  curl -fL "$BASE_IMAGE_URL" -o "$BASE_IMAGE"
 fi
 
 if [[ -n "$BASE_IMAGE_SHA256" ]]; then
   echo "Verifying base image checksum..."
-  actual_sha="$(sha256sum "$BASE_IMAGE" | awk '{print $1}')"
+  actual_sha="$($SHA256SUM_BIN "$BASE_IMAGE" | awk '{print $1}')"
   if [[ "$actual_sha" != "$BASE_IMAGE_SHA256" ]]; then
     echo "base image checksum mismatch: expected=$BASE_IMAGE_SHA256 actual=$actual_sha" >&2
     exit 1

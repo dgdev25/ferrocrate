@@ -29,6 +29,12 @@ pub enum ImageManifestParseError {
     InvalidConfigMediaType(String),
     #[error("unsupported layer mediaType: {0}")]
     InvalidLayerMediaType(String),
+    #[error("unsupported schemaVersion: {0}")]
+    InvalidSchemaVersion(u32),
+    #[error("invalid descriptor digest: {0}")]
+    InvalidDescriptorDigest(String),
+    #[error("invalid descriptor size: {0}")]
+    InvalidDescriptorSize(i64),
 }
 
 /// Parse an OCI Image Spec v1.1 manifest document and validate core media types.
@@ -61,6 +67,11 @@ pub struct ImageManifest {
 
 impl ImageManifest {
     pub fn validate(&self) -> Result<(), ImageManifestParseError> {
+        if self.schema_version != 2 {
+            return Err(ImageManifestParseError::InvalidSchemaVersion(
+                self.schema_version,
+            ));
+        }
         if self.media_type != OCI_IMAGE_MANIFEST_MEDIA_TYPE
             && self.media_type != DOCKER_MANIFEST_MEDIA_TYPE
         {
@@ -76,6 +87,7 @@ impl ImageManifest {
                 self.config.media_type.clone(),
             ));
         }
+        validate_descriptor(&self.config)?;
 
         for layer in &self.layers {
             let supported = layer.media_type == OCI_IMAGE_LAYER_MEDIA_TYPE
@@ -89,6 +101,7 @@ impl ImageManifest {
                     layer.media_type.clone(),
                 ));
             }
+            validate_descriptor(layer)?;
         }
 
         Ok(())
@@ -117,6 +130,11 @@ pub struct ImageIndex {
 
 impl ImageIndex {
     pub fn validate(&self) -> Result<(), ImageManifestParseError> {
+        if self.schema_version != 2 {
+            return Err(ImageManifestParseError::InvalidSchemaVersion(
+                self.schema_version,
+            ));
+        }
         if self.media_type != OCI_IMAGE_INDEX_MEDIA_TYPE
             && self.media_type != DOCKER_MANIFEST_LIST_MEDIA_TYPE
         {
@@ -124,8 +142,36 @@ impl ImageIndex {
                 self.media_type.clone(),
             ));
         }
+        for descriptor in &self.manifests {
+            validate_descriptor(descriptor)?;
+            let manifest_type = descriptor.media_type == OCI_IMAGE_MANIFEST_MEDIA_TYPE
+                || descriptor.media_type == DOCKER_MANIFEST_MEDIA_TYPE;
+            if !manifest_type {
+                return Err(ImageManifestParseError::InvalidManifestMediaType(
+                    descriptor.media_type.clone(),
+                ));
+            }
+        }
         Ok(())
     }
+}
+
+fn validate_descriptor(descriptor: &Descriptor) -> Result<(), ImageManifestParseError> {
+    if descriptor.size < 0 {
+        return Err(ImageManifestParseError::InvalidDescriptorSize(descriptor.size));
+    }
+    let digest = descriptor.digest.as_str();
+    let Some(value) = digest.strip_prefix("sha256:") else {
+        return Err(ImageManifestParseError::InvalidDescriptorDigest(
+            descriptor.digest.clone(),
+        ));
+    };
+    if value.len() != 64 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(ImageManifestParseError::InvalidDescriptorDigest(
+            descriptor.digest.clone(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,7 +200,7 @@ pub struct Platform {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_image_manifest;
+    use super::{parse_image_index, parse_image_manifest};
 
     #[test]
     fn parses_valid_oci_image_manifest() {
@@ -231,5 +277,63 @@ mod tests {
 
         let err = parse_image_manifest(manifest).expect_err("should reject unknown layer media type");
         assert!(err.to_string().contains("unsupported layer mediaType"));
+    }
+
+    #[test]
+    fn rejects_invalid_schema_version() {
+        let manifest = r#"
+        {
+          "schemaVersion": 1,
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size": 7023
+          },
+          "layers": []
+        }
+        "#;
+        let err = parse_image_manifest(manifest).expect_err("invalid schema");
+        assert!(err.to_string().contains("unsupported schemaVersion"));
+    }
+
+    #[test]
+    fn rejects_invalid_descriptor_digest_and_size() {
+        let manifest = r#"
+        {
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": "sha256:nothex",
+            "size": -1
+          },
+          "layers": []
+        }
+        "#;
+        let err = parse_image_manifest(manifest).expect_err("invalid descriptor");
+        assert!(
+            err.to_string().contains("invalid descriptor digest")
+                || err.to_string().contains("invalid descriptor size")
+        );
+    }
+
+    #[test]
+    fn rejects_index_with_non_manifest_descriptor_type() {
+        let index = r#"
+        {
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.oci.image.index.v1+json",
+          "manifests": [
+            {
+              "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "size": 1234
+            }
+          ]
+        }
+        "#;
+        let err = parse_image_index(index).expect_err("invalid index descriptor type");
+        assert!(err.to_string().contains("unsupported manifest mediaType"));
     }
 }

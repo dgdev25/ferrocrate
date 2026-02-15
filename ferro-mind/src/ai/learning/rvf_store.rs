@@ -6,6 +6,7 @@ use rvf_runtime::{QueryOptions, RvfOptions, RvfStore as BackendStore};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -37,6 +38,7 @@ pub struct RvfStore {
     _path: PathBuf,
     dimensions: usize,
     pending: Mutex<PendingBatch>,
+    has_pending: AtomicBool,
 }
 
 #[derive(Default)]
@@ -76,6 +78,7 @@ impl RvfStore {
             _path: path,
             dimensions,
             pending: Mutex::new(PendingBatch::default()),
+            has_pending: AtomicBool::new(false),
         })
     }
 
@@ -89,6 +92,7 @@ impl RvfStore {
             let mut pending = self.pending.lock();
             pending.vectors.push(vector.to_vec());
             pending.ids.push(rvf_id);
+            self.has_pending.store(true, Ordering::Relaxed);
             if pending.vectors.len() >= Self::FLUSH_BATCH_SIZE {
                 drop(pending);
                 self.flush_pending()?;
@@ -121,7 +125,11 @@ impl RvfStore {
 
     pub fn len(&self) -> usize {
         let committed = self.backend.lock().status().total_vectors as usize;
-        let buffered = self.pending.lock().vectors.len();
+        let buffered = if self.has_pending.load(Ordering::Relaxed) {
+            self.pending.lock().vectors.len()
+        } else {
+            0
+        };
         committed + buffered
     }
 
@@ -130,8 +138,12 @@ impl RvfStore {
     }
 
     fn flush_pending(&self) -> Result<()> {
+        if !self.has_pending.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let mut pending = self.pending.lock();
         if pending.vectors.is_empty() {
+            self.has_pending.store(false, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -143,6 +155,7 @@ impl RvfStore {
             .map_err(|err| RvfStoreError::Runtime(err.to_string()))?;
         pending.vectors.clear();
         pending.ids.clear();
+        self.has_pending.store(false, Ordering::Relaxed);
         Ok(())
     }
 }

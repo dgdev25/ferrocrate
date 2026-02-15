@@ -5,7 +5,9 @@
 //! 2. Analyzing memory growth trends
 //! 3. Predicting when memory will exceed limits
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+#[cfg(feature = "rvf-persistence")]
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use ruv_fann::{Network, NetworkBuilder};
 use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
@@ -374,6 +376,7 @@ impl ResourcePredictor {
         self.memory_limit = limit;
     }
 
+    #[cfg(feature = "rvf-persistence")]
     fn sample_vector(sample: &ResourceSample) -> Vec<f32> {
         vec![
             sample.cpu_percent / 100.0,

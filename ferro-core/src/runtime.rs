@@ -2343,6 +2343,12 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
     if limit.trim().is_empty() {
         return Ok(());
     }
+    if !command_available("tc") {
+        return Err(RuntimeError::Network(
+            "bandwidth limit requires tc command".to_string(),
+        ));
+    }
+    let rate = validate_bandwidth_limit(limit)?;
     let cmd = vec![
         "tc".to_string(),
         "qdisc".to_string(),
@@ -2352,13 +2358,50 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
         "root".to_string(),
         "tbf".to_string(),
         "rate".to_string(),
-        limit.to_string(),
+        rate.clone(),
         "burst".to_string(),
         "32kbit".to_string(),
         "latency".to_string(),
         "400ms".to_string(),
     ];
-    run_cmd(&cmd)
+    run_cmd(&cmd)?;
+    let verify = vec![
+        "tc".to_string(),
+        "qdisc".to_string(),
+        "show".to_string(),
+        "dev".to_string(),
+        link.to_string(),
+    ];
+    let (bin, rest) = parse_cmd_args(&verify)?;
+    let output = Command::new(bin).args(rest).output()?;
+    if !output.status.success() {
+        return Err(RuntimeError::Network("failed to verify bandwidth limit".to_string()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("tbf") {
+        return Err(RuntimeError::Network(format!(
+            "bandwidth limit verification failed for {link}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bandwidth_limit(limit: &str) -> Result<String, RuntimeError> {
+    let value = limit.trim().to_ascii_lowercase();
+    let units = ["kbit", "mbit", "gbit"];
+    let unit = units
+        .iter()
+        .find(|unit| value.ends_with(*unit))
+        .ok_or_else(|| {
+            RuntimeError::Network("bandwidth limit must end with kbit, mbit, or gbit".to_string())
+        })?;
+    let digits = value.trim_end_matches(unit);
+    if digits.is_empty() || digits.parse::<u64>().map(|v| v == 0).unwrap_or(true) {
+        return Err(RuntimeError::Network(
+            "bandwidth limit must be a positive integer with unit".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn ebpf_monitor_enabled() -> bool {
@@ -3327,6 +3370,26 @@ mod tests {
         let third = super::allocate_container_ipv6("cid-2", &gateway, 64);
         assert_eq!(first, second);
         assert_ne!(first, third);
+    }
+
+    #[test]
+    fn bandwidth_limit_validation_accepts_supported_units() {
+        assert_eq!(
+            super::validate_bandwidth_limit("100mbit").expect("valid"),
+            "100mbit"
+        );
+        assert_eq!(
+            super::validate_bandwidth_limit("42KBIT").expect("valid"),
+            "42kbit"
+        );
+    }
+
+    #[test]
+    fn bandwidth_limit_validation_rejects_invalid_values() {
+        let err = super::validate_bandwidth_limit("0mbit").expect_err("invalid");
+        assert!(err.to_string().contains("positive integer"));
+        let err = super::validate_bandwidth_limit("100").expect_err("missing unit");
+        assert!(err.to_string().contains("must end with"));
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

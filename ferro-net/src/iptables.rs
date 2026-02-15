@@ -62,6 +62,22 @@ pub fn build_iptables_delete_cmd(rule: &IptablesRule) -> Result<Vec<String>, Str
     Ok(cmd)
 }
 
+pub fn apply_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
+    let cmd = build_iptables_cmd(rule).map_err(|err| ExecError::CommandFailed {
+        cmd: "iptables build".to_string(),
+        stderr: err,
+    })?;
+    exec_cmd(&cmd)
+}
+
+pub fn delete_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
+    let cmd = build_iptables_delete_cmd(rule).map_err(|err| ExecError::CommandFailed {
+        cmd: "iptables delete build".to_string(),
+        stderr: err,
+    })?;
+    exec_cmd(&cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IptablesRule, build_iptables_cmd, build_iptables_delete_cmd};
@@ -105,3 +121,4 @@ mod tests {
         assert!(build_iptables_cmd(&rule).is_err());
     }
 }
+use crate::executor::{ExecError, exec_cmd};

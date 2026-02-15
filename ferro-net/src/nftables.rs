@@ -1,3 +1,4 @@
+use crate::executor::{ExecError, exec_cmd};
 use crate::validate::validate_nft_family;
 
 /// Allowed nftables tables for security validation
@@ -72,6 +73,22 @@ pub fn build_nft_delete_rule_cmd(rule: &NftRule) -> Result<Vec<String>, String> 
     cmd.push(rule.chain.clone());
     cmd.extend(rule.expr.clone());
     Ok(cmd)
+}
+
+pub fn apply_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
+    let cmd = build_nft_add_rule_cmd(rule).map_err(|err| ExecError::CommandFailed {
+        cmd: "nft add build".to_string(),
+        stderr: err,
+    })?;
+    exec_cmd(&cmd)
+}
+
+pub fn delete_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
+    let cmd = build_nft_delete_rule_cmd(rule).map_err(|err| ExecError::CommandFailed {
+        cmd: "nft delete build".to_string(),
+        stderr: err,
+    })?;
+    exec_cmd(&cmd)
 }
 
 #[cfg(test)]

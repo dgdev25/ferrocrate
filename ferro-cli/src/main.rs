@@ -346,6 +346,10 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         bootstrap: bool,
         #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     Entitlement {
@@ -885,6 +889,15 @@ struct DoctorCheck {
     message: String,
     hint: Option<String>,
     remediated: bool,
+    action: Option<DoctorAction>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorAction {
+    id: String,
+    description: String,
+    command: Vec<String>,
+    requires_confirmation: bool,
 }
 
 fn run_command_status(mut cmd: std::process::Command) -> bool {
@@ -976,7 +989,7 @@ fn doctor_guest_ferrocrate_installed(
     run_command_status(command)
 }
 
-fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
+fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json: bool) -> Result<(), String> {
     let mut checks = Vec::<DoctorCheck>::new();
 
     #[cfg(target_os = "macos")]
@@ -995,6 +1008,18 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                 "install paid desktop artifacts (`scripts/install-macos.sh --channel paid --full-stack`)".to_string(),
             ),
             remediated: false,
+            action: (!desktop_present).then_some(DoctorAction {
+                id: "install_desktop_artifacts".to_string(),
+                description: "install paid desktop artifacts".to_string(),
+                command: vec![
+                    "bash".to_string(),
+                    "scripts/install-macos.sh".to_string(),
+                    "--channel".to_string(),
+                    "paid".to_string(),
+                    "--full-stack".to_string(),
+                ],
+                requires_confirmation: true,
+            }),
         });
 
         let arch_bin = if cfg!(target_arch = "aarch64") {
@@ -1014,6 +1039,12 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                 ok = doctor_ensure_brew_formula(bin, formula);
                 remediated = ok;
             }
+            let action = (!ok && fix).then_some(DoctorAction {
+                id: format!("install_{bin}"),
+                description: format!("install {formula} via brew"),
+                command: vec!["brew".to_string(), "install".to_string(), formula.to_string()],
+                requires_confirmation: true,
+            });
             checks.push(DoctorCheck {
                 id: id.to_string(),
                 ok,
@@ -1024,6 +1055,7 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                 },
                 hint: (!ok).then_some(format!("install dependency: brew install {formula}")),
                 remediated,
+                action,
             });
         }
 
@@ -1048,7 +1080,7 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
         }
 
         let mut vm_remediated = false;
-        if !vm_running && fix && desktop_present {
+        if !vm_running && fix && desktop_present && confirm && !dry_run {
             vm_remediated = run_command_status({
                 let mut command = std::process::Command::new(&desktop_bin);
                 command.args(["vm", "start"]);
@@ -1089,6 +1121,12 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                 "initialize/start VM with `ferro-desktop vm init ...` then `ferro-desktop vm start`".to_string(),
             ),
             remediated: vm_remediated,
+            action: (!vm_running && desktop_present).then_some(DoctorAction {
+                id: "start_vm".to_string(),
+                description: "start desktop VM".to_string(),
+                command: vec![desktop_bin.display().to_string(), "vm".to_string(), "start".to_string()],
+                requires_confirmation: true,
+            }),
         });
 
         let mut ssh_ok = false;
@@ -1112,6 +1150,7 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                     .to_string(),
             ),
             remediated: false,
+            action: None,
         });
 
         let guest_ferro_ok = if ssh_ok {
@@ -1132,6 +1171,18 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                     .to_string(),
             ),
             remediated: false,
+            action: (!guest_ferro_ok).then_some(DoctorAction {
+                id: "bootstrap_guest_runtime".to_string(),
+                description: "bootstrap guest runtime via paid installer".to_string(),
+                command: vec![
+                    "bash".to_string(),
+                    "scripts/install-macos.sh".to_string(),
+                    "--channel".to_string(),
+                    "paid".to_string(),
+                    "--full-stack".to_string(),
+                ],
+                requires_confirmation: true,
+            }),
         });
     }
 
@@ -1144,6 +1195,7 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                 .to_string(),
             hint: None,
             remediated: false,
+            action: None,
         });
     }
 
@@ -1153,6 +1205,12 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     if fix && bootstrap && !healthy {
+        if !confirm {
+            return Err("doctor bootstrap requires --confirm to execute. Use --dry-run to preview actions.".to_string());
+        }
+        if dry_run {
+            return Err("doctor bootstrap requested with --dry-run; no changes applied.".to_string());
+        }
         let mut bootstrap_ok = false;
         let mut bootstrap_msg = "bootstrap script not found".to_string();
         let mut bootstrap_hint = Some(
@@ -1174,6 +1232,7 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
                 .arg("--channel")
                 .arg("paid")
                 .arg("--full-stack")
+                .arg("--force")
                 .status();
             match status {
                 Ok(exit) if exit.success() => {
@@ -1202,6 +1261,7 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
             message: bootstrap_msg,
             hint: bootstrap_hint,
             remediated: bootstrap_ok,
+            action: None,
         });
         healthy = checks.iter().all(|check| check.ok);
     }
@@ -1211,6 +1271,8 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
             "healthy": healthy,
             "fix": fix,
             "bootstrap": bootstrap,
+            "dry_run": dry_run,
+            "confirm": confirm,
             "checks": checks,
         });
         println!(
@@ -1229,13 +1291,14 @@ fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
             } else {
                 ""
             };
-            println!(
-                "  [{}] {}: {}{}",
-                status, check.id, check.message, remediated
-            );
+            println!("  [{}] {}: {}{}", status, check.id, check.message, remediated);
             if !check.ok {
                 if let Some(hint) = &check.hint {
                     println!("      hint: {hint}");
+                }
+                if let Some(action) = &check.action {
+                    println!("      action: {}", action.description);
+                    println!("      command: {}", action.command.join(" "));
                 }
             }
         }
@@ -1498,8 +1561,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Doctor {
                 fix,
                 bootstrap,
+                dry_run,
+                confirm,
                 json,
-            } => handle_doctor(fix, bootstrap, json),
+            } => handle_doctor(fix, bootstrap, dry_run, confirm, json),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -1576,8 +1641,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Doctor {
                 fix,
                 bootstrap,
+                dry_run,
+                confirm,
                 json,
-            } => handle_doctor(fix, bootstrap, json),
+            } => handle_doctor(fix, bootstrap, dry_run, confirm, json),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -5055,15 +5122,27 @@ mod tests {
 
     #[test]
     fn parses_doctor_command() {
-        let cli = Cli::parse_from(["ferrocrate", "doctor", "--fix", "--bootstrap", "--json"]);
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "doctor",
+            "--fix",
+            "--bootstrap",
+            "--dry-run",
+            "--confirm",
+            "--json",
+        ]);
         match cli.command {
             Commands::Doctor {
                 fix,
                 bootstrap,
+                dry_run,
+                confirm,
                 json,
             } => {
                 assert!(fix);
                 assert!(bootstrap);
+                assert!(dry_run);
+                assert!(confirm);
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),

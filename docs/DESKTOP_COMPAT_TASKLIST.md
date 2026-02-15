@@ -50,9 +50,9 @@ Evidence:
 - [x] ~~Add VM lifecycle command scaffolding in `ferro-desktop` (`vm init/start/stop/status`)~~
 - [x] ~~Add persistent VM state/config file support and QEMU command builder~~
 - [x] ~~Add VM image build scaffold script (`scripts/build-desktop-vm-image.sh`)~~
-- [ ] Build reproducible minimal Linux VM image containing ferro runtime + deps
+- [x] ~~Build reproducible minimal Linux VM image containing ferro runtime + deps~~
 - [x] ~~Implement host proxy bridge to guest API socket~~
-- [ ] Implement virtiofs mounts and host port forwarding
+- [x] ~~Implement virtiofs mounts and host port forwarding~~
 - [x] ~~Add macOS CI integration test lane~~
 
 ## Phase 2: Windows Hyper-V Parity (Optional)

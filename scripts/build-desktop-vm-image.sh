@@ -10,6 +10,8 @@ SIZE_GB="${2:-20}"
 BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-amd64.img}"
 CACHE_DIR="${CACHE_DIR:-./tmp/vm-cache}"
 BASE_IMAGE="${CACHE_DIR}/base-cloudimg.qcow2"
+BASE_IMAGE_SHA256="${BASE_IMAGE_SHA256:-}"
+MANIFEST_PATH="${MANIFEST_PATH:-${OUT_IMAGE}.manifest.txt}"
 
 mkdir -p "$(dirname "$OUT_IMAGE")" "$CACHE_DIR"
 
@@ -22,10 +24,20 @@ require() {
 
 require curl
 require qemu-img
+require sha256sum
 
 if [[ ! -f "$BASE_IMAGE" ]]; then
   echo "Downloading base cloud image..."
   curl -L "$BASE_IMAGE_URL" -o "$BASE_IMAGE"
+fi
+
+if [[ -n "$BASE_IMAGE_SHA256" ]]; then
+  echo "Verifying base image checksum..."
+  actual_sha="$(sha256sum "$BASE_IMAGE" | awk '{print $1}')"
+  if [[ "$actual_sha" != "$BASE_IMAGE_SHA256" ]]; then
+    echo "base image checksum mismatch: expected=$BASE_IMAGE_SHA256 actual=$actual_sha" >&2
+    exit 1
+  fi
 fi
 
 echo "Preparing output image: $OUT_IMAGE"
@@ -44,4 +56,16 @@ else
   echo "virt-customize not found; skipping package customization"
 fi
 
+out_sha="$(sha256sum "$OUT_IMAGE" | awk '{print $1}')"
+cat >"$MANIFEST_PATH" <<EOF
+ferrocrate_desktop_vm_manifest_v1
+source_url=$BASE_IMAGE_URL
+source_sha256=${BASE_IMAGE_SHA256:-unverified}
+output_image=$OUT_IMAGE
+output_sha256=$out_sha
+size_gb=$SIZE_GB
+built_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
 echo "Desktop VM image scaffold ready: $OUT_IMAGE"
+echo "Manifest written: $MANIFEST_PATH"

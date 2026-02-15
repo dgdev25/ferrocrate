@@ -35,8 +35,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 - [x] ~~SEC-02 - Enforce seccomp profiles at runtime (not parse-only)~~
 - [x] ~~SEC-08 - Implement runtime eBPF security monitoring execution path~~
-- [ ] SEC-09 - Complete encrypted container communication behavior (IN PROGRESS)
-- [ ] SEC-03 - Rework AppArmor/SELinux integration to production-ready policy enforcement
+- [x] ~~SEC-09 - Complete encrypted container communication behavior~~
+- [ ] SEC-03 - Rework AppArmor/SELinux integration to production-ready policy enforcement (IN PROGRESS)
 
 ## C) Compatibility + CRI (7)
 

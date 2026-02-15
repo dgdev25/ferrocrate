@@ -11,6 +11,7 @@ use ferro_compose::{
     Environment as ComposeEnvironment, Service as ComposeService,
 };
 use ferro_core::docker_auth::resolve_registry_auth;
+use ferro_core::entitlements::{self, Entitlement, Feature};
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
@@ -318,6 +319,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    Entitlement {
+        #[command(subcommand)]
+        command: EntitlementCommands,
+    },
     AiAudit {
         #[arg(long)]
         action: String,
@@ -521,6 +526,14 @@ pub enum ConfigCommands {
     Get { key: String },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum EntitlementCommands {
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 fn main() {
     let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
     match maybe_host_desktop_forward(&raw_args) {
@@ -605,6 +618,7 @@ fn maybe_host_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
     if raw_args[0] == "desktop" {
         return Ok(false);
     }
+    require_cli_feature(Feature::Desktop)?;
     forward_to_desktop(raw_args, true)
 }
 
@@ -616,6 +630,7 @@ fn maybe_host_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
     if raw_args.is_empty() {
         return Ok(false);
     }
+    require_cli_feature(Feature::Desktop)?;
     ensure_macos_vm_running()?;
     forward_to_desktop(raw_args, false)
 }
@@ -820,6 +835,14 @@ fn normalize_cli_error(err: String) -> String {
         );
     }
     err
+}
+
+fn require_cli_feature(feature: Feature) -> Result<Entitlement, String> {
+    entitlements::require_feature(feature).map_err(|err| {
+        format!(
+            "entitlement check failed: {err}. set FERROCRATE_ENTITLEMENT_FILE and FERROCRATE_ENTITLEMENT_PUBKEY"
+        )
+    })
 }
 
 fn dispatch(command: Commands) -> Result<(), String> {
@@ -1068,6 +1091,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 verify,
                 format,
             }),
+            Commands::Entitlement { command } => handle_entitlement(command),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -1140,6 +1164,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 models_dir,
                 format,
             }),
+            Commands::Entitlement { command } => handle_entitlement(command),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -1161,6 +1186,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             timeout_secs,
             format,
         } => {
+            require_cli_feature(Feature::AiAdvanced)?;
             let response = orchestrate_task(
                 &OrchestrateRequest {
                     task: task.clone(),
@@ -1896,6 +1922,76 @@ fn handle_config(command: ConfigCommands) -> Result<(), String> {
                     "config get: unsupported key '{}'. supported: ai.backend",
                     key
                 )),
+            }
+        }
+    }
+}
+
+fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
+    match command {
+        EntitlementCommands::Status { json } => {
+            let path = entitlements::default_entitlement_path();
+            let loaded = entitlements::load_entitlement_from_env();
+            match loaded {
+                Ok(Some(entitlement)) => {
+                    if json {
+                        let out = serde_json::json!({
+                            "status": "ok",
+                            "path": path,
+                            "plan": entitlement.plan.as_str(),
+                            "subject": entitlement.subject,
+                            "issued_at": entitlement.issued_at,
+                            "expires_at": entitlement.expires_at,
+                            "features": entitlement
+                                .features
+                                .iter()
+                                .map(|feature| feature.as_str())
+                                .collect::<Vec<_>>(),
+                        });
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&out)
+                                .map_err(|err| format!("entitlement status: {err}"))?
+                        );
+                    } else {
+                        println!("entitlement: valid");
+                        println!("  plan={}", entitlement.plan.as_str());
+                        println!(
+                            "  subject={}",
+                            entitlement.subject.unwrap_or_else(|| "<none>".to_string())
+                        );
+                        println!(
+                            "  expires_at={}",
+                            entitlement
+                                .expires_at
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "<none>".to_string())
+                        );
+                        println!("  path={}", path.display());
+                    }
+                    Ok(())
+                }
+                Ok(None) => {
+                    if json {
+                        let out = serde_json::json!({
+                            "status": "none",
+                            "path": path,
+                            "plan": "free",
+                            "message": "no entitlement file found; paid features unavailable",
+                        });
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&out)
+                                .map_err(|err| format!("entitlement status: {err}"))?
+                        );
+                    } else {
+                        println!("entitlement: none (plan=free)");
+                        println!("  path={}", path.display());
+                        println!("  message=no entitlement file found; paid features unavailable");
+                    }
+                    Ok(())
+                }
+                Err(err) => Err(format!("entitlement status: {err}")),
             }
         }
     }

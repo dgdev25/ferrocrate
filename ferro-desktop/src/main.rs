@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use ferro_core::entitlements::{self, Feature};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -291,6 +292,14 @@ enum DesktopError {
 
 fn main() {
     let cli = Cli::parse();
+    if command_requires_desktop_entitlement(&cli.command) {
+        if let Err(err) = entitlements::require_feature(Feature::Desktop) {
+            eprintln!(
+                "error: entitlement check failed: {err}. set FERROCRATE_ENTITLEMENT_FILE and FERROCRATE_ENTITLEMENT_PUBKEY"
+            );
+            std::process::exit(1);
+        }
+    }
     let result = match cli.command {
         Commands::Daemon {
             addr,
@@ -322,6 +331,17 @@ fn main() {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
+}
+
+fn command_requires_desktop_entitlement(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Daemon { .. }
+            | Commands::Exec { .. }
+            | Commands::Forward { .. }
+            | Commands::Vm { .. }
+            | Commands::Autostart { .. }
+    )
 }
 
 fn run_daemon(
@@ -1868,12 +1888,13 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_path_for_disk, build_vm_command, command_targets_ferrocrate, exec_mode_from_env,
-        gather_phase0_check, load_channel_manifest, load_forward_entries, load_vm_state,
-        parse_exec_mode, render_macos_launch_agent_plist, render_windows_service_script,
-        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, ExecMode, ExecRequest,
-        ForwardEntry, VmConfig, VmState,
+        backup_path_for_disk, build_vm_command, command_requires_desktop_entitlement,
+        command_targets_ferrocrate, exec_mode_from_env, gather_phase0_check, load_channel_manifest,
+        load_forward_entries, load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
+        render_windows_service_script, run_request, save_forward_entries, save_vm_state,
+        should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr, vm_state_running,
+        Commands, ExecMode, ExecRequest, ForwardCommands, ForwardEntry, VmConfig, VmCommands,
+        VmState,
     };
     use std::path::PathBuf;
 
@@ -1911,6 +1932,34 @@ mod tests {
     #[test]
     fn daemon_addr_remote_allowed_with_flag() {
         assert!(validate_daemon_addr("0.0.0.0:4288", true).is_ok());
+    }
+
+    #[test]
+    fn desktop_entitlement_gate_applies_to_runtime_commands() {
+        assert!(command_requires_desktop_entitlement(&Commands::Daemon {
+            addr: "127.0.0.1:4288".to_string(),
+            pipe_name: None,
+            wsl_distro: None,
+            allow_remote: false,
+        }));
+        assert!(command_requires_desktop_entitlement(&Commands::Forward {
+            state_file: None,
+            json: false,
+            command: ForwardCommands::List,
+        }));
+        assert!(command_requires_desktop_entitlement(&Commands::Vm {
+            state_file: None,
+            command: VmCommands::Status { json: true },
+        }));
+        assert!(!command_requires_desktop_entitlement(&Commands::Doctor {
+            wsl_distro: None,
+        }));
+        assert!(!command_requires_desktop_entitlement(
+            &Commands::Phase0Check {
+                wsl_distro: None,
+                json: false,
+            }
+        ));
     }
 
     #[test]

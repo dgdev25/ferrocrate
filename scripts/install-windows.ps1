@@ -1,9 +1,13 @@
 param(
   [ValidateSet('binary','source')]
   [string]$Method = 'binary',
+  [ValidateSet('public','paid')]
+  [string]$Channel = 'public',
   [string]$Version = 'latest',
   [string]$Repo = 'dgtise25/ferrocrate',
   [string]$Prefix = "$env:ProgramFiles\FerroCrate\bin",
+  [string]$PaidReleaseBaseUrl = $env:PAID_RELEASE_BASE_URL,
+  [switch]$WithDesktopBin,
   [switch]$Force
 )
 
@@ -44,7 +48,7 @@ function Install-File {
 }
 
 function Install-BinariesFromDir {
-  param([string]$Dir,[string]$Prefix,[switch]$Force)
+  param([string]$Dir,[string]$Prefix,[bool]$InstallDesktopBin,[switch]$Force)
 
   $ferrocrateCandidates = @(
     (Join-Path $Dir 'ferrocrate.exe'),
@@ -65,13 +69,15 @@ function Install-BinariesFromDir {
 
   New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
   Install-File -Source $ferrocrate -Destination (Join-Path $Prefix 'ferrocrate.exe') -Force:$Force
-  if ($desktop) {
+  if ($InstallDesktopBin -and $desktop) {
     Install-File -Source $desktop -Destination (Join-Path $Prefix 'ferro-desktop.exe') -Force:$Force
+  } elseif ($InstallDesktopBin) {
+    throw 'Desktop binary requested but artifact did not contain ferro-desktop.exe. Use -Channel paid with -PaidReleaseBaseUrl (or PAID_RELEASE_BASE_URL) or install from source.'
   }
 }
 
 function Install-BinaryRelease {
-  param([string]$Repo,[string]$Version,[string]$Prefix,[switch]$Force)
+  param([string]$Repo,[string]$Version,[string]$Prefix,[string]$Channel,[string]$PaidReleaseBaseUrl,[bool]$InstallDesktopBin,[switch]$Force)
 
   Require-Command -Name 'Invoke-WebRequest'
   $arch = Get-ArchName
@@ -79,7 +85,21 @@ function Install-BinaryRelease {
 
   $assetName = "ferrocrate-$tag-windows-$arch.zip"
   $checksumName = "ferrocrate-$tag-checksums.txt"
-  $baseUrl = "https://github.com/$Repo/releases/download/$tag"
+  if ($Channel -eq 'paid') {
+    $checksumName = "ferrocrate-$tag-paid-checksums.txt"
+  }
+  if ($Channel -eq 'public') {
+    $baseUrl = "https://github.com/$Repo/releases/download/$tag"
+  } else {
+    if ([string]::IsNullOrWhiteSpace($PaidReleaseBaseUrl)) {
+      throw 'Paid channel requires -PaidReleaseBaseUrl (or PAID_RELEASE_BASE_URL env).'
+    }
+    if ($PaidReleaseBaseUrl.Contains('{tag}')) {
+      $baseUrl = $PaidReleaseBaseUrl.Replace('{tag}', $tag)
+    } else {
+      $baseUrl = ($PaidReleaseBaseUrl.TrimEnd('/') + "/$tag")
+    }
+  }
 
   $tmp = Join-Path $env:TEMP ([guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -105,7 +125,7 @@ function Install-BinaryRelease {
 
     $extractDir = Join-Path $tmp 'unpack'
     Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-    Install-BinariesFromDir -Dir $extractDir -Prefix $Prefix -Force:$Force
+    Install-BinariesFromDir -Dir $extractDir -Prefix $Prefix -InstallDesktopBin:$InstallDesktopBin -Force:$Force
     Write-Host "Installed FerroCrate from release tag $tag"
   }
   finally {
@@ -114,7 +134,7 @@ function Install-BinaryRelease {
 }
 
 function Install-FromSource {
-  param([string]$Repo,[string]$Version,[string]$Prefix,[switch]$Force)
+  param([string]$Repo,[string]$Version,[string]$Prefix,[bool]$InstallDesktopBin,[switch]$Force)
 
   Require-Command -Name 'git'
   Require-Command -Name 'cargo'
@@ -137,7 +157,11 @@ function Install-FromSource {
 
     Push-Location $src
     try {
-      cargo build --release -p ferro-cli -p ferro-desktop
+      $buildPackages = @('-p','ferro-cli')
+      if ($InstallDesktopBin) {
+        $buildPackages += @('-p','ferro-desktop')
+      }
+      cargo build --release @buildPackages
     }
     finally {
       Pop-Location
@@ -146,11 +170,11 @@ function Install-FromSource {
     $out = Join-Path $tmp 'unpack'
     New-Item -ItemType Directory -Path $out | Out-Null
     Copy-Item (Join-Path $src 'target\release\ferro-cli.exe') (Join-Path $out 'ferrocrate.exe')
-    if (Test-Path (Join-Path $src 'target\release\ferro-desktop.exe')) {
+    if ($InstallDesktopBin -and (Test-Path (Join-Path $src 'target\release\ferro-desktop.exe'))) {
       Copy-Item (Join-Path $src 'target\release\ferro-desktop.exe') (Join-Path $out 'ferro-desktop.exe')
     }
 
-    Install-BinariesFromDir -Dir $out -Prefix $Prefix -Force:$Force
+    Install-BinariesFromDir -Dir $out -Prefix $Prefix -InstallDesktopBin:$InstallDesktopBin -Force:$Force
     Write-Host 'Installed FerroCrate from source'
   }
   finally {
@@ -158,9 +182,13 @@ function Install-FromSource {
   }
 }
 
+if ($WithDesktopBin) {
+  Write-Host 'Desktop binary install enabled (-WithDesktopBin).'
+}
+
 switch ($Method) {
-  'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Force:$Force }
-  'source' { Install-FromSource -Repo $Repo -Version $Version -Prefix $Prefix -Force:$Force }
+  'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Channel $Channel -PaidReleaseBaseUrl $PaidReleaseBaseUrl -InstallDesktopBin:$WithDesktopBin -Force:$Force }
+  'source' { Install-FromSource -Repo $Repo -Version $Version -Prefix $Prefix -InstallDesktopBin:$WithDesktopBin -Force:$Force }
   default { throw "Invalid method: $Method" }
 }
 

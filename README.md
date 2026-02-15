@@ -118,6 +118,13 @@ curl -fsSL https://raw.githubusercontent.com/dgtise25/ferrocrate/main/scripts/in
 bash install-macos.sh
 ```
 
+macOS paid desktop channel:
+
+```bash
+PAID_RELEASE_BASE_URL="https://downloads.ferrocrate.com/paid/{tag}" \
+bash install-macos.sh --channel paid --with-desktop-bin --with-desktop-bootstrap
+```
+
 macOS source-build fallback:
 
 ```bash
@@ -131,6 +138,12 @@ iwr https://raw.githubusercontent.com/dgtise25/ferrocrate/main/scripts/install-w
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
+Windows paid desktop channel:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Channel paid -WithDesktopBin -PaidReleaseBaseUrl "https://downloads.ferrocrate.com/paid/{tag}"
+```
+
 Windows source-build fallback:
 
 ```powershell
@@ -141,6 +154,7 @@ Installer notes:
 - Default install paths: `/usr/local/bin` (macOS), `%ProgramFiles%\\FerroCrate\\bin` (Windows).
 - Use `--version <tag>` to pin a release.
 - Use `--force` to overwrite existing binaries.
+- Use `--channel paid` plus `PAID_RELEASE_BASE_URL` only for paid artifact channels.
 - Release installer expects artifacts named `ferrocrate-<tag>-<os>-<arch>` plus a matching checksums file.
 
 ### Basic Usage

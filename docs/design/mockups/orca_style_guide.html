@@ -1,0 +1,2106 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orca Design System — Style Guide</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        /* ═══════════════════════════════════════════════════════════════
+           ORCA DESIGN SYSTEM — STYLE GUIDE
+           Deep Space / Aurora Theme
+        ═══════════════════════════════════════════════════════════════ */
+
+        :root {
+            /* ─────────────────────────────────────────────────────────
+               PRIMARY PALETTE — Aurora Colors
+            ───────────────────────────────────────────────────────── */
+            --aurora-cyan: #00d4ff;
+            --aurora-teal: #00ffc8;
+            --aurora-violet: #a855f7;
+            --aurora-magenta: #ec4899;
+            --aurora-blue: #3b82f6;
+
+            /* ─────────────────────────────────────────────────────────
+               STATUS COLORS
+            ───────────────────────────────────────────────────────── */
+            --status-success: #10b981;
+            --status-warning: #f59e0b;
+            --status-error: #ef4444;
+            --status-info: #06b6d4;
+
+            /* ─────────────────────────────────────────────────────────
+               DARK THEME — Backgrounds
+            ───────────────────────────────────────────────────────── */
+            --bg-void: #030712;
+            --bg-deep: #0a0f1c;
+            --bg-elevated: #111827;
+
+            /* ─────────────────────────────────────────────────────────
+               GLASS MORPHISM
+            ───────────────────────────────────────────────────────── */
+            --glass-bg: rgba(15, 23, 42, 0.6);
+            --glass-bg-hover: rgba(15, 23, 42, 0.8);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --glass-border-active: rgba(0, 212, 255, 0.3);
+            --glass-glow: 0 0 60px rgba(0, 212, 255, 0.15);
+            --glass-blur: blur(20px);
+
+            /* ─────────────────────────────────────────────────────────
+               TYPOGRAPHY
+            ───────────────────────────────────────────────────────── */
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --text-accent: var(--aurora-cyan);
+
+            /* ─────────────────────────────────────────────────────────
+               TRANSITIONS
+            ───────────────────────────────────────────────────────── */
+            --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-smooth: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-bounce: 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+            /* ─────────────────────────────────────────────────────────
+               SPACING
+            ───────────────────────────────────────────────────────── */
+            --space-xs: 4px;
+            --space-sm: 8px;
+            --space-md: 16px;
+            --space-lg: 24px;
+            --space-xl: 32px;
+            --space-2xl: 48px;
+
+            /* ─────────────────────────────────────────────────────────
+               BORDER RADIUS
+            ───────────────────────────────────────────────────────── */
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --radius-xl: 20px;
+            --radius-full: 9999px;
+
+            /* ─────────────────────────────────────────────────────────
+               SHADOWS
+            ───────────────────────────────────────────────────────── */
+            --shadow-sm: 0 4px 15px rgba(0, 0, 0, 0.2);
+            --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.25);
+            --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.3);
+            --shadow-glow: 0 0 60px rgba(0, 212, 255, 0.15);
+        }
+
+        /* Light Theme Override */
+        [data-theme="light"] {
+            --bg-void: #f8fafc;
+            --bg-deep: #f1f5f9;
+            --bg-elevated: #ffffff;
+            --glass-bg: rgba(255, 255, 255, 0.7);
+            --glass-bg-hover: rgba(255, 255, 255, 0.9);
+            --glass-border: rgba(0, 0, 0, 0.08);
+            --glass-border-active: rgba(0, 150, 200, 0.4);
+            --glass-glow: 0 0 60px rgba(0, 150, 200, 0.1);
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --aurora-cyan: #0891b2;
+            --aurora-teal: #059669;
+            --aurora-violet: #7c3aed;
+        }
+
+        /* Reset */
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-void);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           LAYOUT
+        ═══════════════════════════════════════════════════════════════ */
+        .styleguide-container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        .styleguide-sidebar {
+            width: 280px;
+            min-height: 100vh;
+            padding: var(--space-xl) var(--space-lg);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            border-right: 1px solid var(--glass-border);
+            position: sticky;
+            top: 0;
+            overflow-y: auto;
+        }
+
+        .styleguide-main {
+            flex: 1;
+            padding: var(--space-2xl);
+            max-width: 1200px;
+        }
+
+        .styleguide-nav {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-xs);
+        }
+
+        .styleguide-nav-item {
+            padding: var(--space-md) var(--space-lg);
+            border-radius: var(--radius-lg);
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all var(--transition-smooth);
+            border: 1px solid transparent;
+        }
+
+        .styleguide-nav-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+        }
+
+        .styleguide-nav-item.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: rgba(0, 212, 255, 0.2);
+            color: var(--aurora-cyan);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           SECTIONS
+        ═══════════════════════════════════════════════════════════════ */
+        .styleguide-section {
+            margin-bottom: var(--space-2xl);
+            padding-bottom: var(--space-2xl);
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        .styleguide-section:last-child {
+            border-bottom: none;
+        }
+
+        .section-title {
+            font-family: 'Sora', sans-serif;
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-bottom: var(--space-lg);
+            color: var(--text-primary);
+        }
+
+        .section-subtitle {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: var(--space-xl);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           COLOR SWATCHES
+        ═══════════════════════════════════════════════════════════════ */
+        .color-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: var(--space-lg);
+        }
+
+        .color-swatch {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            transition: transform var(--transition-smooth);
+        }
+
+        .color-swatch:hover {
+            transform: translateY(-4px);
+        }
+
+        .color-preview {
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            color: rgba(0, 0, 0, 0.6);
+            text-shadow: 0 1px 2px rgba(255, 255, 255, 0.3);
+        }
+
+        .color-info {
+            padding: var(--space-md);
+        }
+
+        .color-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: var(--space-xs);
+        }
+
+        .color-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Aurora Colors */
+        .swatch-cyan .color-preview { background: var(--aurora-cyan); }
+        .swatch-teal .color-preview { background: var(--aurora-teal); }
+        .swatch-violet .color-preview { background: var(--aurora-violet); }
+        .swatch-magenta .color-preview { background: var(--aurora-magenta); }
+        .swatch-blue .color-preview { background: var(--aurora-blue); }
+
+        /* Status Colors */
+        .swatch-success .color-preview { background: var(--status-success); }
+        .swatch-warning .color-preview { background: var(--status-warning); }
+        .swatch-error .color-preview { background: var(--status-error); }
+        .swatch-info .color-preview { background: var(--status-info); }
+
+        /* Backgrounds */
+        .swatch-void .color-preview { background: var(--bg-void); }
+        .swatch-deep .color-preview { background: var(--bg-deep); }
+        .swatch-elevated .color-preview { background: var(--bg-elevated); }
+
+        /* ═══════════════════════════════════════════════════════════════
+           TYPOGRAPHY
+        ═══════════════════════════════════════════════════════════════ */
+        .type-scale {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-lg);
+        }
+
+        .type-item {
+            display: flex;
+            align-items: baseline;
+            gap: var(--space-lg);
+            padding: var(--space-md);
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-md);
+        }
+
+        .type-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            min-width: 80px;
+        }
+
+        .type-sample {
+            color: var(--text-primary);
+        }
+
+        .type-sample.h1 {
+            font-family: 'Sora', sans-serif;
+            font-size: 2.25rem;
+            font-weight: 700;
+        }
+
+        .type-sample.h2 {
+            font-family: 'Sora', sans-serif;
+            font-size: 1.75rem;
+            font-weight: 700;
+        }
+
+        .type-sample.h3 {
+            font-family: 'Sora', sans-serif;
+            font-size: 1.35rem;
+            font-weight: 600;
+        }
+
+        .type-sample.body {
+            font-size: 1rem;
+        }
+
+        .type-sample.small {
+            font-size: 0.875rem;
+        }
+
+        .type-sample.caption {
+            font-size: 0.75rem;
+        }
+
+        .type-sample.mono {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+        }
+
+        /* Font Families */
+        .font-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: var(--space-lg);
+        }
+
+        .font-card {
+            padding: var(--space-xl);
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg);
+        }
+
+        .font-name {
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: var(--space-md);
+        }
+
+        .font-sample {
+            font-size: 1.5rem;
+            color: var(--text-primary);
+            margin-bottom: var(--space-sm);
+        }
+
+        .font-usage {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           BUTTONS
+        ═══════════════════════════════════════════════════════════════ */
+        .button-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-md);
+            align-items: flex-start;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--space-sm);
+            padding: 14px 28px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all var(--transition-smooth);
+            border: none;
+            text-decoration: none;
+        }
+
+        /* Primary Button */
+        .btn-primary {
+            background: linear-gradient(135deg, var(--aurora-cyan), var(--aurora-teal));
+            color: var(--bg-void);
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 30px rgba(0, 212, 255, 0.4);
+        }
+
+        /* Secondary Button */
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-primary);
+            border: 1px solid var(--glass-border);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--glass-border-active);
+        }
+
+        /* Violet Button */
+        .btn-violet {
+            background: linear-gradient(135deg, var(--aurora-violet), var(--aurora-magenta));
+            color: white;
+            box-shadow: 0 4px 20px rgba(168, 85, 247, 0.3);
+        }
+
+        .btn-violet:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 30px rgba(168, 85, 247, 0.4);
+        }
+
+        /* AI Assist Button */
+        .btn-ai {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-sm);
+            padding: 12px 24px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--aurora-violet);
+            background: rgba(168, 85, 247, 0.1);
+            border: 1px solid rgba(168, 85, 247, 0.25);
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-ai:hover {
+            background: rgba(168, 85, 247, 0.2);
+            border-color: rgba(168, 85, 247, 0.4);
+            box-shadow: 0 4px 20px rgba(168, 85, 247, 0.2);
+        }
+
+        /* Success Button */
+        .btn-success {
+            background: var(--status-success);
+            color: white;
+            border: none;
+        }
+
+        .btn-success:hover {
+            background: #059669;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+
+        /* Error Button */
+        .btn-error {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--status-error);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-error:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
+        /* Small Button */
+        .btn-sm {
+            padding: 8px 14px;
+            font-size: 0.8rem;
+        }
+
+        /* Large Button */
+        .btn-lg {
+            padding: 18px 36px;
+            font-size: 1rem;
+        }
+
+        /* Button Sizes */
+        .button-sizes {
+            display: flex;
+            gap: var(--space-md);
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           CARDS
+        ═══════════════════════════════════════════════════════════════ */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: var(--space-lg);
+        }
+
+        .card {
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-xl);
+            transition: all var(--transition-smooth);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg,
+                rgba(0, 212, 255, 0.1) 0%,
+                transparent 50%,
+                rgba(168, 85, 247, 0.05) 100%);
+            opacity: 0;
+            transition: opacity var(--transition-smooth);
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(255, 255, 255, 0.15);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .card:hover::before {
+            opacity: 1;
+        }
+
+        .card.selected {
+            border-color: var(--aurora-cyan);
+            box-shadow:
+                0 0 0 1px var(--aurora-cyan),
+                0 20px 60px rgba(0, 212, 255, 0.2),
+                inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+
+        .card-icon-wrap {
+            width: 64px;
+            height: 64px;
+            border-radius: var(--radius-lg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            margin-bottom: var(--space-lg);
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.15), rgba(168, 85, 247, 0.1));
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .card-title {
+            font-family: 'Sora', sans-serif;
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: var(--space-sm);
+        }
+
+        .card-desc {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           FORM ELEMENTS
+        ═══════════════════════════════════════════════════════════════ */
+        .form-demo {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-xl);
+            max-width: 500px;
+        }
+
+        .form-group {
+            margin-bottom: var(--space-lg);
+        }
+
+        .form-label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: var(--space-sm);
+        }
+
+        .form-label .required {
+            color: var(--aurora-magenta);
+            margin-left: 4px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 16px 20px;
+            font-size: 1rem;
+            font-family: inherit;
+            color: var(--text-primary);
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-md);
+            transition: all var(--transition-smooth);
+            outline: none;
+        }
+
+        .form-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .form-input:focus {
+            border-color: var(--aurora-cyan);
+            box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.15);
+        }
+
+        .form-textarea {
+            min-height: 120px;
+            resize: vertical;
+        }
+
+        .form-hint {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: var(--space-xs);
+        }
+
+        /* Toggle Switch */
+        .toggle-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-md);
+        }
+
+        .toggle-item {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+            padding: var(--space-md) var(--space-lg);
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .toggle-item:hover {
+            border-color: rgba(0, 212, 255, 0.3);
+        }
+
+        .toggle-item.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: rgba(0, 212, 255, 0.3);
+        }
+
+        .toggle-switch {
+            width: 44px;
+            height: 24px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius-full);
+            position: relative;
+            transition: background 0.2s ease;
+        }
+
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 18px;
+            height: 18px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            transition: all 0.2s ease;
+        }
+
+        .toggle-item.active .toggle-switch {
+            background: var(--aurora-cyan);
+        }
+
+        .toggle-item.active .toggle-switch::after {
+            left: 23px;
+            background: white;
+        }
+
+        .toggle-label {
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .toggle-item.active .toggle-label {
+            color: var(--text-primary);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           BADGES & TAGS
+        ═══════════════════════════════════════════════════════════════ */
+        .badge-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-sm);
+        }
+
+        .badge {
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: var(--radius-full);
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-xs);
+        }
+
+        .badge-default {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-muted);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .badge-cyan {
+            background: rgba(0, 212, 255, 0.1);
+            color: var(--aurora-cyan);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+
+        .badge-violet {
+            background: rgba(168, 85, 247, 0.15);
+            color: var(--aurora-violet);
+            border: 1px solid rgba(168, 85, 247, 0.25);
+        }
+
+        .badge-success {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--status-success);
+        }
+
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--status-warning);
+        }
+
+        .badge-error {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--status-error);
+        }
+
+        /* Confidence Badges */
+        .confidence-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--space-md);
+        }
+
+        .confidence-badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 8px 16px;
+            border-radius: var(--radius-md);
+        }
+
+        .confidence-high {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--status-success);
+        }
+
+        .confidence-medium {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--status-warning);
+        }
+
+        .confidence-low {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--status-error);
+        }
+
+        .confidence-ai {
+            background: rgba(168, 85, 247, 0.15);
+            color: var(--aurora-violet);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           STEP INDICATORS
+        ═══════════════════════════════════════════════════════════════ */
+        .step-demo {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-md);
+            padding: var(--space-xl);
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+        }
+
+        .step-item-demo {
+            display: flex;
+            align-items: center;
+            gap: var(--space-lg);
+            padding: var(--space-md) var(--space-lg);
+            border-radius: var(--radius-lg);
+            transition: all var(--transition-smooth);
+        }
+
+        .step-badge-demo {
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.9rem;
+            background: rgba(255, 255, 255, 0.06);
+            border: 2px solid var(--glass-border);
+            transition: all var(--transition-smooth);
+            position: relative;
+        }
+
+        .step-item-demo.active .step-badge-demo {
+            background: linear-gradient(135deg, var(--aurora-cyan), var(--aurora-teal));
+            border-color: transparent;
+            color: var(--bg-void);
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.4);
+        }
+
+        .step-item-demo.completed .step-badge-demo {
+            background: var(--status-success);
+            border-color: transparent;
+            color: white;
+        }
+
+        .step-item-demo.completed .step-badge-demo::after {
+            content: '✓';
+            position: absolute;
+            font-size: 0.9rem;
+        }
+
+        .step-item-demo.completed .step-badge-demo span {
+            opacity: 0;
+        }
+
+        .step-info-demo {
+            flex: 1;
+        }
+
+        .step-title-demo {
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--text-primary);
+        }
+
+        .step-desc-demo {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .step-item-demo.active .step-title-demo {
+            color: var(--aurora-cyan);
+        }
+
+        .step-connector-demo {
+            width: 2px;
+            height: 24px;
+            background: var(--glass-border);
+            margin-left: 19px;
+            border-radius: 1px;
+        }
+
+        .step-connector-demo.completed {
+            background: linear-gradient(180deg, var(--status-success), var(--aurora-cyan));
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           PROGRESS BARS
+        ═══════════════════════════════════════════════════════════════ */
+        .progress-demo {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-lg);
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--aurora-cyan), var(--aurora-teal));
+            border-radius: 3px;
+            transition: width 0.4s ease;
+        }
+
+        .progress-fill.partial {
+            width: 65%;
+        }
+
+        .progress-fill.full {
+            width: 100%;
+        }
+
+        /* Large Progress Bar */
+        .progress-lg .progress-bar {
+            height: 8px;
+        }
+
+        /* Thin Progress Bar */
+        .progress-thin .progress-bar {
+            height: 4px;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           LOADERS & SPINNERS
+        ═══════════════════════════════════════════════════════════════ */
+        .loader-grid {
+            display: flex;
+            gap: var(--space-xl);
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .loader-spinner {
+            width: 48px;
+            height: 48px;
+            border: 3px solid var(--glass-border);
+            border-top-color: var(--aurora-cyan);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        .loader-spinner.sm {
+            width: 24px;
+            height: 24px;
+            border-width: 2px;
+        }
+
+        .loader-spinner.lg {
+            width: 64px;
+            height: 64px;
+            border-width: 4px;
+        }
+
+        .loader-spinner.violet {
+            border-top-color: var(--aurora-violet);
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           ANIMATIONS
+        ═══════════════════════════════════════════════════════════════ */
+        .animation-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: var(--space-lg);
+        }
+
+        .animation-card {
+            padding: var(--space-xl);
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg);
+            text-align: center;
+        }
+
+        .animation-demo {
+            width: 60px;
+            height: 60px;
+            margin: 0 auto var(--space-md);
+            background: linear-gradient(135deg, var(--aurora-cyan), var(--aurora-violet));
+            border-radius: var(--radius-md);
+        }
+
+        .animation-name {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: var(--space-xs);
+        }
+
+        .animation-desc {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Fade In */
+        .anim-fade-in {
+            animation: fade-in 0.5s ease;
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* Slide Up */
+        .anim-slide-up {
+            animation: slide-up 0.5s ease;
+        }
+
+        @keyframes slide-up {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Slide In */
+        .anim-slide-in {
+            animation: slide-in 0.5s ease;
+        }
+
+        @keyframes slide-in {
+            from { opacity: 0; transform: translateX(30px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* Pulse */
+        .anim-pulse {
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        /* Glow */
+        .anim-glow {
+            animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
+            50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.6); }
+        }
+
+        /* Bounce */
+        .anim-bounce {
+            animation: bounce 0.6s ease;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           GLASS CARDS
+        ═══════════════════════════════════════════════════════════════ */
+        .glass-demo {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: var(--space-xl);
+        }
+
+        .glass-card {
+            padding: var(--space-xl);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+        }
+
+        .glass-card-hover {
+            transition: all var(--transition-smooth);
+            cursor: pointer;
+        }
+
+        .glass-card-hover:hover {
+            background: var(--glass-bg-hover);
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-4px);
+        }
+
+        .glass-card-glow {
+            box-shadow: var(--shadow-glow);
+        }
+
+        .glass-card-dark {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .glass-card-title {
+            font-family: 'Sora', sans-serif;
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: var(--space-sm);
+        }
+
+        .glass-card-text {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           MODAL / OVERLAY
+        ═══════════════════════════════════════════════════════════════ */
+        .modal-demo {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-lg);
+        }
+
+        .modal-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            overflow: hidden;
+            box-shadow: 0 25px 80px rgba(0, 0, 0, 0.5);
+            max-width: 400px;
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: var(--space-lg);
+            background: linear-gradient(135deg, rgba(168, 85, 247, 0.15) 0%, rgba(236, 72, 153, 0.1) 100%);
+            border-bottom: 1px solid rgba(168, 85, 247, 0.2);
+        }
+
+        .modal-title {
+            font-family: 'Sora', sans-serif;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--aurora-violet);
+        }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            color: var(--text-muted);
+            background: rgba(0, 0, 0, 0.2);
+            border: none;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .modal-close:hover {
+            color: var(--text-primary);
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-body {
+            padding: var(--space-xl);
+        }
+
+        .modal-text {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: var(--space-md);
+            padding: var(--space-lg);
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .modal-btn {
+            flex: 1;
+            padding: 12px 16px;
+            font-family: inherit;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           CSS VARIABLES REFERENCE
+        ═══════════════════════════════════════════════════════════════ */
+        .var-reference {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }
+
+        .var-category {
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        .var-category:last-child {
+            border-bottom: none;
+        }
+
+        .var-category-header {
+            padding: var(--space-md) var(--space-lg);
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--aurora-cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .var-list {
+            padding: var(--space-md);
+        }
+
+        .var-item {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+            padding: var(--space-sm) var(--space-md);
+            border-radius: var(--radius-sm);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+
+        .var-item:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .var-name {
+            color: var(--aurora-teal);
+            min-width: 200px;
+        }
+
+        .var-value {
+            color: var(--text-secondary);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           SECTION HEADERS
+        ═══════════════════════════════════════════════════════════════ */
+        .panel-header {
+            margin-bottom: var(--space-xl);
+        }
+
+        .panel-eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-sm);
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--aurora-cyan);
+            margin-bottom: var(--space-md);
+        }
+
+        .panel-eyebrow::before {
+            content: '';
+            width: 24px;
+            height: 2px;
+            background: linear-gradient(90deg, var(--aurora-cyan), transparent);
+            border-radius: 1px;
+        }
+
+        .panel-title {
+            font-family: 'Sora', sans-serif;
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: var(--space-sm);
+        }
+
+        .panel-subtitle {
+            font-size: 1rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           AVATARS & ICONS
+        ═══════════════════════════════════════════════════════════════ */
+        .avatar-grid {
+            display: flex;
+            gap: var(--space-md);
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .avatar {
+            width: 48px;
+            height: 48px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--bg-void);
+        }
+
+        .avatar.sm {
+            width: 32px;
+            height: 32px;
+            font-size: 0.85rem;
+        }
+
+        .avatar.lg {
+            width: 64px;
+            height: 64px;
+            font-size: 1.5rem;
+        }
+
+        .avatar.cyan {
+            background: linear-gradient(135deg, var(--aurora-cyan), var(--aurora-teal));
+        }
+
+        .avatar.violet {
+            background: linear-gradient(135deg, var(--aurora-violet), var(--aurora-magenta));
+        }
+
+        .avatar.blue {
+            background: linear-gradient(135deg, var(--aurora-blue), var(--aurora-cyan));
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           CODE BLOCKS
+        ═══════════════════════════════════════════════════════════════ */
+        .code-block {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-md);
+            padding: var(--space-lg);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .code-line {
+            display: block;
+            padding: 2px 0;
+        }
+
+        .code-keyword {
+            color: var(--aurora-magenta);
+        }
+
+        .code-string {
+            color: var(--aurora-teal);
+        }
+
+        .code-property {
+            color: var(--aurora-cyan);
+        }
+
+        .code-comment {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           THEME TOGGLE
+        ═══════════════════════════════════════════════════════════════ */
+        .theme-toggle-demo {
+            display: flex;
+            gap: var(--space-md);
+            align-items: center;
+        }
+
+        .theme-btn {
+            padding: var(--space-md) var(--space-lg);
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all var(--transition-smooth);
+            border: 1px solid var(--glass-border);
+            background: transparent;
+            color: var(--text-secondary);
+            font-family: inherit;
+            font-size: 0.875rem;
+        }
+
+        .theme-btn:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: var(--glass-border-active);
+        }
+
+        .theme-btn.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: rgba(0, 212, 255, 0.3);
+            color: var(--aurora-cyan);
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           RESPONSIVE
+        ═══════════════════════════════════════════════════════════════ */
+        @media (max-width: 768px) {
+            .styleguide-container {
+                flex-direction: column;
+            }
+
+            .styleguide-sidebar {
+                width: 100%;
+                min-height: auto;
+                position: relative;
+                border-right: none;
+                border-bottom: 1px solid var(--glass-border);
+            }
+
+            .styleguide-nav {
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+
+            .styleguide-main {
+                padding: var(--space-lg);
+            }
+
+            .color-grid {
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="styleguide-container">
+        <!-- Sidebar Navigation -->
+        <aside class="styleguide-sidebar">
+            <div style="margin-bottom: 32px; padding: 0 8px;">
+                <div class="logo-mark" style="width: 40px; height: 40px; font-size: 24px; margin-bottom: 12px;">
+                    <span style="position: relative; z-index: 1;">o</span>
+                </div>
+                <div class="logo-text" style="font-size: 1.25rem;">Orca Design System</div>
+            </div>
+
+            <nav class="styleguide-nav">
+                <a href="#colors" class="styleguide-nav-item active">Colors</a>
+                <a href="#typography" class="styleguide-nav-item">Typography</a>
+                <a href="#buttons" class="styleguide-nav-item">Buttons</a>
+                <a href="#cards" class="styleguide-nav-item">Cards</a>
+                <a href="#forms" class="styleguide-nav-item">Forms</a>
+                <a href="#badges" class="styleguide-nav-item">Badges & Tags</a>
+                <a href="#steps" class="styleguide-nav-item">Step Indicators</a>
+                <a href="#progress" class="styleguide-nav-item">Progress</a>
+                <a href="#loaders" class="styleguide-nav-item">Loaders</a>
+                <a href="#animations" class="styleguide-nav-item">Animations</a>
+                <a href="#glass" class="styleguide-nav-item">Glass Effects</a>
+                <a href="#variables" class="styleguide-nav-item">CSS Variables</a>
+            </nav>
+
+            <div style="margin-top: auto; padding-top: 32px;">
+                <button class="theme-btn" onclick="toggleTheme()">
+                    <span class="theme-icon">&#9789;</span>
+                    Toggle Theme
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="styleguide-main">
+            <!-- Header -->
+            <div class="panel-header">
+                <div class="panel-eyebrow">Design System</div>
+                <h1 class="panel-title">Orca Style Guide</h1>
+                <p class="panel-subtitle">A comprehensive reference for the Orca design system, including colors, typography, components, and patterns.</p>
+            </div>
+
+            <!-- Colors Section -->
+            <section id="colors" class="styleguide-section">
+                <h2 class="section-title">Colors</h2>
+                <p class="section-subtitle">The Orca design system uses a carefully curated color palette inspired by aurora borealis effects.</p>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Aurora Palette</h3>
+                <div class="color-grid">
+                    <div class="color-swatch swatch-cyan">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Aurora Cyan</div>
+                            <div class="color-value">#00d4ff</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-teal">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Aurora Teal</div>
+                            <div class="color-value">#00ffc8</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-violet">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Aurora Violet</div>
+                            <div class="color-value">#a855f7</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-magenta">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Aurora Magenta</div>
+                            <div class="color-value">#ec4899</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-blue">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Aurora Blue</div>
+                            <div class="color-value">#3b82f6</div>
+                        </div>
+                    </div>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin: 32px 0 16px; color: var(--text-primary);">Status Colors</h3>
+                <div class="color-grid">
+                    <div class="color-swatch swatch-success">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Success</div>
+                            <div class="color-value">#10b981</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-warning">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Warning</div>
+                            <div class="color-value">#f59e0b</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-error">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Error</div>
+                            <div class="color-value">#ef4444</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-info">
+                        <div class="color-preview">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Info</div>
+                            <div class="color-value">#06b6d4</div>
+                        </div>
+                    </div>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin: 32px 0 16px; color: var(--text-primary);">Backgrounds</h3>
+                <div class="color-grid">
+                    <div class="color-swatch swatch-void">
+                        <div class="color-preview" style="color: white;">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Void</div>
+                            <div class="color-value">#030712</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-deep">
+                        <div class="color-preview" style="color: white;">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Deep</div>
+                            <div class="color-value">#0a0f1c</div>
+                        </div>
+                    </div>
+                    <div class="color-swatch swatch-elevated">
+                        <div class="color-preview" style="color: white;">Aa</div>
+                        <div class="color-info">
+                            <div class="color-name">Elevated</div>
+                            <div class="color-value">#111827</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Typography Section -->
+            <section id="typography" class="styleguide-section">
+                <h2 class="section-title">Typography</h2>
+                <p class="section-subtitle">Typography is a key part of the Orca design system, using three carefully selected fonts.</p>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Font Families</h3>
+                <div class="font-grid">
+                    <div class="font-card">
+                        <div class="font-name">Outfit</div>
+                        <div class="font-sample">Outfit Sans</div>
+                        <div class="font-usage">Primary UI font for body text, buttons, and form elements.</div>
+                    </div>
+                    <div class="font-card">
+                        <div class="font-name">Sora</div>
+                        <div class="font-sample">Sora Display</div>
+                        <div class="font-usage">Headlines, titles, panel headers, and branding.</div>
+                    </div>
+                    <div class="font-card">
+                        <div class="font-name">JetBrains Mono</div>
+                        <div class="font-sample" style="font-family: 'JetBrains Mono', monospace;">JetBrains Mono</div>
+                        <div class="font-usage">Code snippets, data display, and technical content.</div>
+                    </div>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin: 32px 0 16px; color: var(--text-primary);">Type Scale</h3>
+                <div class="type-scale">
+                    <div class="type-item">
+                        <span class="type-label">H1 / 2.25rem</span>
+                        <span class="type-sample h1">The quick brown fox</span>
+                    </div>
+                    <div class="type-item">
+                        <span class="type-label">H2 / 1.75rem</span>
+                        <span class="type-sample h2">The quick brown fox</span>
+                    </div>
+                    <div class="type-item">
+                        <span class="type-label">H3 / 1.35rem</span>
+                        <span class="type-sample h3">The quick brown fox</span>
+                    </div>
+                    <div class="type-item">
+                        <span class="type-label">Body / 1rem</span>
+                        <span class="type-sample body">The quick brown fox jumps over the lazy dog.</span>
+                    </div>
+                    <div class="type-item">
+                        <span class="type-label">Small / 0.875rem</span>
+                        <span class="type-sample small">The quick brown fox jumps over the lazy dog.</span>
+                    </div>
+                    <div class="type-item">
+                        <span class="type-label">Caption / 0.75rem</span>
+                        <span class="type-sample caption">The quick brown fox jumps over the lazy dog.</span>
+                    </div>
+                    <div class="type-item">
+                        <span class="type-label">Mono / 0.85rem</span>
+                        <span class="type-sample mono">const orca = "awesome";</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Buttons Section -->
+            <section id="buttons" class="styleguide-section">
+                <h2 class="section-title">Buttons</h2>
+                <p class="section-subtitle">Buttons come in various styles and sizes to suit different contexts and importance levels.</p>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Primary Buttons</h3>
+                <div class="button-grid" style="margin-bottom: 24px;">
+                    <button class="btn btn-primary">Continue</button>
+                    <button class="btn btn-secondary">Cancel</button>
+                    <button class="btn btn-violet">
+                        <span style="font-size: 1.1rem;">✨</span> AI Assist
+                    </button>
+                    <button class="btn btn-success">Accept</button>
+                    <button class="btn btn-error">Reject</button>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Button Sizes</h3>
+                <div class="button-sizes">
+                    <button class="btn btn-primary btn-sm">Small</button>
+                    <button class="btn btn-primary">Medium</button>
+                    <button class="btn btn-primary btn-lg">Large</button>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin: 32px 0 16px; color: var(--text-primary);">AI Assist Button Variant</h3>
+                <div class="button-grid">
+                    <button class="btn-ai">
+                        <span style="font-size: 1rem;">&#9733;</span> AI Auto-fill
+                    </button>
+                    <button class="btn-ai primary">
+                        <span class="sparkle">&#9733;</span> Generate with AI
+                    </button>
+                    <button class="btn-ai">
+                        <span>&#9998;</span> Edit Field
+                    </button>
+                </div>
+            </section>
+
+            <!-- Cards Section -->
+            <section id="cards" class="styleguide-section">
+                <h2 class="section-title">Cards</h2>
+                <p class="section-subtitle">Cards are versatile containers with glass morphism effects and hover interactions.</p>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Path Selection Cards</h3>
+                <div class="card-grid">
+                    <div class="card">
+                        <div class="card-icon-wrap">&#128196;</div>
+                        <div class="card-title">Upload PRD</div>
+                        <div class="card-desc">Upload your Product Requirements Document to auto-generate the project specification.</div>
+                    </div>
+                    <div class="card selected">
+                        <div class="card-icon-wrap">&#9998;</div>
+                        <div class="card-title">Start from Scratch</div>
+                        <div class="card-desc">Define your project from scratch with our guided workflow wizard.</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon-wrap">&#128279;</div>
+                        <div class="card-title">Use Template</div>
+                        <div class="card-desc">Start from a pre-built project template for common use cases.</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Forms Section -->
+            <section id="forms" class="styleguide-section">
+                <h2 class="section-title">Form Elements</h2>
+                <p class="section-subtitle">Forms feature clean inputs with focus states and glass backgrounds.</p>
+
+                <div class="form-demo">
+                    <div class="form-group">
+                        <label class="form-label">Project Name <span class="required">*</span></label>
+                        <input type="text" class="form-input" placeholder="Enter your project name">
+                        <div class="form-hint">Required for project creation</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Description</label>
+                        <textarea class="form-input form-textarea" placeholder="Describe your project..."></textarea>
+                        <div class="form-hint">Optional but recommended</div>
+                    </div>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin: 32px 0 16px; color: var(--text-primary);">Toggle Switches</h3>
+                <div class="toggle-group">
+                    <div class="toggle-item">
+                        <div class="toggle-switch"></div>
+                        <span class="toggle-label">Off</span>
+                    </div>
+                    <div class="toggle-item active">
+                        <div class="toggle-switch"></div>
+                        <span class="toggle-label">On</span>
+                    </div>
+                    <div class="toggle-item">
+                        <div class="toggle-switch"></div>
+                        <span class="toggle-label">Auto-save</span>
+                    </div>
+                    <div class="toggle-item active">
+                        <div class="toggle-switch"></div>
+                        <span class="toggle-label">AI Enabled</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Badges Section -->
+            <section id="badges" class="styleguide-section">
+                <h2 class="section-title">Badges & Tags</h2>
+                <p class="section-subtitle">Small indicators for status, confidence levels, and categorization.</p>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Tags</h3>
+                <div class="badge-grid" style="margin-bottom: 32px;">
+                    <span class="badge badge-default">TypeScript</span>
+                    <span class="badge badge-cyan">React</span>
+                    <span class="badge badge-violet">AI</span>
+                    <span class="badge badge-success">Complete</span>
+                    <span class="badge badge-warning">In Progress</span>
+                    <span class="badge badge-error">Error</span>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Confidence Badges</h3>
+                <div class="confidence-grid">
+                    <span class="confidence-badge confidence-high">High Confidence</span>
+                    <span class="confidence-badge confidence-medium">Medium Confidence</span>
+                    <span class="confidence-badge confidence-low">Low Confidence</span>
+                    <span class="confidence-badge confidence-ai">AI Confirmed</span>
+                </div>
+            </section>
+
+            <!-- Steps Section -->
+            <section id="steps" class="styleguide-section">
+                <h2 class="section-title">Step Indicators</h2>
+                <p class="section-subtitle">Visual indicators for multi-step workflows and progress tracking.</p>
+
+                <div class="step-demo">
+                    <div class="step-item-demo">
+                        <div class="step-badge-demo"><span>1</span></div>
+                        <div class="step-info-demo">
+                            <div class="step-title-demo">Origin</div>
+                            <div class="step-desc-demo">Choose how to start your project</div>
+                        </div>
+                    </div>
+                    <div class="step-connector-demo"></div>
+                    <div class="step-item-demo completed">
+                        <div class="step-badge-demo"><span>2</span></div>
+                        <div class="step-info-demo">
+                            <div class="step-title-demo">Define</div>
+                            <div class="step-desc-demo">Set project specifications</div>
+                        </div>
+                    </div>
+                    <div class="step-connector-demo completed"></div>
+                    <div class="step-item-demo active">
+                        <div class="step-badge-demo"><span>3</span></div>
+                        <div class="step-info-demo">
+                            <div class="step-title-demo">Refine</div>
+                            <div class="step-desc-demo">Review and customize</div>
+                        </div>
+                    </div>
+                    <div class="step-connector-demo"></div>
+                    <div class="step-item-demo">
+                        <div class="step-badge-demo"><span>4</span></div>
+                        <div class="step-info-demo">
+                            <div class="step-title-demo">Build</div>
+                            <div class="step-desc-demo">Generate your project</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Progress Section -->
+            <section id="progress" class="styleguide-section">
+                <h2 class="section-title">Progress Bars</h2>
+                <p class="section-subtitle">Visual indicators for completion status and form progress.</p>
+
+                <div class="progress-demo" style="max-width: 500px;">
+                    <div>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Form Completion</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill partial"></div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Analysis Progress</div>
+                        <div class="progress-bar progress-lg">
+                            <div class="progress-fill partial" style="width: 45%;"></div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Complete</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill full"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Loaders Section -->
+            <section id="loaders" class="styleguide-section">
+                <h2 class="section-title">Loaders & Spinners</h2>
+                <p class="section-subtitle">Animated indicators for loading states.</p>
+
+                <div class="loader-grid">
+                    <div style="text-align: center;">
+                        <div class="loader-spinner sm"></div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">Small</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div class="loader-spinner"></div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">Medium</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div class="loader-spinner lg"></div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">Large</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div class="loader-spinner violet"></div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">Violet</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Animations Section -->
+            <section id="animations" class="styleguide-section">
+                <h2 class="section-title">Animations</h2>
+                <p class="section-subtitle">Pre-defined animations for smooth transitions and interactions.</p>
+
+                <div class="animation-grid">
+                    <div class="animation-card">
+                        <div class="animation-demo anim-fade-in"></div>
+                        <div class="animation-name">Fade In</div>
+                        <div class="animation-desc">0.5s ease</div>
+                    </div>
+                    <div class="animation-card">
+                        <div class="animation-demo anim-slide-up"></div>
+                        <div class="animation-name">Slide Up</div>
+                        <div class="animation-desc">0.5s ease, 20px translate</div>
+                    </div>
+                    <div class="animation-card">
+                        <div class="animation-demo anim-slide-in"></div>
+                        <div class="animation-name">Slide In</div>
+                        <div class="animation-desc">0.5s ease, 30px translate</div>
+                    </div>
+                    <div class="animation-card">
+                        <div class="animation-demo anim-pulse"></div>
+                        <div class="animation-name">Pulse</div>
+                        <div class="animation-desc">2s infinite</div>
+                    </div>
+                    <div class="animation-card">
+                        <div class="animation-demo anim-glow"></div>
+                        <div class="animation-name">Glow</div>
+                        <div class="animation-desc">2s infinite</div>
+                    </div>
+                    <div class="animation-card">
+                        <div class="animation-demo anim-bounce"></div>
+                        <div class="animation-name">Bounce</div>
+                        <div class="animation-desc">0.6s ease</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Glass Effects Section -->
+            <section id="glass" class="styleguide-section">
+                <h2 class="section-title">Glass Effects</h2>
+                <p class="section-subtitle">Glass morphism styling with blur and transparency effects.</p>
+
+                <div class="glass-demo">
+                    <div class="glass-card">
+                        <div class="glass-card-title">Default Glass</div>
+                        <div class="glass-card-text">Standard glass effect with blur and subtle border.</div>
+                    </div>
+                    <div class="glass-card glass-card-hover">
+                        <div class="glass-card-title">Hover Effect</div>
+                        <div class="glass-card-text">Hover to see elevation and border highlight.</div>
+                    </div>
+                    <div class="glass-card glass-card-glow">
+                        <div class="glass-card-title">Glow Effect</div>
+                        <div class="glass-card-text">Card with cyan glow shadow effect.</div>
+                    </div>
+                    <div class="glass-card glass-card-dark">
+                        <div class="glass-card-title">Dark Glass</div>
+                        <div class="glass-card-text">Higher opacity for darker backgrounds.</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Modal Section -->
+            <section id="modal" class="styleguide-section">
+                <h2 class="section-title">Modal Dialogs</h2>
+                <p class="section-subtitle">Modal dialogs with gradient headers and action buttons.</p>
+
+                <div class="modal-card">
+                    <div class="modal-header">
+                        <span class="modal-title">AI Suggestion</span>
+                        <button class="modal-close">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-text">Based on your PRD, I suggest adding automated testing with Jest and React Testing Library for comprehensive coverage.</p>
+                    </div>
+                    <div class="modal-actions">
+                        <button class="modal-btn btn-reject">Reject</button>
+                        <button class="modal-btn btn-edit-first" style="background: rgba(0, 212, 255, 0.1); color: var(--aurora-cyan); border: 1px solid rgba(0, 212, 255, 0.3);">Edit First</button>
+                        <button class="modal-btn btn-accept">Accept</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- CSS Variables Reference -->
+            <section id="variables" class="styleguide-section">
+                <h2 class="section-title">CSS Variables Reference</h2>
+                <p class="section-subtitle">Complete reference of all CSS custom properties used in the design system.</p>
+
+                <div class="var-reference">
+                    <div class="var-category">
+                        <div class="var-category-header">Colors — Aurora</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--aurora-cyan</span><span class="var-value">#00d4ff</span></div>
+                            <div class="var-item"><span class="var-name">--aurora-teal</span><span class="var-value">#00ffc8</span></div>
+                            <div class="var-item"><span class="var-name">--aurora-violet</span><span class="var-value">#a855f7</span></div>
+                            <div class="var-item"><span class="var-name">--aurora-magenta</span><span class="var-value">#ec4899</span></div>
+                            <div class="var-item"><span class="var-name">--aurora-blue</span><span class="var-value">#3b82f6</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Colors — Status</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--status-success</span><span class="var-value">#10b981</span></div>
+                            <div class="var-item"><span class="var-name">--status-warning</span><span class="var-value">#f59e0b</span></div>
+                            <div class="var-item"><span class="var-name">--status-error</span><span class="var-value">#ef4444</span></div>
+                            <div class="var-item"><span class="var-name">--status-info</span><span class="var-value">#06b6d4</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Backgrounds</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--bg-void</span><span class="var-value">#030712</span></div>
+                            <div class="var-item"><span class="var-name">--bg-deep</span><span class="var-value">#0a0f1c</span></div>
+                            <div class="var-item"><span class="var-name">--bg-elevated</span><span class="var-value">#111827</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Glass Effects</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--glass-bg</span><span class="var-value">rgba(15, 23, 42, 0.6)</span></div>
+                            <div class="var-item"><span class="var-name">--glass-bg-hover</span><span class="var-value">rgba(15, 23, 42, 0.8)</span></div>
+                            <div class="var-item"><span class="var-name">--glass-border</span><span class="var-value">rgba(255, 255, 255, 0.08)</span></div>
+                            <div class="var-item"><span class="var-name">--glass-border-active</span><span class="var-value">rgba(0, 212, 255, 0.3)</span></div>
+                            <div class="var-item"><span class="var-name">--glass-glow</span><span class="var-value">0 0 60px rgba(0, 212, 255, 0.15)</span></div>
+                            <div class="var-item"><span class="var-name">--glass-blur</span><span class="var-value">blur(20px)</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Typography</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--text-primary</span><span class="var-value">#f8fafc</span></div>
+                            <div class="var-item"><span class="var-name">--text-secondary</span><span class="var-value">#94a3b8</span></div>
+                            <div class="var-item"><span class="var-name">--text-muted</span><span class="var-value">#64748b</span></div>
+                            <div class="var-item"><span class="var-name">--text-accent</span><span class="var-value">--aurora-cyan</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Transitions</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--transition-fast</span><span class="var-value">0.15s cubic-bezier(0.4, 0, 0.2, 1)</span></div>
+                            <div class="var-item"><span class="var-name">--transition-smooth</span><span class="var-value">0.3s cubic-bezier(0.4, 0, 0.2, 1)</span></div>
+                            <div class="var-item"><span class="var-name">--transition-bounce</span><span class="var-value">0.5s cubic-bezier(0.34, 1.56, 0.64, 1)</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Spacing</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--space-xs</span><span class="var-value">4px</span></div>
+                            <div class="var-item"><span class="var-name">--space-sm</span><span class="var-value">8px</span></div>
+                            <div class="var-item"><span class="var-name">--space-md</span><span class="var-value">16px</span></div>
+                            <div class="var-item"><span class="var-name">--space-lg</span><span class="var-value">24px</span></div>
+                            <div class="var-item"><span class="var-name">--space-xl</span><span class="var-value">32px</span></div>
+                            <div class="var-item"><span class="var-name">--space-2xl</span><span class="var-value">48px</span></div>
+                        </div>
+                    </div>
+                    <div class="var-category">
+                        <div class="var-category-header">Border Radius</div>
+                        <div class="var-list">
+                            <div class="var-item"><span class="var-name">--radius-sm</span><span class="var-value">8px</span></div>
+                            <div class="var-item"><span class="var-name">--radius-md</span><span class="var-value">12px</span></div>
+                            <div class="var-item"><span class="var-name">--radius-lg</span><span class="var-value">16px</span></div>
+                            <div class="var-item"><span class="var-name">--radius-xl</span><span class="var-value">20px</span></div>
+                            <div class="var-item"><span class="var-name">--radius-full</span><span class="var-value">9999px</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Code Usage Examples -->
+            <section id="usage" class="styleguide-section">
+                <h2 class="section-title">Usage Examples</h2>
+                <p class="section-subtitle">Quick reference for common patterns and implementations.</p>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-primary);">Using CSS Variables</h3>
+                <div class="code-block">
+                    <span class="code-line"><span class="code-comment">/* Reference a variable */</span></span>
+                    <span class="code-line"><span class="code-property">color</span>: <span class="code-string">var</span>(<span class="code-property">--text-primary</span>);</span>
+                    <span class="code-line"></span>
+                    <span class="code-line"><span class="code-comment">/* Override in specific context */</span></span>
+                    <span class="code-line"><span class="code-property">.my-component</span> {</span>
+                    <span class="code-line">  <span class="code-property">background</span>: <span class="code-string">var</span>(<span class="code-property">--glass-bg</span>);</span>
+                    <span class="code-line">  <span class="code-property">border</span>: <span class="code-string">1px solid var</span>(<span class="code-property">--glass-border</span>);</span>
+                    <span class="code-line">  <span class="code-property">border-radius</span>: <span class="code-string">var</span>(<span class="code-property">--radius-lg</span>);</span>
+                    <span class="code-line">}</span>
+                </div>
+
+                <h3 style="font-size: 1rem; font-weight: 600; margin: 32px 0 16px; color: var(--text-primary);">Light Theme Override</h3>
+                <div class="code-block">
+                    <span class="code-line"><span class="code-keyword">[data-theme="light"]</span> {</span>
+                    <span class="code-line">  <span class="code-property">--bg-void</span>: <span class="code-string">#f8fafc</span>;</span>
+                    <span class="code-line">  <span class="code-property">--text-primary</span>: <span class="code-string">#0f172a</span>;</span>
+                    <span class="code-line">  <span class="code-property">--aurora-cyan</span>: <span class="code-string">#0891b2</span>;</span>
+                    <span class="code-line">}</span>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        // Theme Toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            html.setAttribute('data-theme', currentTheme === 'dark' ? 'light' : 'dark');
+        }
+
+        // Smooth scroll for navigation
+        document.querySelectorAll('.styleguide-nav-item').forEach(link => {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                const targetId = this.getAttribute('href').substring(1);
+                const target = document.getElementById(targetId);
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth' });
+                }
+
+                // Update active state
+                document.querySelectorAll('.styleguide-nav-item').forEach(l => l.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+
+        // Update active nav on scroll
+        window.addEventListener('scroll', () => {
+            const sections = document.querySelectorAll('.styleguide-section');
+            const navItems = document.querySelectorAll('.styleguide-nav-item');
+
+            let current = '';
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop;
+                if (window.scrollY >= sectionTop - 100) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navItems.forEach(item => {
+                item.classList.remove('active');
+                if (item.getAttribute('href') === '#' + current) {
+                    item.classList.add('active');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

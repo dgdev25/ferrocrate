@@ -2919,6 +2919,30 @@ struct DockerCreateSpec {
     network_mode: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DockerNetworkCreateSpec {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Driver")]
+    driver: Option<String>,
+    #[serde(rename = "IPAM")]
+    ipam: Option<DockerIpamSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DockerIpamSpec {
+    #[serde(rename = "Config", default)]
+    config: Vec<DockerIpamConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DockerIpamConfig {
+    #[serde(rename = "Subnet")]
+    subnet: Option<String>,
+    #[serde(rename = "Gateway")]
+    gateway: Option<String>,
+}
+
 #[derive(Default)]
 struct DockerCompatState {
     next_id: AtomicU64,
@@ -3291,6 +3315,69 @@ fn handle_docker_compat_connection(
                     .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
                 http_response(200, json.as_bytes(), "application/json")
             }
+            ("GET", "/networks") => {
+                let networks = load_networks(runtime_dir.as_ref())?;
+                let mut entries = vec![serde_json::json!({
+                    "Name": "bridge",
+                    "Id": "bridge",
+                    "Driver": "bridge",
+                    "Scope": "local",
+                })];
+                entries.extend(networks.into_iter().map(|record| {
+                    serde_json::json!({
+                        "Name": record.name,
+                        "Id": record.name,
+                        "Driver": record.driver,
+                        "Scope": "local",
+                        "IPAM": {
+                            "Config": [{
+                                "Subnet": record.subnet,
+                                "Gateway": record.gateway
+                            }]
+                        }
+                    })
+                }));
+                let body = serde_json::to_string(&entries).map_err(|err| err.to_string())?;
+                http_response(200, body.as_bytes(), "application/json")
+            }
+            ("POST", "/networks/create") => {
+                let spec = parse_docker_network_create_spec(&request.body)?;
+                if spec.driver.as_deref().unwrap_or("bridge") != "bridge" {
+                    return Err("docker: only bridge network driver is supported".to_string());
+                }
+                let subnet = spec
+                    .ipam
+                    .as_ref()
+                    .and_then(|ipam| ipam.config.first())
+                    .and_then(|cfg| cfg.subnet.clone());
+                let gateway = spec
+                    .ipam
+                    .as_ref()
+                    .and_then(|ipam| ipam.config.first())
+                    .and_then(|cfg| cfg.gateway.clone());
+                handle_network(
+                    runtime_dir.as_ref(),
+                    &runtime,
+                    NetworkCommands::Create {
+                        name: spec.name.clone(),
+                        subnet,
+                        gateway,
+                    },
+                )?;
+                let body = serde_json::json!({ "Id": spec.name, "Warning": "" });
+                http_response(201, body.to_string().as_bytes(), "application/json")
+            }
+            ("DELETE", path) if path.starts_with("/networks/") => {
+                let id = path.trim_start_matches("/networks/");
+                handle_network(
+                    runtime_dir.as_ref(),
+                    &runtime,
+                    NetworkCommands::Rm {
+                        name: id.to_string(),
+                    },
+                )?;
+                http_response(204, &[], "text/plain")
+            }
             ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
                 let name = path
                     .trim_start_matches("/images/")
@@ -3431,6 +3518,15 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         name,
         network_mode,
     })
+}
+
+fn parse_docker_network_create_spec(body: &[u8]) -> Result<DockerNetworkCreateSpec, String> {
+    let spec: DockerNetworkCreateSpec = serde_json::from_slice(body)
+        .map_err(|err| format!("docker: invalid network create payload: {err}"))?;
+    if spec.name.trim().is_empty() {
+        return Err("docker: network name is required".to_string());
+    }
+    Ok(spec)
 }
 
 fn port_bindings_to_publish(

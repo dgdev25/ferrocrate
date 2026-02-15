@@ -130,3 +130,28 @@ fn docker_compat_malformed_content_length_returns_400_json_error() {
         "body={body}"
     );
 }
+
+#[test]
+fn docker_compat_network_create_list_delete_routes_work() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{
+        "Name":"compat-net",
+        "Driver":"bridge",
+        "IPAM":{"Config":[{"Subnet":"172.44.0.0/16","Gateway":"172.44.0.1"}]}
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/networks/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (create_status, create_resp) = harness.request_raw(&create_request);
+    assert_eq!(create_status, 201, "create body={create_resp}");
+    assert!(create_resp.contains("\"Id\":\"compat-net\""), "body={create_resp}");
+
+    let (list_status, list_resp) = harness.request("GET", "/v1.45/networks");
+    assert_eq!(list_status, 200, "list body={list_resp}");
+    assert!(list_resp.contains("\"Name\":\"compat-net\""), "body={list_resp}");
+
+    let (delete_status, delete_resp) = harness.request("DELETE", "/v1.45/networks/compat-net");
+    assert_eq!(delete_status, 204, "delete body={delete_resp}");
+}

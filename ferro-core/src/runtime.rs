@@ -51,17 +51,6 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 // ============================================================================
-// Platform-specific type aliases
-// ============================================================================
-
-#[cfg(target_os = "linux")]
-type CapabilityType = caps::Capability;
-
-#[cfg(not(target_os = "linux"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CapabilityType;
-
-// ============================================================================
 // Atomic Operations Support (Task 4.1)
 // ============================================================================
 

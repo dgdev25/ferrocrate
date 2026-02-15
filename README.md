@@ -109,6 +109,40 @@ cargo build --release
 sudo cp target/release/ferro-cli /usr/local/bin/ferrocrate
 ```
 
+### One-Command Installers
+
+macOS (secure release install with checksum verification):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dgtise25/ferrocrate/main/scripts/install-macos.sh -o install-macos.sh
+bash install-macos.sh
+```
+
+macOS source-build fallback:
+
+```bash
+bash install-macos.sh --method source
+```
+
+Windows PowerShell (secure release install with checksum verification):
+
+```powershell
+iwr https://raw.githubusercontent.com/dgtise25/ferrocrate/main/scripts/install-windows.ps1 -OutFile install-windows.ps1
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+
+Windows source-build fallback:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -Method source
+```
+
+Installer notes:
+- Default install paths: `/usr/local/bin` (macOS), `%ProgramFiles%\\FerroCrate\\bin` (Windows).
+- Use `--version <tag>` to pin a release.
+- Use `--force` to overwrite existing binaries.
+- Release installer expects artifacts named `ferrocrate-<tag>-<os>-<arch>` plus a matching checksums file.
+
 ### Basic Usage
 
 ```bash

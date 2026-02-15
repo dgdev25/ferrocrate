@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Component;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Duration;
 use thiserror::Error;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -101,10 +103,26 @@ enum ForwardCommands {
     Run,
 }
 
+fn default_vm_backend() -> String {
+    if cfg!(target_arch = "aarch64") {
+        "qemu-hvf".to_string()
+    } else {
+        "qemu-x86_64".to_string()
+    }
+}
+
+fn default_fs_backend() -> String {
+    if Command::new("virtiofsd").arg("--version").output().is_ok() {
+        "virtiofs".to_string()
+    } else {
+        "9p".to_string()
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum VmCommands {
     Init {
-        #[arg(long, default_value = "qemu-hvf")]
+        #[arg(long, default_value_t = default_vm_backend())]
         backend: String,
         #[arg(long, default_value = "FerroCrateDesktopVM")]
         vm_name: String,
@@ -116,7 +134,7 @@ enum VmCommands {
         disk_path: Option<String>,
         #[arg(long)]
         host_share_path: Option<String>,
-        #[arg(long, default_value = "virtiofs")]
+        #[arg(long, default_value_t = default_fs_backend())]
         fs_backend: String,
         #[arg(long)]
         virtiofs_socket_path: Option<String>,
@@ -266,6 +284,162 @@ struct VmState {
 
 fn default_vm_name() -> String {
     "FerroCrateDesktopVM".to_string()
+}
+
+fn command_exists(bin: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {bin} >/dev/null 2>&1"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn require_command(bin: &str) -> Result<(), DesktopError> {
+    if command_exists(bin) {
+        Ok(())
+    } else {
+        Err(DesktopError::Invalid(format!(
+            "missing required command: {bin}"
+        )))
+    }
+}
+
+fn vm_arch_tag() -> Result<&'static str, DesktopError> {
+    match std::env::consts::ARCH {
+        "aarch64" => Ok("arm64"),
+        "x86_64" => Ok("amd64"),
+        other => Err(DesktopError::Invalid(format!(
+            "unsupported architecture: {other}"
+        ))),
+    }
+}
+
+fn base_cloud_image_url() -> Result<String, DesktopError> {
+    let arch = vm_arch_tag()?;
+    Ok(std::env::var("FERROCRATE_VM_BASE_IMAGE_URL").unwrap_or_else(|_| {
+        format!(
+            "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-{arch}.img"
+        )
+    }))
+}
+
+fn ensure_base_image(cache_dir: &Path) -> Result<PathBuf, DesktopError> {
+    require_command("curl")?;
+    let base = cache_dir.join("base-cloudimg.qcow2");
+    if base.exists() {
+        return Ok(base);
+    }
+    fs::create_dir_all(cache_dir)?;
+    let url = base_cloud_image_url()?;
+    let status = Command::new("curl")
+        .arg("-fL")
+        .arg(&url)
+        .arg("-o")
+        .arg(&base)
+        .status()?;
+    if !status.success() {
+        return Err(DesktopError::Invalid(format!(
+            "failed to download base image from {url}"
+        )));
+    }
+    Ok(base)
+}
+
+fn ensure_vm_disk(disk_path: &Path, vm_dir: &Path) -> Result<(), DesktopError> {
+    if disk_path.exists() {
+        return Ok(());
+    }
+    require_command("qemu-img")?;
+    let cache_dir = vm_dir.join("vm-cache");
+    let base = ensure_base_image(&cache_dir)?;
+    let size_gb = std::env::var("FERROCRATE_VM_SIZE_GB")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(20);
+    let status = Command::new("qemu-img")
+        .args([
+            "create",
+            "-f",
+            "qcow2",
+            "-F",
+            "qcow2",
+            "-b",
+            base.to_string_lossy().as_ref(),
+            disk_path.to_string_lossy().as_ref(),
+            &format!("{size_gb}G"),
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(DesktopError::Invalid(format!(
+            "failed to create vm disk at {}",
+            disk_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
+    require_command("ssh-keygen")?;
+    let key_path = vm_dir.join("vm_ssh_key");
+    let pub_path = vm_dir.join("vm_ssh_key.pub");
+    if key_path.exists() && pub_path.exists() {
+        return Ok((key_path, pub_path));
+    }
+    let status = Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-f"])
+        .arg(&key_path)
+        .status()?;
+    if !status.success() {
+        return Err(DesktopError::Invalid(
+            "failed to generate vm ssh key".to_string(),
+        ));
+    }
+    Ok((key_path, pub_path))
+}
+
+fn ensure_cloud_init_iso(vm_dir: &Path, ssh_pubkey: &str) -> Result<PathBuf, DesktopError> {
+    require_command("hdiutil")?;
+    let seed_path = vm_dir.join("cloud-init.iso");
+    if seed_path.exists() {
+        fs::remove_file(&seed_path)?;
+    }
+    let tmp_dir = tempfile::tempdir()?;
+    let user_data = tmp_dir.path().join("user-data");
+    let meta_data = tmp_dir.path().join("meta-data");
+    fs::write(
+        &user_data,
+        format!(
+            "#cloud-config\noutput:\n  all: \"| tee -a /var/log/cloud-init-output.log > /dev/ttyS0\"\nusers:\n  - name: ubuntu\n    lock_passwd: false\n    plain_text_passwd: ferrocrate\n    ssh_authorized_keys:\n      - {ssh_pubkey}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\nssh_pwauth: true\npackage_update: true\npackages:\n  - openssh-server\nwrite_files:\n  - path: /etc/systemd/system/ferro-cloud-debug.service\n    permissions: \"0644\"\n    owner: root:root\n    content: |\n      [Unit]\n      Description=Ferrocrate cloud-init debug capture\n      After=cloud-init.service\n\n      [Service]\n      Type=oneshot\n      ExecStart=/bin/bash -c 'echo ferro-cloud-debug $(date -Is) >> /var/log/ferro-cloud-debug.log; cloud-init status --long >> /var/log/ferro-cloud-debug.log 2>&1 || true; tail -200 /var/log/cloud-init.log >> /var/log/ferro-cloud-debug.log 2>&1 || true; tail -200 /var/log/cloud-init-output.log >> /var/log/ferro-cloud-debug.log 2>&1 || true; cat /run/cloud-init/ds-identify.log >> /var/log/ferro-cloud-debug.log 2>&1 || true'\n\n      [Install]\n      WantedBy=multi-user.target\nbootcmd:\n  - ['sh', '-c', 'echo cloud-init-bootcmd-start > /dev/ttyS0']\n  - rm -f /etc/systemd/system/ssh.service.d/* || true\n  - rm -f /etc/systemd/system/sshd.service.d/* || true\nruncmd:\n  - ['sh', '-c', 'echo cloud-init-runcmd-start > /dev/ttyS0']\n  - systemctl daemon-reload\n  - systemctl enable ferro-cloud-debug.service || true\n  - modprobe 9pnet_virtio || true\n  - modprobe 9p || true\n  - mkdir -p /mnt/host\n  - mount -t 9p -o trans=virtio,version=9p2000.L,cache=mmap ferrohost /mnt/host || true\n  - mkdir -p /mnt/host/.ferrocrate\n  - ssh-keygen -A\n  - sed -i 's/^#\\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config\n  - sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config\n  - systemctl disable --now ssh.socket || true\n  - systemctl enable ssh.service\n  - systemctl restart ssh.service\n  - ['sh', '-c', 'sleep 1 && ss -ltnp']\n  - ss -ltnp > /mnt/host/.ferrocrate/guest-ssh-debug.log || true\n  - cp -f /var/log/ferro-cloud-debug.log /mnt/host/.ferrocrate/ferro-cloud-debug.log 2>/dev/null || true\n  - cp -f /var/log/cloud-init.log /mnt/host/.ferrocrate/cloud-init.log 2>/dev/null || true\n  - cp -f /var/log/cloud-init-output.log /mnt/host/.ferrocrate/cloud-init-output.log 2>/dev/null || true\n",
+        ),
+    )?;
+    let instance_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    fs::write(
+        &meta_data,
+        format!("instance-id: ferrocrate-vm-{instance_ts}\nlocal-hostname: ferrocrate\n"),
+    )?;
+
+    let status = Command::new("hdiutil")
+        .args([
+            "makehybrid",
+            "-iso",
+            "-joliet",
+            "-o",
+            seed_path.to_string_lossy().as_ref(),
+            "-default-volume-name",
+            "cidata",
+        ])
+        .arg(tmp_dir.path())
+        .status()?;
+    if !status.success() {
+        return Err(DesktopError::Invalid(
+            "failed to create cloud-init seed iso".to_string(),
+        ));
+    }
+    Ok(seed_path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -851,6 +1025,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .display()
                     .to_string()
             });
+            let vm_dir = state_path.parent().unwrap_or_else(|| Path::new("."));
             let fs_backend = fs_backend.to_ascii_lowercase();
             if fs_backend != "virtiofs" && fs_backend != "9p" {
                 return Err(DesktopError::Invalid(format!(
@@ -863,6 +1038,31 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .parent()
                     .map(|p| p.join("virtiofsd.sock").display().to_string())
             });
+            let guest_user = guest_user.unwrap_or_else(|| "ferro".to_string());
+            let mut ssh_private_key_path = ssh_private_key_path;
+            let mut cloud_init_image_path = cloud_init_image_path;
+            if backend.starts_with("qemu") {
+                ensure_vm_disk(Path::new(&disk_path), vm_dir)?;
+                if ssh_private_key_path.is_none() {
+                    let (priv_key, pub_key) = ensure_ssh_key(vm_dir)?;
+                    ssh_private_key_path = Some(priv_key.display().to_string());
+                    let ssh_pub = fs::read_to_string(&pub_key)?;
+                    let seed = ensure_cloud_init_iso(vm_dir, ssh_pub.trim())?;
+                    cloud_init_image_path = Some(seed.display().to_string());
+                } else if cloud_init_image_path.is_none() {
+                    let pub_path = PathBuf::from(
+                        ssh_private_key_path
+                            .as_ref()
+                            .map(|p| format!("{p}.pub"))
+                            .unwrap_or_default(),
+                    );
+                    if pub_path.exists() {
+                        let ssh_pub = fs::read_to_string(&pub_path)?;
+                        let seed = ensure_cloud_init_iso(vm_dir, ssh_pub.trim())?;
+                        cloud_init_image_path = Some(seed.display().to_string());
+                    }
+                }
+            }
             let state = VmState {
                 config: VmConfig {
                     backend,
@@ -876,7 +1076,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     hyperv_switch,
                     ssh_port,
                     api_port,
-                    guest_user,
+                    guest_user: Some(guest_user),
                     ssh_private_key_path,
                     cloud_init_image_path,
                 },
@@ -922,6 +1122,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     }
                     let mut command = build_vm_command(&state.config, &forwards)?;
                     if foreground {
+                        command.arg("-serial").arg("mon:stdio");
                         let status = command.status()?;
                         if !status.success() {
                             return Err(DesktopError::Invalid(format!(
@@ -930,13 +1131,59 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                         }
                         return Ok(());
                     }
-                    let child = command.spawn()?;
-                    let pid = child.id();
+                    let log_path = state_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("ferro-desktop-vm.log");
+                    command.arg("-serial").arg(format!("file:{}", log_path.display()));
+                    let log_file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)?;
+                    let log_file_err = log_file.try_clone()?;
+                    command.stdin(Stdio::null());
+                    command.stdout(Stdio::from(log_file));
+                    command.stderr(Stdio::from(log_file_err));
+                    let pid = if cfg!(target_os = "macos") {
+                        let pidfile = state_path
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join("ferro-desktop-vm.pid");
+                        command.arg("-daemonize").arg("-pidfile").arg(&pidfile);
+                        let status = command.status()?;
+                        if !status.success() {
+                            return Err(DesktopError::Invalid(format!(
+                                "vm process exited with status {status}"
+                            )));
+                        }
+                        let pid = fs::read_to_string(&pidfile)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<u32>().ok());
+                        pid.ok_or_else(|| {
+                            DesktopError::Invalid(format!(
+                                "vm pidfile missing or invalid: {}",
+                                pidfile.display()
+                            ))
+                        })?
+                    } else {
+                        let child = command.spawn()?;
+                        child.id()
+                    };
                     state.pid = Some(pid);
                     state.status = "running".to_string();
                     state.last_error = None;
                     save_vm_state(&state_path, &state)?;
                     println!("vm: started pid={pid}");
+                    std::thread::sleep(Duration::from_millis(500));
+                    if !pid_alive(pid) {
+                        state.pid = None;
+                        state.status = "stopped".to_string();
+                        state.last_error = Some(format!(
+                            "vm exited early; see {}",
+                            log_path.display()
+                        ));
+                        save_vm_state(&state_path, &state)?;
+                    }
                     Ok(())
                 }
                 "hyperv" => {
@@ -1546,8 +1793,31 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         }
     };
     let mut cmd = Command::new(qemu_bin);
-    if config.backend == "qemu-hvf" {
+    if cfg!(target_os = "macos")
+        && (config.backend == "qemu-hvf" || config.backend == "qemu-x86_64")
+    {
         cmd.arg("-accel").arg("hvf");
+    }
+    if cfg!(target_os = "macos") {
+        cmd.arg("-display").arg("none");
+    }
+    let machine = if config.backend == "qemu-x86_64" {
+        "q35"
+    } else {
+        "virt"
+    };
+    if let Some((code, vars)) = find_uefi_firmware(config.backend.as_str()) {
+        if let Some(vars_path) = vars {
+            cmd.arg("-drive")
+                .arg(format!(
+                    "if=pflash,format=raw,readonly=on,file={}",
+                    code.display()
+                ))
+                .arg("-drive")
+                .arg(format!("if=pflash,format=raw,file={}", vars_path.display()));
+        } else if config.backend != "qemu-x86_64" {
+            cmd.arg("-bios").arg(code);
+        }
     }
     let mut host_forward_specs = vec![
         format!("hostfwd=tcp:127.0.0.1:{}-:22", config.ssh_port),
@@ -1576,7 +1846,7 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
     }
     let netdev = format!("user,id=net0,{}", host_forward_specs.join(","));
     cmd.arg("-machine")
-        .arg("virt")
+        .arg(machine)
         .arg("-cpu")
         .arg("host")
         .arg("-smp")
@@ -1619,6 +1889,35 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         }
     }
     Ok(cmd)
+}
+
+fn find_uefi_firmware(backend: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    let candidates = if backend == "qemu-x86_64" {
+        vec![
+            ("OVMF_CODE.fd", Some("OVMF_VARS.fd")),
+            ("edk2-x86_64-code.fd", Some("edk2-x86_64-vars.fd")),
+        ]
+    } else {
+        vec![
+            ("edk2-aarch64-code.fd", Some("edk2-aarch64-vars.fd")),
+            ("edk2-aarch64-code.fd", None),
+        ]
+    };
+    let roots = ["/usr/local/share/qemu", "/opt/homebrew/share/qemu"];
+    for (code_name, vars_name) in candidates {
+        for root in roots {
+            let code = Path::new(root).join(code_name);
+            if !code.exists() {
+                continue;
+            }
+            let vars = vars_name.and_then(|name| {
+                let vars_path = Path::new(root).join(name);
+                vars_path.exists().then_some(vars_path)
+            });
+            return Some((code, vars));
+        }
+    }
+    None
 }
 
 fn is_loopback_host(value: &str) -> bool {

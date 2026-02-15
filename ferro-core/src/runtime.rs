@@ -23,7 +23,7 @@ use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
-use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
+use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile};
 use ferro_net::bridge;
 use ferro_net::ebpf::{
     build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
@@ -1783,6 +1783,34 @@ fn seccomp_permissive_mode() -> bool {
 fn load_seccomp_profile() -> Result<Option<SeccompProfile>, RuntimeError> {
     if !seccomp_enabled() {
         return Ok(None);
+    }
+    if let Ok(raw_path) = std::env::var("FERROCRATE_SECCOMP_PROFILE") {
+        let path = PathBuf::from(raw_path.trim());
+        let metadata = fs::metadata(&path).map_err(|err| {
+            RuntimeError::InvalidCommand(format!(
+                "seccomp profile {}: {}",
+                path.display(),
+                err
+            ))
+        })?;
+        const MAX_SECCOMP_PROFILE_BYTES: u64 = 1024 * 1024;
+        if metadata.len() > MAX_SECCOMP_PROFILE_BYTES {
+            return Err(RuntimeError::InvalidCommand(format!(
+                "seccomp profile {} exceeds {} bytes",
+                path.display(),
+                MAX_SECCOMP_PROFILE_BYTES
+            )));
+        }
+        let raw = fs::read_to_string(&path).map_err(|err| {
+            RuntimeError::InvalidCommand(format!(
+                "seccomp profile {}: {}",
+                path.display(),
+                err
+            ))
+        })?;
+        let profile = parse_seccomp_profile(&raw)
+            .map_err(|err| RuntimeError::InvalidCommand(format!("seccomp profile: {err}")))?;
+        return Ok(Some(profile));
     }
     let profile = default_seccomp_profile()
         .map_err(|err| RuntimeError::InvalidCommand(format!("seccomp profile: {err}")))?;
@@ -3925,11 +3953,48 @@ mod tests {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
             std::env::set_var("FERROCRATE_SECCOMP", "0");
+            std::env::remove_var("FERROCRATE_SECCOMP_PROFILE");
         }
         let profile = super::load_seccomp_profile().expect("seccomp profile");
         assert!(profile.is_none());
         unsafe {
             std::env::remove_var("FERROCRATE_SECCOMP");
+        }
+    }
+
+    #[test]
+    fn seccomp_profile_can_load_custom_file() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile_path = temp.path().join("seccomp.json");
+        std::fs::write(&profile_path, crate::seccomp::default_seccomp_profile_json())
+            .expect("write profile");
+        unsafe {
+            std::env::set_var("FERROCRATE_SECCOMP_PROFILE", profile_path.as_os_str());
+            std::env::remove_var("FERROCRATE_SECCOMP");
+        }
+        let profile = super::load_seccomp_profile().expect("seccomp profile");
+        assert!(profile.is_some());
+        unsafe {
+            std::env::remove_var("FERROCRATE_SECCOMP_PROFILE");
+        }
+    }
+
+    #[test]
+    fn seccomp_profile_rejects_oversized_custom_file() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile_path = temp.path().join("seccomp.json");
+        let oversized = vec![b'a'; (1024 * 1024) + 1];
+        std::fs::write(&profile_path, oversized).expect("write profile");
+        unsafe {
+            std::env::set_var("FERROCRATE_SECCOMP_PROFILE", profile_path.as_os_str());
+            std::env::remove_var("FERROCRATE_SECCOMP");
+        }
+        let err = super::load_seccomp_profile().expect_err("oversized should fail");
+        assert!(err.to_string().contains("exceeds"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_SECCOMP_PROFILE");
         }
     }
 

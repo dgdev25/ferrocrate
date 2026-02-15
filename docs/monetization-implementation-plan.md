@@ -69,6 +69,9 @@ Implement enforceable monetization aligned to strategy:
 - Linux entitlement integration CI:
   - `ferro-cli/tests/entitlement_linux_integration.rs`
   - executed in `.github/workflows/rust-no-warnings.yml` on `ubuntu-latest`
+- Paid installer smoke CI:
+  - `.github/workflows/paid-installer-smoke.yml`
+  - boots ephemeral paid gateway and validates paid-channel installer logic on `macos-latest` and `windows-latest`.
 
 ## What Is Implemented (Phase 3 - Bootstrap + Gateway Wiring)
 - One-command paid bootstrap defaults:
@@ -78,18 +81,21 @@ Implement enforceable monetization aligned to strategy:
   - installs/validates `qemu`, `virtiofsd`, and `ssh` on macOS.
 - Installer token flow for paid channel:
   - macOS and Windows installers support `PAID_RELEASE_TOKEN` and `PAID_RELEASE_TOKEN_ENDPOINT`.
+  - Installers now also support session-based issuance via `PAID_SESSION_TOKEN`.
   - token exchange uses entitlement envelope file (`PAID_ENTITLEMENT_FILE`) and release tag header.
 - Authenticated artifact host implementation:
   - `scripts/paid-artifact-gateway.py` provides:
     - `POST /v1/token` entitlement validation and short-lived token issuance.
     - `GET /v1/releases/<tag>/<asset>` bearer-token protected artifact delivery.
+  - Auth modes: `session`, `entitlement`, `hybrid` with optional TLS/rate-limit/audit/revocation controls.
 - CLI compatibility doctor command:
-  - `ferrocrate doctor [--fix] [--json]` with macOS-focused checks for:
+  - `ferrocrate doctor [--fix] [--bootstrap] [--json]` with macOS-focused checks for:
     - desktop binary presence
     - host dependencies (`qemu-img`, `qemu-system-*`, `virtiofsd`, `ssh`)
     - desktop VM running state
     - guest SSH reachability
     - guest ferrocrate runtime availability
+  - `--bootstrap` can trigger full paid installer bootstrap path automatically when standard remediation is insufficient.
 
 ## Remaining Work (Phase 3)
 - Entitlement issuance service and key management rotation policy hardening

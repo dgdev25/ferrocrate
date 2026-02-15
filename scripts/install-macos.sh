@@ -16,6 +16,7 @@ DESKTOP_BOOTSTRAP="${DESKTOP_BOOTSTRAP:-0}"
 FULL_STACK="${FULL_STACK:-0}"
 PAID_RELEASE_BASE_URL="${PAID_RELEASE_BASE_URL:-}"
 PAID_RELEASE_TOKEN="${PAID_RELEASE_TOKEN:-}"
+PAID_SESSION_TOKEN="${PAID_SESSION_TOKEN:-}"
 PAID_RELEASE_TOKEN_ENDPOINT="${PAID_RELEASE_TOKEN_ENDPOINT:-}"
 PAID_ENTITLEMENT_FILE="${PAID_ENTITLEMENT_FILE:-$HOME/.ferrocrate/entitlement.lic}"
 VM_STATE_FILE="${VM_STATE_FILE:-$HOME/.ferrocrate/desktop-vm.json}"
@@ -204,6 +205,28 @@ ensure_paid_release_token() {
   if [[ "$RELEASE_CHANNEL" != "paid" ]]; then
     return
   fi
+  if [[ -n "$PAID_SESSION_TOKEN" ]]; then
+    if [[ -z "$PAID_RELEASE_TOKEN_ENDPOINT" ]]; then
+      echo "paid channel with PAID_SESSION_TOKEN requires PAID_RELEASE_TOKEN_ENDPOINT" >&2
+      exit 1
+    fi
+    local session_response session_token
+    echo "requesting paid release token via session..."
+    session_response="$(
+      curl -fsSL \
+        -X POST \
+        -H "Authorization: Bearer ${PAID_SESSION_TOKEN}" \
+        -H "X-Ferrocrate-Tag: ${tag}" \
+        "$PAID_RELEASE_TOKEN_ENDPOINT"
+    )"
+    session_token="$(printf '%s' "$session_response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [[ -z "$session_token" ]]; then
+      echo "failed to parse token from session token endpoint response" >&2
+      exit 1
+    fi
+    PAID_RELEASE_TOKEN="$session_token"
+    return
+  fi
   if [[ -n "$PAID_RELEASE_TOKEN" ]]; then
     return
   fi
@@ -225,7 +248,7 @@ ensure_paid_release_token() {
       --data-binary @"$PAID_ENTITLEMENT_FILE" \
       "$PAID_RELEASE_TOKEN_ENDPOINT"
   )"
-  token="$(printf '%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p')"
+  token="$(printf '%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   if [[ -z "$token" ]]; then
     echo "failed to parse token from paid release token endpoint response" >&2
     exit 1
@@ -252,7 +275,7 @@ install_binary_release() {
   fi
 
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  trap "rm -rf '$tmpdir'" EXIT
 
   tarball="$tmpdir/$asset_name"
   checksums="$tmpdir/$checksum_name"
@@ -306,7 +329,7 @@ install_from_source() {
 
   local tmpdir
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  trap "rm -rf '$tmpdir'" EXIT
 
   echo "cloning repository: https://github.com/${REPO}.git"
   git clone "https://github.com/${REPO}.git" "$tmpdir/src" --depth 1

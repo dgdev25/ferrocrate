@@ -1,3 +1,4 @@
+use crate::fs_atomic::write_atomic;
 use crate::registry::{RegistryAuth, parse_image_reference};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -190,12 +191,9 @@ pub fn write_ferrocrate_auth_file(
         );
     }
     let file = FerrocrateAuthFile { auths: entries };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| DockerAuthError::Read(err.to_string()))?;
-    }
     let bytes = serde_json::to_vec_pretty(&file)
         .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
-    fs::write(path, &bytes).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    write_atomic(path, &bytes).map_err(|err| DockerAuthError::Read(err.to_string()))?;
 
     // Set restrictive permissions (0o600) on auth file to prevent credential exposure
     #[cfg(unix)]

@@ -29,8 +29,5 @@ jobs:
       - name: Run macOS compatibility integration test target
         run: cargo test -p ferro-cli --test macos_compatibility_tests -- --nocapture
 
-      - name: Run Docker compat integration tests on macOS
-        run: cargo test -p ferro-cli --test docker_compat_integration -- --nocapture
-
       - name: Run macOS compatibility script
         run: bash scripts/test-macos-compatibility.sh

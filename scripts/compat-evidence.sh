@@ -23,6 +23,8 @@ run_check() {
 
 echo "[compat] collecting compatibility evidence..."
 os_name="$(uname -s)"
+docker_api_skip_reason=""
+dockerfile_build_skip_reason=""
 
 if [[ "$os_name" == "Linux" ]]; then
   docker_api_matrix_status="$(run_check docker_api_matrix cargo test -p ferro-cli --test api_compat_matrix -- --nocapture)"
@@ -30,6 +32,7 @@ if [[ "$os_name" == "Linux" ]]; then
 else
   docker_api_matrix_status="skipped"
   docker_api_integration_status="skipped"
+  docker_api_skip_reason="linux_only_daemon_compat_tests"
 fi
 seccomp_security_status="$(run_check seccomp_security cargo test -p ferro-core --test security_tests -- --nocapture)"
 oci_smoke_status="$(run_check oci_smoke bash scripts/perf/oci-compat.sh)"
@@ -37,6 +40,7 @@ if [[ "$os_name" == "Linux" ]]; then
   dockerfile_build_status="$(run_check dockerfile_build cargo test -p ferro-cli --test dockerfile_parity_integration -- --nocapture)"
 else
   dockerfile_build_status="skipped"
+  dockerfile_build_skip_reason="linux_only_dockerfile_parity_integration"
 fi
 ai_latency_status="$(run_check ai_latency cargo run -p ferro-mind --example ai_latency)"
 ai_quality_status="$(run_check ai_quality cargo run -p ferro-mind --example ai_quality)"
@@ -83,6 +87,7 @@ fi
 cat >"$REPORT_JSON" <<JSON
 {
   "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "platform": "${os_name}",
   "checks": {
     "docker_api_matrix": "${docker_api_matrix_status}",
     "docker_api_integration": "${docker_api_integration_status}",
@@ -102,6 +107,10 @@ cat >"$REPORT_JSON" <<JSON
     "ai_oom_detection_rate": "${ai_oom_detection_rate}",
     "ai_oom_detection_min": "${ai_oom_detection_min}",
     "ai_oom_detection_status": "${ai_oom_detection_status}"
+  },
+  "skip_reasons": {
+    "docker_api": "${docker_api_skip_reason}",
+    "dockerfile_build": "${dockerfile_build_skip_reason}"
   }
 }
 JSON
@@ -110,11 +119,14 @@ cat >"$REPORT_MD" <<MD
 # Compatibility Evidence
 
 - Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+- Platform: ${os_name}
 - Docker API matrix: ${docker_api_matrix_status}
 - Docker API integration: ${docker_api_integration_status}
+- Docker API skip reason: ${docker_api_skip_reason}
 - Seccomp/security tests: ${seccomp_security_status}
 - OCI smoke: ${oci_smoke_status}
 - Dockerfile build smoke: ${dockerfile_build_status}
+- Dockerfile build skip reason: ${dockerfile_build_skip_reason}
 - AI latency example: ${ai_latency_status}
 - AI inference latency (ns): ${ai_latency_ns}
 - AI latency threshold (ns): ${ai_latency_threshold_ns}

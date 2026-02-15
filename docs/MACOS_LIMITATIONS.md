@@ -1,10 +1,10 @@
-# FerroCrate macOS Limitations
+# FerroCrate macOS Runtime Notes
 
 ## Overview
 
-FerroCrate has been ported to macOS to support development, image management, and AI orchestration workflows. However, native container execution is **not available** on macOS due to fundamental platform differences. This document explains the limitations and provides guidance for macOS users.
+FerroCrate supports macOS by running the Linux container runtime in a Linux guest (desktop VM path). Native Linux-kernel container primitives are not available on macOS itself, but standard user-facing commands (including `run`) are expected to work via the desktop integration layer.
 
-**Status:** ✅ **macOS Support Implemented** (v0.1.0+)
+**Status:** ✅ **macOS host support implemented** (v0.1.0+)
 **Platform:** macOS (x86_64, arm64)
 **Release Date:** 2026-02-15
 
@@ -12,40 +12,43 @@ FerroCrate has been ported to macOS to support development, image management, an
 
 ## Supported Features on macOS ✅
 
+### Desktop VM Runtime Path
+- **`ferrocrate run`** - Runs containers through Linux guest runtime
+- **`ferrocrate ps`** - Lists containers via desktop bridge
+- **`ferrocrate compose up/down`** - Compose workflows via desktop bridge
+- **`ferro-desktop vm ...`** - VM lifecycle (init/start/stop/status/update)
+- **`ferro-desktop autostart ...`** - launch agent setup
+
 ### Image Management
-- **`ferro-cli images`** - List local images
-- **`ferro-cli rmi`** - Remove images
-- **`ferro-cli image-prune`** - Clean up unused images
-- **`ferro-cli pull`** - Download container images
-- **`ferro-cli push`** - Upload images to registries
+- **`ferrocrate images`** - List local images
+- **`ferrocrate rmi`** - Remove images
+- **`ferrocrate image-prune`** - Clean up unused images
+- **`ferrocrate pull`** - Download container images
+- **`ferrocrate push`** - Upload images to registries
 
 ### AI & Machine Learning
-- **`ferro-cli ai orchestrate`** - Run AI orchestration tasks
-- **`ferro-cli ai-train`** - Train ML models
-- **`ferro-cli ai-export`** - Export trained models
-- **`ferro-cli ai-import`** - Import pre-trained models
-- **`ferro-cli ai-stats`** - Get model statistics
-- **`ferro-cli ai-audit`** - Audit AI decisions
+- **`ferrocrate ai orchestrate`** - Run AI orchestration tasks
+- **`ferrocrate ai-train`** - Train ML models
+- **`ferrocrate ai-export`** - Export trained models
+- **`ferrocrate ai-import`** - Import pre-trained models
+- **`ferrocrate ai-stats`** - Get model statistics
+- **`ferrocrate ai-audit`** - Audit AI decisions
 
 ### Configuration
-- **`ferro-cli config`** - Manage configuration
-- **`ferro-cli completion`** - Shell completions
+- **`ferrocrate config`** - Manage configuration
+- **`ferrocrate completion`** - Shell completions
 
 ---
 
-## Unsupported Features on macOS ❌
+## Not Native on macOS ❌
 
-### Container Execution (Linux-Only)
-The following commands are **NOT available** on macOS:
+### Direct Host-Kernel Container Execution
+The following is not available directly on the macOS host kernel:
 
-| Command | Reason | Workaround |
-|---------|--------|-----------|
-| `ferro-cli run` | Requires Linux namespaces & cgroups | Use Docker Desktop + Linux VM |
-| `ferro-cli ps` | Container management (Linux-only) | Use `docker ps` |
-| `ferro-cli compose up/down` | Requires Linux container runtime | Use Docker Compose |
-| `ferro-cli ai branch` | RVF persistence (Linux-only) | Run on Linux system |
-| `ferro-cli ai lineage` | RVF file format support | Run on Linux system |
-| `ferro-cli ai migrate` | Model migration to RVF format | Run on Linux system |
+| Area | Reason | Practical path |
+|------|--------|----------------|
+| Linux namespaces/cgroups/seccomp on host | macOS kernel is XNU, not Linux | Run through `ferro-desktop` Linux guest |
+| Host-native OverlayFS/netfilter/eBPF runtime hooks | Linux kernel-only subsystems | Use guest runtime networking/storage |
 
 ### Linux-Only AI Features
 The following AI features require Linux-specific dependencies:
@@ -123,40 +126,28 @@ use rvf_runtime;  // Only compiled on Linux
 
 ## Workarounds for macOS Users
 
-### Scenario 1: Develop Locally, Deploy on Linux
-
-**Recommended setup:**
-1. Use macOS for development/testing with supported features
-2. Deploy to Linux production for full container execution
-3. Push images to registry for cross-platform use
+### Scenario 1: Use FerroCrate Desktop VM Path (Recommended)
 
 ```bash
-# macOS development
-ferro-cli ai-train --model-type anomaly-detector
-ferro-cli ai-export --model-type anomaly-detector --output model.native
-ferro-cli push myregistry.com/myimage:latest
+# Start VM/runtime path
+ferro-desktop vm init --backend qemu-hvf --cpus 2 --memory-mb 2048
+ferro-desktop vm start
 
-# Linux production
-ferro-cli run myimage:latest
-ferro-cli ai-stats --model-type anomaly-detector
+# Use ferrocrate as normal
+ferrocrate run alpine:latest echo "Hello from FerroCrate on macOS"
+ferrocrate ps
 ```
 
-### Scenario 2: Use Docker Desktop for Container Execution
+### Scenario 2: Develop Locally, Deploy on Linux
 
-If you need to run containers on macOS:
-
-1. **Install Docker Desktop** for macOS
-2. Use Docker CLI for container operations
-3. Use FerroCrate for image management and AI features
+1. Use macOS for development/testing.
+2. Deploy to Linux production for strict Linux-native parity.
+3. Push images to a registry for cross-platform use.
 
 ```bash
-# FerroCrate on macOS (cross-platform)
-ferro-cli images
-ferro-cli pull alpine:latest
-ferro-cli ai orchestrate --task "analyze containers"
-
-# Docker Desktop (container execution)
-docker run alpine:latest echo "Hello"
+ferrocrate ai-train --model-type anomaly-detector
+ferrocrate ai-export --model-type anomaly-detector --output model.native
+ferrocrate push myregistry.com/myimage:latest
 ```
 
 ### Scenario 3: Use Linux VM/Remote Machine
@@ -166,8 +157,8 @@ For full FerroCrate functionality:
 ```bash
 # macOS: Remote SSH
 ssh user@linux-server.com
-ferro-cli run alpine:latest echo "Hello from Linux"
-ferro-cli ai branch --source model1.rvf --target model2.rvf
+ferrocrate run alpine:latest echo "Hello from Linux"
+ferrocrate ai branch --source model1.rvf --target model2.rvf
 ```
 
 ---
@@ -242,20 +233,20 @@ ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
 
 ## Troubleshooting
 
-### "Command not available on macOS"
+### "`run` command missing on macOS"
 
 **Symptom:**
 ```
-$ ferro-cli run alpine:latest
+$ ferrocrate run alpine:latest
 error: unrecognized subcommand 'run'
 ```
 
-**Cause:** Attempting to use a Linux-only command on macOS
+**Cause:** Usually an installation/path mismatch (wrong binary), not expected behavior.
 
 **Solution:**
-1. Switch to a Linux machine/VM
-2. Use `ferro-cli --help` to see available commands
-3. Refer to "Workarounds" section above
+1. Ensure you are running `ferrocrate` (CLI), not only `ferro-desktop`.
+2. Check `which ferrocrate` and `ferrocrate --help`.
+3. Confirm desktop VM path is initialized and started.
 
 ### "RVF format not supported"
 
@@ -318,9 +309,9 @@ For macOS-specific issues:
 | **Platform Support** | ✅ Supported | Builds and runs on macOS |
 | **Image Management** | ✅ Supported | Full image operations |
 | **AI Features** | ✅ Mostly Supported | Except RVF-specific features |
-| **Container Execution** | ❌ Not Supported | Requires Linux kernel |
+| **Container Execution** | ✅ Supported via Desktop VM | Not host-native on XNU kernel |
 | **RVF Format** | ❌ Not Supported | Linux-only persistence layer |
-| **Recommended Use** | 📱 Development & Management | Not production container host |
+| **Recommended Use** | 📱 Development & Managed Runtime | Use desktop VM path for parity |
 
 ---
 
@@ -328,24 +319,27 @@ For macOS-specific issues:
 
 ### Available on macOS
 ```bash
-ferro-cli images
-ferro-cli pull <image>
-ferro-cli push <image>
-ferro-cli ai orchestrate --task "..."
-ferro-cli ai-train --model-type <type>
-ferro-cli ai-export --model-type <type>
-ferro-cli ai-import --model-type <type>
-ferro-cli config
+ferro-desktop vm init --backend qemu-hvf --cpus 2 --memory-mb 2048
+ferro-desktop vm start
+ferrocrate run <image>
+ferrocrate ps
+ferrocrate compose up/down
+ferrocrate images
+ferrocrate pull <image>
+ferrocrate push <image>
+ferrocrate ai orchestrate --task "..."
+ferrocrate ai-train --model-type <type>
+ferrocrate ai-export --model-type <type>
+ferrocrate ai-import --model-type <type>
+ferrocrate config
 ```
 
-### Not Available on macOS
+### Not Host-Native on macOS
 ```bash
-ferro-cli run                    # ❌ Container execution
-ferro-cli ps                     # ❌ Container listing
-ferro-cli compose up/down        # ❌ Compose orchestration
-ferro-cli ai branch              # ❌ RVF branching
-ferro-cli ai lineage             # ❌ RVF lineage
-ferro-cli ai migrate             # ❌ RVF migration
+Linux namespaces/cgroups/seccomp on host kernel  # ❌ requires Linux guest runtime
+ferrocrate ai branch                            # ❌ RVF branching
+ferrocrate ai lineage                           # ❌ RVF lineage
+ferrocrate ai migrate                           # ❌ RVF migration
 ```
 
 ---

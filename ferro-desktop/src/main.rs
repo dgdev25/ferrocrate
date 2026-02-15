@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -11,7 +12,11 @@ use thiserror::Error;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Parser)]
-#[command(name = "ferro-desktop", version, about = "FerroCrate desktop daemon/proxy")]
+#[command(
+    name = "ferro-desktop",
+    version,
+    about = "FerroCrate desktop daemon/proxy"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -102,6 +107,10 @@ enum VmCommands {
         disk_path: Option<String>,
         #[arg(long)]
         host_share_path: Option<String>,
+        #[arg(long, default_value = "virtiofs")]
+        fs_backend: String,
+        #[arg(long)]
+        virtiofs_socket_path: Option<String>,
         #[arg(long, default_value_t = 2222)]
         ssh_port: u16,
         #[arg(long, default_value_t = 4288)]
@@ -110,6 +119,8 @@ enum VmCommands {
     Start {
         #[arg(long, default_value_t = false)]
         foreground: bool,
+        #[arg(long)]
+        forward_state_file: Option<String>,
     },
     Stop,
     Status {
@@ -170,6 +181,8 @@ struct VmConfig {
     memory_mb: u32,
     disk_path: String,
     host_share_path: String,
+    fs_backend: String,
+    virtiofs_socket_path: Option<String>,
     ssh_port: u16,
     api_port: u16,
 }
@@ -215,7 +228,10 @@ fn main() {
             json,
             command,
         } => run_forward_command(state_file.as_deref(), json, command),
-        Commands::Vm { state_file, command } => run_vm_command(state_file.as_deref(), command),
+        Commands::Vm {
+            state_file,
+            command,
+        } => run_vm_command(state_file.as_deref(), command),
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
@@ -245,7 +261,10 @@ fn validate_daemon_addr(addr: &str, allow_remote: bool) -> Result<(), DesktopErr
     if allow_remote {
         return Ok(());
     }
-    if addr.starts_with("127.0.0.1:") || addr.starts_with("localhost:") || addr.starts_with("[::1]:") {
+    if addr.starts_with("127.0.0.1:")
+        || addr.starts_with("localhost:")
+        || addr.starts_with("[::1]:")
+    {
         return Ok(());
     }
     Err(DesktopError::Invalid(
@@ -540,7 +559,11 @@ fn run_forward_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
-                println!("forward: added {} entries={}", state_path.display(), entries.len());
+                println!(
+                    "forward: added {} entries={}",
+                    state_path.display(),
+                    entries.len()
+                );
             }
         }
         ForwardCommands::Remove {
@@ -548,7 +571,9 @@ fn run_forward_command(
             listen_port,
         } => {
             let before = entries.len();
-            entries.retain(|entry| !(entry.bind_addr == bind_addr && entry.listen_port == listen_port));
+            entries.retain(|entry| {
+                !(entry.bind_addr == bind_addr && entry.listen_port == listen_port)
+            });
             save_forward_entries(&state_path, &entries)?;
             let removed = before.saturating_sub(entries.len());
             if json {
@@ -605,7 +630,9 @@ fn default_forward_state_path() -> PathBuf {
             .join("desktop-forwards.json");
     }
     if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".ferrocrate").join("desktop-forwards.json");
+        return PathBuf::from(home)
+            .join(".ferrocrate")
+            .join("desktop-forwards.json");
     }
     PathBuf::from(".ferrocrate").join("desktop-forwards.json")
 }
@@ -631,10 +658,9 @@ fn save_forward_entries(path: &Path, entries: &[ForwardEntry]) -> Result<(), Des
 }
 
 fn upsert_forward_entry(entries: &mut Vec<ForwardEntry>, entry: ForwardEntry) {
-    if let Some(existing) = entries
-        .iter_mut()
-        .find(|existing| existing.bind_addr == entry.bind_addr && existing.listen_port == entry.listen_port)
-    {
+    if let Some(existing) = entries.iter_mut().find(|existing| {
+        existing.bind_addr == entry.bind_addr && existing.listen_port == entry.listen_port
+    }) {
         *existing = entry;
         return;
     }
@@ -693,6 +719,8 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             memory_mb,
             disk_path,
             host_share_path,
+            fs_backend,
+            virtiofs_socket_path,
             ssh_port,
             api_port,
         } => {
@@ -710,6 +738,18 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .display()
                     .to_string()
             });
+            let fs_backend = fs_backend.to_ascii_lowercase();
+            if fs_backend != "virtiofs" && fs_backend != "9p" {
+                return Err(DesktopError::Invalid(format!(
+                    "unsupported fs backend: {} (expected virtiofs or 9p)",
+                    fs_backend
+                )));
+            }
+            let virtiofs_socket_path = virtiofs_socket_path.or_else(|| {
+                state_path
+                    .parent()
+                    .map(|p| p.join("virtiofsd.sock").display().to_string())
+            });
             let state = VmState {
                 config: VmConfig {
                     backend,
@@ -717,6 +757,8 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     memory_mb,
                     disk_path,
                     host_share_path,
+                    fs_backend,
+                    virtiofs_socket_path,
                     ssh_port,
                     api_port,
                 },
@@ -728,7 +770,10 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             println!("vm: initialized {}", state_path.display());
             Ok(())
         }
-        VmCommands::Start { foreground } => {
+        VmCommands::Start {
+            foreground,
+            forward_state_file,
+        } => {
             let mut state = load_vm_state(&state_path)?;
             if let Some(pid) = state.pid {
                 if pid_alive(pid) {
@@ -741,7 +786,20 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     "vm start is currently supported on macOS hosts only".to_string(),
                 ));
             }
-            let mut command = build_vm_command(&state.config)?;
+            let forward_state_path = forward_state_file
+                .map(PathBuf::from)
+                .unwrap_or_else(default_forward_state_path);
+            let forwards = load_forward_entries(&forward_state_path)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| entry.enabled)
+                .collect::<Vec<_>>();
+
+            if state.config.fs_backend == "virtiofs" {
+                start_virtiofs_daemon(&state.config)?;
+            }
+
+            let mut command = build_vm_command(&state.config, &forwards)?;
             if foreground {
                 let status = command.status()?;
                 if !status.success() {
@@ -814,14 +872,20 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     println!("vm: pid={pid}");
                 }
                 println!(
-                    "vm: backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={}",
+                    "vm: backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={}",
                     state.config.backend,
                     state.config.cpus,
                     state.config.memory_mb,
                     state.config.api_port,
                     state.config.ssh_port,
                     state.config.disk_path,
-                    state.config.host_share_path
+                    state.config.host_share_path,
+                    state.config.fs_backend,
+                    state
+                        .config
+                        .virtiofs_socket_path
+                        .as_deref()
+                        .unwrap_or("-")
                 );
             }
             Ok(())
@@ -869,7 +933,9 @@ fn default_vm_state_path() -> PathBuf {
             .join("desktop-vm.json");
     }
     if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".ferrocrate").join("desktop-vm.json");
+        return PathBuf::from(home)
+            .join(".ferrocrate")
+            .join("desktop-vm.json");
     }
     PathBuf::from(".ferrocrate").join("desktop-vm.json")
 }
@@ -894,7 +960,30 @@ fn save_vm_state(path: &Path, state: &VmState) -> Result<(), DesktopError> {
     Ok(())
 }
 
-fn build_vm_command(config: &VmConfig) -> Result<Command, DesktopError> {
+fn start_virtiofs_daemon(config: &VmConfig) -> Result<(), DesktopError> {
+    let socket_path = config.virtiofs_socket_path.as_deref().ok_or_else(|| {
+        DesktopError::Invalid("virtiofs backend requires virtiofs_socket_path".to_string())
+    })?;
+    if fs::metadata(socket_path).is_ok() {
+        let _ = fs::remove_file(socket_path);
+    }
+    let status = Command::new("virtiofsd")
+        .arg("--socket-path")
+        .arg(socket_path)
+        .arg("--shared-dir")
+        .arg(&config.host_share_path)
+        .arg("--cache")
+        .arg("auto")
+        .spawn();
+    match status {
+        Ok(_) => Ok(()),
+        Err(err) => Err(DesktopError::Invalid(format!(
+            "failed to start virtiofsd: {err}"
+        ))),
+    }
+}
+
+fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Command, DesktopError> {
     let qemu_bin = match config.backend.as_str() {
         "qemu-hvf" => "qemu-system-aarch64",
         "qemu-x86_64" => "qemu-system-x86_64",
@@ -908,6 +997,32 @@ fn build_vm_command(config: &VmConfig) -> Result<Command, DesktopError> {
     if config.backend == "qemu-hvf" {
         cmd.arg("-accel").arg("hvf");
     }
+    let mut host_forward_specs = vec![
+        format!("hostfwd=tcp:127.0.0.1:{}-:22", config.ssh_port),
+        format!("hostfwd=tcp:127.0.0.1:{}-:4288", config.api_port),
+    ];
+    let mut used_bind_ports = HashSet::new();
+    used_bind_ports.insert(("127.0.0.1".to_string(), config.ssh_port));
+    used_bind_ports.insert(("127.0.0.1".to_string(), config.api_port));
+    for entry in forwards {
+        if !is_loopback_host(&entry.target_host) {
+            continue;
+        }
+        let bind_addr = if entry.bind_addr.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            entry.bind_addr.clone()
+        };
+        if used_bind_ports.contains(&(bind_addr.clone(), entry.listen_port)) {
+            continue;
+        }
+        host_forward_specs.push(format!(
+            "hostfwd=tcp:{}:{}-:{}",
+            bind_addr, entry.listen_port, entry.target_port
+        ));
+        used_bind_ports.insert((bind_addr, entry.listen_port));
+    }
+    let netdev = format!("user,id=net0,{}", host_forward_specs.join(","));
     cmd.arg("-machine")
         .arg("virt")
         .arg("-cpu")
@@ -919,18 +1034,39 @@ fn build_vm_command(config: &VmConfig) -> Result<Command, DesktopError> {
         .arg("-drive")
         .arg(format!("file={},if=virtio,format=qcow2", config.disk_path))
         .arg("-netdev")
-        .arg(format!(
-            "user,id=net0,hostfwd=tcp::{}-:22,hostfwd=tcp::{}-:4288",
-            config.ssh_port, config.api_port
-        ))
+        .arg(netdev)
         .arg("-device")
-        .arg("virtio-net-pci,netdev=net0")
-        .arg("-virtfs")
-        .arg(format!(
-            "local,path={},mount_tag=ferrohost,security_model=none",
-            config.host_share_path
-        ));
+        .arg("virtio-net-pci,netdev=net0");
+    match config.fs_backend.as_str() {
+        "virtiofs" => {
+            let socket_path = config.virtiofs_socket_path.as_deref().ok_or_else(|| {
+                DesktopError::Invalid(
+                    "virtiofs backend requires virtiofs_socket_path in vm config".to_string(),
+                )
+            })?;
+            cmd.arg("-chardev")
+                .arg(format!("socket,id=vfs0,path={socket_path}"))
+                .arg("-device")
+                .arg("vhost-user-fs-pci,chardev=vfs0,tag=ferrohost");
+        }
+        "9p" => {
+            cmd.arg("-virtfs").arg(format!(
+                "local,path={},mount_tag=ferrohost,security_model=none",
+                config.host_share_path
+            ));
+        }
+        other => {
+            return Err(DesktopError::Invalid(format!(
+                "unsupported fs backend: {other}"
+            )))
+        }
+    }
     Ok(cmd)
+}
+
+fn is_loopback_host(value: &str) -> bool {
+    let lowered = value.trim().to_ascii_lowercase();
+    lowered == "127.0.0.1" || lowered == "localhost" || lowered == "::1"
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -1003,10 +1139,14 @@ fn gather_phase0_check(wsl_distro: Option<String>) -> Result<Phase0CheckResult, 
             let found = lines.any(|line| line.trim() == "FC_PRESENT=1");
             check.ferrocrate_present_in_guest = Some(found);
             if !found {
-                check.notes.push("ferrocrate binary not found in selected WSL distro".to_string());
+                check
+                    .notes
+                    .push("ferrocrate binary not found in selected WSL distro".to_string());
             }
         } else {
-            check.notes.push("no WSL distro available; install/import distro first".to_string());
+            check
+                .notes
+                .push("no WSL distro available; install/import distro first".to_string());
         }
 
         return Ok(check);
@@ -1066,9 +1206,9 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecRequest, ForwardEntry, VmConfig, VmState, build_vm_command, gather_phase0_check,
-        load_forward_entries, load_vm_state, run_request, save_forward_entries, save_vm_state,
-        upsert_forward_entry, validate_daemon_addr,
+        build_vm_command, gather_phase0_check, load_forward_entries, load_vm_state, run_request,
+        save_forward_entries, save_vm_state, upsert_forward_entry, validate_daemon_addr,
+        ExecRequest, ForwardEntry, VmConfig, VmState,
     };
     use std::path::PathBuf;
 
@@ -1164,6 +1304,8 @@ mod tests {
                 memory_mb: 4096,
                 disk_path: "/tmp/vm.qcow2".to_string(),
                 host_share_path: ".".to_string(),
+                fs_backend: "9p".to_string(),
+                virtiofs_socket_path: None,
                 ssh_port: 2222,
                 api_port: 4288,
             },
@@ -1184,10 +1326,44 @@ mod tests {
             memory_mb: 2048,
             disk_path: "/tmp/disk.qcow2".to_string(),
             host_share_path: ".".to_string(),
+            fs_backend: "9p".to_string(),
+            virtiofs_socket_path: None,
             ssh_port: 2222,
             api_port: 4288,
         };
-        let err = build_vm_command(&cfg).expect_err("must reject unknown backend");
+        let err = build_vm_command(&cfg, &[]).expect_err("must reject unknown backend");
         assert!(err.to_string().contains("unsupported vm backend"));
+    }
+
+    #[test]
+    fn vm_command_builder_adds_forward_entries() {
+        let cfg = VmConfig {
+            backend: "qemu-hvf".to_string(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_path: "/tmp/disk.qcow2".to_string(),
+            host_share_path: ".".to_string(),
+            fs_backend: "9p".to_string(),
+            virtiofs_socket_path: None,
+            ssh_port: 2222,
+            api_port: 4288,
+        };
+        let forwards = vec![ForwardEntry {
+            bind_addr: "127.0.0.1".to_string(),
+            listen_port: 8080,
+            target_host: "localhost".to_string(),
+            target_port: 80,
+            enabled: true,
+        }];
+        let cmd = build_vm_command(&cfg, &forwards).expect("build vm command");
+        let args = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let netdev = args
+            .iter()
+            .find(|arg| arg.contains("user,id=net0"))
+            .expect("netdev arg");
+        assert!(netdev.contains("hostfwd=tcp:127.0.0.1:8080-:80"));
     }
 }

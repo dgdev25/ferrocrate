@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -124,6 +125,12 @@ enum VmCommands {
         ssh_port: u16,
         #[arg(long, default_value_t = 4288)]
         api_port: u16,
+        #[arg(long)]
+        guest_user: Option<String>,
+        #[arg(long)]
+        ssh_private_key_path: Option<String>,
+        #[arg(long)]
+        cloud_init_image_path: Option<String>,
     },
     Start {
         #[arg(long, default_value_t = false)]
@@ -238,6 +245,12 @@ struct VmConfig {
     hyperv_switch: Option<String>,
     ssh_port: u16,
     api_port: u16,
+    #[serde(default)]
+    guest_user: Option<String>,
+    #[serde(default)]
+    ssh_private_key_path: Option<String>,
+    #[serde(default)]
+    cloud_init_image_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,7 +337,10 @@ fn run_daemon(
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
         let mut stream = stream?;
-        let _ = handle_client(&mut stream, default_wsl_distro.as_deref());
+        let default_wsl_distro = default_wsl_distro.clone();
+        thread::spawn(move || {
+            let _ = handle_client(&mut stream, default_wsl_distro.as_deref());
+        });
     }
     Ok(())
 }
@@ -797,6 +813,9 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             hyperv_switch,
             ssh_port,
             api_port,
+            guest_user,
+            ssh_private_key_path,
+            cloud_init_image_path,
         } => {
             let disk_path = disk_path.unwrap_or_else(|| {
                 state_path
@@ -837,6 +856,9 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     hyperv_switch,
                     ssh_port,
                     api_port,
+                    guest_user,
+                    ssh_private_key_path,
+                    cloud_init_image_path,
                 },
                 pid: None,
                 status: "initialized".to_string(),
@@ -987,7 +1009,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     println!("vm: version={version}");
                 }
                 println!(
-                    "vm: name={} backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={} hyperv_switch={}",
+                    "vm: name={} backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={} hyperv_switch={} guest_user={} ssh_key={} cloud_init={}",
                     state.config.vm_name,
                     state.config.backend,
                     state.config.cpus,
@@ -1002,7 +1024,10 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                         .virtiofs_socket_path
                         .as_deref()
                         .unwrap_or("-"),
-                    state.config.hyperv_switch.as_deref().unwrap_or("-")
+                    state.config.hyperv_switch.as_deref().unwrap_or("-"),
+                    state.config.guest_user.as_deref().unwrap_or("-"),
+                    state.config.ssh_private_key_path.as_deref().unwrap_or("-"),
+                    state.config.cloud_init_image_path.as_deref().unwrap_or("-")
                 );
             }
             Ok(())
@@ -1096,13 +1121,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
         VmCommands::UpdateImage {
             image_path,
             no_backup,
-        } => apply_vm_image_update(
-            &state_path,
-            Path::new(&image_path),
-            None,
-            no_backup,
-            None,
-        ),
+        } => apply_vm_image_update(&state_path, Path::new(&image_path), None, no_backup, None),
     }
 }
 
@@ -1195,7 +1214,11 @@ fn render_macos_launch_agent_plist(label: &str, ferro_desktop_bin: &str, addr: &
     )
 }
 
-fn render_windows_service_script(service_name: &str, ferro_desktop_bin: &str, addr: &str) -> String {
+fn render_windows_service_script(
+    service_name: &str,
+    ferro_desktop_bin: &str,
+    addr: &str,
+) -> String {
     format!(
         r#"$ErrorActionPreference = "Stop"
 $serviceName = "{service_name}"
@@ -1546,6 +1569,11 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         .arg(netdev)
         .arg("-device")
         .arg("virtio-net-pci,netdev=net0");
+    if let Some(cloud_init) = config.cloud_init_image_path.as_deref() {
+        cmd.arg("-drive").arg(format!(
+            "file={cloud_init},if=virtio,media=cdrom,readonly=on,format=raw"
+        ));
+    }
     match config.fs_backend.as_str() {
         "virtiofs" => {
             let socket_path = config.virtiofs_socket_path.as_deref().ok_or_else(|| {
@@ -1682,11 +1710,136 @@ fn run_request(request: &ExecRequest) -> Result<std::process::Output, DesktopErr
     if request.use_wsl {
         return run_wsl_command(request);
     }
+    #[cfg(target_os = "macos")]
+    {
+        if should_route_to_macos_guest(&request.cmd, exec_mode_from_env()) {
+            return run_macos_guest_command(request);
+        }
+    }
     let (program, args) = request
         .cmd
         .split_first()
         .ok_or_else(|| DesktopError::Invalid("command is required".to_string()))?;
-    Ok(Command::new(program).args(args).output()?)
+    let mut command = Command::new(program);
+    command.args(args);
+    // Prevent recursive host-desktop forwarding loops when daemon executes `ferrocrate`.
+    command.env("FERROCRATE_DESKTOP_FORWARD", "0");
+    Ok(command.output()?)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecMode {
+    Auto,
+    Host,
+    Guest,
+}
+
+fn exec_mode_from_env() -> ExecMode {
+    let value = std::env::var("FERROCRATE_DESKTOP_EXEC_MODE").ok();
+    parse_exec_mode(value.as_deref())
+}
+
+fn parse_exec_mode(value: Option<&str>) -> ExecMode {
+    match value.unwrap_or("auto").to_ascii_lowercase().as_str() {
+        "host" | "local" => ExecMode::Host,
+        "guest" | "vm" => ExecMode::Guest,
+        _ => ExecMode::Auto,
+    }
+}
+
+fn should_route_to_macos_guest(cmd: &[String], mode: ExecMode) -> bool {
+    match mode {
+        ExecMode::Host => false,
+        ExecMode::Guest => true,
+        ExecMode::Auto => command_targets_ferrocrate(cmd),
+    }
+}
+
+fn command_targets_ferrocrate(cmd: &[String]) -> bool {
+    let Some(program) = cmd.first() else {
+        return false;
+    };
+    let basename = Path::new(program)
+        .components()
+        .next_back()
+        .map(|component| match component {
+            Component::Normal(value) => value.to_string_lossy().to_string(),
+            _ => program.clone(),
+        })
+        .unwrap_or_else(|| program.clone())
+        .to_ascii_lowercase();
+    matches!(
+        basename.as_str(),
+        "ferrocrate" | "ferro-cli" | "ferro-cli.exe" | "ferrocrate.exe"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
+    let state_path = default_vm_state_path();
+    let state = load_vm_state(&state_path).map_err(|err| {
+        DesktopError::Invalid(format!(
+            "cannot route to guest runtime: failed to load vm state {}: {err}",
+            state_path.display()
+        ))
+    })?;
+    if !vm_state_running(&state) {
+        return Err(DesktopError::Invalid(format!(
+            "cannot route to guest runtime: vm is not running (state={})",
+            state.status
+        )));
+    }
+    let mut cmd = build_guest_ssh_command(request, &state)?;
+    cmd.output().map_err(DesktopError::Io)
+}
+
+fn vm_state_running(state: &VmState) -> bool {
+    if state.status.eq_ignore_ascii_case("running") {
+        return true;
+    }
+    state.pid.map(pid_alive).unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn build_guest_ssh_command(
+    request: &ExecRequest,
+    state: &VmState,
+) -> Result<Command, DesktopError> {
+    if request.cmd.is_empty() {
+        return Err(DesktopError::Invalid("command is required".to_string()));
+    }
+
+    let guest_host = std::env::var("FERROCRATE_DESKTOP_VM_HOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let guest_user = std::env::var("FERROCRATE_DESKTOP_VM_USER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| state.config.guest_user.clone())
+        .unwrap_or_else(|| "root".to_string());
+    let ssh_key = std::env::var("FERROCRATE_DESKTOP_VM_SSH_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| state.config.ssh_private_key_path.clone());
+
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-p")
+        .arg(state.config.ssh_port.to_string())
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=10");
+    if let Some(key_path) = ssh_key {
+        cmd.arg("-i").arg(key_path);
+    }
+    cmd.arg(format!("{guest_user}@{guest_host}")).arg("--");
+    for arg in &request.cmd {
+        cmd.arg(arg);
+    }
+    Ok(cmd)
 }
 
 fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
@@ -1715,10 +1868,11 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_path_for_disk, build_vm_command, gather_phase0_check, load_channel_manifest,
-        load_forward_entries, load_vm_state, run_request,
-        save_forward_entries, save_vm_state, upsert_forward_entry, validate_daemon_addr,
-        render_macos_launch_agent_plist, render_windows_service_script, ExecRequest,
+        backup_path_for_disk, build_vm_command, command_targets_ferrocrate, exec_mode_from_env,
+        gather_phase0_check, load_channel_manifest, load_forward_entries, load_vm_state,
+        parse_exec_mode, render_macos_launch_agent_plist, render_windows_service_script,
+        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, ExecMode, ExecRequest,
         ForwardEntry, VmConfig, VmState,
     };
     use std::path::PathBuf;
@@ -1763,6 +1917,114 @@ mod tests {
     fn phase0_check_runs_on_current_host() {
         let result = gather_phase0_check(None).expect("phase0 check");
         assert!(!result.host_os.is_empty());
+    }
+
+    #[test]
+    fn detects_ferrocrate_program_names() {
+        assert!(command_targets_ferrocrate(&["ferrocrate".to_string()]));
+        assert!(command_targets_ferrocrate(&[
+            "/usr/local/bin/ferro-cli".to_string()
+        ]));
+        assert!(!command_targets_ferrocrate(&[
+            "echo".to_string(),
+            "ok".to_string()
+        ]));
+    }
+
+    #[test]
+    fn guest_routing_mode_logic_is_stable() {
+        let fc = vec!["ferrocrate".to_string(), "run".to_string()];
+        let echo = vec!["echo".to_string(), "ok".to_string()];
+        assert!(should_route_to_macos_guest(&fc, ExecMode::Auto));
+        assert!(!should_route_to_macos_guest(&echo, ExecMode::Auto));
+        assert!(should_route_to_macos_guest(&echo, ExecMode::Guest));
+        assert!(!should_route_to_macos_guest(&fc, ExecMode::Host));
+    }
+
+    #[test]
+    fn vm_state_running_accepts_status_or_live_pid() {
+        let mut state = VmState {
+            config: VmConfig {
+                backend: "qemu-hvf".to_string(),
+                vm_name: "FerroCrateDesktopVM".to_string(),
+                cpus: 2,
+                memory_mb: 4096,
+                disk_path: "/tmp/vm.qcow2".to_string(),
+                host_share_path: ".".to_string(),
+                fs_backend: "9p".to_string(),
+                virtiofs_socket_path: None,
+                hyperv_switch: None,
+                ssh_port: 2222,
+                api_port: 4288,
+                guest_user: None,
+                ssh_private_key_path: None,
+                cloud_init_image_path: None,
+            },
+            pid: None,
+            status: "running".to_string(),
+            current_version: None,
+            last_error: None,
+        };
+        assert!(vm_state_running(&state));
+        state.status = "stopped".to_string();
+        assert!(!vm_state_running(&state));
+    }
+
+    #[test]
+    fn exec_mode_parser_handles_known_values() {
+        assert_eq!(parse_exec_mode(None), ExecMode::Auto);
+        assert_eq!(parse_exec_mode(Some("auto")), ExecMode::Auto);
+        assert_eq!(parse_exec_mode(Some("host")), ExecMode::Host);
+        assert_eq!(parse_exec_mode(Some("guest")), ExecMode::Guest);
+        assert_eq!(parse_exec_mode(Some("vm")), ExecMode::Guest);
+    }
+
+    #[test]
+    fn exec_mode_from_env_is_non_panicking() {
+        let _ = exec_mode_from_env();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn builds_guest_ssh_command_with_vm_port() {
+        let state = VmState {
+            config: VmConfig {
+                backend: "qemu-hvf".to_string(),
+                vm_name: "FerroCrateDesktopVM".to_string(),
+                cpus: 2,
+                memory_mb: 4096,
+                disk_path: "/tmp/vm.qcow2".to_string(),
+                host_share_path: ".".to_string(),
+                fs_backend: "9p".to_string(),
+                virtiofs_socket_path: None,
+                hyperv_switch: None,
+                ssh_port: 2222,
+                api_port: 4288,
+                guest_user: None,
+                ssh_private_key_path: None,
+                cloud_init_image_path: None,
+            },
+            pid: None,
+            status: "running".to_string(),
+            current_version: None,
+            last_error: None,
+        };
+        let req = ExecRequest {
+            cmd: vec!["ferrocrate".to_string(), "images".to_string()],
+            use_wsl: false,
+            wsl_distro: None,
+        };
+        let cmd = super::build_guest_ssh_command(&req, &state).expect("ssh command");
+        assert_eq!(cmd.get_program().to_string_lossy(), "ssh");
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"2222".to_string()));
+        assert!(args.contains(&"--".to_string()));
+        assert!(args.contains(&"ferrocrate".to_string()));
+        assert!(args.contains(&"images".to_string()));
     }
 
     #[test]
@@ -1821,6 +2083,9 @@ mod tests {
                 hyperv_switch: None,
                 ssh_port: 2222,
                 api_port: 4288,
+                guest_user: None,
+                ssh_private_key_path: None,
+                cloud_init_image_path: None,
             },
             pid: None,
             status: "initialized".to_string(),
@@ -1846,6 +2111,9 @@ mod tests {
             hyperv_switch: None,
             ssh_port: 2222,
             api_port: 4288,
+            guest_user: None,
+            ssh_private_key_path: None,
+            cloud_init_image_path: None,
         };
         let err = build_vm_command(&cfg, &[]).expect_err("must reject unknown backend");
         assert!(err.to_string().contains("unsupported vm backend"));
@@ -1865,6 +2133,9 @@ mod tests {
             hyperv_switch: None,
             ssh_port: 2222,
             api_port: 4288,
+            guest_user: None,
+            ssh_private_key_path: None,
+            cloud_init_image_path: None,
         };
         let forwards = vec![ForwardEntry {
             bind_addr: "127.0.0.1".to_string(),

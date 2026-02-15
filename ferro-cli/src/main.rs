@@ -644,12 +644,35 @@ fn desktop_error_json_enabled() -> bool {
 }
 
 #[cfg(any(test, not(target_os = "linux")))]
-fn structured_desktop_error(
-    category: &str,
-    message: &str,
-    hint: &str,
-    retryable: bool,
-) -> String {
+fn desktop_binary_path() -> PathBuf {
+    if let Ok(path) = std::env::var("FERROCRATE_DESKTOP_BIN") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let candidate = parent.join(if cfg!(windows) {
+                "ferro-desktop.exe"
+            } else {
+                "ferro-desktop"
+            });
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    PathBuf::from(if cfg!(windows) {
+        "ferro-desktop.exe"
+    } else {
+        "ferro-desktop"
+    })
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+fn structured_desktop_error(category: &str, message: &str, hint: &str, retryable: bool) -> String {
     if desktop_error_json_enabled() {
         return serde_json::json!({
             "category": category,
@@ -665,14 +688,15 @@ fn structured_desktop_error(
 #[cfg(any(test, not(target_os = "linux")))]
 #[cfg_attr(test, allow(dead_code))]
 fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool, String> {
-    let addr = std::env::var("FERROCRATE_DESKTOP_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:4288".to_string());
+    let addr =
+        std::env::var("FERROCRATE_DESKTOP_ADDR").unwrap_or_else(|_| "127.0.0.1:4288".to_string());
     let wsl_distro = std::env::var("FERROCRATE_DESKTOP_WSL_DISTRO").ok();
     let use_wsl = std::env::var("FERROCRATE_DESKTOP_USE_WSL")
         .map(|value| !(value == "0" || value.eq_ignore_ascii_case("false")))
         .unwrap_or(use_wsl_default);
 
-    let mut command = std::process::Command::new("ferro-desktop");
+    let desktop_bin = desktop_binary_path();
+    let mut command = std::process::Command::new(&desktop_bin);
     command.arg("exec").arg("--addr").arg(addr);
     #[cfg(windows)]
     {
@@ -698,8 +722,11 @@ fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool
     let status = command.status().map_err(|err| {
         structured_desktop_error(
             "desktop_bridge_unavailable",
-            &format!("desktop forward failed to launch ferro-desktop: {err}"),
-            "ensure `ferro-desktop` is installed and on PATH",
+            &format!(
+                "desktop forward failed to launch {}: {err}",
+                desktop_bin.display()
+            ),
+            "set FERROCRATE_DESKTOP_BIN or ensure `ferro-desktop` is installed and on PATH",
             true,
         )
     })?;
@@ -729,14 +756,18 @@ fn vm_status_is_running(output: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn ensure_macos_vm_running() -> Result<(), String> {
-    let status_output = std::process::Command::new("ferro-desktop")
+    let desktop_bin = desktop_binary_path();
+    let status_output = std::process::Command::new(&desktop_bin)
         .args(["vm", "status", "--json"])
         .output()
         .map_err(|err| {
             structured_desktop_error(
                 "vm_status_check_failed",
-                &format!("failed to query desktop VM status: {err}"),
-                "initialize the VM with `ferro-desktop vm init`",
+                &format!(
+                    "failed to query desktop VM status via {}: {err}",
+                    desktop_bin.display()
+                ),
+                "initialize the VM with `ferro-desktop vm init` and/or set FERROCRATE_DESKTOP_BIN",
                 false,
             )
         })?;
@@ -753,14 +784,17 @@ fn ensure_macos_vm_running() -> Result<(), String> {
         return Ok(());
     }
 
-    let start_status = std::process::Command::new("ferro-desktop")
+    let start_status = std::process::Command::new(&desktop_bin)
         .args(["vm", "start"])
         .status()
         .map_err(|err| {
             structured_desktop_error(
                 "vm_start_failed",
-                &format!("failed to start desktop VM: {err}"),
-                "run `ferro-desktop vm start` manually to inspect startup errors",
+                &format!(
+                    "failed to start desktop VM via {}: {err}",
+                    desktop_bin.display()
+                ),
+                "run `ferro-desktop vm start` manually or set FERROCRATE_DESKTOP_BIN",
                 true,
             )
         })?;
@@ -820,234 +854,237 @@ fn dispatch(command: Commands) -> Result<(), String> {
             LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
         match command {
-        #[cfg(target_os = "linux")]
-        Commands::Run {
-            image,
-            cmd,
-            network_backend,
-            network,
-            bind_mounts,
-            tmpfs_mounts,
-            volumes,
-            read_only_rootfs,
-            read_write_rootfs,
-            no_new_privs,
-            env,
-            labels,
-            annotations,
-            cap_add,
-            profile,
-            user,
-            workdir,
-            entrypoint,
-            publish,
-            name,
-            health_cmd,
-            health_interval,
-            health_timeout,
-            health_retries,
-            health_start_period,
-            restart_policy,
-            rm,
-            bridge_cidr,
-            bridge_name,
-            net_limit,
-            memory_max,
-            cpu_quota,
-            cpu_period,
-            pids_max,
-            ai_model,
-        } => {
-            let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
-                .map_err(|err| err.to_string())?;
-            handle_run(
-                &runtime_dir,
-                &runtime,
-                &image_store,
-                &volume_store,
-                &image,
-                &cmd,
-                &network,
-                &network_backend,
-                &bind_mounts,
-                &tmpfs_mounts,
-                &volumes,
-                effective_readonly(&profile, read_only_rootfs, read_write_rootfs)?,
+            #[cfg(target_os = "linux")]
+            Commands::Run {
+                image,
+                cmd,
+                network_backend,
+                network,
+                bind_mounts,
+                tmpfs_mounts,
+                volumes,
+                read_only_rootfs,
+                read_write_rootfs,
                 no_new_privs,
-                &env,
-                &labels,
-                &annotations,
-                &cap_add,
-                entrypoint.as_deref(),
-                workdir.as_deref(),
-                user.as_deref(),
-                name.as_deref(),
-                &publish,
-                health_cmd.as_deref(),
+                env,
+                labels,
+                annotations,
+                cap_add,
+                profile,
+                user,
+                workdir,
+                entrypoint,
+                publish,
+                name,
+                health_cmd,
                 health_interval,
                 health_timeout,
                 health_retries,
                 health_start_period,
-                &restart_policy,
+                restart_policy,
                 rm,
-                bridge_cidr.as_deref(),
-                bridge_name.as_deref(),
-                net_limit.as_deref(),
+                bridge_cidr,
+                bridge_name,
+                net_limit,
                 memory_max,
                 cpu_quota,
                 cpu_period,
                 pids_max,
-                ai_model.as_deref(),
-            )
-        }
-        #[cfg(target_os = "linux")]
-        Commands::Build {
-            dockerfile,
-            ferrofile,
-            tag,
-            compress,
-        } => handle_build(
-            &image_store,
-            dockerfile.as_deref(),
-            ferrofile.as_deref(),
-            tag.as_deref(),
-            compress.as_str(),
-        ),
-        Commands::Images { format } => handle_images(&image_store, &format),
-        Commands::Rmi { image } => handle_rmi(&image_store, &image),
-        Commands::ImagePrune => handle_image_prune(&image_store),
-        Commands::Volume { command } => handle_volume(&runtime_dir, command),
-        #[cfg(target_os = "linux")]
-        Commands::Network { command } => handle_network(&runtime_dir, &runtime, command),
-        #[cfg(target_os = "linux")]
-        Commands::Containers { format } => handle_containers(&runtime, &format),
-        #[cfg(target_os = "linux")]
-        Commands::Logs { container, format } => handle_logs(&runtime, &container, &format),
-        #[cfg(target_os = "linux")]
-        Commands::Inspect { container, format } => handle_inspect(&runtime, &container, &format),
-        #[cfg(target_os = "linux")]
-        Commands::Stats { container, format } => handle_stats(&runtime, &container, &format),
-        #[cfg(target_os = "linux")]
-        Commands::Pause { container } => handle_pause(&runtime, &container),
-        #[cfg(target_os = "linux")]
-        Commands::Unpause { container } => handle_unpause(&runtime, &container),
-        #[cfg(target_os = "linux")]
-        Commands::Stop { container, timeout } => handle_stop(&runtime, &container, timeout),
-        #[cfg(target_os = "linux")]
-        Commands::Kill { container } => handle_kill(&runtime, &container),
-        #[cfg(target_os = "linux")]
-        Commands::Rm { container } => handle_rm(&runtime, &container),
-        #[cfg(target_os = "linux")]
-        Commands::Restart { container, timeout } => handle_restart(&runtime, &container, timeout),
-        #[cfg(target_os = "linux")]
-        Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
-        Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
-        Commands::Push { image } => handle_push(&image_store, &image),
-        #[cfg(target_os = "linux")]
-        Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner),
-        #[cfg(target_os = "linux")]
-        Commands::Compose { file, command } => {
-            let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
-                .map_err(|err| err.to_string())?;
-            handle_compose(
-                &runtime,
+                ai_model,
+            } => {
+                let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                    .map_err(|err| err.to_string())?;
+                handle_run(
+                    &runtime_dir,
+                    &runtime,
+                    &image_store,
+                    &volume_store,
+                    &image,
+                    &cmd,
+                    &network,
+                    &network_backend,
+                    &bind_mounts,
+                    &tmpfs_mounts,
+                    &volumes,
+                    effective_readonly(&profile, read_only_rootfs, read_write_rootfs)?,
+                    no_new_privs,
+                    &env,
+                    &labels,
+                    &annotations,
+                    &cap_add,
+                    entrypoint.as_deref(),
+                    workdir.as_deref(),
+                    user.as_deref(),
+                    name.as_deref(),
+                    &publish,
+                    health_cmd.as_deref(),
+                    health_interval,
+                    health_timeout,
+                    health_retries,
+                    health_start_period,
+                    &restart_policy,
+                    rm,
+                    bridge_cidr.as_deref(),
+                    bridge_name.as_deref(),
+                    net_limit.as_deref(),
+                    memory_max,
+                    cpu_quota,
+                    cpu_period,
+                    pids_max,
+                    ai_model.as_deref(),
+                )
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Build {
+                dockerfile,
+                ferrofile,
+                tag,
+                compress,
+            } => handle_build(
                 &image_store,
-                &volume_store,
-                file.as_deref(),
-                command,
-            )
-        }
-        Commands::Daemon { .. } => {
-            unreachable!("daemon command handled before runtime initialization")
-        }
-        #[cfg(target_os = "linux")]
-        Commands::Completion { shell } => handle_completion(&shell),
-        Commands::Tui => handle_tui(&runtime),
-        Commands::Ai { command } => handle_ai(command),
-        Commands::AiTrain {
-            model_type,
-            data_dir,
-            models_dir,
-            output,
-            format,
-        } => handle_ai(AiCommands::Train {
-            model_type,
-            data_dir,
-            models_dir,
-            output,
-            format,
-        }),
-        Commands::AiExport {
-            model_type,
-            output,
-            models_dir,
-            format,
-        } => handle_ai(AiCommands::Export {
-            model_type,
-            output,
-            models_dir,
-            format,
-        }),
-        Commands::AiImport {
-            model_type,
-            input,
-            models_dir,
-            format,
-        } => handle_ai(AiCommands::Import {
-            model_type,
-            input,
-            models_dir,
-            format,
-        }),
-        Commands::AiStats {
-            path,
-            model_type,
-            models_dir,
-            format,
-        } => handle_ai(AiCommands::Stats {
-            path,
-            model_type,
-            models_dir,
-            format,
-        }),
-        Commands::AiBranch {
-            source,
-            target,
-            force,
-        } => handle_ai(AiCommands::Branch {
-            source,
-            target,
-            force,
-        }),
-        Commands::AiLineage {
-            path,
-            parent_file,
-            verify,
-            format,
-        } => handle_ai(AiCommands::Lineage {
-            path,
-            parent_file,
-            verify,
-            format,
-        }),
-        Commands::Config { command } => handle_config(command),
-        Commands::AiAudit {
-            action,
-            summary,
-            evidence,
-        } => handle_ai_audit(&action, &summary, &evidence),
-        Commands::Migrate { target } => handle_migrate(target),
+                dockerfile.as_deref(),
+                ferrofile.as_deref(),
+                tag.as_deref(),
+                compress.as_str(),
+            ),
+            Commands::Images { format } => handle_images(&image_store, &format),
+            Commands::Rmi { image } => handle_rmi(&image_store, &image),
+            Commands::ImagePrune => handle_image_prune(&image_store),
+            Commands::Volume { command } => handle_volume(&runtime_dir, command),
+            #[cfg(target_os = "linux")]
+            Commands::Network { command } => handle_network(&runtime_dir, &runtime, command),
+            #[cfg(target_os = "linux")]
+            Commands::Containers { format } => handle_containers(&runtime, &format),
+            #[cfg(target_os = "linux")]
+            Commands::Logs { container, format } => handle_logs(&runtime, &container, &format),
+            #[cfg(target_os = "linux")]
+            Commands::Inspect { container, format } => {
+                handle_inspect(&runtime, &container, &format)
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Stats { container, format } => handle_stats(&runtime, &container, &format),
+            #[cfg(target_os = "linux")]
+            Commands::Pause { container } => handle_pause(&runtime, &container),
+            #[cfg(target_os = "linux")]
+            Commands::Unpause { container } => handle_unpause(&runtime, &container),
+            #[cfg(target_os = "linux")]
+            Commands::Stop { container, timeout } => handle_stop(&runtime, &container, timeout),
+            #[cfg(target_os = "linux")]
+            Commands::Kill { container } => handle_kill(&runtime, &container),
+            #[cfg(target_os = "linux")]
+            Commands::Rm { container } => handle_rm(&runtime, &container),
+            #[cfg(target_os = "linux")]
+            Commands::Restart { container, timeout } => {
+                handle_restart(&runtime, &container, timeout)
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
+            Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
+            Commands::Push { image } => handle_push(&image_store, &image),
+            #[cfg(target_os = "linux")]
+            Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner),
+            #[cfg(target_os = "linux")]
+            Commands::Compose { file, command } => {
+                let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                    .map_err(|err| err.to_string())?;
+                handle_compose(
+                    &runtime,
+                    &image_store,
+                    &volume_store,
+                    file.as_deref(),
+                    command,
+                )
+            }
+            Commands::Daemon { .. } => {
+                unreachable!("daemon command handled before runtime initialization")
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Completion { shell } => handle_completion(&shell),
+            Commands::Tui => handle_tui(&runtime),
+            Commands::Ai { command } => handle_ai(command),
+            Commands::AiTrain {
+                model_type,
+                data_dir,
+                models_dir,
+                output,
+                format,
+            } => handle_ai(AiCommands::Train {
+                model_type,
+                data_dir,
+                models_dir,
+                output,
+                format,
+            }),
+            Commands::AiExport {
+                model_type,
+                output,
+                models_dir,
+                format,
+            } => handle_ai(AiCommands::Export {
+                model_type,
+                output,
+                models_dir,
+                format,
+            }),
+            Commands::AiImport {
+                model_type,
+                input,
+                models_dir,
+                format,
+            } => handle_ai(AiCommands::Import {
+                model_type,
+                input,
+                models_dir,
+                format,
+            }),
+            Commands::AiStats {
+                path,
+                model_type,
+                models_dir,
+                format,
+            } => handle_ai(AiCommands::Stats {
+                path,
+                model_type,
+                models_dir,
+                format,
+            }),
+            Commands::AiBranch {
+                source,
+                target,
+                force,
+            } => handle_ai(AiCommands::Branch {
+                source,
+                target,
+                force,
+            }),
+            Commands::AiLineage {
+                path,
+                parent_file,
+                verify,
+                format,
+            } => handle_ai(AiCommands::Lineage {
+                path,
+                parent_file,
+                verify,
+                format,
+            }),
+            Commands::Config { command } => handle_config(command),
+            Commands::AiAudit {
+                action,
+                summary,
+                evidence,
+            } => handle_ai_audit(&action, &summary, &evidence),
+            Commands::Migrate { target } => handle_migrate(target),
         }
     }
 
     // Non-Linux: only handle platform-agnostic commands
     #[cfg(not(target_os = "linux"))]
     {
-        let image_store_path = std::env::var("FERROCRATE_IMAGE_STORE")
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                format!("{}/.ferrocrate/images", home)
-            });
+        let image_store_path = std::env::var("FERROCRATE_IMAGE_STORE").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/.ferrocrate/images", home)
+        });
         let image_store = LocalImageStore::open(image_store_path).map_err(|err| err.to_string())?;
 
         match command {
@@ -1758,7 +1795,10 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
     loop {
         print!("\x1b[2J\x1b[H");
         println!("FerroCrate TUI (press q + Enter to quit)");
-        println!("{:<20} {:<12} {:<20} COMMAND", "CONTAINER", "STATUS", "IMAGE");
+        println!(
+            "{:<20} {:<12} {:<20} COMMAND",
+            "CONTAINER", "STATUS", "IMAGE"
+        );
         let containers = runtime.list().map_err(|err| err.to_string())?;
         for record in containers {
             let name = record.name.unwrap_or(record.id);
@@ -4246,15 +4286,14 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_health_config, build_limits, dispatch, effective_readonly, handle_build,
-        handle_containers, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        build_health_config, build_limits, desktop_forward_enabled, dispatch, effective_readonly,
+        handle_build, handle_containers, handle_exec, handle_image_prune, handle_images,
+        handle_inspect, handle_kill, handle_logs, handle_network, handle_pause, handle_pull,
+        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
         handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_http_request, desktop_forward_enabled,
-        should_desktop_forward, structured_desktop_error, top_level_command_name,
-        validate_network_backend,
+        parse_restart_policy, parse_tmpfs_mounts, read_http_request, should_desktop_forward,
+        structured_desktop_error, top_level_command_name, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         NetworkCommands, VolumeCommands,
     };
@@ -5098,10 +5137,19 @@ mod tests {
 
     #[test]
     fn desktop_forward_detects_runtime_commands() {
-        assert!(should_desktop_forward(&["run".to_string(), "alpine:latest".to_string()]));
-        assert!(should_desktop_forward(&["compose".to_string(), "up".to_string()]));
+        assert!(should_desktop_forward(&[
+            "run".to_string(),
+            "alpine:latest".to_string()
+        ]));
+        assert!(should_desktop_forward(&[
+            "compose".to_string(),
+            "up".to_string()
+        ]));
         assert!(!should_desktop_forward(&["images".to_string()]));
-        assert!(!should_desktop_forward(&["ai".to_string(), "stats".to_string()]));
+        assert!(!should_desktop_forward(&[
+            "ai".to_string(),
+            "stats".to_string()
+        ]));
     }
 
     #[test]
@@ -5122,14 +5170,16 @@ mod tests {
             std::env::remove_var("FERROCRATE_ERROR_FORMAT");
             std::env::remove_var("FERROCRATE_ERROR_JSON");
         }
-        let text = structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
+        let text =
+            structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
         assert!(text.contains("category=desktop_bridge_unavailable"));
         assert!(text.contains("hint: retry"));
 
         unsafe {
             std::env::set_var("FERROCRATE_ERROR_FORMAT", "json");
         }
-        let json = structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
+        let json =
+            structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
         assert!(json.contains("\"category\":\"desktop_bridge_unavailable\""));
         assert!(json.contains("\"retryable\":true"));
         unsafe {

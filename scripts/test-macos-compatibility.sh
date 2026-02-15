@@ -184,9 +184,9 @@ else
 fi
 
 # Check for macOS app bundle structure markers
-if grep -q "Contents/MacOS" "$PACKAGE_SCRIPT" && \
-   grep -q "Contents/Resources" "$PACKAGE_SCRIPT" && \
-   grep -q "Info.plist" "$PACKAGE_SCRIPT"; then
+if grep -q 'MACOS_DIR=' "$PACKAGE_SCRIPT" && \
+   grep -q 'RES_DIR=' "$PACKAGE_SCRIPT" && \
+   grep -q 'PLIST_PATH=' "$PACKAGE_SCRIPT"; then
     log_success "App bundle structure properly configured"
 else
     log_error "App bundle structure not properly configured"
@@ -304,7 +304,7 @@ fi
 section "macOS-specific Unit Tests"
 
 log "Running macOS compatibility tests..."
-if cargo test --test macos_compatibility_tests -- --nocapture 2>&1 | tee -a "$RESULTS_FILE"; then
+if cargo test -p ferro-cli --test macos_compatibility_tests -- --nocapture 2>&1 | tee -a "$RESULTS_FILE"; then
     log_success "macOS compatibility tests passed"
 else
     log_warning "Some tests failed (check detailed output)"

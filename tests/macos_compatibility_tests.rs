@@ -6,13 +6,24 @@
 #[cfg(target_os = "macos")]
 mod macos_tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    fn workspace_root() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if manifest_dir.join("scripts").exists() {
+            manifest_dir
+        } else {
+            manifest_dir
+                .parent()
+                .unwrap_or(manifest_dir.as_path())
+                .to_path_buf()
+        }
+    }
+
     fn get_test_dir() -> PathBuf {
-        let test_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test_macos");
+        let test_root = workspace_root().join("target").join("test_macos");
         let _ = fs::create_dir_all(&test_root);
         test_root
     }
@@ -24,10 +35,7 @@ mod macos_tests {
     #[test]
     fn detect_macos_platform() {
         assert_eq!(std::env::consts::OS, "macos", "Expected macOS platform");
-        assert!(
-            cfg!(target_os = "macos"),
-            "Target OS should be macos"
-        );
+        assert!(cfg!(target_os = "macos"), "Target OS should be macos");
     }
 
     #[test]
@@ -50,7 +58,7 @@ mod macos_tests {
         let version_str = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = version_str.trim().split('.').collect();
 
-        if let Ok(major) = parts.get(0).and_then(|v| v.parse::<u32>().ok()) {
+        if let Some(major) = parts.get(0).and_then(|v| v.parse::<u32>().ok()) {
             assert!(
                 major >= 12,
                 "FerroCrate requires macOS 12 or later, found: {}",
@@ -66,17 +74,13 @@ mod macos_tests {
 
     #[test]
     fn installer_script_exists() {
-        let installer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("scripts")
-            .join("install-macos.sh");
+        let installer_path = workspace_root().join("scripts").join("install-macos.sh");
         assert!(installer_path.exists(), "install-macos.sh not found");
     }
 
     #[test]
     fn installer_script_is_executable() {
-        let installer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("scripts")
-            .join("install-macos.sh");
+        let installer_path = workspace_root().join("scripts").join("install-macos.sh");
 
         let metadata = fs::metadata(&installer_path).expect("Failed to read installer metadata");
         let mode = metadata.permissions().mode();
@@ -85,29 +89,38 @@ mod macos_tests {
 
     #[test]
     fn installer_script_contains_required_functions() {
-        let installer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("scripts")
-            .join("install-macos.sh");
+        let installer_path = workspace_root().join("scripts").join("install-macos.sh");
 
-        let content = fs::read_to_string(&installer_path)
-            .expect("Failed to read install-macos.sh");
+        let content = fs::read_to_string(&installer_path).expect("Failed to read install-macos.sh");
 
-        assert!(content.contains("arch_name()"), "Missing arch_name function");
-        assert!(content.contains("ensure_macos()"), "Missing ensure_macos function");
-        assert!(content.contains("install_binary_release()"), "Missing install_binary_release function");
-        assert!(content.contains("install_from_source()"), "Missing install_from_source function");
+        assert!(
+            content.contains("arch_name()"),
+            "Missing arch_name function"
+        );
+        assert!(
+            content.contains("ensure_macos()"),
+            "Missing ensure_macos function"
+        );
+        assert!(
+            content.contains("install_binary_release()"),
+            "Missing install_binary_release function"
+        );
+        assert!(
+            content.contains("install_from_source()"),
+            "Missing install_from_source function"
+        );
     }
 
     #[test]
     fn installer_supports_both_architectures() {
-        let installer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("scripts")
-            .join("install-macos.sh");
+        let installer_path = workspace_root().join("scripts").join("install-macos.sh");
 
-        let content = fs::read_to_string(&installer_path)
-            .expect("Failed to read install-macos.sh");
+        let content = fs::read_to_string(&installer_path).expect("Failed to read install-macos.sh");
 
-        assert!(content.contains("aarch64"), "Missing aarch64 (Apple Silicon) support");
+        assert!(
+            content.contains("aarch64"),
+            "Missing aarch64 (Apple Silicon) support"
+        );
         assert!(content.contains("x86_64"), "Missing x86_64 (Intel) support");
     }
 
@@ -117,7 +130,7 @@ mod macos_tests {
 
     #[test]
     fn package_macos_app_script_exists() {
-        let package_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let package_script = workspace_root()
             .join("scripts")
             .join("package-macos-app.sh");
         assert!(package_script.exists(), "package-macos-app.sh not found");
@@ -125,18 +138,30 @@ mod macos_tests {
 
     #[test]
     fn package_script_creates_valid_app_structure() {
-        let package_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let package_script = workspace_root()
             .join("scripts")
             .join("package-macos-app.sh");
 
-        let content = fs::read_to_string(&package_script)
-            .expect("Failed to read package-macos-app.sh");
+        let content =
+            fs::read_to_string(&package_script).expect("Failed to read package-macos-app.sh");
 
         // Verify standard macOS app bundle structure creation
-        assert!(content.contains("Contents/MacOS"), "Missing MacOS directory structure");
-        assert!(content.contains("Contents/Resources"), "Missing Resources directory structure");
-        assert!(content.contains("Contents/Info.plist"), "Missing Info.plist creation");
-        assert!(content.contains("CFBundleExecutable"), "Missing CFBundleExecutable in plist");
+        assert!(
+            content.contains("MACOS_DIR="),
+            "Missing MacOS directory structure"
+        );
+        assert!(
+            content.contains("RES_DIR="),
+            "Missing Resources directory structure"
+        );
+        assert!(
+            content.contains("PLIST_PATH="),
+            "Missing Info.plist creation"
+        );
+        assert!(
+            content.contains("CFBundleExecutable"),
+            "Missing CFBundleExecutable in plist"
+        );
     }
 
     // ============================================================================
@@ -145,8 +170,7 @@ mod macos_tests {
 
     #[test]
     fn macos_home_directory_resolution() {
-        let home = std::env::var("HOME")
-            .expect("HOME environment variable not set on macOS");
+        let home = std::env::var("HOME").expect("HOME environment variable not set on macOS");
         assert!(!home.is_empty(), "HOME should not be empty");
         assert!(home.starts_with("/"), "macOS home should use absolute path");
         println!("HOME={}", home);
@@ -202,9 +226,18 @@ mod macos_tests {
 </plist>"#;
 
         // Verify XML structure
-        assert!(plist.starts_with("<?xml"), "Plist should start with XML declaration");
-        assert!(plist.contains("<!DOCTYPE plist"), "Plist should have DOCTYPE");
-        assert!(plist.contains("<dict>"), "Plist should contain dict element");
+        assert!(
+            plist.starts_with("<?xml"),
+            "Plist should start with XML declaration"
+        );
+        assert!(
+            plist.contains("<!DOCTYPE plist"),
+            "Plist should have DOCTYPE"
+        );
+        assert!(
+            plist.contains("<dict>"),
+            "Plist should contain dict element"
+        );
         assert!(plist.contains("RunAtLoad"), "Plist should have RunAtLoad");
         assert!(plist.contains("KeepAlive"), "Plist should have KeepAlive");
     }
@@ -258,11 +291,13 @@ mod macos_tests {
         use std::net::TcpListener;
 
         // Try to bind to a random loopback port
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .expect("Failed to bind to loopback");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to loopback");
 
         let addr = listener.local_addr().expect("Failed to get local address");
-        assert!(addr.ip().to_string().contains("127.0.0.1"), "Should bind to loopback");
+        assert!(
+            addr.ip().to_string().contains("127.0.0.1"),
+            "Should bind to loopback"
+        );
     }
 
     #[test]
@@ -276,7 +311,10 @@ mod macos_tests {
             || addr.starts_with("[::1]:");
 
         let should_reject = !is_loopback && !allow_remote;
-        assert!(should_reject, "Should reject non-loopback when allow_remote=false");
+        assert!(
+            should_reject,
+            "Should reject non-loopback when allow_remote=false"
+        );
     }
 
     // ============================================================================
@@ -345,7 +383,10 @@ mod macos_tests {
         println!("Disk usage for {}: {}", home, df_output);
 
         // At least verify we can parse df output
-        assert!(df_output.contains("Filesystem") || df_output.contains("/"), "df should show filesystem info");
+        assert!(
+            df_output.contains("Filesystem") || df_output.contains("/"),
+            "df should show filesystem info"
+        );
     }
 
     #[test]
@@ -380,9 +421,7 @@ mod macos_tests {
     #[test]
     fn pid_check_command_available() {
         // `kill -0` used to check if pid is alive
-        let output = Command::new("kill")
-            .arg("--help")
-            .output();
+        let output = Command::new("kill").arg("--help").output();
 
         // kill should be available
         assert!(output.is_ok(), "kill command should be available");

@@ -4,6 +4,7 @@ pub mod container_store;
 pub mod docker_auth;
 pub mod dockerfile_build;
 pub mod ferrofile_build;
+pub mod fs_atomic;
 pub mod volume_store;
 pub mod image_manifest;
 pub mod image_config;

@@ -1450,11 +1450,9 @@ fn load_cli_config() -> Result<CliConfig, String> {
 
 fn save_cli_config(config: &CliConfig) -> Result<(), String> {
     let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("config: {err}"))?;
-    }
     let raw = serde_json::to_string_pretty(config).map_err(|err| format!("config: {err}"))?;
-    std::fs::write(&path, raw).map_err(|err| format!("config: {err}"))
+    ferro_core::fs_atomic::write_atomic(&path, raw.as_bytes())
+        .map_err(|err| format!("config: {err}"))
 }
 
 fn configured_ai_backend() -> Option<String> {
@@ -2074,13 +2072,9 @@ fn load_networks(runtime_dir: &Path) -> Result<Vec<NetworkRecord>, String> {
 
 fn save_networks(runtime_dir: &Path, records: &[NetworkRecord]) -> Result<(), String> {
     let path = network_store_path(runtime_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("network: failed to create {}: {err}", parent.display()))?;
-    }
     let payload = serde_json::to_string_pretty(records)
         .map_err(|err| format!("network: failed to encode store: {err}"))?;
-    std::fs::write(&path, payload)
+    ferro_core::fs_atomic::write_atomic(&path, payload.as_bytes())
         .map_err(|err| format!("network: failed to write {}: {err}", path.display()))
 }
 

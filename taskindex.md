@@ -14,9 +14,9 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **3**
-- Completed tasks: **40**
-- Incomplete tasks: **3**
+- Total remaining tasks: **2**
+- Completed tasks: **41**
+- Incomplete tasks: **2**
 
 ---
 
@@ -74,7 +74,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~REL-01 - Rework runtime crash resilience to robust container survivability semantics~~
 - [x] ~~REL-02 - Rework graceful degradation behavior for AI/component failures~~
 - [x] ~~REL-04 - Rework atomic operations audit and close remaining non-atomic paths~~
-- [ ] REL-05 - Rework test-coverage enforcement to production confidence thresholds
+- [x] ~~REL-05 - Rework test-coverage enforcement to production confidence thresholds~~
 - [ ] OBS-02 - Rework OpenTelemetry tracing from optional/basic to production-grade trace coverage
 
 ## F) Observability + Audit Rework (1)

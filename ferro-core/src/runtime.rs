@@ -2890,6 +2890,7 @@ fn run_resource_monitor(
     // Initialize predictor with memory limit
     let mut predictor =
         ferro_mind::ai::resource::ResourcePredictor::new(60).with_memory_limit(memory_limit);
+    let ai_logger = ferro_mind::ai::audit::AuditLogger::from_env();
 
     let sample_interval = Duration::from_secs(30);
     let oom_horizon = Duration::from_secs(1200); // 20 minutes
@@ -2921,6 +2922,7 @@ fn run_resource_monitor(
             };
 
             predictor.push(sample);
+            let latest_prediction = predictor.predict();
 
             // Predict OOM
             if let Some(prediction) = predictor.predict_oom(oom_horizon) {
@@ -2952,6 +2954,41 @@ fn run_resource_monitor(
                         )),
                     ),
                 );
+
+                if let Some(logger) = ai_logger.as_ref() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut trace = ferro_mind::ai::explain::DecisionTrace::new(
+                        format!("oom-prediction-{id}-{ts}"),
+                        format!(
+                            "Container {id} predicted to exceed memory limit in {} seconds",
+                            prediction.time_to_oom.as_secs()
+                        ),
+                    )
+                    .with_evidence("container_id", id.clone())
+                    .with_evidence("current_memory_bytes", prediction.current_memory.to_string())
+                    .with_evidence("memory_limit_bytes", prediction.memory_limit.to_string())
+                    .with_evidence("predicted_peak_bytes", prediction.predicted_peak.to_string())
+                    .with_evidence(
+                        "time_to_oom_secs",
+                        prediction.time_to_oom.as_secs().to_string(),
+                    )
+                    .with_evidence("confidence", format!("{:.4}", prediction.confidence))
+                    .with_evidence("current_pids", metrics.pids_current.to_string())
+                    .with_evidence("memory_current_cgroup", metrics.memory_current.to_string());
+                    if let Some(pred) = latest_prediction {
+                        trace = trace
+                            .with_evidence("predicted_cpu_percent", format!("{:.2}", pred.cpu_percent))
+                            .with_evidence("predicted_memory_bytes", pred.memory_bytes.to_string())
+                            .with_evidence(
+                                "memory_growth_rate_bytes_per_sec",
+                                format!("{:.2}", pred.memory_growth_rate),
+                            );
+                    }
+                    let _ = logger.log("ai_oom_prediction", &trace);
+                }
 
                 // v0.2: FERROCRATE_AI_SUGGEST=1 — print suggestions
                 if std::env::var("FERROCRATE_AI_SUGGEST")

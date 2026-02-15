@@ -13,7 +13,11 @@ METHOD="${METHOD:-binary}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-public}"
 INSTALL_DESKTOP_BIN="${INSTALL_DESKTOP_BIN:-0}"
 DESKTOP_BOOTSTRAP="${DESKTOP_BOOTSTRAP:-0}"
+FULL_STACK="${FULL_STACK:-0}"
 PAID_RELEASE_BASE_URL="${PAID_RELEASE_BASE_URL:-}"
+PAID_RELEASE_TOKEN="${PAID_RELEASE_TOKEN:-}"
+PAID_RELEASE_TOKEN_ENDPOINT="${PAID_RELEASE_TOKEN_ENDPOINT:-}"
+PAID_ENTITLEMENT_FILE="${PAID_ENTITLEMENT_FILE:-$HOME/.ferrocrate/entitlement.lic}"
 VM_STATE_FILE="${VM_STATE_FILE:-$HOME/.ferrocrate/desktop-vm.json}"
 VM_DIR="${VM_DIR:-$HOME/.ferrocrate/vm}"
 VM_DISK_PATH="${VM_DISK_PATH:-$VM_DIR/ferrocrate-desktop.qcow2}"
@@ -26,6 +30,8 @@ VM_GUEST_USER="${VM_GUEST_USER:-ferro}"
 VM_SSH_KEY_PATH="${VM_SSH_KEY_PATH:-$VM_DIR/desktop_vm_ed25519}"
 FORCE="0"
 RESOLVED_RELEASE_TAG=""
+DESKTOP_BIN_SET="0"
+DESKTOP_BOOTSTRAP_SET="0"
 
 usage() {
   cat <<USAGE
@@ -39,6 +45,8 @@ Options:
   --prefix <path>            Install destination (default: /usr/local/bin)
   --with-desktop-bin         Install ferro-desktop binary (paid channels)
   --with-desktop-bootstrap   Initialize/start desktop VM (requires desktop binary)
+  --full-stack               Enable desktop binary + desktop VM bootstrap
+  --cli-only                 Disable desktop binary + bootstrap
   --no-desktop-bootstrap     Skip desktop VM/bootstrap setup
   --force                    Overwrite existing files without prompt
   -h, --help                 Show this help
@@ -46,7 +54,9 @@ Options:
 Examples:
   ./install-macos.sh
   ./install-macos.sh --version v0.1.0
+  ./install-macos.sh --channel paid
   ./install-macos.sh --with-desktop-bin --with-desktop-bootstrap
+  ./install-macos.sh --channel paid --full-stack
   ./install-macos.sh --no-desktop-bootstrap
   ./install-macos.sh --method source --prefix ~/.local/bin
 USAGE
@@ -88,15 +98,30 @@ parse_args() {
         ;;
       --with-desktop-bin)
         INSTALL_DESKTOP_BIN="1"
+        DESKTOP_BIN_SET="1"
         shift
         ;;
       --with-desktop-bootstrap)
         INSTALL_DESKTOP_BIN="1"
         DESKTOP_BOOTSTRAP="1"
+        DESKTOP_BIN_SET="1"
+        DESKTOP_BOOTSTRAP_SET="1"
+        shift
+        ;;
+      --full-stack)
+        FULL_STACK="1"
+        shift
+        ;;
+      --cli-only)
+        INSTALL_DESKTOP_BIN="0"
+        DESKTOP_BOOTSTRAP="0"
+        DESKTOP_BIN_SET="1"
+        DESKTOP_BOOTSTRAP_SET="1"
         shift
         ;;
       --no-desktop-bootstrap)
         DESKTOP_BOOTSTRAP="0"
+        DESKTOP_BOOTSTRAP_SET="1"
         shift
         ;;
       -h|--help)
@@ -174,6 +199,40 @@ release_base_url_for_tag() {
   fi
 }
 
+ensure_paid_release_token() {
+  local tag="${1:-latest}"
+  if [[ "$RELEASE_CHANNEL" != "paid" ]]; then
+    return
+  fi
+  if [[ -n "$PAID_RELEASE_TOKEN" ]]; then
+    return
+  fi
+  if [[ -z "$PAID_RELEASE_TOKEN_ENDPOINT" ]]; then
+    echo "paid channel requires PAID_RELEASE_TOKEN or PAID_RELEASE_TOKEN_ENDPOINT" >&2
+    exit 1
+  fi
+  if [[ ! -f "$PAID_ENTITLEMENT_FILE" ]]; then
+    echo "paid channel token exchange requires entitlement file: $PAID_ENTITLEMENT_FILE" >&2
+    exit 1
+  fi
+
+  local response token
+  echo "requesting paid release token..."
+  response="$(
+    curl -fsSL \
+      -H "Content-Type: application/json" \
+      -H "X-Ferrocrate-Tag: ${tag}" \
+      --data-binary @"$PAID_ENTITLEMENT_FILE" \
+      "$PAID_RELEASE_TOKEN_ENDPOINT"
+  )"
+  token="$(printf '%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p')"
+  if [[ -z "$token" ]]; then
+    echo "failed to parse token from paid release token endpoint response" >&2
+    exit 1
+  fi
+  PAID_RELEASE_TOKEN="$token"
+}
+
 install_binary_release() {
   require_cmd curl
   require_cmd tar
@@ -183,6 +242,7 @@ install_binary_release() {
   arch="$(arch_name)"
 
   tag="$(resolve_release_tag)"
+  ensure_paid_release_token "$tag"
 
   base_url="$(release_base_url_for_tag "$tag")"
   asset_name="ferrocrate-${tag}-macos-${arch}.tar.gz"
@@ -198,10 +258,26 @@ install_binary_release() {
   checksums="$tmpdir/$checksum_name"
 
   echo "downloading: $asset_name"
-  curl -fL "$base_url/$asset_name" -o "$tarball"
+  if [[ "$RELEASE_CHANNEL" == "paid" ]]; then
+    curl -fL \
+      -H "Authorization: Bearer $PAID_RELEASE_TOKEN" \
+      -H "X-Ferrocrate-Channel: paid" \
+      "$base_url/$asset_name" \
+      -o "$tarball"
+  else
+    curl -fL "$base_url/$asset_name" -o "$tarball"
+  fi
 
   echo "downloading: $checksum_name"
-  curl -fL "$base_url/$checksum_name" -o "$checksums"
+  if [[ "$RELEASE_CHANNEL" == "paid" ]]; then
+    curl -fL \
+      -H "Authorization: Bearer $PAID_RELEASE_TOKEN" \
+      -H "X-Ferrocrate-Channel: paid" \
+      "$base_url/$checksum_name" \
+      -o "$checksums"
+  else
+    curl -fL "$base_url/$checksum_name" -o "$checksums"
+  fi
 
   expected="$(awk -v file="$asset_name" '$2==file {print $1}' "$checksums")"
   if [[ -z "$expected" ]]; then
@@ -349,6 +425,19 @@ ensure_host_dependencies() {
       brew_install_if_missing qemu-system-x86_64 qemu
       ;;
   esac
+  if ! command -v virtiofsd >/dev/null 2>&1; then
+    local qemu_prefix qemu_virtiofsd
+    qemu_prefix="$(brew --prefix qemu)"
+    qemu_virtiofsd="$qemu_prefix/libexec/virtiofsd"
+    if [[ -x "$qemu_virtiofsd" ]]; then
+      mkdir -p "$PREFIX"
+      ln -sf "$qemu_virtiofsd" "$PREFIX/virtiofsd"
+    fi
+  fi
+  command -v virtiofsd >/dev/null 2>&1 || {
+    echo "missing required command: virtiofsd (install qemu failed to provide it)" >&2
+    exit 1
+  }
   # ssh client is usually preinstalled on macOS; install via brew if missing.
   if ! command -v ssh >/dev/null 2>&1; then
     brew install openssh
@@ -430,10 +519,16 @@ generate_vm_ssh_key() {
 }
 
 generate_cloud_init_seed() {
-  local tmpdir user_data meta_data pubkey release_tag
+  local tmpdir user_data meta_data pubkey release_tag guest_release_base_url guest_curl_auth
   tmpdir="$(mktemp -d)"
   pubkey="$(cat "${VM_SSH_KEY_PATH}.pub")"
   release_tag="$(resolve_release_tag)"
+  guest_release_base_url="$(release_base_url_for_tag "$release_tag")"
+  guest_curl_auth=""
+  if [[ "$RELEASE_CHANNEL" == "paid" ]]; then
+    ensure_paid_release_token "$release_tag"
+    guest_curl_auth="-H 'Authorization: Bearer ${PAID_RELEASE_TOKEN}' -H 'X-Ferrocrate-Channel: paid'"
+  fi
   user_data="$tmpdir/user-data"
   meta_data="$tmpdir/meta-data"
 
@@ -454,7 +549,7 @@ packages:
   - ca-certificates
   - tar
 runcmd:
-  - [ bash, -lc, "set -euo pipefail; arch=\$(uname -m); case \$arch in aarch64|arm64) fc_arch=aarch64 ;; x86_64|amd64) fc_arch=x86_64 ;; *) exit 0 ;; esac; tag='${release_tag}'; asset=\"ferrocrate-\${tag}-linux-\${fc_arch}.tar.gz\"; url=\"https://github.com/${REPO}/releases/download/\${tag}/\${asset}\"; tmp=/tmp/ferrocrate-install; rm -rf \"\$tmp\"; mkdir -p \"\$tmp\"; curl -fL \"\$url\" -o \"\$tmp/pkg.tgz\"; tar -xzf \"\$tmp/pkg.tgz\" -C \"\$tmp\"; if [ -f \"\$tmp/ferrocrate\" ]; then install -m 0755 \"\$tmp/ferrocrate\" /usr/local/bin/ferrocrate; elif [ -f \"\$tmp/ferro-cli\" ]; then install -m 0755 \"\$tmp/ferro-cli\" /usr/local/bin/ferrocrate; fi; if [ -f \"\$tmp/ferro-desktop\" ]; then install -m 0755 \"\$tmp/ferro-desktop\" /usr/local/bin/ferro-desktop; fi" ]
+  - [ bash, -lc, "set -euo pipefail; arch=\$(uname -m); case \$arch in aarch64|arm64) fc_arch=aarch64 ;; x86_64|amd64) fc_arch=x86_64 ;; *) exit 0 ;; esac; tag='${release_tag}'; asset=\"ferrocrate-\${tag}-linux-\${fc_arch}.tar.gz\"; url=\"${guest_release_base_url}/\${asset}\"; tmp=/tmp/ferrocrate-install; rm -rf \"\$tmp\"; mkdir -p \"\$tmp\"; curl -fL ${guest_curl_auth} \"\$url\" -o \"\$tmp/pkg.tgz\"; tar -xzf \"\$tmp/pkg.tgz\" -C \"\$tmp\"; if [ -f \"\$tmp/ferrocrate\" ]; then install -m 0755 \"\$tmp/ferrocrate\" /usr/local/bin/ferrocrate; elif [ -f \"\$tmp/ferro-cli\" ]; then install -m 0755 \"\$tmp/ferro-cli\" /usr/local/bin/ferrocrate; fi; if [ -f \"\$tmp/ferro-desktop\" ]; then install -m 0755 \"\$tmp/ferro-desktop\" /usr/local/bin/ferro-desktop; fi" ]
 final_message: "FerroCrate guest bootstrap complete"
 EOF
 
@@ -505,15 +600,21 @@ wait_for_guest_ssh() {
 }
 
 ensure_guest_ferrocrate_installed() {
-  local tag install_cmd fallback_cmd
+  local tag install_cmd fallback_cmd guest_release_base_url guest_curl_auth
   if guest_ssh "command -v ferrocrate >/dev/null"; then
     echo "guest ferrocrate runtime is installed"
     return
   fi
 
   tag="$(resolve_release_tag)"
+  guest_release_base_url="$(release_base_url_for_tag "$tag")"
+  guest_curl_auth=""
+  if [[ "$RELEASE_CHANNEL" == "paid" ]]; then
+    ensure_paid_release_token "$tag"
+    guest_curl_auth="-H 'Authorization: Bearer ${PAID_RELEASE_TOKEN}' -H 'X-Ferrocrate-Channel: paid'"
+  fi
   echo "guest runtime missing, installing ferrocrate in VM..."
-  install_cmd="set -euo pipefail; arch=\$(uname -m); case \$arch in aarch64|arm64) fc_arch=aarch64 ;; x86_64|amd64) fc_arch=x86_64 ;; *) echo unsupported_arch:\$arch >&2; exit 1 ;; esac; asset='ferrocrate-${tag}-linux-'\${fc_arch}'.tar.gz'; url='https://github.com/${REPO}/releases/download/${tag}/'\${asset}; tmp=/tmp/ferrocrate-install-host; rm -rf \"\$tmp\"; mkdir -p \"\$tmp\"; curl -fL \"\$url\" -o \"\$tmp/pkg.tgz\"; tar -xzf \"\$tmp/pkg.tgz\" -C \"\$tmp\"; if [ -f \"\$tmp/ferrocrate\" ]; then sudo install -m 0755 \"\$tmp/ferrocrate\" /usr/local/bin/ferrocrate; elif [ -f \"\$tmp/ferro-cli\" ]; then sudo install -m 0755 \"\$tmp/ferro-cli\" /usr/local/bin/ferrocrate; else echo no_ferrocrate_binary >&2; exit 1; fi; if [ -f \"\$tmp/ferro-desktop\" ]; then sudo install -m 0755 \"\$tmp/ferro-desktop\" /usr/local/bin/ferro-desktop; fi"
+  install_cmd="set -euo pipefail; arch=\$(uname -m); case \$arch in aarch64|arm64) fc_arch=aarch64 ;; x86_64|amd64) fc_arch=x86_64 ;; *) echo unsupported_arch:\$arch >&2; exit 1 ;; esac; asset='ferrocrate-${tag}-linux-'\${fc_arch}'.tar.gz'; url='${guest_release_base_url}/'\${asset}; tmp=/tmp/ferrocrate-install-host; rm -rf \"\$tmp\"; mkdir -p \"\$tmp\"; curl -fL ${guest_curl_auth} \"\$url\" -o \"\$tmp/pkg.tgz\"; tar -xzf \"\$tmp/pkg.tgz\" -C \"\$tmp\"; if [ -f \"\$tmp/ferrocrate\" ]; then sudo install -m 0755 \"\$tmp/ferrocrate\" /usr/local/bin/ferrocrate; elif [ -f \"\$tmp/ferro-cli\" ]; then sudo install -m 0755 \"\$tmp/ferro-cli\" /usr/local/bin/ferrocrate; else echo no_ferrocrate_binary >&2; exit 1; fi; if [ -f \"\$tmp/ferro-desktop\" ]; then sudo install -m 0755 \"\$tmp/ferro-desktop\" /usr/local/bin/ferro-desktop; fi"
   if ! guest_ssh "$install_cmd"; then
     echo "guest prebuilt artifacts unavailable for ${tag}; building from source in guest..."
     fallback_cmd="set -euo pipefail; tmp=/tmp/ferrocrate-source-build; rm -rf \"\$tmp\"; mkdir -p \"\$tmp\"; sudo apt-get update; sudo apt-get install -y build-essential pkg-config libssl-dev curl ca-certificates git; if ! command -v cargo >/dev/null 2>&1; then curl https://sh.rustup.rs -sSf | sh -s -- -y; fi; . \"\$HOME/.cargo/env\"; src=\"\$tmp/src\"; if [ '${tag}' = 'latest' ]; then git clone --depth 1 https://github.com/${REPO}.git \"\$src\"; else git clone --depth 1 --branch '${tag}' https://github.com/${REPO}.git \"\$src\"; fi; cd \"\$src\"; cargo build --release -p ferro-cli -p ferro-desktop; if [ -f target/release/ferro-cli ]; then sudo install -m 0755 target/release/ferro-cli /usr/local/bin/ferrocrate; elif [ -f target/release/ferrocrate ]; then sudo install -m 0755 target/release/ferrocrate /usr/local/bin/ferrocrate; else echo missing_guest_cli_binary >&2; exit 1; fi; if [ -f target/release/ferro-desktop ]; then sudo install -m 0755 target/release/ferro-desktop /usr/local/bin/ferro-desktop; fi"
@@ -578,6 +679,19 @@ bootstrap_desktop_vm() {
 main() {
   parse_args "$@"
   ensure_macos
+
+  if [[ "$FULL_STACK" == "1" ]]; then
+    if [[ "$RELEASE_CHANNEL" == "public" ]]; then
+      echo "--full-stack requires --channel paid (desktop artifacts are paid-channel only)" >&2
+      exit 1
+    fi
+    INSTALL_DESKTOP_BIN="1"
+    DESKTOP_BOOTSTRAP="1"
+  elif [[ "$RELEASE_CHANNEL" == "paid" && "$DESKTOP_BIN_SET" == "0" && "$DESKTOP_BOOTSTRAP_SET" == "0" ]]; then
+    # Paid channel defaults to one-command full setup unless explicitly overridden.
+    INSTALL_DESKTOP_BIN="1"
+    DESKTOP_BOOTSTRAP="1"
+  fi
 
   if [[ "$DESKTOP_BOOTSTRAP" == "1" && "$INSTALL_DESKTOP_BIN" != "1" ]]; then
     echo "--with-desktop-bootstrap requires --with-desktop-bin" >&2

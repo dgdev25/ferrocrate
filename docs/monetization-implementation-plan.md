@@ -70,9 +70,29 @@ Implement enforceable monetization aligned to strategy:
   - `ferro-cli/tests/entitlement_linux_integration.rs`
   - executed in `.github/workflows/rust-no-warnings.yml` on `ubuntu-latest`
 
+## What Is Implemented (Phase 3 - Bootstrap + Gateway Wiring)
+- One-command paid bootstrap defaults:
+  - `scripts/install-macos.sh --channel paid` now defaults to desktop binary install + VM bootstrap.
+  - Added explicit `--full-stack` and `--cli-only` controls.
+- Host dependency remediation in installer:
+  - installs/validates `qemu`, `virtiofsd`, and `ssh` on macOS.
+- Installer token flow for paid channel:
+  - macOS and Windows installers support `PAID_RELEASE_TOKEN` and `PAID_RELEASE_TOKEN_ENDPOINT`.
+  - token exchange uses entitlement envelope file (`PAID_ENTITLEMENT_FILE`) and release tag header.
+- Authenticated artifact host implementation:
+  - `scripts/paid-artifact-gateway.py` provides:
+    - `POST /v1/token` entitlement validation and short-lived token issuance.
+    - `GET /v1/releases/<tag>/<asset>` bearer-token protected artifact delivery.
+- CLI compatibility doctor command:
+  - `ferrocrate doctor [--fix] [--json]` with macOS-focused checks for:
+    - desktop binary presence
+    - host dependencies (`qemu-img`, `qemu-system-*`, `virtiofsd`, `ssh`)
+    - desktop VM running state
+    - guest SSH reachability
+    - guest ferrocrate runtime availability
+
 ## Remaining Work (Phase 3)
-- Paid artifact hosting and authenticated download gateway wiring (installer token flow)
-- Entitlement issuance service and key management rotation policy
+- Entitlement issuance service and key management rotation policy hardening
 - Offline enterprise license tooling and revocation strategy
 - UI-level entitlement UX in desktop app (login/status/renewal)
 

@@ -7,7 +7,12 @@ param(
   [string]$Repo = 'dgtise25/ferrocrate',
   [string]$Prefix = "$env:ProgramFiles\FerroCrate\bin",
   [string]$PaidReleaseBaseUrl = $env:PAID_RELEASE_BASE_URL,
+  [string]$PaidReleaseToken = $env:PAID_RELEASE_TOKEN,
+  [string]$PaidReleaseTokenEndpoint = $env:PAID_RELEASE_TOKEN_ENDPOINT,
+  [string]$PaidEntitlementFile = $(if ($env:PAID_ENTITLEMENT_FILE) { $env:PAID_ENTITLEMENT_FILE } else { Join-Path $HOME '.ferrocrate\entitlement.lic' }),
   [switch]$WithDesktopBin,
+  [switch]$FullStack,
+  [switch]$CliOnly,
   [switch]$Force
 )
 
@@ -36,6 +41,28 @@ function Resolve-ReleaseTag {
     throw 'Failed to resolve latest release tag from GitHub API'
   }
   return [string]$resp.tag_name
+}
+
+function Resolve-PaidReleaseToken {
+  param([string]$Token,[string]$Endpoint,[string]$EntitlementFile,[string]$Tag = 'latest')
+  if (-not [string]::IsNullOrWhiteSpace($Token)) {
+    return $Token
+  }
+  if ([string]::IsNullOrWhiteSpace($Endpoint)) {
+    throw 'Paid channel requires -PaidReleaseToken (or PAID_RELEASE_TOKEN) or -PaidReleaseTokenEndpoint (or PAID_RELEASE_TOKEN_ENDPOINT).'
+  }
+  if (-not (Test-Path $EntitlementFile)) {
+    throw "Paid channel token exchange requires entitlement file: $EntitlementFile"
+  }
+  $body = Get-Content -Raw -Path $EntitlementFile
+  $headers = @{
+    'X-Ferrocrate-Tag' = $Tag
+  }
+  $resp = Invoke-RestMethod -Uri $Endpoint -Method Post -ContentType 'application/json' -Body $body -Headers $headers
+  if ([string]::IsNullOrWhiteSpace($resp.token)) {
+    throw 'Token endpoint response did not contain a token'
+  }
+  return [string]$resp.token
 }
 
 function Install-File {
@@ -77,11 +104,14 @@ function Install-BinariesFromDir {
 }
 
 function Install-BinaryRelease {
-  param([string]$Repo,[string]$Version,[string]$Prefix,[string]$Channel,[string]$PaidReleaseBaseUrl,[bool]$InstallDesktopBin,[switch]$Force)
+  param([string]$Repo,[string]$Version,[string]$Prefix,[string]$Channel,[string]$PaidReleaseBaseUrl,[string]$PaidReleaseToken,[string]$PaidReleaseTokenEndpoint,[string]$PaidEntitlementFile,[bool]$InstallDesktopBin,[switch]$Force)
 
   Require-Command -Name 'Invoke-WebRequest'
   $arch = Get-ArchName
   $tag = Resolve-ReleaseTag -Repo $Repo -Version $Version
+  if ($Channel -eq 'paid') {
+    $PaidReleaseToken = Resolve-PaidReleaseToken -Token $PaidReleaseToken -Endpoint $PaidReleaseTokenEndpoint -EntitlementFile $PaidEntitlementFile -Tag $tag
+  }
 
   $assetName = "ferrocrate-$tag-windows-$arch.zip"
   $checksumName = "ferrocrate-$tag-checksums.txt"
@@ -90,9 +120,17 @@ function Install-BinaryRelease {
   }
   if ($Channel -eq 'public') {
     $baseUrl = "https://github.com/$Repo/releases/download/$tag"
+    $headers = @{}
   } else {
     if ([string]::IsNullOrWhiteSpace($PaidReleaseBaseUrl)) {
       throw 'Paid channel requires -PaidReleaseBaseUrl (or PAID_RELEASE_BASE_URL env).'
+    }
+    if ([string]::IsNullOrWhiteSpace($PaidReleaseToken)) {
+      throw 'Paid channel requires token auth. Set -PaidReleaseToken or -PaidReleaseTokenEndpoint.'
+    }
+    $headers = @{
+      Authorization = "Bearer $PaidReleaseToken"
+      'X-Ferrocrate-Channel' = 'paid'
     }
     if ($PaidReleaseBaseUrl.Contains('{tag}')) {
       $baseUrl = $PaidReleaseBaseUrl.Replace('{tag}', $tag)
@@ -108,10 +146,10 @@ function Install-BinaryRelease {
     $checksumPath = Join-Path $tmp $checksumName
 
     Write-Host "Downloading $assetName"
-    Invoke-WebRequest -Uri "$baseUrl/$assetName" -OutFile $zipPath
+    Invoke-WebRequest -Uri "$baseUrl/$assetName" -OutFile $zipPath -Headers $headers
 
     Write-Host "Downloading $checksumName"
-    Invoke-WebRequest -Uri "$baseUrl/$checksumName" -OutFile $checksumPath
+    Invoke-WebRequest -Uri "$baseUrl/$checksumName" -OutFile $checksumPath -Headers $headers
 
     $expectedLine = Get-Content $checksumPath | Where-Object { $_ -match "\s+$([regex]::Escape($assetName))$" } | Select-Object -First 1
     if (-not $expectedLine) {
@@ -182,13 +220,24 @@ function Install-FromSource {
   }
 }
 
-if ($WithDesktopBin) {
+if ($FullStack -and $Channel -eq 'public') {
+  throw '-FullStack requires -Channel paid (desktop artifacts are paid-channel only).'
+}
+
+$installDesktopBin = [bool]$WithDesktopBin
+if ($CliOnly) {
+  $installDesktopBin = $false
+} elseif ($FullStack -or ($Channel -eq 'paid' -and -not $WithDesktopBin -and -not $CliOnly)) {
+  $installDesktopBin = $true
+}
+
+if ($installDesktopBin) {
   Write-Host 'Desktop binary install enabled (-WithDesktopBin).'
 }
 
 switch ($Method) {
-  'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Channel $Channel -PaidReleaseBaseUrl $PaidReleaseBaseUrl -InstallDesktopBin:$WithDesktopBin -Force:$Force }
-  'source' { Install-FromSource -Repo $Repo -Version $Version -Prefix $Prefix -InstallDesktopBin:$WithDesktopBin -Force:$Force }
+  'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Channel $Channel -PaidReleaseBaseUrl $PaidReleaseBaseUrl -PaidReleaseToken $PaidReleaseToken -PaidReleaseTokenEndpoint $PaidReleaseTokenEndpoint -PaidEntitlementFile $PaidEntitlementFile -InstallDesktopBin:$installDesktopBin -Force:$Force }
+  'source' { Install-FromSource -Repo $Repo -Version $Version -Prefix $Prefix -InstallDesktopBin:$installDesktopBin -Force:$Force }
   default { throw "Invalid method: $Method" }
 }
 

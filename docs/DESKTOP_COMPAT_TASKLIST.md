@@ -62,8 +62,12 @@ Evidence:
 ## Phase 3: Packaging & UX
 - [ ] Windows MSI installer + service wiring
 - [ ] macOS package + launch agent wiring
-- [ ] Auto-start/runtime lifecycle management in host daemon
-- [ ] Upgrade and rollback-safe VM image updates
+- [x] ~~Auto-start/runtime lifecycle management in host daemon~~
+- [x] ~~Upgrade and rollback-safe VM image updates~~
+
+Evidence:
+- `ferro-desktop/src/main.rs` (`autostart` command family; `vm update-image`)
+- `docs/desktop-packaging-guide.md`
 
 ## What Not To Do
 - [x] ~~Do not port Linux isolation primitives directly to native macOS/Windows runtime paths~~

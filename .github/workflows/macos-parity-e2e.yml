@@ -1,0 +1,36 @@
+name: macos-parity-e2e
+
+on:
+  push:
+    branches: [ "desktop-app", "main" ]
+    paths:
+      - "ferro-cli/**"
+      - "ferro-core/**"
+      - "ferro-desktop/**"
+      - "scripts/test-macos-compatibility.sh"
+      - "tests/macos_compatibility_tests.rs"
+      - ".github/workflows/macos-parity-e2e.yml"
+  pull_request:
+    paths:
+      - "ferro-cli/**"
+      - "ferro-core/**"
+      - "ferro-desktop/**"
+      - "scripts/test-macos-compatibility.sh"
+      - "tests/macos_compatibility_tests.rs"
+      - ".github/workflows/macos-parity-e2e.yml"
+
+jobs:
+  macos-parity:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run macOS compatibility integration test target
+        run: cargo test -p ferro-cli --test macos_compatibility_tests -- --nocapture
+
+      - name: Run Docker compat integration tests on macOS
+        run: cargo test -p ferro-cli --test docker_compat_integration -- --nocapture
+
+      - name: Run macOS compatibility script
+        run: bash scripts/test-macos-compatibility.sh

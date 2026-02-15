@@ -29,6 +29,7 @@ use ferro_net::ebpf::{
     build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
     EbpfProgram, SecurityMonitorConfig,
 };
+use ferro_net::exec_cmd as net_exec_cmd;
 use ferro_net::netns;
 use ferro_net::nftables::{build_nft_add_rule_cmd, build_nft_delete_rule_cmd, NftRule};
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
@@ -1198,7 +1199,7 @@ fn build_command(
 
     let caps = capabilities.to_vec();
     let seccomp = seccomp_profile.cloned();
-    let seccomp_strict = seccomp_strict_mode();
+    let seccomp_permissive = seccomp_permissive_mode();
     unsafe {
         command.pre_exec(move || {
             let is_root = nix::unistd::Uid::effective().is_root();
@@ -1215,18 +1216,14 @@ fn build_command(
             }
             // Apply seccomp profile AFTER capability drops (seccomp is last sandboxing step)
             if let Some(profile) = &seccomp {
-                if !is_root && !seccomp_strict {
-                    eprintln!(
-                        "[seccomp] non-root mode: skipping seccomp apply (set FERROCRATE_SECCOMP_STRICT=1 to enforce fail-closed)"
-                    );
-                } else if let Err(err) = apply_seccomp_profile(profile) {
-                    if is_root || seccomp_strict {
+                if let Err(err) = apply_seccomp_profile(profile) {
+                    if !seccomp_permissive {
                         return Err(std::io::Error::other(
                             err.to_string(),
                         ));
                     }
                     eprintln!(
-                        "[seccomp] non-root seccomp apply failed; continuing without seccomp (set FERROCRATE_SECCOMP_STRICT=1 to fail-closed): {}",
+                        "[seccomp] permissive mode: seccomp apply failed, continuing without seccomp: {}",
                         err
                     );
                 }
@@ -1765,7 +1762,11 @@ fn seccomp_enabled() -> bool {
 }
 
 fn seccomp_strict_mode() -> bool {
-    std::env::var("FERROCRATE_SECCOMP_STRICT")
+    !seccomp_permissive_mode()
+}
+
+fn seccomp_permissive_mode() -> bool {
+    std::env::var("FERROCRATE_SECCOMP_PERMISSIVE")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -2225,19 +2226,12 @@ fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = parse_cmd_args(args)?;
     let cmd_str = args.join(" ");
 
     // Log command execution at debug level (visible with RUST_LOG=debug)
     log::debug!("[exec] {}", cmd_str);
 
-    let output = Command::new(bin).args(rest).output()?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Err(RuntimeError::Network(format!("{}: {}", bin, stderr.trim())))
+    net_exec_cmd(args).map_err(|err| RuntimeError::Network(err.to_string()))
 }
 
 /// Execute a command, allowing "already exists" errors (idempotent operations).
@@ -3897,23 +3891,23 @@ mod tests {
     }
 
     #[test]
-    fn seccomp_strict_mode_defaults_to_false() {
+    fn seccomp_strict_mode_defaults_to_true() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
-            std::env::remove_var("FERROCRATE_SECCOMP_STRICT");
+            std::env::remove_var("FERROCRATE_SECCOMP_PERMISSIVE");
         }
-        assert!(!super::seccomp_strict_mode());
+        assert!(super::seccomp_strict_mode());
     }
 
     #[test]
-    fn seccomp_strict_mode_respects_env() {
+    fn seccomp_permissive_mode_relaxes_strict_default() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
-            std::env::set_var("FERROCRATE_SECCOMP_STRICT", "1");
+            std::env::set_var("FERROCRATE_SECCOMP_PERMISSIVE", "1");
         }
-        assert!(super::seccomp_strict_mode());
+        assert!(!super::seccomp_strict_mode());
         unsafe {
-            std::env::remove_var("FERROCRATE_SECCOMP_STRICT");
+            std::env::remove_var("FERROCRATE_SECCOMP_PERMISSIVE");
         }
     }
 

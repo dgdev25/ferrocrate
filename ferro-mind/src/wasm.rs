@@ -1,33 +1,50 @@
+//! WebAssembly inference engine integration
+//!
+//! Provides abstractions for pluggable WASM-based model inference engines.
+
 use std::collections::HashMap;
 use std::time::Instant;
 
+/// A WebAssembly inference request
 #[derive(Debug, Clone)]
 pub struct WasmRequest {
+    /// Raw input bytes for the model
     pub input: Vec<u8>,
+    /// Model identifier
     pub model: String,
 }
 
+/// A WebAssembly inference response
 #[derive(Debug, Clone)]
 pub struct WasmResponse {
+    /// Raw output bytes from the model
     pub output: Vec<u8>,
+    /// Metadata about the inference result
     pub metadata: HashMap<String, String>,
 }
 
+/// Trait for WebAssembly-based inference engines
 pub trait WasmInferenceEngine: Send + Sync {
+    /// Get the name of this engine
     fn name(&self) -> &str;
+    /// Run inference on a request
     fn infer(&self, request: WasmRequest) -> Result<WasmResponse, String>;
 }
 
+/// Registry for managing multiple WASM inference engines
 #[derive(Default)]
 pub struct WasmRegistry {
+    /// Map of engine name to engine instance
     engines: HashMap<String, Box<dyn WasmInferenceEngine>>,
 }
 
 impl WasmRegistry {
+    /// Register a new inference engine
     pub fn register<E: WasmInferenceEngine + 'static>(&mut self, engine: E) {
         self.engines.insert(engine.name().to_string(), Box::new(engine));
     }
 
+    /// Run inference using the specified engine
     pub fn infer(&self, engine: &str, request: WasmRequest) -> Result<WasmResponse, String> {
         let handler = self
             .engines
@@ -37,6 +54,7 @@ impl WasmRegistry {
     }
 }
 
+/// No-op WASM inference engine for testing
 #[derive(Default)]
 pub struct NoopWasmEngine;
 

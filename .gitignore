@@ -6,3 +6,8 @@ ferro-mind/assets/
 
 # Throwaway local scenario workspace (manual testing only)
 tmp/ferro-scenario/
+
+# Desktop UI local artifacts
+apps/ferro-desktop-ui/node_modules/
+apps/ferro-desktop-ui/dist/
+apps/ferro-desktop-ui/src-tauri/target/

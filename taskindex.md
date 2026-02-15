@@ -28,8 +28,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~NET-06 - Implement eBPF mode with explicit fallback semantics and visibility~~
 - [x] ~~NET-07 - Implement WireGuard overlay networking runtime path~~
 - [x] ~~NET-08 - Consolidate and harden real port-mapping execution paths~~
-- [ ] NET-09 - Complete and verify IPv6 allocation/wiring behavior (IN PROGRESS)
-- [ ] NET-10 - Implement enforceable bandwidth limiting path
+- [x] ~~NET-09 - Complete and verify IPv6 allocation/wiring behavior~~
+- [ ] NET-10 - Implement enforceable bandwidth limiting path (IN PROGRESS)
 
 ## B) Security Hardening (4)
 

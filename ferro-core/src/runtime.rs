@@ -2187,12 +2187,32 @@ fn resolve_network_backend(requested: &str, container_id: &str) -> Result<String
     Ok("iptables".to_string())
 }
 
-fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, _prefix: u8) -> String {
-    let mut segments = gateway.segments();
+fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, prefix: u8) -> String {
+    let prefix = prefix.min(128);
+    let gateway_val = u128::from(*gateway);
+    let host_bits = 128u8.saturating_sub(prefix);
+    if host_bits == 0 {
+        return gateway.to_string();
+    }
     let hash = blake3::hash(container_id.as_bytes());
-    let byte = hash.as_bytes()[0] as u16;
-    segments[7] = 2 + (byte % 200);
-    Ipv6Addr::from(segments).to_string()
+    let mut hash_bytes = [0u8; 16];
+    hash_bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    let hash_num = u128::from_be_bytes(hash_bytes);
+    let host_space = if host_bits >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << host_bits) - 1
+    };
+    let min_host = 2u128;
+    let max_host = host_space.saturating_sub(1);
+    let host = if max_host >= min_host {
+        min_host + (hash_num % (max_host - min_host + 1))
+    } else {
+        1
+    };
+    let network_mask = if host_bits >= 128 { 0 } else { !host_space };
+    let address = (gateway_val & network_mask) | host;
+    Ipv6Addr::from(address).to_string()
 }
 
 fn bandwidth_limit() -> Option<String> {
@@ -3283,6 +3303,30 @@ mod tests {
         }];
         let err = super::validate_port_mapping_conflicts(&store, &requested).expect_err("conflict");
         assert!(err.to_string().contains("already mapped"));
+    }
+
+    #[test]
+    fn allocated_ipv6_stays_within_prefix() {
+        let gateway = "fd00:10::1".parse::<std::net::Ipv6Addr>().expect("ipv6");
+        let assigned = super::allocate_container_ipv6("abc123", &gateway, 64)
+            .parse::<std::net::Ipv6Addr>()
+            .expect("assigned ipv6");
+        let gateway_u = u128::from(gateway);
+        let assigned_u = u128::from(assigned);
+        let host_mask = (1u128 << (128 - 64)) - 1;
+        let network_mask = !host_mask;
+        assert_eq!(gateway_u & network_mask, assigned_u & network_mask);
+        assert_ne!(assigned, gateway);
+    }
+
+    #[test]
+    fn allocated_ipv6_is_deterministic_for_container_id() {
+        let gateway = "fd00:20::1".parse::<std::net::Ipv6Addr>().expect("ipv6");
+        let first = super::allocate_container_ipv6("cid-1", &gateway, 64);
+        let second = super::allocate_container_ipv6("cid-1", &gateway, 64);
+        let third = super::allocate_container_ipv6("cid-2", &gateway, 64);
+        assert_eq!(first, second);
+        assert_ne!(first, third);
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

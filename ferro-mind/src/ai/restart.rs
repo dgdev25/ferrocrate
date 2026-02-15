@@ -89,6 +89,11 @@ pub struct AdaptiveRestartPolicy {
     pattern_confidence: f32,
     /// Learned adjustment factor for backoff (multiplier)
     backoff_adjustment: f32,
+    /// Learned logistic model weights for restart success probability.
+    decision_weights: [f32; 5],
+    decision_bias: f32,
+    decision_learning_rate: f32,
+    last_decision_features: Option<[f32; 5]>,
 }
 
 impl AdaptiveRestartPolicy {
@@ -104,6 +109,10 @@ impl AdaptiveRestartPolicy {
             detected_pattern: CrashPattern::Unknown,
             pattern_confidence: 0.0,
             backoff_adjustment: 1.0,
+            decision_weights: [0.35, -0.5, -0.2, 0.4, 0.25],
+            decision_bias: 0.1,
+            decision_learning_rate: 0.08,
+            last_decision_features: None,
         }
     }
 
@@ -121,7 +130,7 @@ impl AdaptiveRestartPolicy {
     }
 
     /// Make a restart decision based on signal and learned patterns
-    pub fn decide(&self, signal: &RestartSignal) -> RestartDecision {
+    pub fn decide(&mut self, signal: &RestartSignal) -> RestartDecision {
         // Exit code 0 means clean exit - don't restart
         if signal.exit_code == 0 {
             return RestartDecision::DoNotRestart;
@@ -139,6 +148,20 @@ impl AdaptiveRestartPolicy {
 
         // Calculate exponential backoff with learned adjustment
         let backoff = self.calculate_backoff(signal.recent_failures);
+        let features = self.build_decision_features(signal);
+        let success_probability = self.predict_success_probability(features);
+        self.last_decision_features = Some(features);
+
+        // Learned model: if expected restart success is very low, avoid restart loops.
+        if signal.recent_failures >= 2 && success_probability < 0.20 {
+            return RestartDecision::DoNotRestart;
+        }
+        // If confidence is weak, back off more aggressively.
+        if signal.recent_failures > 0 && success_probability < 0.45 {
+            return RestartDecision::RestartAfterDelay {
+                delay_secs: (backoff.saturating_mul(2)).min(self.max_backoff_secs),
+            };
+        }
 
         // Time-based pattern - proactive restart suggestion (logged but not enforced)
         if let CrashPattern::TimeBased { typical_uptime_secs } = self.detected_pattern {
@@ -201,6 +224,10 @@ impl AdaptiveRestartPolicy {
             let elapsed = last.timestamp.elapsed().as_secs();
             last.outcome = Some(outcome);
             last.time_to_outcome_secs = Some(elapsed);
+
+            if let Some(features) = self.last_decision_features.take() {
+                self.update_decision_model(features, outcome);
+            }
 
             // Adjust backoff based on outcome
             match outcome {
@@ -272,9 +299,55 @@ impl AdaptiveRestartPolicy {
             return;
         }
 
+        // Check for recurring OOM-like exits (e.g., SIGKILL=137)
+        let memory_pressure = records
+            .iter()
+            .filter(|r| r.exit_code == 137 || r.exit_code == 9)
+            .count();
+        if memory_pressure as f32 / records.len() as f32 > 0.6 {
+            self.detected_pattern = CrashPattern::MemoryPressure;
+            self.pattern_confidence = memory_pressure as f32 / records.len() as f32;
+            return;
+        }
+
         // Default to random pattern
         self.detected_pattern = CrashPattern::Random;
         self.pattern_confidence = 0.3;
+    }
+
+    fn build_decision_features(&self, signal: &RestartSignal) -> [f32; 5] {
+        let failure_norm = (signal.recent_failures as f32 / self.max_retries.max(1) as f32).clamp(0.0, 1.0);
+        let uptime_norm = (signal.uptime_secs as f32 / self.observation_window_secs.max(1) as f32).clamp(0.0, 1.0);
+        let exit_severity = match signal.exit_code {
+            137 | 139 => 1.0,
+            125..=255 => 0.8,
+            1..=124 => 0.6,
+            _ => 0.2,
+        };
+        let success_rate = self.success_rate().clamp(0.0, 1.0);
+        let pattern_conf = self.pattern_confidence.clamp(0.0, 1.0);
+        [1.0 - failure_norm, uptime_norm, 1.0 - exit_severity, success_rate, pattern_conf]
+    }
+
+    fn predict_success_probability(&self, features: [f32; 5]) -> f32 {
+        let mut z = self.decision_bias;
+        for (w, x) in self.decision_weights.iter().zip(features.iter()) {
+            z += w * x;
+        }
+        1.0 / (1.0 + (-z).exp())
+    }
+
+    fn update_decision_model(&mut self, features: [f32; 5], outcome: RestartOutcome) {
+        let target = match outcome {
+            RestartOutcome::Success => 1.0,
+            RestartOutcome::Failure => 0.0,
+        };
+        let pred = self.predict_success_probability(features);
+        let error = target - pred;
+        for (w, x) in self.decision_weights.iter_mut().zip(features.iter()) {
+            *w += self.decision_learning_rate * error * x;
+        }
+        self.decision_bias += self.decision_learning_rate * error;
     }
 
     /// Get the detected crash pattern
@@ -372,8 +445,8 @@ impl RestartPolicyRegistry {
     }
 
     /// Make a restart decision
-    pub fn decide(&self, container_id: &str, signal: &RestartSignal) -> RestartDecision {
-        if let Some(policy) = self.policies.get(container_id) {
+    pub fn decide(&mut self, container_id: &str, signal: &RestartSignal) -> RestartDecision {
+        if let Some(policy) = self.policies.get_mut(container_id) {
             policy.decide(signal)
         } else {
             decide_restart(*signal)
@@ -433,7 +506,7 @@ mod tests {
 
     #[test]
     fn adaptive_policy_first_failure_restarts_immediately() {
-        let policy = AdaptiveRestartPolicy::new("test");
+        let mut policy = AdaptiveRestartPolicy::new("test");
         let signal = RestartSignal {
             exit_code: 1,
             recent_failures: 0,
@@ -444,7 +517,7 @@ mod tests {
 
     #[test]
     fn adaptive_policy_backoff_increases() {
-        let policy = AdaptiveRestartPolicy::new("test");
+        let mut policy = AdaptiveRestartPolicy::new("test");
 
         let signal1 = RestartSignal { exit_code: 1, recent_failures: 1, uptime_secs: 100 };
         let signal2 = RestartSignal { exit_code: 1, recent_failures: 2, uptime_secs: 100 };
@@ -505,7 +578,7 @@ mod tests {
 
     #[test]
     fn decision_trace_includes_context() {
-        let policy = AdaptiveRestartPolicy::new("container-123");
+        let mut policy = AdaptiveRestartPolicy::new("container-123");
         let signal = RestartSignal {
             exit_code: 137,
             recent_failures: 2,
@@ -529,6 +602,25 @@ mod tests {
         let (policies, restarts) = registry.stats();
         assert_eq!(policies, 2);
         assert_eq!(restarts, 2);
+    }
+
+    #[test]
+    fn learned_model_discourages_restarts_after_repeated_failures() {
+        let mut policy = AdaptiveRestartPolicy::new("learned");
+        let signal = RestartSignal {
+            exit_code: 137,
+            recent_failures: 3,
+            uptime_secs: 10,
+        };
+
+        for _ in 0..12 {
+            let _ = policy.decide(&signal);
+            policy.record_restart(signal.exit_code, signal.uptime_secs);
+            policy.record_outcome(RestartOutcome::Failure);
+        }
+
+        let final_decision = policy.decide(&signal);
+        assert!(matches!(final_decision, RestartDecision::DoNotRestart | RestartDecision::RestartAfterDelay { .. }));
     }
 
     #[test]

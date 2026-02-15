@@ -1341,11 +1341,20 @@ fn setup_network(
     }
 
     let bridge_config = bridge_config()?;
-    run_cmd_allow_exists(&bridge::build_ip_link_add_bridge_cmd(&bridge_config.name)?)?;
-    run_cmd_allow_exists(&bridge::build_ip_addr_add_bridge_cmd(
-        &bridge_config.name,
-        &bridge_config.cidr,
-    )?)?;
+    let bridge_exec_config = bridge::BridgeConfig {
+        name: bridge_config.name.clone(),
+        cidr: bridge_config.cidr.clone(),
+    };
+    match bridge::create_bridge(&bridge_exec_config) {
+        Ok(()) => {}
+        Err(err) => {
+            let err_text = err.to_string();
+            // Preserve previous idempotent behavior for repeated setup calls.
+            if !err_text.contains("File exists") {
+                return Err(RuntimeError::Network(err_text));
+            }
+        }
+    }
     if let Some(ipv6_cidr) = bridge_config.ipv6_cidr.as_ref() {
         run_cmd_allow_exists(&bridge::build_ip_addr_add_ipv6_bridge_cmd(
             &bridge_config.name,

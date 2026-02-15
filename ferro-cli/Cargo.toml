@@ -19,6 +19,8 @@ caps = "0.5"
 ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
 
 [dev-dependencies]
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 
 [[test]]
 name = "macos_compatibility_tests"

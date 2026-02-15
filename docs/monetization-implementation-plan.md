@@ -62,6 +62,10 @@ Implement enforceable monetization aligned to strategy:
 - CI workflows for artifact generation:
   - `.github/workflows/release-public.yml`
   - `.github/workflows/release-paid.yml`
+- CI release assertions:
+  - `scripts/verify-release-channel-artifacts.sh` enforces:
+    - public artifacts include `ferrocrate` and exclude `ferro-desktop`
+    - paid artifacts include both `ferrocrate` and `ferro-desktop`
 
 ## Remaining Work (Phase 3)
 - Paid artifact hosting and authenticated download gateway wiring (installer token flow)

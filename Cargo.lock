@@ -662,9 +662,11 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 name = "ferro-cli"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "caps",
  "clap",
  "clap_complete",
+ "ed25519-dalek",
  "ferro-compose",
  "ferro-core",
  "ferro-mind",

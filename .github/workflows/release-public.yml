@@ -40,6 +40,14 @@ jobs:
             --channel public \
             --output-dir dist/release
 
+      - name: Verify public artifact contents
+        shell: bash
+        run: |
+          scripts/verify-release-channel-artifacts.sh \
+            --channel public \
+            --version "${{ steps.version.outputs.value }}" \
+            --artifact-dir dist/release
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

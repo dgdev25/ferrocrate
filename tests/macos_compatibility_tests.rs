@@ -5,6 +5,9 @@
 
 #[cfg(target_os = "macos")]
 mod macos_tests {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer, SigningKey};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -26,6 +29,34 @@ mod macos_tests {
         let test_root = workspace_root().join("target").join("test_macos");
         let _ = fs::create_dir_all(&test_root);
         test_root
+    }
+
+    fn ferrocrate_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_ferro-cli"))
+    }
+
+    fn write_signed_entitlement(path: &Path, features: &[&str]) -> String {
+        let signing_key = SigningKey::from_bytes(&[23u8; 32]);
+        let verify_key = signing_key.verifying_key();
+        let pubkey_b64 = BASE64_STANDARD.encode(verify_key.to_bytes());
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "plan": "pro",
+            "subject": "macos-test-suite",
+            "issued_at": 1760000000u64,
+            "features": features,
+        }))
+        .expect("entitlement payload");
+        let signature = signing_key.sign(&payload);
+        let envelope = serde_json::json!({
+            "payload": BASE64_STANDARD.encode(&payload),
+            "signature": BASE64_STANDARD.encode(signature.to_bytes()),
+        });
+        fs::write(
+            path,
+            serde_json::to_string(&envelope).expect("entitlement envelope"),
+        )
+        .expect("write entitlement file");
+        pubkey_b64
     }
 
     // ============================================================================
@@ -517,6 +548,56 @@ mod macos_tests {
                 dir_name
             );
         }
+    }
+
+    #[test]
+    fn ai_orchestrate_requires_entitlement() {
+        let test_dir = get_test_dir();
+        let image_store = test_dir.join("images-entitlement-missing");
+        let _ = fs::create_dir_all(&image_store);
+        let out = Command::new(ferrocrate_bin())
+            .args(["ai", "orchestrate", "--task", "test-entitlement-gate"])
+            .env("FERROCRATE_IMAGE_STORE", &image_store)
+            .env("FERROCRATE_AI_DEGRADE", "1")
+            .output()
+            .expect("run ferrocrate ai orchestrate");
+
+        assert!(
+            !out.status.success(),
+            "ai orchestrate should fail without entitlement"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("requires paid entitlement"),
+            "expected entitlement error, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn ai_orchestrate_succeeds_with_valid_entitlement() {
+        let test_dir = get_test_dir();
+        let entitlement = test_dir.join("entitlement-ai.lic");
+        let image_store = test_dir.join("images-entitlement-valid");
+        let _ = fs::create_dir_all(&image_store);
+        let pubkey = write_signed_entitlement(&entitlement, &["ai_advanced"]);
+
+        let out = Command::new(ferrocrate_bin())
+            .args(["ai", "orchestrate", "--task", "test-entitlement-ok"])
+            .env("FERROCRATE_IMAGE_STORE", &image_store)
+            .env("FERROCRATE_ENTITLEMENT_FILE", &entitlement)
+            .env("FERROCRATE_ENTITLEMENT_PUBKEY", &pubkey)
+            .env("FERROCRATE_CLAUDE_FLOW_CMD", "/definitely/missing/claude-flow")
+            .env("FERROCRATE_AI_DEGRADE", "1")
+            .output()
+            .expect("run ferrocrate ai orchestrate with entitlement");
+
+        assert!(out.status.success(), "expected success with valid entitlement");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("degraded mode enabled")
+                || stdout.contains("claude-flow unavailable"),
+            "expected degraded orchestration output, got: {stdout}"
+        );
     }
 }
 

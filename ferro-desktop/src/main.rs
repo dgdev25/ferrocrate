@@ -103,6 +103,8 @@ enum VmCommands {
     Init {
         #[arg(long, default_value = "qemu-hvf")]
         backend: String,
+        #[arg(long, default_value = "FerroCrateDesktopVM")]
+        vm_name: String,
         #[arg(long, default_value_t = 2)]
         cpus: u8,
         #[arg(long, default_value_t = 4096)]
@@ -203,6 +205,7 @@ struct ForwardEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct VmConfig {
     backend: String,
+    vm_name: String,
     cpus: u8,
     memory_mb: u32,
     disk_path: String,
@@ -742,6 +745,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
     match command {
         VmCommands::Init {
             backend,
+            vm_name,
             cpus,
             memory_mb,
             disk_path,
@@ -780,6 +784,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             let state = VmState {
                 config: VmConfig {
                     backend,
+                    vm_name,
                     cpus,
                     memory_mb,
                     disk_path,
@@ -808,11 +813,6 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     return Ok(());
                 }
             }
-            if !cfg!(target_os = "macos") {
-                return Err(DesktopError::Invalid(
-                    "vm start is currently supported on macOS hosts only".to_string(),
-                ));
-            }
             let forward_state_path = forward_state_file
                 .map(PathBuf::from)
                 .unwrap_or_else(default_forward_state_path);
@@ -822,31 +822,60 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                 .filter(|entry| entry.enabled)
                 .collect::<Vec<_>>();
 
-            if state.config.fs_backend == "virtiofs" {
-                start_virtiofs_daemon(&state.config)?;
-            }
-
-            let mut command = build_vm_command(&state.config, &forwards)?;
-            if foreground {
-                let status = command.status()?;
-                if !status.success() {
-                    return Err(DesktopError::Invalid(format!(
-                        "vm process exited with status {status}"
-                    )));
+            match state.config.backend.as_str() {
+                "qemu-hvf" | "qemu-x86_64" => {
+                    if !cfg!(target_os = "macos") {
+                        return Err(DesktopError::Invalid(
+                            "qemu vm backend is currently supported on macOS hosts only"
+                                .to_string(),
+                        ));
+                    }
+                    if state.config.fs_backend == "virtiofs" {
+                        start_virtiofs_daemon(&state.config)?;
+                    }
+                    let mut command = build_vm_command(&state.config, &forwards)?;
+                    if foreground {
+                        let status = command.status()?;
+                        if !status.success() {
+                            return Err(DesktopError::Invalid(format!(
+                                "vm process exited with status {status}"
+                            )));
+                        }
+                        return Ok(());
+                    }
+                    let child = command.spawn()?;
+                    let pid = child.id();
+                    state.pid = Some(pid);
+                    state.status = "running".to_string();
+                    state.last_error = None;
+                    save_vm_state(&state_path, &state)?;
+                    println!("vm: started pid={pid}");
+                    Ok(())
                 }
-                return Ok(());
+                "hyperv" => {
+                    start_hyperv_vm(&state.config)?;
+                    state.pid = None;
+                    state.status = "running".to_string();
+                    state.last_error = None;
+                    save_vm_state(&state_path, &state)?;
+                    println!("vm: started backend=hyperv name={}", state.config.vm_name);
+                    Ok(())
+                }
+                other => Err(DesktopError::Invalid(format!(
+                    "unsupported vm backend: {other}"
+                ))),
             }
-            let child = command.spawn()?;
-            let pid = child.id();
-            state.pid = Some(pid);
-            state.status = "running".to_string();
-            state.last_error = None;
-            save_vm_state(&state_path, &state)?;
-            println!("vm: started pid={pid}");
-            Ok(())
         }
         VmCommands::Stop => {
             let mut state = load_vm_state(&state_path)?;
+            if state.config.backend == "hyperv" {
+                stop_hyperv_vm(&state.config)?;
+                state.pid = None;
+                state.status = "stopped".to_string();
+                save_vm_state(&state_path, &state)?;
+                println!("vm: stopped backend=hyperv name={}", state.config.vm_name);
+                return Ok(());
+            }
             let Some(pid) = state.pid else {
                 println!("vm: already stopped");
                 return Ok(());
@@ -899,7 +928,8 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     println!("vm: pid={pid}");
                 }
                 println!(
-                    "vm: backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={}",
+                    "vm: name={} backend={} cpus={} memory_mb={} api_port={} ssh_port={} disk={} host_share={} fs_backend={} virtiofs_socket={}",
+                    state.config.vm_name,
                     state.config.backend,
                     state.config.cpus,
                     state.config.memory_mb,
@@ -1157,6 +1187,63 @@ fn start_virtiofs_daemon(config: &VmConfig) -> Result<(), DesktopError> {
         Err(err) => Err(DesktopError::Invalid(format!(
             "failed to start virtiofsd: {err}"
         ))),
+    }
+}
+
+fn start_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "$name = '{name}'; if (-not (Get-VM -Name $name -ErrorAction SilentlyContinue)) {{ New-VM -Name $name -Generation 2 -MemoryStartupBytes {mem}MB -VHDPath '{vhd}' | Out-Null; Set-VMProcessor -VMName $name -Count {cpus}; }}; Start-VM -Name $name | Out-Null",
+            name = config.vm_name,
+            mem = config.memory_mb,
+            vhd = config.disk_path,
+            cpus = config.cpus
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .status()?;
+        if !status.success() {
+            return Err(DesktopError::Invalid(format!(
+                "failed to start Hyper-V vm {}",
+                config.vm_name
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = config;
+        Err(DesktopError::Invalid(
+            "hyperv backend is only supported on Windows hosts".to_string(),
+        ))
+    }
+}
+
+fn stop_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "$name = '{name}'; if (Get-VM -Name $name -ErrorAction SilentlyContinue) {{ Stop-VM -Name $name -TurnOff -Force -ErrorAction SilentlyContinue | Out-Null; }}",
+            name = config.vm_name
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .status()?;
+        if !status.success() {
+            return Err(DesktopError::Invalid(format!(
+                "failed to stop Hyper-V vm {}",
+                config.vm_name
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = config;
+        Err(DesktopError::Invalid(
+            "hyperv backend is only supported on Windows hosts".to_string(),
+        ))
     }
 }
 
@@ -1478,6 +1565,7 @@ mod tests {
         let state = VmState {
             config: VmConfig {
                 backend: "qemu-hvf".to_string(),
+                vm_name: "FerroCrateDesktopVM".to_string(),
                 cpus: 2,
                 memory_mb: 4096,
                 disk_path: "/tmp/vm.qcow2".to_string(),
@@ -1500,6 +1588,7 @@ mod tests {
     fn vm_command_builder_rejects_unknown_backend() {
         let cfg = VmConfig {
             backend: "unknown".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
             cpus: 2,
             memory_mb: 2048,
             disk_path: "/tmp/disk.qcow2".to_string(),
@@ -1517,6 +1606,7 @@ mod tests {
     fn vm_command_builder_adds_forward_entries() {
         let cfg = VmConfig {
             backend: "qemu-hvf".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
             cpus: 2,
             memory_mb: 2048,
             disk_path: "/tmp/disk.qcow2".to_string(),

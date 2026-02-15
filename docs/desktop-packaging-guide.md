@@ -69,6 +69,15 @@ Behavior:
 - Creates backup next to current image as `*.qcow2.bak` unless `--no-backup` is set.
 - Copies new image into configured VM disk path and resets state to initialized.
 
+## Hyper-V Backend (Windows Optional Path)
+Initialize VM state for Hyper-V backend:
+
+```powershell
+cargo run -p ferro-desktop -- vm init --backend hyperv --vm-name FerroCrateDesktopVM --disk-path C:\\ferrocrate\\ferro-desktop.vhdx
+```
+
+Then start/stop using the same `vm start` / `vm stop` commands.
+
 ## Remaining Packaging Work
 - Signing and notarization for macOS package distribution.
 - Signing for Windows MSI and upgrade-code/versioning policy hardening.

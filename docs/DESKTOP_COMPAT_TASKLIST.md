@@ -56,8 +56,11 @@ Evidence:
 - [x] ~~Add macOS CI integration test lane~~
 
 ## Phase 2: Windows Hyper-V Parity (Optional)
-- [ ] Add Hyper-V backend if WSL2 path is insufficient for enterprise policy constraints
-- [ ] Reuse Linux VM image + proxy protocol from macOS path
+- [x] ~~Add Hyper-V backend if WSL2 path is insufficient for enterprise policy constraints~~
+- [x] ~~Reuse Linux VM image + proxy protocol from macOS path~~
+
+Evidence:
+- `ferro-desktop/src/main.rs` (`vm init --backend hyperv`, `vm start/stop` Hyper-V path)
 
 ## Phase 3: Packaging & UX
 - [x] ~~Windows MSI installer + service wiring~~

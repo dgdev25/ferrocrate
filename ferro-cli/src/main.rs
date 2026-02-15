@@ -2680,7 +2680,7 @@ fn handle_build(
         return Ok(());
     }
 
-    let dockerfile = dockerfile.ok_or_else(|| "build: dockerfile path is required".to_string())?;
+    let dockerfile = dockerfile.unwrap_or("Dockerfile");
     let tag = tag.unwrap_or("local/build:latest");
     parse_image_reference(tag).map_err(|err| err.to_string())?;
 
@@ -5511,11 +5511,15 @@ mod tests {
     }
 
     #[test]
-    fn build_handler_requires_dockerfile_path() {
+    fn build_handler_defaults_to_dockerfile_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_build(&store, None, None, None, "gzip").expect_err("dockerfile required");
-        assert!(err.contains("dockerfile path is required"));
+        let err =
+            handle_build(&store, None, None, None, "gzip").expect_err("dockerfile should be read");
+        assert!(
+            err.contains("Dockerfile"),
+            "expected default dockerfile path in error, got: {err}"
+        );
     }
 
     #[test]

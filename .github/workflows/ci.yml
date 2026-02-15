@@ -14,3 +14,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --workspace
+      - name: Run API contract tests
+        run: |
+          cargo test -p ferro-cli --test docker_compat_integration
+          cargo test -p ferro-cli --test api_compat_matrix
+          cargo test -p ferro-cri --test socket_integration

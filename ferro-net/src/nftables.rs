@@ -88,7 +88,7 @@ mod tests {
         };
 
         assert_eq!(
-            build_nft_add_rule_cmd(&rule),
+            build_nft_add_rule_cmd(&rule).unwrap(),
             vec![
                 "nft", "add", "rule", "ip", "nat", "prerouting", "tcp", "dport", "80", "dnat",
                 "to", "10.0.0.2:80"
@@ -96,7 +96,7 @@ mod tests {
         );
 
         assert_eq!(
-            build_nft_delete_rule_cmd(&rule),
+            build_nft_delete_rule_cmd(&rule).unwrap(),
             vec![
                 "nft", "delete", "rule", "ip", "nat", "prerouting", "tcp", "dport", "80", "dnat",
                 "to", "10.0.0.2:80"

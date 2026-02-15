@@ -8,7 +8,7 @@ fn nftables_rule_builder_compat() {
         chain: "prerouting".to_string(),
         expr: vec!["tcp".to_string(), "dport".to_string(), "443".to_string(), "dnat".to_string(), "to".to_string(), "10.0.0.3:443".to_string()],
     };
-    let cmd = build_nft_add_rule_cmd(&rule);
+    let cmd = build_nft_add_rule_cmd(&rule).expect("build nftables command");
     assert_eq!(
         cmd,
         vec![

@@ -30,6 +30,7 @@ pub enum CriError {
 
 pub struct CriRuntime {
     store: Arc<LocalImageStore>,
+    runtime_dir: std::path::PathBuf,
 }
 
 impl std::fmt::Debug for CriRuntime {
@@ -40,7 +41,22 @@ impl std::fmt::Debug for CriRuntime {
 
 impl CriRuntime {
     pub fn new(store: Arc<LocalImageStore>) -> Self {
-        Self { store }
+        let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
+        Self {
+            store,
+            runtime_dir: std::path::PathBuf::from(runtime_dir),
+        }
+    }
+
+    pub fn with_runtime_dir(
+        store: Arc<LocalImageStore>,
+        runtime_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            runtime_dir: runtime_dir.into(),
+        }
     }
 }
 
@@ -60,19 +76,33 @@ impl RuntimeService for CriRuntime {
 
     async fn status(
         &self,
-        _request: Request<StatusRequest>,
+        request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
+        let req = request.into_inner();
         let condition = RuntimeCondition {
             r#type: "RuntimeReady".to_string(),
             status: true,
             reason: "Ready".to_string(),
             message: "FerroCrate CRI shim is ready".to_string(),
         };
+        let info = if req.verbose {
+            let mut map = std::collections::HashMap::new();
+            map.insert("runtimeName".to_string(), RUNTIME_NAME.to_string());
+            map.insert("runtimeVersion".to_string(), env!("CARGO_PKG_VERSION").to_string());
+            map.insert("runtimeApiVersion".to_string(), RUNTIME_API_VERSION.to_string());
+            map.insert(
+                "runtimeDir".to_string(),
+                self.runtime_dir.display().to_string(),
+            );
+            map
+        } else {
+            Default::default()
+        };
         Ok(Response::new(StatusResponse {
             status: Some(RuntimeStatus {
                 conditions: vec![condition],
             }),
-            info: Default::default(),
+            info,
         }))
     }
 }
@@ -81,12 +111,22 @@ impl RuntimeService for CriRuntime {
 impl ImageService for CriRuntime {
     async fn list_images(
         &self,
-        _request: Request<ListImagesRequest>,
+        request: Request<ListImagesRequest>,
     ) -> Result<Response<ListImagesResponse>, Status> {
+        let req = request.into_inner();
+        let filter = req.filter.trim().to_ascii_lowercase();
         let images: Result<Vec<_>, ImageStoreError> = self.store.list_references();
         let images = images.map_err(|err| Status::internal(err.to_string()))?;
         let entries = images
             .into_iter()
+            .filter(|record| {
+                if filter.is_empty() {
+                    true
+                } else {
+                    record.reference.to_ascii_lowercase().contains(&filter)
+                        || record.digest.to_ascii_lowercase().contains(&filter)
+                }
+            })
             .map(|record| {
                 // Extract tags from reference (e.g., "alpine:latest" -> ["alpine:latest"])
                 let repo_tags = if record.reference.starts_with("sha256:") {
@@ -131,6 +171,22 @@ impl ImageService for CriRuntime {
                 } else {
                     vec![record.reference.clone()]
                 };
+                let info = if req.verbose {
+                    let mut map = std::collections::HashMap::new();
+                    map.insert("reference".to_string(), record.reference.clone());
+                    map.insert("digest".to_string(), record.digest.clone());
+                    map.insert(
+                        "manifestMediaType".to_string(),
+                        record.manifest_media_type.clone(),
+                    );
+                    map.insert(
+                        "createdAtUnix".to_string(),
+                        record.created_at_unix.to_string(),
+                    );
+                    map
+                } else {
+                    Default::default()
+                };
                 Ok(Response::new(ImageStatusResponse {
                     image: Some(Image {
                         id: record.digest.clone(),
@@ -140,7 +196,7 @@ impl ImageService for CriRuntime {
                         uid: String::new(),
                         username: String::new(),
                     }),
-                    info: Default::default(),
+                    info,
                 }))
             }
             None => Err(Status::not_found(format!(
@@ -152,24 +208,83 @@ impl ImageService for CriRuntime {
 
     async fn pull_image(
         &self,
-        _request: Request<PullImageRequest>,
+        request: Request<PullImageRequest>,
     ) -> Result<Response<PullImageResponse>, Status> {
-        // Image pulling requires integration with ferro-core runtime
-        // This is a placeholder that returns an error indicating the limitation
-        Err(Status::unimplemented(
-            "PullImage is not yet implemented. Use 'ferrocrate pull' CLI command instead."
-        ))
+        let req = request.into_inner();
+        let image = req
+            .image
+            .ok_or_else(|| Status::invalid_argument("image spec is required"))?
+            .image;
+        if image.trim().is_empty() {
+            return Err(Status::invalid_argument("image spec is required"));
+        }
+
+        let pulled = ferro_core::image_fetch::pull_image_with_store(
+            &self.runtime_dir,
+            &image,
+            &self.store,
+        )
+        .map_err(map_image_fetch_error)?;
+
+        Ok(Response::new(PullImageResponse {
+            image_ref: pulled.reference,
+        }))
     }
 
     async fn remove_image(
         &self,
-        _request: Request<RemoveImageRequest>,
+        request: Request<RemoveImageRequest>,
     ) -> Result<Response<RemoveImageResponse>, Status> {
-        // Image removal requires integration with ferro-core runtime
-        // This is a placeholder that returns an error indicating the limitation
-        Err(Status::unimplemented(
-            "RemoveImage is not yet implemented. Use 'ferrocrate rmi' CLI command instead."
-        ))
+        let req = request.into_inner();
+        let image = req
+            .image
+            .ok_or_else(|| Status::invalid_argument("image spec is required"))?
+            .image;
+        let image = image.trim();
+        if image.is_empty() {
+            return Err(Status::invalid_argument("image spec is required"));
+        }
+
+        let canonical = ferro_core::image_tagging::canonicalize_reference(image).ok();
+        let mut removed = self
+            .store
+            .remove_reference(image)
+            .map_err(|err| Status::internal(err.to_string()))?;
+        if !removed {
+            if let Some(canonical) = canonical.as_ref() {
+                if canonical != image {
+                    removed = self
+                        .store
+                        .remove_reference(canonical)
+                        .map_err(|err| Status::internal(err.to_string()))?;
+                }
+            }
+        }
+        if !removed && image.starts_with("sha256:") {
+            let refs = self
+                .store
+                .list_references()
+                .map_err(|err| Status::internal(err.to_string()))?;
+            for record in refs.into_iter().filter(|entry| entry.digest == image) {
+                let _ = self.store.remove_reference(&record.reference);
+                removed = true;
+            }
+        }
+
+        if !removed {
+            return Err(Status::not_found(format!("image {} not found", image)));
+        }
+
+        Ok(Response::new(RemoveImageResponse {}))
+    }
+}
+
+fn map_image_fetch_error(err: ferro_core::image_fetch::ImageFetchError) -> Status {
+    let msg = err.to_string();
+    if msg.contains("invalid image reference") {
+        Status::invalid_argument(msg)
+    } else {
+        Status::internal(msg)
     }
 }
 
@@ -203,11 +318,7 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 mod tests {
     use super::*;
     use crate::runtime::{ImageSpec, ListImagesRequest, ImageStatusRequest, PullImageRequest, RemoveImageRequest};
-    use std::sync::Mutex;
     use tonic::Request;
-
-    // Mutex to prevent environment variable pollution between tests
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // Helper to create a test runtime with a temporary image store
     async fn create_test_runtime() -> CriRuntime {
@@ -297,8 +408,11 @@ mod tests {
 
         let inner = response.into_inner();
         assert!(inner.status.is_some());
-        // Verbose flag should still return the same status
         assert_eq!(inner.status.unwrap().conditions.len(), 1);
+        assert_eq!(inner.info.get("runtimeName"), Some(&"ferrocrate".to_string()));
+        assert!(inner.info.contains_key("runtimeVersion"));
+        assert_eq!(inner.info.get("runtimeApiVersion"), Some(&"v1".to_string()));
+        assert!(inner.info.contains_key("runtimeDir"));
     }
 
     #[tokio::test]
@@ -355,7 +469,6 @@ mod tests {
 
         let runtime = CriRuntime::new(Arc::new(store));
 
-        // Filter parameter is currently ignored - just verify it doesn't error
         let request = Request::new(ListImagesRequest {
             filter: "alpine".to_string(),
         });
@@ -364,8 +477,8 @@ mod tests {
             .expect("list_images with filter should succeed");
 
         let inner = response.into_inner();
-        // Current implementation doesn't actually filter
-        assert!(!inner.images.is_empty());
+        assert_eq!(inner.images.len(), 1);
+        assert_eq!(inner.images[0].repo_tags, vec!["alpine:latest"]);
     }
 
     #[tokio::test]
@@ -483,12 +596,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_image_returns_unimplemented_error() {
+    async fn pull_image_requires_image_spec() {
         let runtime = create_test_runtime().await;
         let request = Request::new(PullImageRequest {
-            image: Some(ImageSpec {
-                image: "alpine:latest".to_string(),
-            }),
+            image: None,
             auth: Default::default(),
             sandbox_config: String::new(),
         });
@@ -497,13 +608,40 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
-        assert!(err.message().contains("PullImage is not yet implemented"));
-        assert!(err.message().contains("ferrocrate pull"));
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("image spec is required"));
     }
 
     #[tokio::test]
-    async fn remove_image_returns_unimplemented_error() {
+    async fn remove_image_removes_existing_reference() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path())
+            .expect("open test store");
+        populate_test_store(&store).await;
+        let runtime = CriRuntime::new(Arc::new(store));
+
+        let request = Request::new(RemoveImageRequest {
+            image: Some(ImageSpec {
+                image: "alpine:latest".to_string(),
+            }),
+        });
+
+        runtime.remove_image(request).await.expect("remove_image should succeed");
+
+        let status = runtime
+            .image_status(Request::new(ImageStatusRequest {
+                image: Some(ImageSpec {
+                    image: "alpine:latest".to_string(),
+                }),
+                verbose: false,
+            }))
+            .await;
+        assert!(status.is_err());
+        assert_eq!(status.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn remove_image_returns_not_found_when_missing() {
         let runtime = create_test_runtime().await;
         let request = Request::new(RemoveImageRequest {
             image: Some(ImageSpec {
@@ -513,11 +651,7 @@ mod tests {
 
         let result = runtime.remove_image(request).await;
         assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
-        assert!(err.message().contains("RemoveImage is not yet implemented"));
-        assert!(err.message().contains("ferrocrate rmi"));
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]
@@ -594,8 +728,10 @@ mod tests {
 
         let inner = response.into_inner();
         assert!(inner.image.is_some());
-        // Verbose flag is currently ignored but should not error
-        assert!(inner.info.is_empty()); // No info populated yet
+        assert_eq!(inner.info.get("reference"), Some(&"alpine:latest".to_string()));
+        assert!(inner.info.contains_key("digest"));
+        assert!(inner.info.contains_key("manifestMediaType"));
+        assert!(inner.info.contains_key("createdAtUnix"));
     }
 
     #[tokio::test]

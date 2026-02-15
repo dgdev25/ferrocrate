@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **32**
-- Partial tasks: **19**
+- Total remaining tasks: **31**
+- Partial tasks: **18**
 - Rework-needed tasks: **13**
 
 ---
@@ -63,7 +63,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## E) Performance + Reliability (13)
 
-- [ ] PERF-01 - Convert startup-time measurement to enforced startup SLO and optimization closure
+- [x] ~~PERF-01 - Convert startup-time measurement to enforced startup SLO and optimization closure~~
 - [ ] PERF-02 - Convert pull-throughput measurement to enforced SLO and optimization closure
 - [ ] PERF-03 - Convert idle-memory (no daemon) measurement to enforced SLO and optimization closure
 - [ ] PERF-04 - Convert idle-memory (daemon) measurement to enforced SLO and optimization closure

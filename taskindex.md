@@ -29,11 +29,11 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~NET-07 - Implement WireGuard overlay networking runtime path~~
 - [x] ~~NET-08 - Consolidate and harden real port-mapping execution paths~~
 - [x] ~~NET-09 - Complete and verify IPv6 allocation/wiring behavior~~
-- [ ] NET-10 - Implement enforceable bandwidth limiting path (IN PROGRESS)
+- [x] ~~NET-10 - Implement enforceable bandwidth limiting path~~
 
 ## B) Security Hardening (4)
 
-- [ ] SEC-02 - Enforce seccomp profiles at runtime (not parse-only)
+- [ ] SEC-02 - Enforce seccomp profiles at runtime (not parse-only) (IN PROGRESS)
 - [ ] SEC-08 - Implement runtime eBPF security monitoring execution path
 - [ ] SEC-09 - Complete encrypted container communication behavior
 - [ ] SEC-03 - Rework AppArmor/SELinux integration to production-ready policy enforcement

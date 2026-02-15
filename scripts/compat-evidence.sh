@@ -25,6 +25,11 @@ echo "[compat] collecting compatibility evidence..."
 os_name="$(uname -s)"
 docker_api_skip_reason=""
 dockerfile_build_skip_reason=""
+docker_api_total="unknown"
+docker_api_implemented="unknown"
+docker_api_partial="unknown"
+docker_api_unsupported="unknown"
+dockerfile_parity_tests="unknown"
 
 if [[ "$os_name" == "Linux" ]]; then
   docker_api_matrix_status="$(run_check docker_api_matrix cargo test -p ferro-cli --test api_compat_matrix -- --nocapture)"
@@ -41,6 +46,17 @@ if [[ "$os_name" == "Linux" ]]; then
 else
   dockerfile_build_status="skipped"
   dockerfile_build_skip_reason="linux_only_dockerfile_parity_integration"
+fi
+
+if [[ -f "ferro-cli/tests/api_compat_matrix.rs" ]]; then
+  docker_api_total="$(rg -n "coverage: Coverage::" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
+  docker_api_implemented="$(rg -n "Coverage::Implemented" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
+  docker_api_partial="$(rg -n "Coverage::Partial" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
+  docker_api_unsupported="$(rg -n "Coverage::Unsupported" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
+fi
+
+if [[ -f "ferro-cli/tests/dockerfile_parity_integration.rs" ]]; then
+  dockerfile_parity_tests="$(rg -n "^#\\[test\\]" ferro-cli/tests/dockerfile_parity_integration.rs | wc -l | tr -d ' ')"
 fi
 ai_latency_status="$(run_check ai_latency cargo run -p ferro-mind --example ai_latency)"
 ai_quality_status="$(run_check ai_quality cargo run -p ferro-mind --example ai_quality)"
@@ -98,6 +114,10 @@ cat >"$REPORT_JSON" <<JSON
     "ai_quality_example": "${ai_quality_status}"
   },
   "metrics": {
+    "docker_api_cases_total": "${docker_api_total}",
+    "docker_api_cases_implemented": "${docker_api_implemented}",
+    "docker_api_cases_partial": "${docker_api_partial}",
+    "docker_api_cases_unsupported": "${docker_api_unsupported}",
     "ai_inference_ns": "${ai_latency_ns}",
     "ai_latency_max_ns": "${ai_latency_threshold_ns}",
     "ai_latency_threshold_status": "${ai_latency_threshold_status}",
@@ -107,6 +127,9 @@ cat >"$REPORT_JSON" <<JSON
     "ai_oom_detection_rate": "${ai_oom_detection_rate}",
     "ai_oom_detection_min": "${ai_oom_detection_min}",
     "ai_oom_detection_status": "${ai_oom_detection_status}"
+  },
+  "coverage": {
+    "dockerfile_parity_tests": "${dockerfile_parity_tests}"
   },
   "skip_reasons": {
     "docker_api": "${docker_api_skip_reason}",
@@ -123,10 +146,12 @@ cat >"$REPORT_MD" <<MD
 - Docker API matrix: ${docker_api_matrix_status}
 - Docker API integration: ${docker_api_integration_status}
 - Docker API skip reason: ${docker_api_skip_reason}
+- Docker API coverage cases: total=${docker_api_total} implemented=${docker_api_implemented} partial=${docker_api_partial} unsupported=${docker_api_unsupported}
 - Seccomp/security tests: ${seccomp_security_status}
 - OCI smoke: ${oci_smoke_status}
 - Dockerfile build smoke: ${dockerfile_build_status}
 - Dockerfile build skip reason: ${dockerfile_build_skip_reason}
+- Dockerfile parity tests: ${dockerfile_parity_tests}
 - AI latency example: ${ai_latency_status}
 - AI inference latency (ns): ${ai_latency_ns}
 - AI latency threshold (ns): ${ai_latency_threshold_ns}

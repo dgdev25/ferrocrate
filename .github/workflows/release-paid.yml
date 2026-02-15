@@ -27,6 +27,14 @@ jobs:
             --channel paid \
             --output-dir dist/release
 
+      - name: Verify paid artifact contents
+        shell: bash
+        run: |
+          scripts/verify-release-channel-artifacts.sh \
+            --channel paid \
+            --version "${{ inputs.version }}" \
+            --artifact-dir dist/release
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

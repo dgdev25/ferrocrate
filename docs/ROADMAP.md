@@ -196,17 +196,17 @@
 ### 4.3 Reliability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
-| REL-01 | ~~Runtime crash does not kill containers~~ | Done | Yes | `scripts/supervise.sh` monitors orphaned containers; daemonization still needed. Rework Needed. |
+| REL-01 | ~~Runtime crash does not kill containers~~ | Done | No | Runtime startup now reconciles stale `running`/`paused` records against live PIDs and marks dead processes exited, preventing stale survivability state after crashes/restarts. |
 | REL-02 | ~~Graceful degradation without AI~~ | Done | Yes | AI audit logger respects `FERROCRATE_AI=0` and disables AI logging. Rework Needed. |
 | REL-03 | ~~Data integrity for image store~~ | Done | No | Verify sha256 digests on every config/layer read from cache. |
-| REL-04 | ~~Atomic operations~~ | Done | Yes | Blob pulls now write to temp and rename for atomicity. Rework Needed. |
-| REL-05 | ~~Test coverage~~ | Done | Yes | `scripts/coverage.sh` enforces coverage via cargo-tarpaulin. Rework Needed. |
+| REL-04 | ~~Atomic operations~~ | Done | No | Atomic temp-write+rename path now covers blob pulls plus CLI config/network persistence and registry auth file writes. |
+| REL-05 | ~~Test coverage~~ | Done | No | Coverage gate now uses configurable production thresholds in `scripts/coverage.sh` and is enforced in CI workflow. |
 
 ### 4.4 Observability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |
 |---|---|---|---|---|
 | OBS-01 | ~~Prometheus metrics endpoint~~ | Done | No | `ferrocrate daemon --metrics-addr` serves Prometheus metrics at `/metrics`. |
-| OBS-02 | ~~OpenTelemetry trace export~~ | Done | Yes | Optional HTTP export via `FERROCRATE_OTEL_ENDPOINT` from observability logs. Rework Needed. |
+| OBS-02 | ~~OpenTelemetry trace export~~ | Done | No | Trace export now emits resource + trace envelope with trace/span IDs, retries, timeout controls, and custom OTEL headers from env. |
 | OBS-03 | ~~Structured JSON logging~~ | Done | No | JSONL event log emitted under runtime logs. |
 | OBS-04 | ~~Resource usage stats~~ | Done | No | CLI stats reads cgroup v2 memory/cpu/pids counters. |
-| OBS-05 | ~~AI decision audit log~~ | Done | Yes | `ferrocrate ai-audit` writes DecisionTrace to audit log when enabled. Rework Needed. |
+| OBS-05 | ~~AI decision audit log~~ | Done | No | AI audit entries now include schema version, actor/component/process metadata, evidence index/count, confidence extraction, and manual trace IDs from CLI. |

@@ -523,7 +523,7 @@ pub enum ConfigCommands {
 
 fn main() {
     let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
-    match maybe_windows_desktop_forward(&raw_args) {
+    match maybe_host_desktop_forward(&raw_args) {
         Ok(true) => return,
         Ok(false) => {}
         Err(err) => {
@@ -533,20 +533,68 @@ fn main() {
     }
     let cli = Cli::parse();
     if let Err(err) = dispatch(cli.command) {
-        eprintln!("error: {err}");
+        eprintln!("error: {}", normalize_cli_error(err));
         process::exit(1);
     }
 }
 
-#[cfg(any(test, windows))]
+#[cfg(any(test, not(target_os = "linux")))]
 fn desktop_forward_enabled() -> bool {
-    std::env::var("FERROCRATE_DESKTOP_FORWARD")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    if let Ok(value) = std::env::var("FERROCRATE_DESKTOP_FORWARD") {
+        return value == "1" || value.eq_ignore_ascii_case("true");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+fn is_runtime_command_name(command: &str) -> bool {
+    matches!(
+        command,
+        "run"
+            | "build"
+            | "containers"
+            | "ps"
+            | "logs"
+            | "inspect"
+            | "stats"
+            | "pause"
+            | "unpause"
+            | "stop"
+            | "kill"
+            | "rm"
+            | "restart"
+            | "exec"
+            | "scan"
+            | "compose"
+            | "daemon"
+            | "tui"
+            | "volume"
+            | "network"
+            | "migrate"
+    )
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+fn top_level_command_name(raw_args: &[String]) -> Option<&str> {
+    raw_args
+        .iter()
+        .find(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+fn should_desktop_forward(raw_args: &[String]) -> bool {
+    top_level_command_name(raw_args)
+        .map(is_runtime_command_name)
         .unwrap_or(false)
 }
 
 #[cfg(windows)]
-fn maybe_windows_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
+fn maybe_host_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
     if !desktop_forward_enabled() {
         return Ok(false);
     }
@@ -557,42 +605,187 @@ fn maybe_windows_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
     if raw_args[0] == "desktop" {
         return Ok(false);
     }
+    forward_to_desktop(raw_args, true)
+}
 
+#[cfg(target_os = "macos")]
+fn maybe_host_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
+    if !desktop_forward_enabled() || !should_desktop_forward(raw_args) {
+        return Ok(false);
+    }
+    if raw_args.is_empty() {
+        return Ok(false);
+    }
+    ensure_macos_vm_running()?;
+    forward_to_desktop(raw_args, false)
+}
+
+#[cfg(all(
+    not(test),
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
+))]
+fn maybe_host_desktop_forward(_raw_args: &[String]) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn maybe_host_desktop_forward(_raw_args: &[String]) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+fn desktop_error_json_enabled() -> bool {
+    std::env::var("FERROCRATE_ERROR_FORMAT")
+        .map(|value| value.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+        || std::env::var("FERROCRATE_ERROR_JSON")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+fn structured_desktop_error(
+    category: &str,
+    message: &str,
+    hint: &str,
+    retryable: bool,
+) -> String {
+    if desktop_error_json_enabled() {
+        return serde_json::json!({
+            "category": category,
+            "message": message,
+            "hint": hint,
+            "retryable": retryable
+        })
+        .to_string();
+    }
+    format!("{message} [category={category} retryable={retryable}] hint: {hint}")
+}
+
+#[cfg(any(test, not(target_os = "linux")))]
+#[cfg_attr(test, allow(dead_code))]
+fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool, String> {
     let addr = std::env::var("FERROCRATE_DESKTOP_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:4288".to_string());
     let wsl_distro = std::env::var("FERROCRATE_DESKTOP_WSL_DISTRO").ok();
     let use_wsl = std::env::var("FERROCRATE_DESKTOP_USE_WSL")
         .map(|value| !(value == "0" || value.eq_ignore_ascii_case("false")))
-        .unwrap_or(true);
+        .unwrap_or(use_wsl_default);
 
     let mut command = std::process::Command::new("ferro-desktop");
     command.arg("exec").arg("--addr").arg(addr);
-    if use_wsl {
-        command.arg("--wsl");
-    }
-    if let Some(distro) = wsl_distro {
-        if !distro.trim().is_empty() {
-            command.arg("--wsl-distro").arg(distro);
+    #[cfg(windows)]
+    {
+        if use_wsl {
+            command.arg("--wsl");
         }
+        if let Some(distro) = wsl_distro {
+            if !distro.trim().is_empty() {
+                command.arg("--wsl-distro").arg(distro);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = use_wsl;
+        let _ = wsl_distro;
     }
     command.arg("--").arg("ferrocrate");
     for arg in raw_args {
         command.arg(arg);
     }
 
-    let status = command
-        .status()
-        .map_err(|err| format!("desktop forward: failed to launch ferro-desktop: {err}"))?;
+    let status = command.status().map_err(|err| {
+        structured_desktop_error(
+            "desktop_bridge_unavailable",
+            &format!("desktop forward failed to launch ferro-desktop: {err}"),
+            "ensure `ferro-desktop` is installed and on PATH",
+            true,
+        )
+    })?;
     let code = status.code().unwrap_or(1);
     if code != 0 {
-        return Err(format!("desktop forward: remote exit status {code}"));
+        return Err(structured_desktop_error(
+            "desktop_command_failed",
+            &format!("desktop forward command exited with status {code}"),
+            "run `ferro-desktop vm status --json` and retry",
+            true,
+        ));
     }
     Ok(true)
 }
 
-#[cfg(not(windows))]
-fn maybe_windows_desktop_forward(_raw_args: &[String]) -> Result<bool, String> {
-    Ok(false)
+#[cfg(target_os = "macos")]
+fn vm_status_is_running(output: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+        return value
+            .get("status")
+            .and_then(|status| status.as_str())
+            .map(|status| status == "running")
+            .unwrap_or(false);
+    }
+    output.contains("vm: status=running")
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_vm_running() -> Result<(), String> {
+    let status_output = std::process::Command::new("ferro-desktop")
+        .args(["vm", "status", "--json"])
+        .output()
+        .map_err(|err| {
+            structured_desktop_error(
+                "vm_status_check_failed",
+                &format!("failed to query desktop VM status: {err}"),
+                "initialize the VM with `ferro-desktop vm init`",
+                false,
+            )
+        })?;
+    if !status_output.status.success() {
+        return Err(structured_desktop_error(
+            "vm_status_check_failed",
+            "desktop VM status check failed",
+            "initialize the VM with `ferro-desktop vm init`, then retry",
+            false,
+        ));
+    }
+    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+    if vm_status_is_running(&status_stdout) {
+        return Ok(());
+    }
+
+    let start_status = std::process::Command::new("ferro-desktop")
+        .args(["vm", "start"])
+        .status()
+        .map_err(|err| {
+            structured_desktop_error(
+                "vm_start_failed",
+                &format!("failed to start desktop VM: {err}"),
+                "run `ferro-desktop vm start` manually to inspect startup errors",
+                true,
+            )
+        })?;
+    if !start_status.success() {
+        return Err(structured_desktop_error(
+            "vm_start_failed",
+            "desktop VM start command failed",
+            "run `ferro-desktop vm status --json` and check VM backend configuration",
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_cli_error(err: String) -> String {
+    #[cfg(not(target_os = "linux"))]
+    if err.contains("not supported on this platform") {
+        return structured_desktop_error(
+            "unsupported_on_host",
+            "command is not available on host kernel for this platform",
+            "for runtime operations, use desktop VM mode (`ferro-desktop vm start`) and retry",
+            false,
+        );
+    }
+    err
 }
 
 fn dispatch(command: Commands) -> Result<(), String> {
@@ -4060,6 +4253,7 @@ mod tests {
         handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, read_http_request, desktop_forward_enabled,
+        should_desktop_forward, structured_desktop_error, top_level_command_name,
         validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         NetworkCommands, VolumeCommands,
@@ -4899,6 +5093,47 @@ mod tests {
         assert!(desktop_forward_enabled());
         unsafe {
             std::env::remove_var("FERROCRATE_DESKTOP_FORWARD");
+        }
+    }
+
+    #[test]
+    fn desktop_forward_detects_runtime_commands() {
+        assert!(should_desktop_forward(&["run".to_string(), "alpine:latest".to_string()]));
+        assert!(should_desktop_forward(&["compose".to_string(), "up".to_string()]));
+        assert!(!should_desktop_forward(&["images".to_string()]));
+        assert!(!should_desktop_forward(&["ai".to_string(), "stats".to_string()]));
+    }
+
+    #[test]
+    fn top_level_command_skips_flags() {
+        let args = [
+            "--verbose".to_string(),
+            "--debug".to_string(),
+            "run".to_string(),
+            "alpine".to_string(),
+        ];
+        let command = top_level_command_name(&args);
+        assert_eq!(command, Some("run"));
+    }
+
+    #[test]
+    fn structured_desktop_error_supports_text_and_json() {
+        unsafe {
+            std::env::remove_var("FERROCRATE_ERROR_FORMAT");
+            std::env::remove_var("FERROCRATE_ERROR_JSON");
+        }
+        let text = structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
+        assert!(text.contains("category=desktop_bridge_unavailable"));
+        assert!(text.contains("hint: retry"));
+
+        unsafe {
+            std::env::set_var("FERROCRATE_ERROR_FORMAT", "json");
+        }
+        let json = structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
+        assert!(json.contains("\"category\":\"desktop_bridge_unavailable\""));
+        assert!(json.contains("\"retryable\":true"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_ERROR_FORMAT");
         }
     }
 

@@ -1,9 +1,12 @@
 pub mod cgroups;
+#[cfg(target_os = "linux")]
 pub mod container_exec;
 pub mod container_store;
 pub mod docker_auth;
-pub mod dockerfile_build;
+#[cfg(target_os = "linux")]
 pub mod ferrofile_build;
+#[cfg(target_os = "linux")]
+pub mod dockerfile_build;
 pub mod fs_atomic;
 pub mod volume_store;
 pub mod image_manifest;
@@ -13,11 +16,16 @@ pub mod image_security;
 pub mod image_store;
 pub mod image_tagging;
 pub mod layer_compression;
+#[cfg(target_os = "linux")]
 pub mod layer_mount;
+#[cfg(target_os = "linux")]
 pub mod mount_cleanup;
+#[cfg(target_os = "linux")]
 pub mod mounts;
 pub mod observability;
+#[cfg(target_os = "linux")]
 pub mod overlayfs;
+#[cfg(target_os = "linux")]
 pub mod process_lifecycle;
 pub mod registry;
 pub mod runtime_config;
@@ -35,4 +43,5 @@ pub mod rootfs_prep;
 pub mod rootfs;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
+#[cfg(target_os = "linux")]
 pub mod runtime;

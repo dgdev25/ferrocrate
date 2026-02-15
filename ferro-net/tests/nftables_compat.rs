@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_net::nftables::{NftRule, build_nft_add_rule_cmd};
 
 #[test]

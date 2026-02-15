@@ -40,15 +40,25 @@ use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
+#[cfg(target_os = "linux")]
+use std::net::TcpListener;
 #[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
+#[cfg(all(unix, target_os = "linux"))]
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicU64;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -559,14 +569,18 @@ fn main() {
     }
 }
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(all(any(test, not(target_os = "linux")), target_os = "macos"))]
 fn desktop_forward_enabled() -> bool {
     if let Ok(value) = std::env::var("FERROCRATE_DESKTOP_FORWARD") {
         return value == "1" || value.eq_ignore_ascii_case("true");
     }
-    #[cfg(target_os = "macos")]
-    {
-        return true;
+    true
+}
+
+#[cfg(all(any(test, not(target_os = "linux")), not(target_os = "macos")))]
+fn desktop_forward_enabled() -> bool {
+    if let Ok(value) = std::env::var("FERROCRATE_DESKTOP_FORWARD") {
+        return value == "1" || value.eq_ignore_ascii_case("true");
     }
     false
 }

@@ -7,6 +7,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+use ruv_fann::{Network, NetworkBuilder};
+use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
 #[cfg(feature = "rvf-persistence")]
 use std::path::Path;
 
@@ -67,6 +69,12 @@ pub struct ResourcePredictor {
     /// Optional persistent similarity memory for cross-session learning
     #[cfg(feature = "rvf-persistence")]
     memory: Option<VectorMemory>,
+    /// Feed-forward network trained on sequential resource samples.
+    neural_network: Option<Network<f32>>,
+    neural_trained: bool,
+    neural_last_train_len: usize,
+    neural_memory_scale: f32,
+    neural_pids_scale: f32,
 }
 
 impl Default for ResourcePredictor {
@@ -88,6 +96,11 @@ impl ResourcePredictor {
             min_samples: 3,
             #[cfg(feature = "rvf-persistence")]
             memory: None,
+            neural_network: None,
+            neural_trained: false,
+            neural_last_train_len: 0,
+            neural_memory_scale: 1.0,
+            neural_pids_scale: 1.0,
         }
     }
 
@@ -112,6 +125,7 @@ impl ResourcePredictor {
         if self.window.len() > self.max_len {
             self.window.pop_front();
         }
+        self.maybe_train_neural_model();
 
         #[cfg(feature = "rvf-persistence")]
         if let Some(memory) = self.memory.as_mut() {
@@ -139,7 +153,7 @@ impl ResourcePredictor {
     }
 
     /// Predict average resource usage.
-    pub fn predict(&self) -> Option<ResourcePrediction> {
+    pub fn predict(&mut self) -> Option<ResourcePrediction> {
         if self.window.len() < self.min_samples {
             return None;
         }
@@ -198,6 +212,16 @@ impl ResourcePredictor {
                     }
                     prediction.memory_bytes = (mem_sum / count) as u64;
                     prediction.cpu_percent = (cpu_sum / count) as f32;
+                }
+            }
+        }
+
+        if self.neural_trained {
+            if let Some(latest) = self.window.back().copied() {
+                if let Some(neural) = self.predict_with_neural(latest) {
+                    prediction.cpu_percent = (prediction.cpu_percent * 0.35) + (neural.0 * 0.65);
+                    prediction.memory_bytes =
+                        ((prediction.memory_bytes as f64 * 0.35) + (neural.1 as f64 * 0.65)) as u64;
                 }
             }
         }
@@ -357,6 +381,94 @@ impl ResourcePredictor {
             sample.pids_count as f32,
         ]
     }
+
+    fn maybe_train_neural_model(&mut self) {
+        const MIN_SEQUENTIAL_SAMPLES: usize = 16;
+        const RETRAIN_INTERVAL: usize = 8;
+        const TRAIN_EPOCHS: usize = 30;
+
+        if self.window.len() < MIN_SEQUENTIAL_SAMPLES {
+            return;
+        }
+        if self.window.len().saturating_sub(self.neural_last_train_len) < RETRAIN_INTERVAL {
+            return;
+        }
+
+        let memory_scale = self
+            .window
+            .iter()
+            .map(|s| s.memory_bytes)
+            .max()
+            .unwrap_or(1) as f32;
+        let pids_scale = self.window.iter().map(|s| s.pids_count).max().unwrap_or(1) as f32;
+        if memory_scale <= 0.0 || pids_scale <= 0.0 {
+            return;
+        }
+
+        let samples = self.window.iter().copied().collect::<Vec<_>>();
+        let mut inputs = Vec::with_capacity(samples.len().saturating_sub(1));
+        let mut outputs = Vec::with_capacity(samples.len().saturating_sub(1));
+        for pair in samples.windows(2) {
+            let current = pair[0];
+            let next = pair[1];
+            inputs.push(vec![
+                (current.cpu_percent / 100.0).clamp(0.0, 1.0),
+                (current.memory_bytes as f32 / memory_scale).clamp(0.0, 1.0),
+                (current.pids_count as f32 / pids_scale).clamp(0.0, 1.0),
+            ]);
+            outputs.push(vec![
+                (next.cpu_percent / 100.0).clamp(0.0, 1.0),
+                (next.memory_bytes as f32 / memory_scale).clamp(0.0, 1.0),
+                (next.pids_count as f32 / pids_scale).clamp(0.0, 1.0),
+            ]);
+        }
+
+        if inputs.len() < 8 {
+            return;
+        }
+
+        let mut network = NetworkBuilder::new()
+            .input_layer(3)
+            .hidden_layer(8)
+            .output_layer(3)
+            .build();
+        let training_data = TrainingData { inputs, outputs };
+        let mut trainer = IncrementalBackprop::new(0.01);
+        for _ in 0..TRAIN_EPOCHS {
+            if trainer.train_epoch(&mut network, &training_data).is_err() {
+                return;
+            }
+        }
+
+        self.neural_network = Some(network);
+        self.neural_trained = true;
+        self.neural_last_train_len = self.window.len();
+        self.neural_memory_scale = memory_scale.max(1.0);
+        self.neural_pids_scale = pids_scale.max(1.0);
+    }
+
+    fn predict_with_neural(&mut self, latest: ResourceSample) -> Option<(f32, u64)> {
+        let network = self.neural_network.as_mut()?;
+        let output = network
+            .run(&[
+                (latest.cpu_percent / 100.0).clamp(0.0, 1.0),
+                (latest.memory_bytes as f32 / self.neural_memory_scale).clamp(0.0, 1.0),
+                (latest.pids_count as f32 / self.neural_pids_scale).clamp(0.0, 1.0),
+            ])
+            .ok()?;
+        if output.len() < 2 {
+            return None;
+        }
+        let cpu = (output[0].clamp(0.0, 1.0) * 100.0).clamp(0.0, 100.0);
+        let memory = (output[1].clamp(0.0, 1.0) * self.neural_memory_scale)
+            .round()
+            .max(0.0) as u64;
+        Some((cpu, memory))
+    }
+
+    pub fn has_neural_model(&self) -> bool {
+        self.neural_trained && self.neural_network.is_some()
+    }
 }
 
 /// Cgroup v2 metrics read from /sys/fs/cgroup/<cgroup>/.
@@ -441,7 +553,7 @@ mod tests {
 
     #[test]
     fn predictor_starts_empty() {
-        let p = ResourcePredictor::new(10);
+        let mut p = ResourcePredictor::new(10);
         assert_eq!(p.sample_count(), 0);
         assert!(p.predict().is_none());
     }
@@ -468,6 +580,24 @@ mod tests {
         let pred = p.predict().expect("should have prediction");
         // Average of 20,21,22,23,24 = 22
         assert!((pred.cpu_percent - 22.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn predictor_trains_neural_model_for_stable_sequences() {
+        let base = Instant::now();
+        let mut p = ResourcePredictor::new(64);
+        for i in 0..24 {
+            p.push(ResourceSample {
+                cpu_percent: 20.0 + (i as f32 * 0.2),
+                memory_bytes: 100_000 + i as u64 * 2_000,
+                pids_count: 4 + (i as u64 % 2),
+                timestamp: base + Duration::from_secs(i as u64),
+            });
+        }
+        assert!(p.has_neural_model());
+        let pred = p.predict().expect("predict");
+        assert!(pred.memory_bytes > 0);
+        assert!(pred.cpu_percent > 0.0);
     }
 
     #[test]

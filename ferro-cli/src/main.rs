@@ -732,8 +732,35 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                     context: context.clone(),
                 },
                 Some(Duration::from_secs(timeout_secs)),
-            )
-            .map_err(|err| format!("ai orchestrate: {err}"))?;
+            );
+            let degrade = std::env::var("FERROCRATE_AI_DEGRADE")
+                .map(|value| !(value == "0" || value.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
+            let response = match response {
+                Ok(response) => response,
+                Err(err) if degrade => {
+                    if format == "json" {
+                        let payload = serde_json::json!({
+                            "task": task,
+                            "context": context,
+                            "degraded": true,
+                            "error": err.to_string(),
+                            "fallback": "local-ai-only",
+                            "message": "claude-flow unavailable, continuing without external orchestration",
+                        });
+                        let text = serde_json::to_string_pretty(&payload)
+                            .map_err(|json_err| format!("ai orchestrate: {json_err}"))?;
+                        println!("{text}");
+                    } else {
+                        println!("ai orchestrate: degraded mode enabled");
+                        println!("  reason: {}", err);
+                        println!("  fallback: local-ai-only");
+                        println!("  message: claude-flow unavailable, continuing without external orchestration");
+                    }
+                    return Ok(());
+                }
+                Err(err) => return Err(format!("ai orchestrate: {err}")),
+            };
             if format == "json" {
                 let payload = serde_json::json!({
                     "task": task,

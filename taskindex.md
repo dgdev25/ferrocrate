@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **24**
-- Partial tasks: **11**
+- Total remaining tasks: **23**
+- Partial tasks: **10**
 - Rework-needed tasks: **13**
 
 ---
@@ -72,7 +72,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~PERF-07 - Convert CLI binary size measurement to enforced SLO and optimization closure~~
 - [x] ~~PERF-08 - Convert AI latency measurement to enforced SLO and optimization closure~~
 - [ ] REL-01 - Rework runtime crash resilience to robust container survivability semantics
-- [ ] REL-02 - Rework graceful degradation behavior for AI/component failures
+- [x] ~~REL-02 - Rework graceful degradation behavior for AI/component failures~~
 - [ ] REL-04 - Rework atomic operations audit and close remaining non-atomic paths
 - [ ] REL-05 - Rework test-coverage enforcement to production confidence thresholds
 - [ ] OBS-02 - Rework OpenTelemetry tracing from optional/basic to production-grade trace coverage

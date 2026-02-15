@@ -19,7 +19,9 @@ use crate::ai::learning::rvf_store::{RvfStore, stable_id};
 /// Suitable for large-scale vector similarity search in container
 /// memory patterns, anomaly detection, and resource prediction.
 pub struct VectorMemory {
-    db: Arc<RwLock<Option<VectorDB>>>,
+    db_cosine: Arc<RwLock<Option<VectorDB>>>,
+    db_euclidean: Arc<RwLock<Option<VectorDB>>>,
+    db_manhattan: Arc<RwLock<Option<VectorDB>>>,
     entries: Vec<VectorEntry>,  // Fallback storage for when db not initialized
     default_dimensions: usize,
     #[cfg(feature = "rvf-persistence")]
@@ -31,7 +33,9 @@ pub struct VectorMemory {
 impl Default for VectorMemory {
     fn default() -> Self {
         Self {
-            db: Arc::new(RwLock::new(None)),
+            db_cosine: Arc::new(RwLock::new(None)),
+            db_euclidean: Arc::new(RwLock::new(None)),
+            db_manhattan: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: 384,  // Default embedding dimension
             #[cfg(feature = "rvf-persistence")]
@@ -46,7 +50,9 @@ impl VectorMemory {
     /// Create a new VectorMemory with specified dimensions
     pub fn with_dimensions(dimensions: usize) -> Self {
         Self {
-            db: Arc::new(RwLock::new(None)),
+            db_cosine: Arc::new(RwLock::new(None)),
+            db_euclidean: Arc::new(RwLock::new(None)),
+            db_manhattan: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: dimensions,
             #[cfg(feature = "rvf-persistence")]
@@ -75,7 +81,9 @@ impl VectorMemory {
     pub fn persistent(path: &Path, dimensions: usize) -> Result<Self, String> {
         let rvf = RvfStore::open_or_create(path, dimensions).map_err(|err| err.to_string())?;
         Ok(Self {
-            db: Arc::new(RwLock::new(None)),
+            db_cosine: Arc::new(RwLock::new(None)),
+            db_euclidean: Arc::new(RwLock::new(None)),
+            db_manhattan: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: dimensions,
             rvf: Some(rvf),
@@ -84,10 +92,10 @@ impl VectorMemory {
     }
 
     /// Initialize the HNSW-backed database
-    fn init_db(&self, dimensions: usize) -> VectorDB {
+    fn init_db(&self, dimensions: usize, metric: ruvector_core::types::DistanceMetric) -> VectorDB {
         let options = DbOptions {
             dimensions,
-            distance_metric: ruvector_core::types::DistanceMetric::Cosine,
+            distance_metric: metric,
             storage_path: ":memory:".to_string(),  // In-memory for vector memory
             hnsw_config: Some(HnswConfig {
                 m: 16,                // Number of connections per node
@@ -121,17 +129,21 @@ impl VectorMemory {
             entry.vector.len()
         };
 
-        // Initialize DB on first insert if needed
-        {
-            let mut db_guard = self.db.write();
+        // Initialize metric indexes on first insert.
+        for (guard, metric) in [
+            (&self.db_cosine, ruvector_core::types::DistanceMetric::Cosine),
+            (&self.db_euclidean, ruvector_core::types::DistanceMetric::Euclidean),
+            (&self.db_manhattan, ruvector_core::types::DistanceMetric::Manhattan),
+        ] {
+            let mut db_guard = guard.write();
             if db_guard.is_none() {
-                *db_guard = Some(self.init_db(dimensions));
+                *db_guard = Some(self.init_db(dimensions, metric));
             }
         }
 
-        // Insert into HNSW index
-        {
-            let db_guard = self.db.read();
+        // Insert into each metric index so all query types remain sublinear.
+        for guard in [&self.db_cosine, &self.db_euclidean, &self.db_manhattan] {
+            let db_guard = guard.read();
             if let Some(db) = db_guard.as_ref() {
                 let ruv_entry = ruvector_core::types::VectorEntry {
                     id: entry.id.clone(),
@@ -176,33 +188,35 @@ impl VectorMemory {
             }
         }
 
-        // HNSW is only configured for Cosine similarity - use brute-force for other metrics
-        if metric == DistanceMetric::Cosine {
-            // Try HNSW search first for Cosine similarity
-            let db_guard = self.db.read();
-            if let Some(db) = db_guard.as_ref() {
-                let search_query = SearchQuery {
-                    vector: query.to_vec(),
-                    k,
-                    filter: None,
-                    ef_search: Some(50),
-                };
+        let db_for_metric = match metric {
+            DistanceMetric::Cosine => &self.db_cosine,
+            DistanceMetric::Euclidean => &self.db_euclidean,
+            DistanceMetric::Manhattan => &self.db_manhattan,
+            _ => &self.db_cosine,
+        };
+        let db_guard = db_for_metric.read();
+        if let Some(db) = db_guard.as_ref() {
+            let search_query = SearchQuery {
+                vector: query.to_vec(),
+                k,
+                filter: None,
+                ef_search: Some(50),
+            };
 
-                if let Ok(results) = db.search(search_query) {
-                    return results
-                        .into_iter()
-                        .map(|r| SearchResult {
-                            id: VectorId::from(r.id),
-                            score: r.score,
-                            vector: r.vector,
-                            metadata: r.metadata,
-                        })
-                        .collect();
-                }
+            if let Ok(results) = db.search(search_query) {
+                return results
+                    .into_iter()
+                    .map(|r| SearchResult {
+                        id: VectorId::from(r.id),
+                        score: r.score,
+                        vector: r.vector,
+                        metadata: r.metadata,
+                    })
+                    .collect();
             }
         }
 
-        // Fallback to brute-force O(n) for non-Cosine metrics or if HNSW fails
+        // Fallback to brute-force O(n) only if index search fails.
         self.search_bruteforce(query, k, metric)
     }
 

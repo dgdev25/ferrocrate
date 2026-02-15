@@ -1,0 +1,24 @@
+name: Windows Desktop CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build ferro-desktop
+        run: cargo build -p ferro-desktop
+      - name: Test ferro-desktop
+        run: cargo test -p ferro-desktop
+      - name: Test ferro-cli
+        run: cargo test -p ferro-cli
+      - name: Run phase0 check
+        run: cargo run -p ferro-desktop -- phase0-check --json
+      - name: Run doctor check
+        run: cargo run -p ferro-desktop -- doctor

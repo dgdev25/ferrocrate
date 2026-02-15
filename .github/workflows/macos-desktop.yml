@@ -1,0 +1,28 @@
+name: macOS Desktop CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  macos-desktop:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build ferro-desktop
+        run: cargo build -p ferro-desktop
+      - name: Test ferro-desktop
+        run: cargo test -p ferro-desktop
+      - name: Lint ferro-desktop
+        run: cargo clippy -p ferro-desktop --all-targets -- -D warnings
+      - name: Initialize desktop VM state
+        run: cargo run -p ferro-desktop -- vm init --backend qemu-hvf --cpus 2 --memory-mb 2048 --api-port 4288 --ssh-port 2222
+      - name: Show desktop VM status
+        run: cargo run -p ferro-desktop -- vm status --json
+      - name: Configure API bridge
+        run: cargo run -p ferro-desktop -- vm bridge-api --bind-addr 127.0.0.1 --listen-port 4288
+      - name: List forward rules
+        run: cargo run -p ferro-desktop -- forward list --json

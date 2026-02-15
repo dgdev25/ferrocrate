@@ -109,24 +109,62 @@ Evidence:
 - `ferro-core/src/process_lifecycle.rs:179`
 - `ferro-core/src/image_security.rs:122`
 
-### SEC-LOW-02: Dependency advisories (unmaintained crates)
-Status: Partially completed
-Severity source: `cargo audit`
+### SEC-LOW-02: `RUSTSEC-2025-0141` (`bincode` via `ruvector-core`)
+Status: Open (tracked with risk acceptance)
+Severity source: `cargo audit` (unmaintained advisory)
 
 Tasks:
-- [x] ~~Remove `tokenizers`/`tract` optional ONNX chain to eliminate `number_prefix`/`paste` advisories~~
-- [x] ~~Disable `ruv-fann` binary/default feature path to eliminate `bincode` v1 advisory~~
+- [x] ~~Disable `ruv-fann` default/binary features to remove `bincode` v1 path~~
 - [x] ~~Upgrade `ruvector-core` from `2.0.2` to `2.0.3`~~
-- [ ] Replace or isolate remaining `ruvector-core` dependency path still pulling `bincode` v2 advisory (`RUSTSEC-2025-0141`)
-- [ ] Replace `sled` dependency chain pulling `fxhash` and `instant` advisories
-- [x] ~~Add temporary risk-acceptance entry with owner + expiry for unresolved advisory items~~
+- [ ] Replace or isolate remaining `ruvector-core` usage that still pulls `bincode` v2 transitively
+- [x] ~~Create risk-acceptance record with owner and expiry~~
+
+Evidence:
+- `ferro-mind/Cargo.toml`
+- `cargo audit` output (2026-02-15): `RUSTSEC-2025-0141` via `ruvector-core`
+- `docs/SECURITY_RISK_ACCEPTANCE.md`
+
+### SEC-LOW-03: `RUSTSEC-2025-0057` (`fxhash` via `sled`)
+Status: Open (tracked with risk acceptance)
+Severity source: `cargo audit` (unmaintained advisory)
+
+Tasks:
+- [ ] Migrate `sled`-backed stores to a maintained backend (`redb` or equivalent)
+- [ ] Refactor runtime store integration away from `sled::Db` direct usage
+- [ ] Validate data migration path and backward compatibility
+- [x] ~~Create risk-acceptance record with owner and expiry~~
+
+Evidence:
+- `ferro-core/src/container_store.rs`
+- `ferro-core/src/image_store.rs`
+- `ferro-core/src/volume_store.rs`
+- `ferro-core/src/runtime.rs`
+- `docs/SECURITY_RISK_ACCEPTANCE.md`
+
+### SEC-LOW-04: `RUSTSEC-2024-0384` (`instant` via `sled` -> `parking_lot`)
+Status: Open (tracked with risk acceptance)
+Severity source: `cargo audit` (unmaintained advisory)
+
+Tasks:
+- [ ] Remove transitive `instant` by completing `sled` backend replacement
+- [x] ~~Create risk-acceptance record with owner and expiry~~
+
+Evidence:
+- `cargo audit` output (2026-02-15): `RUSTSEC-2024-0384`
+- `docs/SECURITY_RISK_ACCEPTANCE.md`
+
+### SEC-LOW-05: Deprecated optional ONNX dependency chain (`number_prefix`/`paste`) [resolved]
+Status: Completed
+Severity source: prior `cargo audit` warnings (now removed)
+
+Tasks:
+- [x] ~~Remove `tokenizers`/`tract` optional ONNX chain~~
+- [x] ~~Remove ONNX-only tests and exports~~
 
 Evidence:
 - `ferro-mind/Cargo.toml`
 - `ferro-mind/src/ruv/embeddings.rs`
 - `ferro-mind/tests/embeddings_tests.rs`
-- `docs/SECURITY_RISK_ACCEPTANCE.md`
-- `cargo audit` output (2026-02-15, latest): `RUSTSEC-2025-0141` (bincode v2 via `ruvector-core`), `RUSTSEC-2025-0057` (fxhash via `sled`), `RUSTSEC-2024-0384` (instant via `sled`)
 
 ## Operational Follow-up
 

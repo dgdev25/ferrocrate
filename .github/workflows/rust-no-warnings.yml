@@ -14,3 +14,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Enforce clippy and rustdoc warning-free workspace
         run: scripts/verify-no-warnings.sh
+
+  linux-entitlement-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Linux entitlement integration tests
+        run: cargo test -p ferro-cli --test entitlement_linux_integration -- --nocapture

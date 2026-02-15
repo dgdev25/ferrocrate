@@ -66,6 +66,9 @@ Implement enforceable monetization aligned to strategy:
   - `scripts/verify-release-channel-artifacts.sh` enforces:
     - public artifacts include `ferrocrate` and exclude `ferro-desktop`
     - paid artifacts include both `ferrocrate` and `ferro-desktop`
+- Linux entitlement integration CI:
+  - `ferro-cli/tests/entitlement_linux_integration.rs`
+  - executed in `.github/workflows/rust-no-warnings.yml` on `ubuntu-latest`
 
 ## Remaining Work (Phase 3)
 - Paid artifact hosting and authenticated download gateway wiring (installer token flow)

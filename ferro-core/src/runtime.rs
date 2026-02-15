@@ -416,8 +416,9 @@ impl ContainerRuntime {
         let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
 
-        // Load default seccomp profile for container isolation
-        let seccomp_profile = default_seccomp_profile().ok();
+        // Load default seccomp profile for container isolation.
+        // Fail closed by default if the profile cannot be loaded.
+        let seccomp_profile = load_seccomp_profile()?;
 
         let child_id = spawn_process_with_logs(
             &exec_cmd,
@@ -784,8 +785,9 @@ impl ContainerRuntime {
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
 
-        // Load default seccomp profile for restarted container
-        let seccomp_profile = default_seccomp_profile().ok();
+        // Load default seccomp profile for restarted container.
+        // Fail closed by default if the profile cannot be loaded.
+        let seccomp_profile = load_seccomp_profile()?;
 
         let child_id = spawn_process_with_logs(
             &record.command,
@@ -1637,6 +1639,21 @@ fn rootless_netns_enabled() -> bool {
     std::env::var("FERROCRATE_ROOTLESS_NETNS")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn seccomp_enabled() -> bool {
+    std::env::var("FERROCRATE_SECCOMP")
+        .map(|val| !(val == "0" || val.eq_ignore_ascii_case("false")))
+        .unwrap_or(true)
+}
+
+fn load_seccomp_profile() -> Result<Option<SeccompProfile>, RuntimeError> {
+    if !seccomp_enabled() {
+        return Ok(None);
+    }
+    let profile = default_seccomp_profile()
+        .map_err(|err| RuntimeError::InvalidCommand(format!("seccomp profile: {err}")))?;
+    Ok(Some(profile))
 }
 
 fn apparmor_enabled() -> bool {
@@ -3390,6 +3407,29 @@ mod tests {
         assert!(err.to_string().contains("positive integer"));
         let err = super::validate_bandwidth_limit("100").expect_err("missing unit");
         assert!(err.to_string().contains("must end with"));
+    }
+
+    #[test]
+    fn seccomp_profile_is_enabled_by_default() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_SECCOMP");
+        }
+        let profile = super::load_seccomp_profile().expect("seccomp profile");
+        assert!(profile.is_some());
+    }
+
+    #[test]
+    fn seccomp_profile_can_be_disabled_explicitly() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::set_var("FERROCRATE_SECCOMP", "0");
+        }
+        let profile = super::load_seccomp_profile().expect("seccomp profile");
+        assert!(profile.is_none());
+        unsafe {
+            std::env::remove_var("FERROCRATE_SECCOMP");
+        }
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **26**
-- Partial tasks: **13**
+- Total remaining tasks: **25**
+- Partial tasks: **12**
 - Rework-needed tasks: **13**
 
 ---
@@ -69,7 +69,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~PERF-04 - Convert idle-memory (daemon) measurement to enforced SLO and optimization closure~~
 - [x] ~~PERF-05 - Convert per-container overhead measurement to enforced SLO and optimization closure~~
 - [x] ~~PERF-06 - Convert build-performance measurement to enforced SLO and optimization closure~~
-- [ ] PERF-07 - Convert CLI binary size measurement to enforced SLO and optimization closure
+- [x] ~~PERF-07 - Convert CLI binary size measurement to enforced SLO and optimization closure~~
 - [ ] PERF-08 - Convert AI latency measurement to enforced SLO and optimization closure
 - [ ] REL-01 - Rework runtime crash resilience to robust container survivability semantics
 - [ ] REL-02 - Rework graceful degradation behavior for AI/component failures

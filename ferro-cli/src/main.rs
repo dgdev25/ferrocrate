@@ -45,23 +45,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream};
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
-#[cfg(unix)]
+#[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::net::UnixStream;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::Duration;
@@ -3942,6 +3945,7 @@ fn compose_service_mounts(
     Ok(out)
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
 struct DockerCreateRequest {
     #[serde(rename = "Image")]
@@ -3962,6 +3966,7 @@ struct DockerCreateRequest {
     host_config: Option<DockerHostConfig>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
 struct DockerHostConfig {
     #[serde(rename = "Binds")]
@@ -3972,12 +3977,14 @@ struct DockerHostConfig {
     network_mode: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
 struct DockerPortBinding {
     #[serde(rename = "HostPort")]
     host_port: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 struct DockerCreateSpec {
     image: String,
@@ -3992,6 +3999,7 @@ struct DockerCreateSpec {
     network_mode: String,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Deserialize)]
 struct DockerNetworkCreateSpec {
     #[serde(rename = "Name")]
@@ -4002,12 +4010,14 @@ struct DockerNetworkCreateSpec {
     ipam: Option<DockerIpamSpec>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Deserialize)]
 struct DockerIpamSpec {
     #[serde(rename = "Config", default)]
     config: Vec<DockerIpamConfig>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Deserialize)]
 struct DockerIpamConfig {
     #[serde(rename = "Subnet")]
@@ -4016,6 +4026,7 @@ struct DockerIpamConfig {
     gateway: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct DockerCompatState {
     next_id: AtomicU64,
@@ -4508,6 +4519,7 @@ fn handle_docker_compat_connection(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
     let body = serde_json::json!({
         "message": message
@@ -4516,6 +4528,7 @@ fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
     http_response(status, body.as_bytes(), "application/json")
 }
 
+#[cfg(target_os = "linux")]
 fn docker_status_for_error(err: &str) -> u16 {
     let lowered = err.to_lowercase();
     if lowered.contains("not found")
@@ -4535,6 +4548,7 @@ fn docker_status_for_error(err: &str) -> u16 {
     500
 }
 
+#[cfg(target_os = "linux")]
 fn normalize_docker_api_path(path: &str) -> String {
     if !path.starts_with("/v") {
         return path.to_string();
@@ -4566,6 +4580,7 @@ fn normalize_docker_api_path(path: &str) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
     let request: DockerCreateRequest =
         serde_json::from_slice(body).map_err(|err| err.to_string())?;
@@ -4608,6 +4623,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
     })
 }
 
+#[cfg(target_os = "linux")]
 fn parse_docker_network_create_spec(body: &[u8]) -> Result<DockerNetworkCreateSpec, String> {
     let spec: DockerNetworkCreateSpec = serde_json::from_slice(body)
         .map_err(|err| format!("docker: invalid network create payload: {err}"))?;
@@ -4617,6 +4633,7 @@ fn parse_docker_network_create_spec(body: &[u8]) -> Result<DockerNetworkCreateSp
     Ok(spec)
 }
 
+#[cfg(target_os = "linux")]
 fn port_bindings_to_publish(
     bindings: Option<HashMap<String, Vec<DockerPortBinding>>>,
 ) -> Result<Vec<String>, String> {
@@ -4638,6 +4655,7 @@ fn port_bindings_to_publish(
     Ok(out)
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct HttpRequest {
     method: String,
@@ -4645,6 +4663,7 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+#[cfg(target_os = "linux")]
 fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
     const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -4737,6 +4756,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     Ok(HttpRequest { method, path, body })
 }
 
+#[cfg(target_os = "linux")]
 fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
     let status_line = match status {
         200 => "200 OK",
@@ -4756,6 +4776,7 @@ fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn split_path_query(path: &str) -> (String, HashMap<String, String>) {
     let mut query_map = HashMap::new();
     let mut parts = path.splitn(2, '?');

@@ -1,46 +1,43 @@
-use clap::{Parser, Subcommand, CommandFactory};
-use clap_complete::{Shell, generate};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
+use ferro_compose::compose::{
+    compose_down, compose_logs, compose_ps, compose_up, find_compose_file, ComposeProject,
+};
+use ferro_compose::{
+    Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
+    Environment as ComposeEnvironment, Service as ComposeService,
+};
 use ferro_core::docker_auth::resolve_registry_auth;
+use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
 use ferro_core::layer_compression::CompressionFormat;
-use ferro_core::registry::{RegistryClient, parse_image_reference};
-use ferro_core::runtime::ContainerRuntime;
+use ferro_core::registry::{parse_image_reference, RegistryClient};
 use ferro_core::rootfs::construct_rootfs_with_dedup;
-use ferro_core::image_fetch::resolve_layer_paths_with_store;
+use ferro_core::runtime::ContainerRuntime;
+use ferro_core::volume_store::LocalVolumeStore;
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
-    handle_community_download_command, handle_community_list_command, handle_community_publish_command,
-    handle_export_command, handle_export_rvf_command, handle_import_command,
-    handle_rvf_branch_command, handle_rvf_lineage_command, handle_rvf_stats_command,
-    handle_rvf_verify_command,
-    handle_stats_command,
+    handle_community_download_command, handle_community_list_command,
+    handle_community_publish_command, handle_export_command, handle_export_rvf_command,
+    handle_import_command, handle_rvf_branch_command, handle_rvf_lineage_command,
+    handle_rvf_stats_command, handle_rvf_verify_command, handle_stats_command,
     handle_train_command,
 };
-use ferro_core::volume_store::LocalVolumeStore;
-use ferro_compose::compose::{
-    ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file,
-};
-use ferro_compose::{
-    Command as ComposeCommandSpec,
-    DependsOn as ComposeDependsOn,
-    Environment as ComposeEnvironment,
-    Service as ComposeService,
-};
-use serde::{Deserialize, Serialize};
 use owo_colors::OwoColorize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::process;
-use std::path::{Path, PathBuf};
-use std::net::TcpListener;
-use std::time::{Duration, Instant};
 use std::io::{Read, Write};
-use std::time::SystemTime;
+use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -142,6 +139,10 @@ pub enum Commands {
     Volume {
         #[command(subcommand)]
         command: VolumeCommands,
+    },
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommands,
     },
     #[command(alias = "ps")]
     Containers {
@@ -333,10 +334,33 @@ pub enum VolumeCommands {
         #[arg(long = "opt")]
         opts: Vec<String>,
     },
-    Backup { name: String, path: String },
-    Restore { name: String, path: String },
+    Backup {
+        name: String,
+        path: String,
+    },
+    Restore {
+        name: String,
+        path: String,
+    },
     Ls,
-    Rm { name: String },
+    Rm {
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NetworkCommands {
+    Create {
+        name: String,
+        #[arg(long)]
+        subnet: Option<String>,
+        #[arg(long)]
+        gateway: Option<String>,
+    },
+    Ls,
+    Rm {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -448,13 +472,8 @@ pub enum AiCommunityCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommands {
-    Set {
-        key: String,
-        value: String,
-    },
-    Get {
-        key: String,
-    },
+    Set { key: String, value: String },
+    Get { key: String },
 }
 
 fn main() {
@@ -473,14 +492,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
         ref metrics_addr,
     } = command
     {
-        let image_store = LocalImageStore::open(runtime_dir.join("images"))
-            .map_err(|err| err.to_string())?;
+        let image_store =
+            LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
         return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
     }
 
     let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
-    let image_store = LocalImageStore::open(runtime_dir.join("images"))
-        .map_err(|err| err.to_string())?;
+    let image_store =
+        LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
     match command {
         Commands::Run {
@@ -523,6 +542,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                 .map_err(|err| err.to_string())?;
             handle_run(
+                &runtime_dir,
                 &runtime,
                 &image_store,
                 &volume_store,
@@ -577,20 +597,17 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Rmi { image } => handle_rmi(&image_store, &image),
         Commands::ImagePrune => handle_image_prune(&image_store),
         Commands::Volume { command } => handle_volume(&runtime_dir, command),
+        Commands::Network { command } => handle_network(&runtime_dir, &runtime, command),
         Commands::Containers { format } => handle_containers(&runtime, &format),
         Commands::Logs { container, format } => handle_logs(&runtime, &container, &format),
         Commands::Inspect { container, format } => handle_inspect(&runtime, &container, &format),
         Commands::Stats { container, format } => handle_stats(&runtime, &container, &format),
         Commands::Pause { container } => handle_pause(&runtime, &container),
         Commands::Unpause { container } => handle_unpause(&runtime, &container),
-        Commands::Stop { container, timeout } => {
-            handle_stop(&runtime, &container, timeout)
-        }
+        Commands::Stop { container, timeout } => handle_stop(&runtime, &container, timeout),
         Commands::Kill { container } => handle_kill(&runtime, &container),
         Commands::Rm { container } => handle_rm(&runtime, &container),
-        Commands::Restart { container, timeout } => {
-            handle_restart(&runtime, &container, timeout)
-        }
+        Commands::Restart { container, timeout } => handle_restart(&runtime, &container, timeout),
         Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
         Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
         Commands::Push { image } => handle_push(&image_store, &image),
@@ -606,74 +623,84 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 command,
             )
         }
-        Commands::Daemon {
-            ..
-        } => unreachable!("daemon command handled before runtime initialization"),
+        Commands::Daemon { .. } => {
+            unreachable!("daemon command handled before runtime initialization")
+        }
         Commands::Completion { shell } => handle_completion(&shell),
         Commands::Tui => handle_tui(&runtime),
         Commands::Ai { command } => handle_ai(command),
-        Commands::AiTrain { model_type, data_dir, models_dir, output, format } => handle_ai(
-            AiCommands::Train {
-                model_type,
-                data_dir,
-                models_dir,
-                output,
-                format,
-            },
-        ),
-        Commands::AiExport { model_type, output, models_dir, format } => handle_ai(
-            AiCommands::Export {
-                model_type,
-                output,
-                models_dir,
-                format,
-            },
-        ),
-        Commands::AiImport { model_type, input, models_dir, format } => handle_ai(
-            AiCommands::Import {
-                model_type,
-                input,
-                models_dir,
-                format,
-            },
-        ),
+        Commands::AiTrain {
+            model_type,
+            data_dir,
+            models_dir,
+            output,
+            format,
+        } => handle_ai(AiCommands::Train {
+            model_type,
+            data_dir,
+            models_dir,
+            output,
+            format,
+        }),
+        Commands::AiExport {
+            model_type,
+            output,
+            models_dir,
+            format,
+        } => handle_ai(AiCommands::Export {
+            model_type,
+            output,
+            models_dir,
+            format,
+        }),
+        Commands::AiImport {
+            model_type,
+            input,
+            models_dir,
+            format,
+        } => handle_ai(AiCommands::Import {
+            model_type,
+            input,
+            models_dir,
+            format,
+        }),
         Commands::AiStats {
             path,
             model_type,
             models_dir,
             format,
-        } => handle_ai(
-            AiCommands::Stats {
-                path,
-                model_type,
-                models_dir,
-                format,
-            },
-        ),
-        Commands::AiBranch { source, target, force } => handle_ai(
-            AiCommands::Branch {
-                source,
-                target,
-                force,
-            },
-        ),
+        } => handle_ai(AiCommands::Stats {
+            path,
+            model_type,
+            models_dir,
+            format,
+        }),
+        Commands::AiBranch {
+            source,
+            target,
+            force,
+        } => handle_ai(AiCommands::Branch {
+            source,
+            target,
+            force,
+        }),
         Commands::AiLineage {
             path,
             parent_file,
             verify,
             format,
-        } => handle_ai(
-            AiCommands::Lineage {
-                path,
-                parent_file,
-                verify,
-                format,
-            },
-        ),
+        } => handle_ai(AiCommands::Lineage {
+            path,
+            parent_file,
+            verify,
+            format,
+        }),
         Commands::Config { command } => handle_config(command),
-        Commands::AiAudit { action, summary, evidence } => {
-            handle_ai_audit(&action, &summary, &evidence)
-        }
+        Commands::AiAudit {
+            action,
+            summary,
+            evidence,
+        } => handle_ai_audit(&action, &summary, &evidence),
         Commands::Migrate { target } => handle_migrate(target),
     }
 }
@@ -700,11 +727,17 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                     .map(|ext| ext.eq_ignore_ascii_case("rvf"))
                     .unwrap_or(false);
                 if is_rvf {
-                    handle_export_rvf_command(&model_type, &output_path, data_dir_path, models_dir_path)
-                        .map_err(|err| format!("ai train: {err}"))?;
+                    handle_export_rvf_command(
+                        &model_type,
+                        &output_path,
+                        data_dir_path,
+                        models_dir_path,
+                    )
+                    .map_err(|err| format!("ai train: {err}"))?;
                 } else {
                     if let Some(parent) = output_path.parent() {
-                        std::fs::create_dir_all(parent).map_err(|err| format!("ai train: {err}"))?;
+                        std::fs::create_dir_all(parent)
+                            .map_err(|err| format!("ai train: {err}"))?;
                     }
                     std::fs::copy(&result.model_path, &output_path)
                         .map_err(|err| format!("ai train: {err}"))?;
@@ -719,8 +752,8 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                     "loss": result.loss,
                     "model_path": result.model_path,
                 });
-                let text = serde_json::to_string_pretty(&out)
-                    .map_err(|err| format!("ai train: {err}"))?;
+                let text =
+                    serde_json::to_string_pretty(&out).map_err(|err| format!("ai train: {err}"))?;
                 println!("{text}");
                 return Ok(());
             }
@@ -823,8 +856,9 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 return Ok(());
             }
 
-            let model_type = model_type
-                .ok_or_else(|| "ai stats: provide --model-type <type> or ai stats <file.rvf>".to_string())?;
+            let model_type = model_type.ok_or_else(|| {
+                "ai stats: provide --model-type <type> or ai stats <file.rvf>".to_string()
+            })?;
             let stats = handle_stats_command(&model_type, models_dir_path)
                 .map_err(|err| format!("ai stats: {err}"))?;
             if format == "json" {
@@ -847,11 +881,17 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             );
             println!(
                 "  last_trained_at={}",
-                stats.last_trained_at.unwrap_or_else(|| "<none>".to_string())
+                stats
+                    .last_trained_at
+                    .unwrap_or_else(|| "<none>".to_string())
             );
             Ok(())
         }
-        AiCommands::Branch { source, target, force } => {
+        AiCommands::Branch {
+            source,
+            target,
+            force,
+        } => {
             let source = PathBuf::from(source);
             let target = PathBuf::from(target);
             if force && target.exists() {
@@ -998,7 +1038,8 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                     let marketplace = marketplace_dir
                         .map(PathBuf::from)
                         .unwrap_or(default_marketplace);
-                    let description = description.unwrap_or_else(|| "Community shared model".to_string());
+                    let description =
+                        description.unwrap_or_else(|| "Community shared model".to_string());
                     let out = handle_community_publish_command(
                         Path::new(&input),
                         &name,
@@ -1030,8 +1071,9 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                     let marketplace = marketplace_dir
                         .map(PathBuf::from)
                         .unwrap_or(default_marketplace);
-                    let out = handle_community_download_command(&name, Path::new(&output), &marketplace)
-                        .map_err(|err| format!("ai community download: {err}"))?;
+                    let out =
+                        handle_community_download_command(&name, Path::new(&output), &marketplace)
+                            .map_err(|err| format!("ai community download: {err}"))?;
                     if format == "json" {
                         let payload = serde_json::json!({
                             "name": name,
@@ -1052,6 +1094,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
 }
 
 fn handle_run(
+    runtime_dir: &Path,
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
@@ -1089,16 +1132,42 @@ fn handle_run(
     pids_max: Option<u64>,
     ai_model: Option<&str>,
 ) -> Result<(), String> {
-    let _bridge_cidr_guard = ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", bridge_cidr);
-    let _bridge_name_guard = ScopedEnv::set("FERROCRATE_BRIDGE_NAME", bridge_name);
+    let mut effective_network = network.to_string();
+    if effective_network == "encrypted" {
+        effective_network = "wireguard".to_string();
+    }
+    let mut resolved_bridge_cidr = bridge_cidr.map(|val| val.to_string());
+    let mut resolved_bridge_name = bridge_name.map(|val| val.to_string());
+    let selected_network_name = if is_builtin_network_mode(&effective_network) {
+        validate_network_mode(&effective_network)?;
+        if effective_network == "bridge" {
+            Some("bridge".to_string())
+        } else {
+            Some(effective_network.clone())
+        }
+    } else {
+        let named = resolve_named_network(runtime_dir, network)?;
+        effective_network = "bridge".to_string();
+        if resolved_bridge_cidr.is_none() {
+            resolved_bridge_cidr = Some(named.bridge_cidr.clone());
+        }
+        if resolved_bridge_name.is_none() {
+            resolved_bridge_name = Some(named.bridge_name.clone());
+        }
+        Some(named.name)
+    };
+    let _bridge_cidr_guard =
+        ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", resolved_bridge_cidr.as_deref());
+    let _bridge_name_guard =
+        ScopedEnv::set("FERROCRATE_BRIDGE_NAME", resolved_bridge_name.as_deref());
+    let _network_name_guard =
+        ScopedEnv::set("FERROCRATE_NETWORK_NAME", selected_network_name.as_deref());
     let _net_limit_guard = ScopedEnv::set("FERROCRATE_BANDWIDTH_LIMIT", net_limit);
     let configured_backend = configured_ai_backend();
     let _backend_guard = ScopedEnv::set("FERROCRATE_AI_BACKEND", configured_backend.as_deref());
     let _model_guard = ScopedEnv::set("FERROCRATE_AI_MODEL", ai_model);
-    validate_network_mode(network)?;
-    let network = if network == "encrypted" { "wireguard" } else { network };
     let mut effective_backend = network_backend.to_string();
-    if !publish.is_empty() && network != "bridge" {
+    if !publish.is_empty() && effective_network != "bridge" {
         return Err("run: publish requires --network bridge".to_string());
     }
     if !publish.is_empty() && effective_backend == "ebpf" {
@@ -1153,7 +1222,7 @@ fn handle_run(
             user,
             name,
             &port_mappings,
-            network,
+            &effective_network,
             &effective_backend,
         )
         .map_err(|err| err.to_string())?;
@@ -1163,9 +1232,7 @@ fn handle_run(
     );
     if rm {
         wait_for_container_exit(runtime, &record.id)?;
-        runtime
-            .remove(&record.id)
-            .map_err(|err| err.to_string())?;
+        runtime.remove(&record.id).map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -1195,12 +1262,18 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
     loop {
         print!("\x1b[2J\x1b[H");
         println!("FerroCrate TUI (press q + Enter to quit)");
-        println!("{:<20} {:<12} {:<20} {}", "CONTAINER", "STATUS", "IMAGE", "COMMAND");
+        println!(
+            "{:<20} {:<12} {:<20} {}",
+            "CONTAINER", "STATUS", "IMAGE", "COMMAND"
+        );
         let containers = runtime.list().map_err(|err| err.to_string())?;
         for record in containers {
             let name = record.name.unwrap_or(record.id);
             let cmd = record.command.join(" ");
-            println!("{:<20} {:<12} {:<20} {}", name, record.status, record.image, cmd);
+            println!(
+                "{:<20} {:<12} {:<20} {}",
+                name, record.status, record.image, cmd
+            );
         }
         if let Ok(msg) = rx.try_recv() {
             if msg.eq_ignore_ascii_case("q") {
@@ -1213,9 +1286,8 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
 }
 
 fn handle_ai_audit(action: &str, summary: &str, evidence: &[String]) -> Result<(), String> {
-    let logger = AuditLogger::from_env().ok_or_else(|| {
-        "ai-audit: FERROCRATE_AI_AUDIT_LOG not set or AI disabled".to_string()
-    })?;
+    let logger = AuditLogger::from_env()
+        .ok_or_else(|| "ai-audit: FERROCRATE_AI_AUDIT_LOG not set or AI disabled".to_string())?;
     let mut trace = DecisionTrace::new("manual", summary);
     for entry in evidence {
         if let Some((key, value)) = entry.split_once('=') {
@@ -1338,7 +1410,6 @@ fn handle_migrate_docker_auth(output: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-
 struct ScopedEnv {
     key: String,
     original: Option<String>,
@@ -1389,8 +1460,7 @@ fn latest_mtime(root: &Path) -> Result<SystemTime, String> {
     let mut latest = SystemTime::UNIX_EPOCH;
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let entries = std::fs::read_dir(&path)
-            .map_err(|err| format!("watch: {err}"))?;
+        let entries = std::fs::read_dir(&path).map_err(|err| format!("watch: {err}"))?;
         for entry in entries {
             let entry = entry.map_err(|err| format!("watch: {err}"))?;
             let path = entry.path();
@@ -1452,9 +1522,7 @@ fn parse_volume_mounts(
         } else {
             let record = match volume_store.get(source).map_err(|err| err.to_string())? {
                 Some(record) => record,
-                None => volume_store
-                    .create(source)
-                    .map_err(|err| err.to_string())?,
+                None => volume_store.create(source).map_err(|err| err.to_string())?,
             };
             record.path
         };
@@ -1468,7 +1536,9 @@ fn parse_volume_mounts(
     Ok(out)
 }
 
-fn parse_publish(entries: &[String]) -> Result<Vec<ferro_core::container_store::PortMappingRecord>, String> {
+fn parse_publish(
+    entries: &[String],
+) -> Result<Vec<ferro_core::container_store::PortMappingRecord>, String> {
     let mut out = Vec::new();
     for entry in entries {
         let mut parts = entry.splitn(2, '/');
@@ -1498,14 +1568,18 @@ fn parse_publish(entries: &[String]) -> Result<Vec<ferro_core::container_store::
     Ok(out)
 }
 
-fn parse_tmpfs_mounts(tmpfs_mounts: &[String]) -> Result<Vec<ferro_core::mounts::TmpfsMount>, String> {
+fn parse_tmpfs_mounts(
+    tmpfs_mounts: &[String],
+) -> Result<Vec<ferro_core::mounts::TmpfsMount>, String> {
     let mut out = Vec::new();
     for entry in tmpfs_mounts {
         let parts = entry.split(':').collect::<Vec<_>>();
         if parts.is_empty() || parts[0].is_empty() {
             return Err("run: tmpfs must be target[:size=...]".to_string());
         }
-        let size = parts.get(1).map(|val| val.trim_start_matches("size=").to_string());
+        let size = parts
+            .get(1)
+            .map(|val| val.trim_start_matches("size=").to_string());
         out.push(ferro_core::mounts::TmpfsMount {
             target: parts[0].trim_start_matches('/').into(),
             size,
@@ -1517,8 +1591,7 @@ fn parse_tmpfs_mounts(tmpfs_mounts: &[String]) -> Result<Vec<ferro_core::mounts:
 fn ensure_image_present(store: &LocalImageStore, image: &str) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
     let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
-    let existing = resolve_reference(store, &canonical)
-        .map_err(|err| err.to_string())?;
+    let existing = resolve_reference(store, &canonical).map_err(|err| err.to_string())?;
     if existing.is_some() {
         return Ok(());
     }
@@ -1674,7 +1747,9 @@ fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
 
 fn handle_rmi(store: &LocalImageStore, image: &str) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
-    let removed = store.remove_reference(image).map_err(|err| err.to_string())?;
+    let removed = store
+        .remove_reference(image)
+        .map_err(|err| err.to_string())?;
     if removed {
         println!("rmi: removed {image}");
     } else {
@@ -1896,6 +1971,223 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NetworkRecord {
+    name: String,
+    driver: String,
+    subnet: String,
+    gateway: String,
+    bridge_name: String,
+    bridge_cidr: String,
+    created_at_unix: u64,
+}
+
+fn is_builtin_network_mode(value: &str) -> bool {
+    matches!(value, "bridge" | "host" | "none" | "wireguard")
+}
+
+fn network_store_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("networks").join("networks.json")
+}
+
+fn load_networks(runtime_dir: &Path) -> Result<Vec<NetworkRecord>, String> {
+    let path = network_store_path(runtime_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| format!("network: failed to read {}: {err}", path.display()))?;
+    serde_json::from_str::<Vec<NetworkRecord>>(&content)
+        .map_err(|err| format!("network: failed to parse {}: {err}", path.display()))
+}
+
+fn save_networks(runtime_dir: &Path, records: &[NetworkRecord]) -> Result<(), String> {
+    let path = network_store_path(runtime_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("network: failed to create {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(records)
+        .map_err(|err| format!("network: failed to encode store: {err}"))?;
+    std::fs::write(&path, payload)
+        .map_err(|err| format!("network: failed to write {}: {err}", path.display()))
+}
+
+fn validate_network_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("network: name is required".to_string());
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    {
+        return Err("network: name must be [a-zA-Z0-9_.-]".to_string());
+    }
+    Ok(())
+}
+
+fn parse_ipv4_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
+    let (ip_part, prefix_part) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("network: invalid CIDR {cidr}"))?;
+    let ip = ip_part
+        .parse::<Ipv4Addr>()
+        .map_err(|_| format!("network: invalid CIDR {cidr}"))?;
+    let prefix = prefix_part
+        .parse::<u8>()
+        .map_err(|_| format!("network: invalid CIDR {cidr}"))?;
+    if prefix > 32 {
+        return Err(format!("network: invalid CIDR {cidr}"));
+    }
+    Ok((ip, prefix))
+}
+
+fn ipv4_to_u32(addr: Ipv4Addr) -> u32 {
+    u32::from(addr)
+}
+
+fn u32_to_ipv4(value: u32) -> Ipv4Addr {
+    Ipv4Addr::from(value)
+}
+
+fn subnet_network_addr(addr: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    u32_to_ipv4(ipv4_to_u32(addr) & mask)
+}
+
+fn ip_in_subnet(addr: Ipv4Addr, subnet: Ipv4Addr, prefix: u8) -> bool {
+    subnet_network_addr(addr, prefix) == subnet
+}
+
+fn default_gateway_for_subnet(subnet: Ipv4Addr) -> Ipv4Addr {
+    u32_to_ipv4(ipv4_to_u32(subnet).saturating_add(1))
+}
+
+fn bridge_name_for_network(name: &str) -> String {
+    let normalized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let mut bridge = format!("fc-{normalized}");
+    if bridge.len() > 15 {
+        bridge.truncate(15);
+    }
+    bridge
+}
+
+fn create_network_record(
+    name: &str,
+    subnet: Option<&str>,
+    gateway: Option<&str>,
+) -> Result<NetworkRecord, String> {
+    validate_network_name(name)?;
+    let subnet = subnet.unwrap_or("172.20.0.0/16");
+    let (subnet_ip, prefix) = parse_ipv4_cidr(subnet)?;
+    let network_ip = subnet_network_addr(subnet_ip, prefix);
+    let gateway_ip = match gateway {
+        Some(value) => value
+            .parse::<Ipv4Addr>()
+            .map_err(|_| format!("network: invalid gateway {value}"))?,
+        None => default_gateway_for_subnet(network_ip),
+    };
+    if !ip_in_subnet(gateway_ip, network_ip, prefix) {
+        return Err(format!(
+            "network: gateway {gateway_ip} is outside subnet {network_ip}/{prefix}"
+        ));
+    }
+    Ok(NetworkRecord {
+        name: name.to_string(),
+        driver: "bridge".to_string(),
+        subnet: format!("{network_ip}/{prefix}"),
+        gateway: gateway_ip.to_string(),
+        bridge_name: bridge_name_for_network(name),
+        bridge_cidr: format!("{gateway_ip}/{prefix}"),
+        created_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    })
+}
+
+fn resolve_named_network(runtime_dir: &Path, name: &str) -> Result<NetworkRecord, String> {
+    let records = load_networks(runtime_dir)?;
+    records
+        .into_iter()
+        .find(|record| record.name == name)
+        .ok_or_else(|| format!("network: not found {name}"))
+}
+
+fn handle_network(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    command: NetworkCommands,
+) -> Result<(), String> {
+    match command {
+        NetworkCommands::Create {
+            name,
+            subnet,
+            gateway,
+        } => {
+            if is_builtin_network_mode(&name) {
+                return Err(format!("network: reserved name {name}"));
+            }
+            let mut records = load_networks(runtime_dir)?;
+            if records.iter().any(|record| record.name == name) {
+                return Err(format!("network: already exists {name}"));
+            }
+            let record = create_network_record(&name, subnet.as_deref(), gateway.as_deref())?;
+            records.push(record.clone());
+            records.sort_by(|a, b| a.name.cmp(&b.name));
+            save_networks(runtime_dir, &records)?;
+            println!(
+                "network create: name={} driver={} subnet={} gateway={}",
+                record.name, record.driver, record.subnet, record.gateway
+            );
+        }
+        NetworkCommands::Ls => {
+            let records = load_networks(runtime_dir)?;
+            println!("NAME\tDRIVER\tSUBNET\tGATEWAY");
+            println!("bridge\tbridge\t10.0.0.0/24\t10.0.0.1");
+            for record in records {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    record.name, record.driver, record.subnet, record.gateway
+                );
+            }
+        }
+        NetworkCommands::Rm { name } => {
+            if is_builtin_network_mode(&name) {
+                return Err(format!("network: cannot remove builtin network {name}"));
+            }
+            let running = runtime.list().map_err(|err| err.to_string())?;
+            if running.iter().any(|record| {
+                record.status == "running" && record.network_name.as_deref() == Some(name.as_str())
+            }) {
+                return Err(format!("network: in use by running containers {name}"));
+            }
+            let mut records = load_networks(runtime_dir)?;
+            let before = records.len();
+            records.retain(|record| record.name != name);
+            if records.len() == before {
+                return Err(format!("network: not found {name}"));
+            }
+            save_networks(runtime_dir, &records)?;
+            println!("network rm: {name}");
+        }
+    }
+    Ok(())
+}
+
 fn parse_driver_opts(opts: &[String]) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for entry in opts {
@@ -1982,7 +2274,9 @@ fn effective_readonly(profile: &str, read_only: bool, read_write: bool) -> Resul
     }
 }
 
-fn parse_restart_policy(policy: &str) -> Result<ferro_core::container_store::RestartPolicy, String> {
+fn parse_restart_policy(
+    policy: &str,
+) -> Result<ferro_core::container_store::RestartPolicy, String> {
     match policy {
         "no" => Ok(ferro_core::container_store::RestartPolicy::No),
         "on-failure" => Ok(ferro_core::container_store::RestartPolicy::OnFailure),
@@ -2020,7 +2314,9 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
         return Err("exec: command is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
-    let result = runtime.exec(&resolved, cmd).map_err(|err| err.to_string())?;
+    let result = runtime
+        .exec(&resolved, cmd)
+        .map_err(|err| err.to_string())?;
     if !result.stdout.is_empty() {
         print!("{}", result.stdout);
     }
@@ -2035,7 +2331,7 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
         return Ok(container.to_string());
     }
     let records = runtime.list().map_err(|err| err.to_string())?;
-    let mut matches = records
+    let matches = records
         .into_iter()
         .filter(|record| record.name.as_deref() == Some(container))
         .map(|record| record.id)
@@ -2050,12 +2346,9 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
 fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool) -> Result<(), String> {
     if lazy {
         let runtime_dir = runtime_dir();
-        let canonical = ferro_core::image_fetch::pull_manifest_only_with_store(
-            &runtime_dir,
-            image,
-            store,
-        )
-        .map_err(|err| err.to_string())?;
+        let canonical =
+            ferro_core::image_fetch::pull_manifest_only_with_store(&runtime_dir, image, store)
+                .map_err(|err| err.to_string())?;
         println!("pull: manifest-only image={canonical}");
         return Ok(());
     }
@@ -2075,24 +2368,22 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
     let client = RegistryClient::new().map_err(|err| err.to_string())?;
     let auth = resolve_registry_auth(&canonical).map_err(|err| err.to_string())?;
     let runtime_dir = runtime_dir();
-    let layer_paths = ferro_core::image_fetch::resolve_layer_paths_with_store(
-        &runtime_dir,
-        &canonical,
-        store,
-    )
-        .map_err(|err| err.to_string())?;
-    let config_path = ferro_core::image_fetch::resolve_config_path_with_store(
-        &runtime_dir,
-        &canonical,
-        store,
-    )
-    .map_err(|err| err.to_string())?
-    .ok_or_else(|| format!("push: missing config blob for {canonical}"))?;
-    let manifest = parse_image_manifest(&record.manifest_json)
-        .map_err(|err| err.to_string())?;
+    let layer_paths =
+        ferro_core::image_fetch::resolve_layer_paths_with_store(&runtime_dir, &canonical, store)
+            .map_err(|err| err.to_string())?;
+    let config_path =
+        ferro_core::image_fetch::resolve_config_path_with_store(&runtime_dir, &canonical, store)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| format!("push: missing config blob for {canonical}"))?;
+    let manifest = parse_image_manifest(&record.manifest_json).map_err(|err| err.to_string())?;
 
     client
-        .push_blob_from_file(&canonical, &manifest.config.digest, &config_path, auth.as_ref())
+        .push_blob_from_file(
+            &canonical,
+            &manifest.config.digest,
+            &config_path,
+            auth.as_ref(),
+        )
         .map_err(|err| err.to_string())?;
     for (layer, path) in manifest.layers.iter().zip(layer_paths.iter()) {
         if !path.exists() {
@@ -2198,14 +2489,7 @@ fn handle_compose(
                 if let Some(depends_on) = service.depends_on.as_ref() {
                     wait_for_compose_dependencies(runtime, depends_on)?;
                 }
-                run_compose_service(
-                    runtime,
-                    store,
-                    volume_store,
-                    project_dir,
-                    &name,
-                    service,
-                )?;
+                run_compose_service(runtime, store, volume_store, project_dir, &name, service)?;
             }
         }
         ComposeCommands::Watch { profile, interval } => {
@@ -2216,7 +2500,9 @@ fn handle_compose(
                     store,
                     volume_store,
                     file,
-                    ComposeCommands::Up { profile: profile.clone() },
+                    ComposeCommands::Up {
+                        profile: profile.clone(),
+                    },
                 )?;
                 loop {
                     std::thread::sleep(Duration::from_secs(interval));
@@ -2226,13 +2512,7 @@ fn handle_compose(
                         break;
                     }
                 }
-                handle_compose(
-                    runtime,
-                    store,
-                    volume_store,
-                    file,
-                    ComposeCommands::Down,
-                )?;
+                handle_compose(runtime, store, volume_store, file, ComposeCommands::Down)?;
             }
         }
         ComposeCommands::Down => {
@@ -2335,9 +2615,7 @@ fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<
                 return Err(format!("compose: dependency {service} is unhealthy"));
             }
             "none" => {
-                return Err(format!(
-                    "compose: dependency {service} has no healthcheck"
-                ));
+                return Err(format!("compose: dependency {service} has no healthcheck"));
             }
             _ => {}
         }
@@ -2408,6 +2686,7 @@ fn run_compose_service(
             }
         };
         handle_run(
+            &runtime_dir(),
             runtime,
             store,
             volume_store,
@@ -2489,7 +2768,10 @@ fn compose_service_command(service: &ComposeService) -> Vec<String> {
     }
 }
 
-fn compose_service_env(project_dir: &Path, service: &ComposeService) -> Result<Vec<String>, String> {
+fn compose_service_env(
+    project_dir: &Path,
+    service: &ComposeService,
+) -> Result<Vec<String>, String> {
     let mut env = HashMap::new();
     if let Some(files) = service.env_file.as_ref() {
         for file in files {
@@ -2517,7 +2799,10 @@ fn compose_service_env(project_dir: &Path, service: &ComposeService) -> Result<V
         None => {}
     }
 
-    Ok(env.into_iter().map(|(key, value)| format!("{key}={value}")).collect())
+    Ok(env
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect())
 }
 
 fn compose_service_labels(service: &ComposeService) -> Vec<String> {
@@ -2774,244 +3059,268 @@ fn handle_docker_compat_connection(
         let (path, query) = split_path_query(&request.path);
         let path = normalize_docker_api_path(&path);
         let response = match (request.method.as_str(), path.as_str()) {
-        ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
-        ("GET", "/version") => {
-            let body = serde_json::json!({
-                "Version": env!("CARGO_PKG_VERSION"),
-                "ApiVersion": "1.45",
-                "MinAPIVersion": "1.24",
-                "GitCommit": "unknown",
-                "Os": std::env::consts::OS,
-                "Arch": std::env::consts::ARCH
-            });
-            http_response(200, body.to_string().as_bytes(), "application/json")
-        }
-        ("GET", "/info") => {
-            let containers = runtime.list().map_err(|err| err.to_string())?;
-            let images = store.list_references().map_err(|err| err.to_string())?;
-            let running = containers.iter().filter(|c| c.status == "running").count();
-            let paused = containers.iter().filter(|c| c.status == "paused").count();
-            let stopped = containers
-                .iter()
-                .filter(|c| c.status == "exited" || c.status == "stopped")
-                .count();
-            let body = serde_json::json!({
-                "ID": "ferrocrate",
-                "Containers": containers.len(),
-                "ContainersRunning": running,
-                "ContainersPaused": paused,
-                "ContainersStopped": stopped,
-                "Images": images.len(),
-                "Driver": "overlayfs",
-                "OperatingSystem": std::env::consts::OS,
-                "Architecture": std::env::consts::ARCH,
-            });
-            http_response(200, body.to_string().as_bytes(), "application/json")
-        }
-        ("GET", "/containers/json") => {
-            let records = runtime.list().map_err(|err| err.to_string())?;
-            let entries: Vec<serde_json::Value> = records
-                .iter()
-                .map(|record| {
-                    let name = record.name.clone().unwrap_or_else(|| record.id.clone());
-                    serde_json::json!({
-                        "Id": record.id,
-                        "Image": record.image,
-                        "Command": record.command.join(" "),
-                        "Created": record.created_at_unix,
-                        "State": record.status,
+            ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
+            ("GET", "/version") => {
+                let body = serde_json::json!({
+                    "Version": env!("CARGO_PKG_VERSION"),
+                    "ApiVersion": "1.45",
+                    "MinAPIVersion": "1.24",
+                    "GitCommit": "unknown",
+                    "Os": std::env::consts::OS,
+                    "Arch": std::env::consts::ARCH
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("GET", "/info") => {
+                let containers = runtime.list().map_err(|err| err.to_string())?;
+                let images = store.list_references().map_err(|err| err.to_string())?;
+                let running = containers.iter().filter(|c| c.status == "running").count();
+                let paused = containers.iter().filter(|c| c.status == "paused").count();
+                let stopped = containers
+                    .iter()
+                    .filter(|c| c.status == "exited" || c.status == "stopped")
+                    .count();
+                let body = serde_json::json!({
+                    "ID": "ferrocrate",
+                    "Containers": containers.len(),
+                    "ContainersRunning": running,
+                    "ContainersPaused": paused,
+                    "ContainersStopped": stopped,
+                    "Images": images.len(),
+                    "Driver": "overlayfs",
+                    "OperatingSystem": std::env::consts::OS,
+                    "Architecture": std::env::consts::ARCH,
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("GET", "/containers/json") => {
+                let records = runtime.list().map_err(|err| err.to_string())?;
+                let entries: Vec<serde_json::Value> = records
+                    .iter()
+                    .map(|record| {
+                        let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+                        serde_json::json!({
+                            "Id": record.id,
+                            "Image": record.image,
+                            "Command": record.command.join(" "),
+                            "Created": record.created_at_unix,
+                            "State": record.status,
+                            "Status": record.status,
+                            "Names": vec![format!("/{name}")],
+                        })
+                    })
+                    .collect();
+                let json = serde_json::to_string(&entries)
+                    .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
+                http_response(200, json.as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/json") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/json");
+                let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+                let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+                let body = serde_json::json!({
+                    "Id": record.id,
+                    "Name": format!("/{name}"),
+                    "Image": record.image,
+                    "Config": {
+                        "Env": record.env,
+                        "Cmd": record.command,
+                        "WorkingDir": record.workdir,
+                        "User": record.user,
+                        "Labels": record.labels,
+                    },
+                    "State": {
                         "Status": record.status,
-                        "Names": vec![format!("/{name}")],
-                    })
-                })
-                .collect();
-            let json = serde_json::to_string(&entries).unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
-            http_response(200, json.as_bytes(), "application/json")
-        }
-        ("GET", path) if path.starts_with("/containers/") && path.ends_with("/json") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/json");
-            let record = runtime.inspect(id).map_err(|err| err.to_string())?;
-            let name = record.name.clone().unwrap_or_else(|| record.id.clone());
-            let body = serde_json::json!({
-                "Id": record.id,
-                "Name": format!("/{name}"),
-                "Image": record.image,
-                "Config": {
-                    "Env": record.env,
-                    "Cmd": record.command,
-                    "WorkingDir": record.workdir,
-                    "User": record.user,
-                    "Labels": record.labels,
-                },
-                "State": {
-                    "Status": record.status,
-                    "Pid": record.pid,
-                    "ExitCode": record.last_exit_code,
-                    "StartedAt": record.created_at_unix,
-                }
-            });
-            http_response(200, body.to_string().as_bytes(), "application/json")
-        }
-        ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/logs");
-            let logs = runtime.logs(id).map_err(|err| err.to_string())?;
-            http_response(200, logs.as_bytes(), "text/plain")
-        }
-        ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/stats");
-            let stats = runtime.stats(id).map_err(|err| err.to_string())?;
-            let body = serde_json::json!({
-                "memory_stats": {
-                    "usage": stats.memory_current,
-                    "limit": stats.memory_max
-                },
-                "pids_stats": {
-                    "current": stats.pids_current
-                },
-                "cpu_stats": {
-                    "cpu_usage": {
-                        "total_usage": stats.cpu_usage_usec
+                        "Pid": record.pid,
+                        "ExitCode": record.last_exit_code,
+                        "StartedAt": record.created_at_unix,
                     }
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/logs");
+                let logs = runtime.logs(id).map_err(|err| err.to_string())?;
+                http_response(200, logs.as_bytes(), "text/plain")
+            }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/stats");
+                let stats = runtime.stats(id).map_err(|err| err.to_string())?;
+                let body = serde_json::json!({
+                    "memory_stats": {
+                        "usage": stats.memory_current,
+                        "limit": stats.memory_max
+                    },
+                    "pids_stats": {
+                        "current": stats.pids_current
+                    },
+                    "cpu_stats": {
+                        "cpu_usage": {
+                            "total_usage": stats.cpu_usage_usec
+                        }
+                    }
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("POST", "/containers/create") => {
+                let name = query.get("name").cloned();
+                let spec = parse_docker_create_spec(&request.body, name)?;
+                let id = format!("d{}", state.next_id.fetch_add(1, Ordering::SeqCst));
+                if let Ok(mut pending) = state.pending.lock() {
+                    pending.insert(id.clone(), spec);
+                } else {
+                    return Err("failed to acquire lock".to_string());
                 }
-            });
-            http_response(200, body.to_string().as_bytes(), "application/json")
-        }
-        ("POST", "/containers/create") => {
-            let name = query.get("name").cloned();
-            let spec = parse_docker_create_spec(&request.body, name)?;
-            let id = format!("d{}", state.next_id.fetch_add(1, Ordering::SeqCst));
-            if let Ok(mut pending) = state.pending.lock() {
-                pending.insert(id.clone(), spec);
-            } else {
-                return Err("failed to acquire lock".to_string());
+                let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
+                http_response(201, body.to_string().as_bytes(), "application/json")
             }
-            let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
-            http_response(201, body.to_string().as_bytes(), "application/json")
-        }
-        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/start") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/start");
-            let spec = {
-                let mut pending = state.pending.lock().map_err(|e| format!("lock poisoned: {e}"))?;
-                pending.remove(id)
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/start") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/start");
+                let spec = {
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|e| format!("lock poisoned: {e}"))?;
+                    pending.remove(id)
+                }
+                .ok_or_else(|| format!("docker: unknown container {id}"))?;
+                handle_run(
+                    runtime_dir.as_ref(),
+                    &runtime,
+                    &store,
+                    &volume_store,
+                    &spec.image,
+                    &spec.cmd,
+                    &spec.network_mode,
+                    "ebpf",
+                    &spec.binds,
+                    &[],
+                    &[],
+                    false,
+                    false,
+                    &spec.env,
+                    &spec.labels,
+                    &[],
+                    &[],
+                    None,
+                    spec.workdir.as_deref(),
+                    spec.user.as_deref(),
+                    spec.name.as_deref(),
+                    &spec.publish,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "no",
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+                http_response(204, &[], "text/plain")
             }
-            .ok_or_else(|| format!("docker: unknown container {id}"))?;
-            handle_run(
-                &runtime,
-                &store,
-                &volume_store,
-                &spec.image,
-                &spec.cmd,
-                &spec.network_mode,
-                "ebpf",
-                &spec.binds,
-                &[],
-                &[],
-                false,
-                false,
-                &spec.env,
-                &spec.labels,
-                &[],
-                &[],
-                None,
-                spec.workdir.as_deref(),
-                spec.user.as_deref(),
-                spec.name.as_deref(),
-                &spec.publish,
-                None,
-                None,
-                None,
-                None,
-                None,
-                "no",
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )?;
-            http_response(204, &[], "text/plain")
-        }
-        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/stop") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/stop");
-            runtime
-                .stop(id, Duration::from_secs(5))
-                .map_err(|err| err.to_string())?;
-            http_response(204, &[], "text/plain")
-        }
-        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/restart") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/restart");
-            runtime
-                .restart(id, Duration::from_secs(5))
-                .map_err(|err| err.to_string())?;
-            http_response(204, &[], "text/plain")
-        }
-        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/kill") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/kill");
-            runtime.kill(id).map_err(|err| err.to_string())?;
-            http_response(204, &[], "text/plain")
-        }
-        ("POST", path) if path.starts_with("/containers/") && path.ends_with("/wait") => {
-            let id = path.trim_start_matches("/containers/").trim_end_matches("/wait");
-            wait_for_container_exit(&runtime, id)?;
-            let record = runtime.inspect(id).map_err(|err| err.to_string())?;
-            let body = serde_json::json!({
-                "StatusCode": record.last_exit_code.unwrap_or(0),
-                "Error": serde_json::Value::Null
-            });
-            http_response(200, body.to_string().as_bytes(), "application/json")
-        }
-        ("DELETE", path) if path.starts_with("/containers/") => {
-            let id = path.trim_start_matches("/containers/");
-            runtime.remove(id).map_err(|err| err.to_string())?;
-            http_response(204, &[], "text/plain")
-        }
-        ("GET", "/images/json") => {
-            let images = store.list_references().map_err(|err| err.to_string())?;
-            let entries: Vec<serde_json::Value> = images
-                .into_iter()
-                .map(|record| {
-                    serde_json::json!({
-                        "Id": record.digest,
-                        "RepoTags": vec![record.reference],
-                        "Created": record.created_at_unix,
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/stop") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/stop");
+                runtime
+                    .stop(id, Duration::from_secs(5))
+                    .map_err(|err| err.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/restart") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/restart");
+                runtime
+                    .restart(id, Duration::from_secs(5))
+                    .map_err(|err| err.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/kill") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/kill");
+                runtime.kill(id).map_err(|err| err.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/wait") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/wait");
+                wait_for_container_exit(&runtime, id)?;
+                let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+                let body = serde_json::json!({
+                    "StatusCode": record.last_exit_code.unwrap_or(0),
+                    "Error": serde_json::Value::Null
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("DELETE", path) if path.starts_with("/containers/") => {
+                let id = path.trim_start_matches("/containers/");
+                runtime.remove(id).map_err(|err| err.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
+            ("GET", "/images/json") => {
+                let images = store.list_references().map_err(|err| err.to_string())?;
+                let entries: Vec<serde_json::Value> = images
+                    .into_iter()
+                    .map(|record| {
+                        serde_json::json!({
+                            "Id": record.digest,
+                            "RepoTags": vec![record.reference],
+                            "Created": record.created_at_unix,
+                        })
                     })
-                })
-                .collect();
-            let json = serde_json::to_string(&entries).unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
-            http_response(200, json.as_bytes(), "application/json")
-        }
-        ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
-            let name = path.trim_start_matches("/images/").trim_end_matches("/json");
-            let reference = resolve_reference(&store, name)
-                .map_err(|err| err.to_string())?
-                .ok_or_else(|| format!("docker: unknown image {name}"))?;
-            let body = serde_json::json!({
-                "Id": reference.digest,
-                "RepoTags": vec![reference.reference],
-                "Created": reference.created_at_unix,
-                "Size": 0,
-                "VirtualSize": 0
-            });
-            http_response(200, body.to_string().as_bytes(), "application/json")
-        }
-        ("POST", "/images/create") => {
-            let from_image = query
-                .get("fromImage")
-                .ok_or_else(|| "docker: missing fromImage".to_string())?;
-            let reference = if let Some(tag) = query.get("tag") {
-                format!("{from_image}:{tag}")
-            } else {
-                from_image.to_string()
-            };
-            ensure_image_present(&store, &reference)?;
-            http_response(200, b"{}", "application/json")
-        }
-        _ => docker_error_response(404, "not found"),
-    };
+                    .collect();
+                let json = serde_json::to_string(&entries)
+                    .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
+                http_response(200, json.as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
+                let name = path
+                    .trim_start_matches("/images/")
+                    .trim_end_matches("/json");
+                let reference = resolve_reference(&store, name)
+                    .map_err(|err| err.to_string())?
+                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let body = serde_json::json!({
+                    "Id": reference.digest,
+                    "RepoTags": vec![reference.reference],
+                    "Created": reference.created_at_unix,
+                    "Size": 0,
+                    "VirtualSize": 0
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("POST", "/images/create") => {
+                let from_image = query
+                    .get("fromImage")
+                    .ok_or_else(|| "docker: missing fromImage".to_string())?;
+                let reference = if let Some(tag) = query.get("tag") {
+                    format!("{from_image}:{tag}")
+                } else {
+                    from_image.to_string()
+                };
+                ensure_image_present(&store, &reference)?;
+                http_response(200, b"{}", "application/json")
+            }
+            _ => docker_error_response(404, "not found"),
+        };
 
         Ok(response)
     })();
@@ -3034,7 +3343,10 @@ fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
 
 fn docker_status_for_error(err: &str) -> u16 {
     let lowered = err.to_lowercase();
-    if lowered.contains("not found") || lowered.contains("unknown image") || lowered.contains("unknown container") {
+    if lowered.contains("not found")
+        || lowered.contains("unknown image")
+        || lowered.contains("unknown container")
+    {
         return 404;
     }
     if lowered.contains("invalid")
@@ -3105,11 +3417,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         None | Some("default") | Some("bridge") => "bridge".to_string(),
         Some("host") => "host".to_string(),
         Some("none") => "none".to_string(),
-        Some(other) => {
-            return Err(format!(
-                "docker: unsupported network mode {other}"
-            ))
-        }
+        Some(other) => return Err(format!("docker: unsupported network mode {other}")),
     };
     Ok(DockerCreateSpec {
         image: request.image,
@@ -3181,11 +3489,21 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     let header_end = header_end.ok_or_else(|| "docker: invalid request".to_string())?;
     let header_str = String::from_utf8_lossy(&buffer[..header_end]);
     let mut lines = header_str.lines();
-    let request_line = lines.next().ok_or_else(|| "docker: invalid request".to_string())?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "docker: invalid request".to_string())?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().ok_or_else(|| "docker: invalid request".to_string())?.to_string();
-    let path = parts.next().ok_or_else(|| "docker: invalid request".to_string())?.to_string();
-    let http_version = parts.next().ok_or_else(|| "docker: invalid request".to_string())?;
+    let method = parts
+        .next()
+        .ok_or_else(|| "docker: invalid request".to_string())?
+        .to_string();
+    let path = parts
+        .next()
+        .ok_or_else(|| "docker: invalid request".to_string())?
+        .to_string();
+    let http_version = parts
+        .next()
+        .ok_or_else(|| "docker: invalid request".to_string())?;
     if parts.next().is_some() {
         return Err("docker: invalid request".to_string());
     }
@@ -3297,15 +3615,15 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, VolumeCommands, dispatch, handle_build, handle_containers, handle_exec,
-        handle_image_prune, handle_images, handle_inspect, handle_logs, handle_pause, handle_pull,
-        handle_push, handle_rmi, handle_run, handle_stats, handle_stop, handle_kill, handle_rm, handle_restart,
-        handle_unpause, build_limits, handle_volume,
-        build_health_config, effective_readonly, parse_bind_mounts, parse_capabilities,
-        parse_driver_opts, parse_env_entries, parse_key_values, parse_restart_policy, parse_publish,
-        parse_tmpfs_mounts,
-        normalize_docker_api_path, read_http_request,
-        validate_network_backend, validate_network_mode,
+        build_health_config, build_limits, dispatch, effective_readonly, handle_build,
+        handle_containers, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
+        parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
+        parse_restart_policy, parse_tmpfs_mounts, read_http_request, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
@@ -3499,7 +3817,13 @@ mod tests {
         ]);
         match cli.command {
             Commands::Ai {
-                command: AiCommands::Lineage { path, parent_file, verify, .. },
+                command:
+                    AiCommands::Lineage {
+                        path,
+                        parent_file,
+                        verify,
+                        ..
+                    },
             } => {
                 assert_eq!(path, "model.rvf");
                 assert!(verify);
@@ -3525,10 +3849,19 @@ mod tests {
 
     #[test]
     fn normalizes_docker_versioned_paths() {
-        assert_eq!(normalize_docker_api_path("/v1.45/containers/json"), "/containers/json");
+        assert_eq!(
+            normalize_docker_api_path("/v1.45/containers/json"),
+            "/containers/json"
+        );
         assert_eq!(normalize_docker_api_path("/v1.24/_ping"), "/_ping");
-        assert_eq!(normalize_docker_api_path("/containers/json"), "/containers/json");
-        assert_eq!(normalize_docker_api_path("/vbad/containers/json"), "/vbad/containers/json");
+        assert_eq!(
+            normalize_docker_api_path("/containers/json"),
+            "/containers/json"
+        );
+        assert_eq!(
+            normalize_docker_api_path("/vbad/containers/json"),
+            "/vbad/containers/json"
+        );
     }
 
     #[test]
@@ -3685,6 +4018,50 @@ mod tests {
     }
 
     #[test]
+    fn parses_network_commands() {
+        let create = Cli::parse_from([
+            "ferrocrate",
+            "network",
+            "create",
+            "--subnet",
+            "172.20.0.0/16",
+            "--gateway",
+            "172.20.0.1",
+            "custom-net",
+        ]);
+        match create.command {
+            Commands::Network { command } => match command {
+                NetworkCommands::Create {
+                    name,
+                    subnet,
+                    gateway,
+                } => {
+                    assert_eq!(name, "custom-net");
+                    assert_eq!(subnet.as_deref(), Some("172.20.0.0/16"));
+                    assert_eq!(gateway.as_deref(), Some("172.20.0.1"));
+                }
+                _ => panic!("unexpected network command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
+        let ls = Cli::parse_from(["ferrocrate", "network", "ls"]);
+        match ls.command {
+            Commands::Network { command } => assert!(matches!(command, NetworkCommands::Ls)),
+            _ => panic!("unexpected command"),
+        }
+
+        let rm = Cli::parse_from(["ferrocrate", "network", "rm", "custom-net"]);
+        match rm.command {
+            Commands::Network { command } => match command {
+                NetworkCommands::Rm { name } => assert_eq!(name, "custom-net"),
+                _ => panic!("unexpected network command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
     fn volume_handlers_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime_dir = temp.path().to_path_buf();
@@ -3701,8 +4078,11 @@ mod tests {
         let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
             .expect("store");
         let record = store.get("data").expect("get").expect("record");
-        std::fs::write(std::path::PathBuf::from(&record.path).join("hello.txt"), "hi")
-            .expect("write");
+        std::fs::write(
+            std::path::PathBuf::from(&record.path).join("hello.txt"),
+            "hi",
+        )
+        .expect("write");
         drop(store);
 
         let archive = runtime_dir.join("backup.tar");
@@ -3715,8 +4095,13 @@ mod tests {
         )
         .expect("backup volume");
 
-        handle_volume(&runtime_dir, VolumeCommands::Rm { name: "data".to_string() })
-            .expect("rm volume");
+        handle_volume(
+            &runtime_dir,
+            VolumeCommands::Rm {
+                name: "data".to_string(),
+            },
+        )
+        .expect("rm volume");
 
         handle_volume(
             &runtime_dir,
@@ -3727,8 +4112,38 @@ mod tests {
         )
         .expect("restore volume");
         handle_volume(&runtime_dir, VolumeCommands::Ls).expect("ls volumes");
-        handle_volume(&runtime_dir, VolumeCommands::Rm { name: "data".to_string() })
-            .expect("rm volume");
+        handle_volume(
+            &runtime_dir,
+            VolumeCommands::Rm {
+                name: "data".to_string(),
+            },
+        )
+        .expect("rm volume");
+    }
+
+    #[test]
+    fn network_handlers_run() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "test-net".to_string(),
+                subnet: Some("172.30.0.0/16".to_string()),
+                gateway: Some("172.30.0.1".to_string()),
+            },
+        )
+        .expect("create network");
+        handle_network(temp.path(), &runtime, NetworkCommands::Ls).expect("ls networks");
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Rm {
+                name: "test-net".to_string(),
+            },
+        )
+        .expect("rm network");
     }
 
     #[test]
@@ -3780,6 +4195,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("store");
         let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
         let err = handle_run(
+            temp.path(),
             &runtime,
             &store,
             &volume_store,
@@ -3980,8 +4396,8 @@ mod tests {
     fn exec_handler_requires_container_and_command() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()])
-            .expect_err("container required");
+        let err =
+            handle_exec(&runtime, "", &["/bin/sh".to_string()]).expect_err("container required");
         assert!(err.contains("exec: container is required"));
 
         let err = handle_exec(&runtime, "c1", &[]).expect_err("command required");
@@ -4036,7 +4452,10 @@ mod tests {
             unsafe {
                 std::env::set_var("FERROCRATE_RUNTIME_DIR", dir.path());
             }
-            Self { original, _dir: dir }
+            Self {
+                original,
+                _dir: dir,
+            }
         }
     }
 

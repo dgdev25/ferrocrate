@@ -45,6 +45,8 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub netns: Option<String>,
     #[serde(default)]
+    pub network_name: Option<String>,
+    #[serde(default)]
     pub ip_address: Option<String>,
     #[serde(default)]
     pub ipv6_address: Option<String>,
@@ -213,7 +215,7 @@ fn default_health_status() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContainerRecord, LocalContainerStore, RestartPolicy, now_unix};
+    use super::{now_unix, ContainerRecord, LocalContainerStore, RestartPolicy};
     use std::collections::HashMap;
 
     #[test]
@@ -230,8 +232,12 @@ mod tests {
             workdir: Some("/app".to_string()),
             user: Some("1000:1000".to_string()),
             env: vec!["HELLO=world".to_string()],
-            labels: [("tier".to_string(), "test".to_string())].into_iter().collect(),
-            annotations: [("owner".to_string(), "cli".to_string())].into_iter().collect(),
+            labels: [("tier".to_string(), "test".to_string())]
+                .into_iter()
+                .collect(),
+            annotations: [("owner".to_string(), "cli".to_string())]
+                .into_iter()
+                .collect(),
             capabilities: vec!["CAP_NET_BIND_SERVICE".to_string()],
             health: None,
             health_status: "none".to_string(),
@@ -244,6 +250,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: Some("ferro-c1".to_string()),
+            network_name: Some("bridge".to_string()),
             ip_address: Some("10.0.0.2".to_string()),
             ipv6_address: Some("fd00::2".to_string()),
             ports: vec![super::PortMappingRecord {
@@ -287,6 +294,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            network_name: None,
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),

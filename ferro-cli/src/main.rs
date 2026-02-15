@@ -1359,7 +1359,15 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
 fn handle_ai_audit(action: &str, summary: &str, evidence: &[String]) -> Result<(), String> {
     let logger = AuditLogger::from_env()
         .ok_or_else(|| "ai-audit: FERROCRATE_AI_AUDIT_LOG not set or AI disabled".to_string())?;
-    let mut trace = DecisionTrace::new("manual", summary);
+    let trace_id = format!(
+        "manual-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    let mut trace = DecisionTrace::new(trace_id.clone(), summary);
     for entry in evidence {
         if let Some((key, value)) = entry.split_once('=') {
             trace = trace.with_evidence(key, value);
@@ -1368,6 +1376,7 @@ fn handle_ai_audit(action: &str, summary: &str, evidence: &[String]) -> Result<(
     logger
         .log(action, &trace)
         .map_err(|err| format!("ai-audit: {err}"))?;
+    println!("ai-audit: logged action='{action}' trace_id='{trace_id}'");
     Ok(())
 }
 

@@ -40,7 +40,7 @@ use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -318,6 +318,12 @@ pub enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    Doctor {
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Entitlement {
         #[command(subcommand)]
@@ -845,6 +851,317 @@ fn require_cli_feature(feature: Feature) -> Result<Entitlement, String> {
     })
 }
 
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    id: String,
+    ok: bool,
+    message: String,
+    hint: Option<String>,
+    remediated: bool,
+}
+
+fn run_command_status(mut cmd: std::process::Command) -> bool {
+    cmd.status().map(|status| status.success()).unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn doctor_ensure_brew_formula(bin: &str, formula: &str) -> bool {
+    if command_exists(bin) {
+        return true;
+    }
+    if !command_exists("brew") {
+        return false;
+    }
+    run_command_status({
+        let mut command = std::process::Command::new("brew");
+        command.arg("install").arg(formula);
+        command
+    }) && command_exists(bin)
+}
+
+#[cfg(target_os = "macos")]
+fn doctor_default_vm_state_file() -> PathBuf {
+    if let Ok(path) = std::env::var("VM_STATE_FILE") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".ferrocrate")
+            .join("desktop-vm.json");
+    }
+    PathBuf::from(".ferrocrate").join("desktop-vm.json")
+}
+
+#[cfg(target_os = "macos")]
+fn parse_vm_status(output: &str) -> Option<(bool, u16, Option<String>, Option<String>)> {
+    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let running = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|v| v == "running")
+        .unwrap_or(false);
+    let ssh_port = value
+        .get("config")
+        .and_then(|config| config.get("ssh_port"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2222) as u16;
+    let guest_user = value
+        .get("config")
+        .and_then(|config| config.get("guest_user"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    let ssh_key = value
+        .get("config")
+        .and_then(|config| config.get("ssh_private_key_path"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    Some((running, ssh_port, guest_user, ssh_key))
+}
+
+#[cfg(target_os = "macos")]
+fn doctor_guest_ferrocrate_installed(
+    ssh_port: u16,
+    guest_user: Option<String>,
+    ssh_key: Option<String>,
+) -> bool {
+    let mut command = std::process::Command::new("ssh");
+    command
+        .arg("-p")
+        .arg(ssh_port.to_string())
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=5");
+    if let Some(path) = ssh_key {
+        command.arg("-i").arg(path);
+    }
+    let user = guest_user.unwrap_or_else(|| "ferro".to_string());
+    command
+        .arg(format!("{user}@127.0.0.1"))
+        .arg("--")
+        .arg("bash")
+        .arg("-lc")
+        .arg("command -v ferrocrate >/dev/null");
+    run_command_status(command)
+}
+
+fn handle_doctor(fix: bool, json: bool) -> Result<(), String> {
+    let mut checks = Vec::<DoctorCheck>::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        let desktop_bin = desktop_binary_path();
+        let desktop_present = desktop_bin.exists() || command_exists("ferro-desktop");
+        checks.push(DoctorCheck {
+            id: "desktop_binary".to_string(),
+            ok: desktop_present,
+            message: if desktop_present {
+                format!("desktop binary available ({})", desktop_bin.display())
+            } else {
+                "desktop binary missing".to_string()
+            },
+            hint: (!desktop_present).then_some(
+                "install paid desktop artifacts (`scripts/install-macos.sh --channel paid --full-stack`)".to_string(),
+            ),
+            remediated: false,
+        });
+
+        let arch_bin = if cfg!(target_arch = "aarch64") {
+            "qemu-system-aarch64"
+        } else {
+            "qemu-system-x86_64"
+        };
+        for (id, bin, formula) in [
+            ("qemu_img", "qemu-img", "qemu"),
+            ("qemu_system", arch_bin, "qemu"),
+            ("virtiofsd", "virtiofsd", "qemu"),
+            ("ssh", "ssh", "openssh"),
+        ] {
+            let mut ok = command_exists(bin);
+            let mut remediated = false;
+            if !ok && fix {
+                ok = doctor_ensure_brew_formula(bin, formula);
+                remediated = ok;
+            }
+            checks.push(DoctorCheck {
+                id: id.to_string(),
+                ok,
+                message: if ok {
+                    format!("{bin} available")
+                } else {
+                    format!("{bin} missing")
+                },
+                hint: (!ok).then_some(format!("install dependency: brew install {formula}")),
+                remediated,
+            });
+        }
+
+        let mut vm_running = false;
+        let mut vm_ssh_port = 2222u16;
+        let mut vm_guest_user = None;
+        let mut vm_ssh_key = None;
+        let status_output = std::process::Command::new(&desktop_bin)
+            .args(["vm", "status", "--json"])
+            .output();
+        match status_output {
+            Ok(output) if output.status.success() => {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                if let Some((running, ssh_port, guest_user, ssh_key)) = parse_vm_status(&raw) {
+                    vm_running = running;
+                    vm_ssh_port = ssh_port;
+                    vm_guest_user = guest_user;
+                    vm_ssh_key = ssh_key;
+                }
+            }
+            _ => {}
+        }
+
+        let mut vm_remediated = false;
+        if !vm_running && fix && desktop_present {
+            vm_remediated = run_command_status({
+                let mut command = std::process::Command::new(&desktop_bin);
+                command.args(["vm", "start"]);
+                command
+            });
+            if vm_remediated {
+                if let Ok(output) = std::process::Command::new(&desktop_bin)
+                    .args(["vm", "status", "--json"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let raw = String::from_utf8_lossy(&output.stdout);
+                        if let Some((running, ssh_port, guest_user, ssh_key)) =
+                            parse_vm_status(&raw)
+                        {
+                            vm_running = running;
+                            vm_ssh_port = ssh_port;
+                            vm_guest_user = guest_user;
+                            vm_ssh_key = ssh_key;
+                        }
+                    }
+                }
+            }
+        }
+
+        checks.push(DoctorCheck {
+            id: "vm_running".to_string(),
+            ok: vm_running,
+            message: if vm_running {
+                "desktop VM is running".to_string()
+            } else {
+                format!(
+                    "desktop VM is not running (state file: {})",
+                    doctor_default_vm_state_file().display()
+                )
+            },
+            hint: (!vm_running).then_some(
+                "initialize/start VM with `ferro-desktop vm init ...` then `ferro-desktop vm start`".to_string(),
+            ),
+            remediated: vm_remediated,
+        });
+
+        let mut ssh_ok = false;
+        if vm_running {
+            ssh_ok = TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], vm_ssh_port)),
+                Duration::from_secs(2),
+            )
+            .is_ok();
+        }
+        checks.push(DoctorCheck {
+            id: "guest_ssh".to_string(),
+            ok: ssh_ok,
+            message: if ssh_ok {
+                format!("guest SSH reachable on 127.0.0.1:{vm_ssh_port}")
+            } else {
+                format!("guest SSH not reachable on 127.0.0.1:{vm_ssh_port}")
+            },
+            hint: (!ssh_ok).then_some(
+                "ensure VM networking/port-forward is healthy (`ferro-desktop vm status --json`)"
+                    .to_string(),
+            ),
+            remediated: false,
+        });
+
+        let guest_ferro_ok = if ssh_ok {
+            doctor_guest_ferrocrate_installed(vm_ssh_port, vm_guest_user, vm_ssh_key)
+        } else {
+            false
+        };
+        checks.push(DoctorCheck {
+            id: "guest_ferrocrate".to_string(),
+            ok: guest_ferro_ok,
+            message: if guest_ferro_ok {
+                "guest ferrocrate runtime is installed".to_string()
+            } else {
+                "guest ferrocrate runtime missing".to_string()
+            },
+            hint: (!guest_ferro_ok).then_some(
+                "run installer with `--channel paid --full-stack` to bootstrap guest runtime"
+                    .to_string(),
+            ),
+            remediated: false,
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        checks.push(DoctorCheck {
+            id: "platform_scope".to_string(),
+            ok: true,
+            message: "doctor currently performs full compatibility checks on macOS hosts"
+                .to_string(),
+            hint: None,
+            remediated: false,
+        });
+    }
+
+    let healthy = checks.iter().all(|check| check.ok);
+    if json {
+        let payload = serde_json::json!({
+            "healthy": healthy,
+            "fix": fix,
+            "checks": checks,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?
+        );
+    } else {
+        println!(
+            "doctor: {}",
+            if healthy { "healthy" } else { "issues found" }
+        );
+        for check in &checks {
+            let status = if check.ok { "ok" } else { "fail" };
+            let remediated = if check.remediated {
+                " (remediated)"
+            } else {
+                ""
+            };
+            println!(
+                "  [{}] {}: {}{}",
+                status, check.id, check.message, remediated
+            );
+            if !check.ok {
+                if let Some(hint) = &check.hint {
+                    println!("      hint: {hint}");
+                }
+            }
+        }
+    }
+
+    if healthy {
+        Ok(())
+    } else {
+        Err("doctor detected compatibility issues".to_string())
+    }
+}
+
 fn dispatch(command: Commands) -> Result<(), String> {
     // Handle platform-agnostic commands that don't need runtime
     if let Commands::AiAudit {
@@ -1092,6 +1409,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 format,
             }),
             Commands::Entitlement { command } => handle_entitlement(command),
+            Commands::Doctor { fix, json } => handle_doctor(fix, json),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -1165,6 +1483,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 format,
             }),
             Commands::Entitlement { command } => handle_entitlement(command),
+            Commands::Doctor { fix, json } => handle_doctor(fix, json),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -4610,6 +4929,18 @@ mod tests {
             } => {
                 assert_eq!(key, "ai.backend");
                 assert_eq!(value, "legacy");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_doctor_command() {
+        let cli = Cli::parse_from(["ferrocrate", "doctor", "--fix", "--json"]);
+        match cli.command {
+            Commands::Doctor { fix, json } => {
+                assert!(fix);
+                assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
         }

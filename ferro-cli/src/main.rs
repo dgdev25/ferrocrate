@@ -3,15 +3,18 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
+#[cfg(target_os = "linux")]
 use ferro_compose::compose::{
     compose_down, compose_logs, compose_ps, compose_up, find_compose_file, ComposeProject,
 };
+#[cfg(target_os = "linux")]
 use ferro_compose::{
     Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
     Environment as ComposeEnvironment, Service as ComposeService,
 };
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
+#[cfg(target_os = "linux")]
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
@@ -22,6 +25,7 @@ use ferro_core::registry::{parse_image_reference, RegistryClient};
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
 use ferro_core::runtime::ContainerRuntime;
+#[cfg(target_os = "linux")]
 use ferro_core::volume_store::LocalVolumeStore;
 use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
 use ferro_mind::ai::audit::AuditLogger;
@@ -38,8 +42,12 @@ use ferro_mind::ai::training::{
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
+use std::collections::{BTreeMap, HashMap};
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
+use std::io::Read;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream};
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
@@ -3597,6 +3605,7 @@ fn handle_compose(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn build_compose_enabled_set(
     project: &ComposeProject,
     profiles: &[String],
@@ -3817,6 +3826,7 @@ fn build_compose_image(
     Ok(result.reference)
 }
 
+#[cfg(target_os = "linux")]
 fn compose_service_command(service: &ComposeService) -> Vec<String> {
     match service.command.as_ref() {
         Some(ComposeCommandSpec::List(list)) => list.clone(),
@@ -3827,6 +3837,7 @@ fn compose_service_command(service: &ComposeService) -> Vec<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn compose_service_env(
     project_dir: &Path,
     service: &ComposeService,
@@ -3864,6 +3875,7 @@ fn compose_service_env(
         .collect())
 }
 
+#[cfg(target_os = "linux")]
 fn compose_service_labels(service: &ComposeService) -> Vec<String> {
     match service.labels.as_ref() {
         Some(map) => map
@@ -3874,6 +3886,7 @@ fn compose_service_labels(service: &ComposeService) -> Vec<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn compose_service_ports(service: &ComposeService) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(ports) = service.ports.as_ref() {
@@ -3896,6 +3909,7 @@ fn compose_service_ports(service: &ComposeService) -> Vec<String> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn compose_service_mounts(
     volume_store: &LocalVolumeStore,
     service: &ComposeService,
@@ -4758,6 +4772,7 @@ fn split_path_query(path: &str) -> (String, HashMap<String, String>) {
     (base, query_map)
 }
 
+#[cfg(target_os = "linux")]
 fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
     let mut env = HashMap::new();
     let content = std::fs::read_to_string(path)

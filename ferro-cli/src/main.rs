@@ -21,10 +21,6 @@ use ferro_core::registry::{parse_image_reference, RegistryClient};
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
 use ferro_core::runtime::ContainerRuntime;
-#[cfg(target_os = "linux")]
-use ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression;
-#[cfg(target_os = "linux")]
-use ferro_core::ferrofile_build::build_from_ferrofile;
 use ferro_core::volume_store::LocalVolumeStore;
 use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
 use ferro_mind::ai::audit::AuditLogger;
@@ -630,7 +626,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         let image_store =
             LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
-        return match command {
+        match command {
         #[cfg(target_os = "linux")]
         Commands::Run {
             image,
@@ -848,7 +844,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             evidence,
         } => handle_ai_audit(&action, &summary, &evidence),
         Commands::Migrate { target } => handle_migrate(target),
-        };
+        }
     }
 
     // Non-Linux: only handle platform-agnostic commands
@@ -861,7 +857,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             });
         let image_store = LocalImageStore::open(image_store_path).map_err(|err| err.to_string())?;
 
-        return match command {
+        match command {
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image),
             Commands::ImagePrune => handle_image_prune(&image_store),
@@ -921,7 +917,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 evidence,
             } => handle_ai_audit(&action, &summary, &evidence),
             _ => Err("This command is not supported on this platform".to_string()),
-        };
+        }
     }
 }
 

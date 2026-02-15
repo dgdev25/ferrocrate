@@ -402,6 +402,8 @@ impl ContainerRuntime {
             apply_readonly_rootfs(&rootfs_dir)?;
         }
 
+        validate_port_mapping_conflicts(&self.store, port_mappings)?;
+
         let rootless = !nix::unistd::Uid::effective().is_root();
         let (netns_name, container_ip, container_ipv6) =
             setup_network(&container_id, port_mappings, network_mode, network_backend)?;
@@ -1521,13 +1523,13 @@ fn setup_network(
             if effective_backend == "nftables" {
                 let prerouting = build_nft_prerouting_cmd(&map, &container_ip)?;
                 let forward = build_nft_forward_cmd(&map, &container_ip)?;
-                run_cmd(&prerouting)?;
-                run_cmd(&forward)?;
+                run_cmd_allow_exists(&prerouting)?;
+                run_cmd_allow_exists(&forward)?;
             } else {
                 let prerouting = build_iptables_prerouting_cmd(&map, &container_ip)?;
                 let forward = build_iptables_forward_cmd(&map, &container_ip)?;
-                run_cmd(&prerouting)?;
-                run_cmd(&forward)?;
+                run_cmd_allow_exists(&prerouting)?;
+                run_cmd_allow_exists(&forward)?;
             }
         }
     }
@@ -1537,6 +1539,34 @@ fn setup_network(
     }
 
     Ok((Some(netns_name), Some(container_ip), container_ipv6))
+}
+
+fn validate_port_mapping_conflicts(
+    store: &LocalContainerStore,
+    requested: &[crate::container_store::PortMappingRecord],
+) -> Result<(), RuntimeError> {
+    if requested.is_empty() {
+        return Ok(());
+    }
+    let records = store.list()?;
+    for existing in records {
+        if existing.status != "running" {
+            continue;
+        }
+        for left in &existing.ports {
+            for right in requested {
+                if left.host_port == right.host_port
+                    && left.protocol.eq_ignore_ascii_case(&right.protocol)
+                {
+                    return Err(RuntimeError::Network(format!(
+                        "host port {} / {} already mapped by container {}",
+                        right.host_port, right.protocol, existing.id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
@@ -2677,7 +2707,7 @@ fn run_resource_monitor(
 mod tests {
     use super::ContainerRuntime;
     use crate::cgroups::{CpuMax, ResourceLimits};
-    use crate::container_store::RestartPolicy;
+    use crate::container_store::{now_unix, ContainerRecord, PortMappingRecord, RestartPolicy};
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
@@ -3206,6 +3236,53 @@ mod tests {
             std::env::remove_var("FERROCRATE_WG_IPV4_CIDR");
             std::env::remove_var("FERROCRATE_WG_IPV6_CIDR");
         }
+    }
+
+    #[test]
+    fn port_mapping_conflicts_are_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = crate::container_store::LocalContainerStore::open(temp.path()).expect("store");
+        let existing = ContainerRecord {
+            id: "c-existing".to_string(),
+            name: None,
+            pid: 1234,
+            image: "alpine:latest".to_string(),
+            command: vec!["sleep".to_string(), "1".to_string()],
+            workdir: None,
+            user: None,
+            env: Vec::new(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            capabilities: Vec::new(),
+            health: None,
+            health_status: "none".to_string(),
+            health_failures: 0,
+            health_checked_at_unix: None,
+            restart_policy: RestartPolicy::No,
+            last_exit_code: None,
+            created_at_unix: now_unix(),
+            stdout_path: "stdout.log".to_string(),
+            stderr_path: "stderr.log".to_string(),
+            status: "running".to_string(),
+            netns: Some("ferro-existing".to_string()),
+            network_name: Some("bridge".to_string()),
+            ip_address: Some("10.0.0.2".to_string()),
+            ipv6_address: None,
+            ports: vec![PortMappingRecord {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
+        };
+        store.put(&existing).expect("put existing");
+
+        let requested = vec![PortMappingRecord {
+            host_port: 8080,
+            container_port: 8080,
+            protocol: "tcp".to_string(),
+        }];
+        let err = super::validate_port_mapping_conflicts(&store, &requested).expect_err("conflict");
+        assert!(err.to_string().contains("already mapped"));
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

@@ -27,8 +27,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~NET-05 - Implement custom network/subnet execution (create/apply lifecycle)~~
 - [x] ~~NET-06 - Implement eBPF mode with explicit fallback semantics and visibility~~
 - [x] ~~NET-07 - Implement WireGuard overlay networking runtime path~~
-- [ ] NET-08 - Consolidate and harden real port-mapping execution paths (IN PROGRESS)
-- [ ] NET-09 - Complete and verify IPv6 allocation/wiring behavior
+- [x] ~~NET-08 - Consolidate and harden real port-mapping execution paths~~
+- [ ] NET-09 - Complete and verify IPv6 allocation/wiring behavior (IN PROGRESS)
 - [ ] NET-10 - Implement enforceable bandwidth limiting path
 
 ## B) Security Hardening (4)

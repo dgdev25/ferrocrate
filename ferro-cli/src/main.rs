@@ -507,6 +507,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
         return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
     }
+    if let Commands::AiAudit {
+        ref action,
+        ref summary,
+        ref evidence,
+    } = command
+    {
+        return handle_ai_audit(action, summary, evidence);
+    }
 
     let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
     let image_store =

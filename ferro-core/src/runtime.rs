@@ -1,30 +1,34 @@
+use crate::capabilities::{drop_all_capabilities, set_capabilities};
+use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
-    ContainerRecord, HealthConfig, LocalContainerStore, RestartPolicy, ContainerStoreError, now_unix,
-    PortMappingRecord,
+    now_unix, ContainerRecord, ContainerStoreError, HealthConfig, LocalContainerStore,
+    PortMappingRecord, RestartPolicy,
 };
-use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
-use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
     working_dir_from_config,
 };
-use crate::image_fetch::{resolve_layer_paths_with_store, resolve_config_path_with_store};
+use crate::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
 use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
 use crate::mac_profiles::generate_apparmor_profile;
+use crate::mounts::{
+    apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts, BindMount, MountError, TmpfsMount,
+};
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
-use crate::rootfs::construct_rootfs_with_dedup;
-use crate::mounts::{BindMount, TmpfsMount, MountError, apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts};
-use crate::process_lifecycle::{ProcessLifecycleError, kill_pid, stop_pid};
+use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
 use crate::registry::parse_image_reference;
+use crate::rootfs::construct_rootfs_with_dedup;
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use ferro_net::bridge;
-use ferro_net::ebpf::{EbpfProgram, build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd};
+use ferro_net::ebpf::{
+    build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, EbpfProgram,
+};
 use ferro_net::netns;
-use ferro_net::nftables::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule_cmd};
+use ferro_net::nftables::{build_nft_add_rule_cmd, build_nft_delete_rule_cmd, NftRule};
 use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
-use ferro_net::rootless::{RootlessNetConfig, build_slirp4netns_cmd};
+use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
 use ferro_net::veth;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -77,7 +81,12 @@ impl CreationRollback {
         self.container_dir = Some(dir);
     }
 
-    fn track_network(&mut self, netns_name: Option<String>, container_ip: Option<String>, ports: Vec<PortMappingRecord>) {
+    fn track_network(
+        &mut self,
+        netns_name: Option<String>,
+        container_ip: Option<String>,
+        ports: Vec<PortMappingRecord>,
+    ) {
         self.netns_name = netns_name;
         self.container_ip = container_ip;
         self.port_mappings = ports;
@@ -163,7 +172,10 @@ impl CreationRollback {
 impl Drop for CreationRollback {
     fn drop(&mut self) {
         if !self.committed {
-            log::warn!("[rollback] container {} creation failed, cleaning up resources", self.container_id);
+            log::warn!(
+                "[rollback] container {} creation failed, cleaning up resources",
+                self.container_id
+            );
             self.rollback();
         }
     }
@@ -314,10 +326,10 @@ impl ContainerRuntime {
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         ensure_kernel_min_version()?;
-        verify_image_signature(image)
-            .map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
+        verify_image_signature(image).map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
         let mut config_json = None;
-        if let Ok(Some(config_path)) = resolve_config_path_with_store(&self.runtime_dir, image, store)
+        if let Ok(Some(config_path)) =
+            resolve_config_path_with_store(&self.runtime_dir, image, store)
         {
             if let Ok(json) = fs::read_to_string(config_path) {
                 config_json = Some(json);
@@ -422,7 +434,8 @@ impl ContainerRuntime {
             netns_name.as_deref(),
             unshare_netns,
             seccomp_profile.as_ref(),
-        ).map_err(|e| {
+        )
+        .map_err(|e| {
             // Kill any partially spawned process on error
             rollback.rollback();
             e
@@ -477,7 +490,11 @@ impl ContainerRuntime {
             annotations: annotations.clone(),
             capabilities: capabilities.iter().map(|cap| cap.to_string()).collect(),
             health: health.clone(),
-            health_status: if health.is_some() { "starting".to_string() } else { "none".to_string() },
+            health_status: if health.is_some() {
+                "starting".to_string()
+            } else {
+                "none".to_string()
+            },
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: restart_policy.clone(),
@@ -487,6 +504,7 @@ impl ContainerRuntime {
             stderr_path: stderr_path.display().to_string(),
             status: "running".to_string(),
             netns: netns_name.clone(),
+            network_name: selected_network_name(network_mode),
             ip_address: container_ip.clone(),
             ipv6_address: container_ipv6.clone(),
             ports: port_mappings
@@ -562,7 +580,11 @@ impl ContainerRuntime {
         Ok(record)
     }
 
-    pub fn exec(&self, id: &str, cmd: &[String]) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+    pub fn exec(
+        &self,
+        id: &str,
+        cmd: &[String],
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let record = self
             .store
             .get(id)?
@@ -570,13 +592,7 @@ impl ContainerRuntime {
         let result = exec_in_container(record.pid, cmd)?;
         let _ = log_event(
             &self.runtime_dir,
-            make_event(
-                "exec",
-                Some(&record.id),
-                Some(&record.image),
-                None,
-                None,
-            ),
+            make_event("exec", Some(&record.id), Some(&record.image), None, None),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -667,7 +683,13 @@ impl ContainerRuntime {
         self.store.update_status(id, "running")?;
         let _ = log_event(
             &self.runtime_dir,
-            make_event("resume", Some(id), Some(&record.image), Some("running"), None),
+            make_event(
+                "resume",
+                Some(id),
+                Some(&record.image),
+                Some("running"),
+                None,
+            ),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -787,7 +809,13 @@ impl ContainerRuntime {
         self.store.put(&record)?;
         let _ = log_event(
             &self.runtime_dir,
-            make_event("restart", Some(id), Some(&record.image), Some("running"), None),
+            make_event(
+                "restart",
+                Some(id),
+                Some(&record.image),
+                Some("running"),
+                None,
+            ),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -824,7 +852,13 @@ impl ContainerRuntime {
             let cgroup_path = cgroup_root.join("ferrocrate").join(&id);
             let memory_limit = ferro_mind::ai::resource::read_cgroup_metrics(&cgroup_path)
                 .ok()
-                .and_then(|m| if m.memory_max > 0 { Some(m.memory_max) } else { None })
+                .and_then(|m| {
+                    if m.memory_max > 0 {
+                        Some(m.memory_max)
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(0);
             let cancel = Arc::new(AtomicBool::new(false));
             if let Ok(mut map) = self.resource_cancel.lock() {
@@ -877,7 +911,13 @@ impl ContainerRuntime {
         // Logging is best-effort - don't fail if logging fails
         let _ = log_event(
             &self.runtime_dir,
-            make_event("remove", Some(id), Some(&record.image), Some("removed"), None),
+            make_event(
+                "remove",
+                Some(id),
+                Some(&record.image),
+                Some("removed"),
+                None,
+            ),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -950,12 +990,8 @@ fn spawn_process_with_logs(
         unshare_netns,
         seccomp_profile,
     )?;
-    let (child_id, child, join_handles) = spawn_child_with_logs(
-        command,
-        stdout_path,
-        stderr_path,
-        append,
-    )?;
+    let (child_id, child, join_handles) =
+        spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -1010,7 +1046,11 @@ fn build_command(
         netns_cmd.arg("netns").arg("exec").arg(netns);
         if let Some(rootfs) = rootfs_dir {
             if nix::unistd::Uid::effective().is_root() {
-                netns_cmd.arg("chroot").arg(rootfs).arg(&cmd[0]).args(&cmd[1..]);
+                netns_cmd
+                    .arg("chroot")
+                    .arg(rootfs)
+                    .arg(&cmd[0])
+                    .args(&cmd[1..]);
             } else {
                 netns_cmd.arg(&cmd[0]).args(&cmd[1..]);
             }
@@ -1047,7 +1087,9 @@ fn build_command(
         let key = parts.next().unwrap_or("").trim();
         let value = parts.next().unwrap_or("").trim();
         if key.is_empty() {
-            return Err(RuntimeError::InvalidState("env var missing key".to_string()));
+            return Err(RuntimeError::InvalidState(
+                "env var missing key".to_string(),
+            ));
         }
         command.env(key, value);
     }
@@ -1083,17 +1125,20 @@ fn build_command(
         command.pre_exec(move || {
             if nix::unistd::Uid::effective().is_root() {
                 if caps.is_empty() {
-                    drop_all_capabilities()
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                    drop_all_capabilities().map_err(|err| {
+                        std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+                    })?;
                 } else {
-                    set_capabilities(&caps)
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                    set_capabilities(&caps).map_err(|err| {
+                        std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+                    })?;
                 }
             }
             // Apply seccomp profile AFTER capability drops (seccomp is last sandboxing step)
             if let Some(profile) = &seccomp {
-                apply_seccomp_profile(&profile)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                apply_seccomp_profile(&profile).map_err(|err| {
+                    std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+                })?;
             }
             Ok(())
         });
@@ -1108,7 +1153,10 @@ fn spawn_child_with_logs(
     stderr_path: &Path,
     append: bool,
 ) -> Result<(u32, Child, Vec<thread::JoinHandle<()>>), RuntimeError> {
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     let mut join_handles = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         let out_path = stdout_path.to_path_buf();
@@ -1150,10 +1198,7 @@ fn supervise_child(
         for handle in join_handles.drain(..) {
             let _ = handle.join();
         }
-        let exit_code = status
-            .ok()
-            .and_then(|s| s.code())
-            .unwrap_or(-1);
+        let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let current_status = match update_exit(&store, &container_id, exit_code) {
             Ok(status) => status,
             Err(_) => "exited".to_string(),
@@ -1234,7 +1279,10 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
     }
     let mut parts = trimmed.splitn(2, ':');
     let uid = parts.next()?.parse::<u32>().ok()?;
-    let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
+    let gid = parts
+        .next()
+        .and_then(|g| g.parse::<u32>().ok())
+        .unwrap_or(uid);
     Some((uid, gid))
 }
 
@@ -1250,11 +1298,18 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
         return Ok(());
     }
     // Use nix crate to get kernel version (no shell-out)
-    let utsname = nix::sys::utsname::uname().map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+    let utsname =
+        nix::sys::utsname::uname().map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
     let version = utsname.release().to_string_lossy();
     let mut parts = version.split(|c| c == '.' || c == '-');
-    let major = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-    let minor = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    let major = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
     if major < 5 || (major == 5 && minor < 10) {
         return Err(RuntimeError::Kernel(format!(
             "kernel {version} below required 5.10"
@@ -1289,15 +1344,16 @@ fn setup_network(
             }
             let netns_name = format!("ferro-{container_id}");
             run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
-            run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+            run_cmd(&ip_netns_exec(
+                &netns_name,
+                &["ip", "link", "set", "lo", "up"],
+            ))?;
             return Ok((Some(netns_name), None, None));
         }
         "bridge" => {}
         "wireguard" => {
             if !nix::unistd::Uid::effective().is_root() {
-                return Err(RuntimeError::Network(
-                    "wireguard requires root".to_string(),
-                ));
+                return Err(RuntimeError::Network("wireguard requires root".to_string()));
             }
             if !port_mappings.is_empty() {
                 return Err(RuntimeError::Network(
@@ -1306,7 +1362,10 @@ fn setup_network(
             }
             let netns_name = format!("ferro-{container_id}");
             run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
-            run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+            run_cmd(&ip_netns_exec(
+                &netns_name,
+                &["ip", "link", "set", "lo", "up"],
+            ))?;
             let (ipv4, ipv6) = setup_wireguard(&netns_name, container_id)?;
             return Ok((Some(netns_name), ipv4, ipv6));
         }
@@ -1386,14 +1445,19 @@ fn setup_network(
     run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name)?)?;
 
     let container_ip = allocate_container_ip(container_id, &bridge_config.gateway)?;
-    let container_ipv6 = if let Some((gateway, prefix)) =
-        bridge_config.ipv6_gateway.as_ref().zip(bridge_config.ipv6_prefix)
+    let container_ipv6 = if let Some((gateway, prefix)) = bridge_config
+        .ipv6_gateway
+        .as_ref()
+        .zip(bridge_config.ipv6_prefix)
     {
         Some(allocate_container_ipv6(container_id, gateway, prefix))
     } else {
         None
     };
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "link", "set", "lo", "up"],
+    ))?;
     run_cmd(&ip_netns_exec(
         &netns_name,
         &[
@@ -1419,7 +1483,10 @@ fn setup_network(
             ],
         ))?;
     }
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "link", "set", "eth0", "up"],
+    ))?;
     run_cmd(&ip_netns_exec(
         &netns_name,
         &[
@@ -1522,7 +1589,12 @@ fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
     };
     let cmd = match build_slirp4netns_cmd(pid, &config) {
         Ok(c) => c,
-        Err(e) => return Err(RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("slirp4netns config: {}", e)))),
+        Err(e) => {
+            return Err(RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("slirp4netns config: {}", e),
+            )))
+        }
     };
     if cmd.is_empty() {
         return Ok(());
@@ -1563,8 +1635,8 @@ fn execute_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<std::process::Output, RuntimeError> {
-    use std::process::{Child, Command, Stdio};
     use std::io::Read;
+    use std::process::{Child, Command, Stdio};
 
     let mut child = Command::new(binary)
         .args(args)
@@ -1574,8 +1646,7 @@ fn execute_with_timeout(
 
     let start = Instant::now();
     loop {
-        if let Some(status) = child.try_wait()?
-        {
+        if let Some(status) = child.try_wait()? {
             // Process completed - collect output
             let mut stdout = child.stdout.take().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::Other, "failed to capture stdout")
@@ -1633,7 +1704,11 @@ fn apply_apparmor_if_enabled(
     fs::write(&profile_path, profile)?;
 
     // SEC-05: Execute apparmor_parser with timeout to prevent blocking indefinitely
-    let output = execute_with_timeout("apparmor_parser", &["-r", &profile_path.to_string_lossy()], Duration::from_secs(10))?;
+    let output = execute_with_timeout(
+        "apparmor_parser",
+        &["-r", &profile_path.to_string_lossy()],
+        Duration::from_secs(10),
+    )?;
     if !output.status.success() {
         return Ok(cmd.to_vec());
     }
@@ -1732,32 +1807,48 @@ fn build_nft_prerouting_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    build_nft_add_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip))
-        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft prerouting: {}", e))))
+    build_nft_add_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip)).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("nft prerouting: {}", e),
+        ))
+    })
 }
 
 fn build_nft_forward_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    build_nft_add_rule_cmd(&build_nft_forward_rule(mapping, container_ip))
-        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft forward: {}", e))))
+    build_nft_add_rule_cmd(&build_nft_forward_rule(mapping, container_ip)).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("nft forward: {}", e),
+        ))
+    })
 }
 
 fn build_nft_prerouting_delete_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    build_nft_delete_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip))
-        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft prerouting delete: {}", e))))
+    build_nft_delete_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip)).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("nft prerouting delete: {}", e),
+        ))
+    })
 }
 
 fn build_nft_forward_delete_cmd(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    build_nft_delete_rule_cmd(&build_nft_forward_rule(mapping, container_ip))
-        .map_err(|e| RuntimeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("nft forward delete: {}", e))))
+    build_nft_delete_rule_cmd(&build_nft_forward_rule(mapping, container_ip)).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("nft forward delete: {}", e),
+        ))
+    })
 }
 
 fn build_nft_prerouting_rule(
@@ -1910,7 +2001,12 @@ fn replace_iptables_action(cmd: &mut Vec<String>, replacement: &str) {
 }
 
 fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
-    let mut out = vec!["ip".to_string(), "netns".to_string(), "exec".to_string(), netns_name.to_string()];
+    let mut out = vec![
+        "ip".to_string(),
+        "netns".to_string(),
+        "exec".to_string(),
+        netns_name.to_string(),
+    ];
     out.extend(args.iter().map(|val| (*val).to_string()));
     out
 }
@@ -1931,19 +2027,13 @@ fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
     // Log command execution at debug level (visible with RUST_LOG=debug)
     log::debug!("[exec] {}", cmd_str);
 
-    let output = Command::new(bin)
-        .args(rest)
-        .output()?;
+    let output = Command::new(bin).args(rest).output()?;
 
     if output.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Err(RuntimeError::Network(format!(
-        "{}: {}",
-        bin,
-        stderr.trim()
-    )))
+    Err(RuntimeError::Network(format!("{}: {}", bin, stderr.trim())))
 }
 
 /// Execute a command, allowing "already exists" errors (idempotent operations).
@@ -1964,11 +2054,7 @@ fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
     if stderr.contains("File exists") || stderr.contains("exists") {
         return Ok(());
     }
-    Err(RuntimeError::Network(format!(
-        "{}: {}",
-        bin,
-        stderr.trim()
-    )))
+    Err(RuntimeError::Network(format!("{}: {}", bin, stderr.trim())))
 }
 
 struct BridgeConfig {
@@ -1982,8 +2068,7 @@ struct BridgeConfig {
 }
 
 fn bridge_config() -> Result<BridgeConfig, RuntimeError> {
-    let name =
-        std::env::var("FERROCRATE_BRIDGE_NAME").unwrap_or_else(|_| "ferro0".to_string());
+    let name = std::env::var("FERROCRATE_BRIDGE_NAME").unwrap_or_else(|_| "ferro0".to_string());
     let cidr =
         std::env::var("FERROCRATE_BRIDGE_CIDR").unwrap_or_else(|_| "10.0.0.1/24".to_string());
     let ipv6_cidr = std::env::var("FERROCRATE_BRIDGE_IPV6_CIDR").ok();
@@ -2037,6 +2122,22 @@ fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, Ru
     Ok(Ipv4Addr::from(octets).to_string())
 }
 
+fn selected_network_name(network_mode: &str) -> Option<String> {
+    if let Ok(name) = std::env::var("FERROCRATE_NETWORK_NAME") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    match network_mode {
+        "bridge" => Some("bridge".to_string()),
+        "host" => Some("host".to_string()),
+        "none" => Some("none".to_string()),
+        "wireguard" => Some("wireguard".to_string()),
+        _ => None,
+    }
+}
+
 fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, _prefix: u8) -> String {
     let mut segments = gateway.segments();
     let hash = blake3::hash(container_id.as_bytes());
@@ -2056,7 +2157,8 @@ fn setup_wireguard(
     // TODO: WireGuard setup requires the `wg` command and proper configuration
     // This is a stub implementation - WireGuard networking is not yet fully implemented
     Err(RuntimeError::Network(
-        "wireguard networking is not yet implemented. Use --network-mode=bridge instead".to_string(),
+        "wireguard networking is not yet implemented. Use --network-mode=bridge instead"
+            .to_string(),
     ))
 }
 
@@ -2119,7 +2221,15 @@ fn setup_ebpf_monitor(iface: &str) -> Result<(), RuntimeError> {
 }
 
 fn short_id(value: &str, max: usize) -> String {
-    value.chars().filter(|c| c.is_ascii_alphanumeric()).rev().take(max).collect::<String>().chars().rev().collect()
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool {
@@ -2153,17 +2263,13 @@ fn update_pid_status(
     Ok(())
 }
 
-fn update_exit(
-    db: &sled::Db,
-    id: &str,
-    exit_code: i32,
-) -> Result<String, ContainerStoreError> {
+fn update_exit(db: &sled::Db, id: &str, exit_code: i32) -> Result<String, ContainerStoreError> {
     let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
     let Some(bytes) = tree.get(id.as_bytes())? else {
         return Ok("exited".to_string());
     };
-    let mut record = serde_json::from_slice::<ContainerRecord>(&bytes)
-        .map_err(ContainerStoreError::Decode)?;
+    let mut record =
+        serde_json::from_slice::<ContainerRecord>(&bytes).map_err(ContainerStoreError::Decode)?;
     record.last_exit_code = Some(exit_code);
     if record.status != "stopped" && record.status != "killed" {
         record.status = "exited".to_string();
@@ -2186,8 +2292,8 @@ fn update_health(
     let Some(bytes) = tree.get(id.as_bytes())? else {
         return Ok(false);
     };
-    let mut record = serde_json::from_slice::<ContainerRecord>(&bytes)
-        .map_err(ContainerStoreError::Decode)?;
+    let mut record =
+        serde_json::from_slice::<ContainerRecord>(&bytes).map_err(ContainerStoreError::Decode)?;
     record.health_status = status.to_string();
     record.health_failures = failures;
     record.health_checked_at_unix = Some(checked_at_unix);
@@ -2232,7 +2338,11 @@ fn run_health_checks(
         }
 
         let result = if config.timeout_secs > 0 {
-            exec_in_container_with_timeout(pid, &config.cmd, Duration::from_secs(config.timeout_secs))
+            exec_in_container_with_timeout(
+                pid,
+                &config.cmd,
+                Duration::from_secs(config.timeout_secs),
+            )
         } else {
             exec_in_container(pid, &config.cmd)
         };
@@ -2316,8 +2426,8 @@ fn run_resource_monitor(
     }
 
     // Initialize predictor with memory limit
-    let mut predictor = ferro_mind::ai::resource::ResourcePredictor::new(60)
-        .with_memory_limit(memory_limit);
+    let mut predictor =
+        ferro_mind::ai::resource::ResourcePredictor::new(60).with_memory_limit(memory_limit);
 
     let sample_interval = Duration::from_secs(30);
     let oom_horizon = Duration::from_secs(1200); // 20 minutes
@@ -2407,11 +2517,18 @@ fn run_resource_monitor(
                     let adjusted_limit = new_limit.min(ceiling);
                     match manager.adjust_memory_limit(&cgroup_path, adjusted_limit) {
                         Ok(()) => {
-                            eprintln!("[ai] container {}: increased memory limit to {}MB", id, adjusted_limit / 1024 / 1024);
+                            eprintln!(
+                                "[ai] container {}: increased memory limit to {}MB",
+                                id,
+                                adjusted_limit / 1024 / 1024
+                            );
                             predictor.set_memory_limit(adjusted_limit);
                         }
                         Err(e) => {
-                            eprintln!("[ai] container {}: failed to adjust memory limit: {}", id, e);
+                            eprintln!(
+                                "[ai] container {}: failed to adjust memory limit: {}",
+                                id, e
+                            );
                         }
                     }
                 }
@@ -2432,11 +2549,11 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::ContainerRuntime;
-    use crate::container_store::RestartPolicy;
-    use crate::image_store::LocalImageStore;
-    use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
-    use crate::image_tagging::canonicalize_reference;
     use crate::cgroups::{CpuMax, ResourceLimits};
+    use crate::container_store::RestartPolicy;
+    use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
+    use crate::image_store::LocalImageStore;
+    use crate::image_tagging::canonicalize_reference;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -2471,25 +2588,25 @@ mod tests {
                 &[
                     "sh".to_string(),
                     "-c".to_string(),
-                "echo hi && sleep 0.05".to_string(),
-            ],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            RestartPolicy::No,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                    "echo hi && sleep 0.05".to_string(),
+                ],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
@@ -2511,28 +2628,24 @@ mod tests {
         let record = runtime
             .run(
                 "alpine:latest",
-                &[
-                    "sh".to_string(),
-                    "-c".to_string(),
-                "echo hi".to_string(),
-            ],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            RestartPolicy::No,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                &["sh".to_string(), "-c".to_string(), "echo hi".to_string()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
@@ -2568,20 +2681,24 @@ mod tests {
                 None,
                 &[],
                 &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
         assert_eq!(
             record.command,
-            vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()]
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string()
+            ]
         );
     }
 
@@ -2662,23 +2779,23 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            RestartPolicy::No,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
@@ -2707,23 +2824,23 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            RestartPolicy::No,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
@@ -2754,13 +2871,18 @@ mod tests {
         std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
         std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
 
-        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root); }
+        unsafe {
+            std::env::set_var("FERROCRATE_CGROUP_ROOT", &root);
+        }
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
 
         let limits = ResourceLimits {
             memory_max: Some(1024),
-            cpu_max: Some(CpuMax { quota: 1000, period: 1000 }),
+            cpu_max: Some(CpuMax {
+                quota: 1000,
+                period: 1000,
+            }),
             pids_max: Some(8),
         };
 
@@ -2768,23 +2890,23 @@ mod tests {
             .run(
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.05".to_string()],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            RestartPolicy::No,
-            &[],
-            Some(&limits),
-            &[],
-            &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                Some(&limits),
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
@@ -2806,7 +2928,9 @@ mod tests {
             record.pid.to_string()
         );
 
-        unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
+        unsafe {
+            std::env::remove_var("FERROCRATE_CGROUP_ROOT");
+        }
     }
 
     #[test]
@@ -2824,7 +2948,9 @@ mod tests {
         std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
         std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
 
-        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root); }
+        unsafe {
+            std::env::set_var("FERROCRATE_CGROUP_ROOT", &root);
+        }
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         seed_image_store(temp.path(), "alpine:latest");
 
@@ -2833,22 +2959,22 @@ mod tests {
                 "alpine:latest",
                 &["sh".to_string(), "-c".to_string(), "sleep 0.1".to_string()],
                 &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            RestartPolicy::No,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "bridge",
-            "ebpf",
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                "ebpf",
             )
             .expect("run");
 
@@ -2860,7 +2986,9 @@ mod tests {
         let resumed = runtime.inspect(&record.id).expect("inspect");
         assert_eq!(resumed.status, "running");
 
-        unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
+        unsafe {
+            std::env::remove_var("FERROCRATE_CGROUP_ROOT");
+        }
     }
 
     #[test]
@@ -2906,9 +3034,8 @@ mod tests {
     fn write_image_config(runtime_dir: &std::path::Path, json: &str) {
         let config_root = runtime_dir.join("images").join("configs");
         std::fs::create_dir_all(&config_root).expect("configs dir");
-        let config_path = config_root.join(
-            "sha256_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
+        let config_path = config_root
+            .join("sha256_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         std::fs::write(config_path, json).expect("write config");
     }
 }

@@ -73,6 +73,8 @@ Evidence:
 - `docs/desktop-packaging-guide.md`
 - `scripts/package-macos-app.sh`
 - `scripts/package-windows-msi.ps1`
+- `scripts/sign-macos-artifacts.sh`
+- `scripts/sign-windows-artifacts.ps1`
 - `.github/workflows/desktop-packaging.yml`
 
 ## What Not To Do

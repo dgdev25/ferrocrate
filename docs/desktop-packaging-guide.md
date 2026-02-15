@@ -15,6 +15,14 @@ Outputs:
 - `dist/macos/FerroCrate Desktop.app`
 - `dist/macos/ferro-desktop.dmg`
 
+Optional signing/notarization:
+
+```bash
+export MACOS_SIGN_IDENTITY="Developer ID Application: Your Company (TEAMID)"
+export MACOS_NOTARY_PROFILE="ferro-notary-profile"
+scripts/sign-macos-artifacts.sh
+```
+
 ### Windows `.msi`
 Build release binary and package with WiX:
 
@@ -26,6 +34,14 @@ scripts/package-windows-msi.ps1 -BinaryPath .\\target\\release\\ferro-desktop.ex
 Outputs:
 - `dist/windows/ferro-desktop-0.1.0.msi`
 - `dist/windows/ferro-desktop.wxs`
+
+Optional signing:
+
+```powershell
+$env:WINDOWS_PFX_BASE64 = "<base64-pfx>"
+$env:WINDOWS_PFX_PASSWORD = "<pfx-password>"
+scripts/sign-windows-artifacts.ps1 -MsiPath .\dist\windows\ferro-desktop-0.1.0.msi
+```
 
 ## macOS Launch Agent
 Generate a launchd plist:
@@ -68,6 +84,33 @@ Behavior:
 - Refuses update while VM is running.
 - Creates backup next to current image as `*.qcow2.bak` unless `--no-backup` is set.
 - Copies new image into configured VM disk path and resets state to initialized.
+
+Channel-managed updates:
+
+```bash
+cargo run -p ferro-desktop -- vm --state-file ~/.ferrocrate/desktop-vm.json update-check --manifest-path ./releases/desktop-channels.json --channel stable --json
+cargo run -p ferro-desktop -- vm --state-file ~/.ferrocrate/desktop-vm.json apply-channel-update --manifest-path ./releases/desktop-channels.json --channel stable
+cargo run -p ferro-desktop -- vm --state-file ~/.ferrocrate/desktop-vm.json rollback-image
+```
+
+Manifest example:
+
+```json
+{
+  "channels": {
+    "stable": {
+      "version": "1.2.3",
+      "image_path": "/opt/ferrocrate/images/ferro-desktop-1.2.3.qcow2",
+      "sha256": "abc123..."
+    },
+    "canary": {
+      "version": "1.2.4-rc1",
+      "image_path": "/opt/ferrocrate/images/ferro-desktop-1.2.4-rc1.qcow2",
+      "sha256": "def456..."
+    }
+  }
+}
+```
 
 ## Hyper-V Backend (Windows Optional Path)
 Initialize VM state for Hyper-V backend:

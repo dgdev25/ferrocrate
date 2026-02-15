@@ -961,6 +961,14 @@ fn parse_vm_status(output: &str) -> Option<(bool, u16, Option<String>, Option<St
 }
 
 #[cfg(target_os = "macos")]
+fn vm_state_status(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn doctor_guest_ferrocrate_installed(
     ssh_port: u16,
     guest_user: Option<String>,
@@ -987,6 +995,54 @@ fn doctor_guest_ferrocrate_installed(
         .arg("-lc")
         .arg("command -v ferrocrate >/dev/null");
     run_command_status(command)
+}
+
+#[cfg(target_os = "macos")]
+fn doctor_guest_ssh_diagnose(
+    ssh_port: u16,
+    guest_user: Option<String>,
+    ssh_key: Option<String>,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("ssh");
+    command
+        .arg("-p")
+        .arg(ssh_port.to_string())
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=5");
+    if let Some(path) = ssh_key {
+        command.arg("-i").arg(path);
+    }
+    let user = guest_user.unwrap_or_else(|| "ferro".to_string());
+    command
+        .arg(format!("{user}@127.0.0.1"))
+        .arg("--")
+        .arg("true");
+    let output = command
+        .output()
+        .map_err(|err| format!("ssh launch failed: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("Connection refused") {
+        return Err("ssh connection refused (port forwarding down)".to_string());
+    }
+    if stderr.contains("Connection timed out") {
+        return Err("ssh connection timed out".to_string());
+    }
+    if stderr.contains("Permission denied") {
+        return Err("ssh permission denied (key/user mismatch)".to_string());
+    }
+    if stderr.contains("No such file") && stderr.contains("identity file") {
+        return Err("ssh key file missing or unreadable".to_string());
+    }
+    Err(format!("ssh failed: {stderr}"))
 }
 
 fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json: bool) -> Result<(), String> {
@@ -1063,12 +1119,16 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
         let mut vm_ssh_port = 2222u16;
         let mut vm_guest_user = None;
         let mut vm_ssh_key = None;
+        let mut vm_status_label: Option<String> = None;
         let status_output = std::process::Command::new(&desktop_bin)
             .args(["vm", "status", "--json"])
             .output();
         match status_output {
             Ok(output) if output.status.success() => {
                 let raw = String::from_utf8_lossy(&output.stdout);
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    vm_status_label = vm_state_status(&value);
+                }
                 if let Some((running, ssh_port, guest_user, ssh_key)) = parse_vm_status(&raw) {
                     vm_running = running;
                     vm_ssh_port = ssh_port;
@@ -1093,6 +1153,9 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
                 {
                     if output.status.success() {
                         let raw = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            vm_status_label = vm_state_status(&value);
+                        }
                         if let Some((running, ssh_port, guest_user, ssh_key)) =
                             parse_vm_status(&raw)
                         {
@@ -1113,7 +1176,8 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
                 "desktop VM is running".to_string()
             } else {
                 format!(
-                    "desktop VM is not running (state file: {})",
+                    "desktop VM is not running (state={}, state file: {})",
+                    vm_status_label.as_deref().unwrap_or("unknown"),
                     doctor_default_vm_state_file().display()
                 )
             },
@@ -1130,12 +1194,16 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
         });
 
         let mut ssh_ok = false;
+        let mut ssh_diag: Option<String> = None;
         if vm_running {
             ssh_ok = TcpStream::connect_timeout(
                 &std::net::SocketAddr::from(([127, 0, 0, 1], vm_ssh_port)),
                 Duration::from_secs(2),
             )
             .is_ok();
+            if !ssh_ok {
+                ssh_diag = doctor_guest_ssh_diagnose(vm_ssh_port, vm_guest_user.clone(), vm_ssh_key.clone()).err();
+            }
         }
         checks.push(DoctorCheck {
             id: "guest_ssh".to_string(),
@@ -1146,8 +1214,10 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
                 format!("guest SSH not reachable on 127.0.0.1:{vm_ssh_port}")
             },
             hint: (!ssh_ok).then_some(
-                "ensure VM networking/port-forward is healthy (`ferro-desktop vm status --json`)"
-                    .to_string(),
+                ssh_diag.clone().unwrap_or_else(|| {
+                    "ensure VM networking/port-forward is healthy (`ferro-desktop vm status --json`)"
+                        .to_string()
+                }),
             ),
             remediated: false,
             action: None,

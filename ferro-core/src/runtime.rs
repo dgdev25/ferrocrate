@@ -2169,16 +2169,124 @@ fn bandwidth_limit() -> Option<String> {
     std::env::var("FERROCRATE_BANDWIDTH_LIMIT").ok()
 }
 
+struct WireGuardConfig {
+    iface: String,
+    ipv4_gateway: String,
+    ipv4_prefix: u8,
+    ipv6_gateway: Option<Ipv6Addr>,
+    ipv6_prefix: Option<u8>,
+}
+
+fn wireguard_config() -> Result<WireGuardConfig, RuntimeError> {
+    let iface = std::env::var("FERROCRATE_WG_IFACE").unwrap_or_else(|_| "wg0".to_string());
+    if iface.trim().is_empty() {
+        return Err(RuntimeError::Network("invalid wireguard interface".to_string()));
+    }
+    let cidr = std::env::var("FERROCRATE_WG_IPV4_CIDR")
+        .unwrap_or_else(|_| "10.44.0.1/24".to_string());
+    let mut parts = cidr.split('/');
+    let ipv4_gateway = parts
+        .next()
+        .ok_or_else(|| RuntimeError::Network("invalid wireguard ipv4 cidr".to_string()))?
+        .to_string();
+    let ipv4_prefix = parts
+        .next()
+        .ok_or_else(|| RuntimeError::Network("invalid wireguard ipv4 cidr".to_string()))?
+        .parse::<u8>()
+        .map_err(|_| RuntimeError::Network("invalid wireguard ipv4 cidr".to_string()))?;
+    let ipv6_cidr = std::env::var("FERROCRATE_WG_IPV6_CIDR").ok();
+    let (ipv6_gateway, ipv6_prefix) = if let Some(cidr) = ipv6_cidr.as_deref() {
+        let mut parts = cidr.split('/');
+        let gateway = parts
+            .next()
+            .ok_or_else(|| RuntimeError::Network("invalid wireguard ipv6 cidr".to_string()))?;
+        let prefix = parts
+            .next()
+            .ok_or_else(|| RuntimeError::Network("invalid wireguard ipv6 cidr".to_string()))?
+            .parse::<u8>()
+            .map_err(|_| RuntimeError::Network("invalid wireguard ipv6 cidr".to_string()))?;
+        let gateway = gateway
+            .parse::<Ipv6Addr>()
+            .map_err(|_| RuntimeError::Network("invalid wireguard ipv6 gateway".to_string()))?;
+        (Some(gateway), Some(prefix))
+    } else {
+        (None, None)
+    };
+    Ok(WireGuardConfig {
+        iface,
+        ipv4_gateway,
+        ipv4_prefix,
+        ipv6_gateway,
+        ipv6_prefix,
+    })
+}
+
 fn setup_wireguard(
-    _netns_name: &str,
-    _container_id: &str,
+    netns_name: &str,
+    container_id: &str,
 ) -> Result<(Option<String>, Option<String>), RuntimeError> {
-    // TODO: WireGuard setup requires the `wg` command and proper configuration
-    // This is a stub implementation - WireGuard networking is not yet fully implemented
-    Err(RuntimeError::Network(
-        "wireguard networking is not yet implemented. Use --network-mode=bridge instead"
-            .to_string(),
-    ))
+    let cfg = wireguard_config()?;
+    let create_iface = ip_netns_exec(
+        netns_name,
+        &["ip", "link", "add", &cfg.iface, "type", "wireguard"],
+    );
+    match run_cmd(&create_iface) {
+        Ok(()) => {}
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("Operation not supported")
+                || msg.contains("Unknown device type")
+                || msg.contains("not supported")
+            {
+                return Err(RuntimeError::Network(
+                    "wireguard kernel support is unavailable on this host".to_string(),
+                ));
+            }
+            return Err(err);
+        }
+    }
+
+    let ipv4 = allocate_container_ip(container_id, &cfg.ipv4_gateway)?;
+    run_cmd(&ip_netns_exec(
+        netns_name,
+        &[
+            "ip",
+            "addr",
+            "add",
+            &format!("{ipv4}/{}", cfg.ipv4_prefix),
+            "dev",
+            &cfg.iface,
+        ],
+    ))?;
+
+    let ipv6 = if let Some((gateway, prefix)) = cfg.ipv6_gateway.as_ref().zip(cfg.ipv6_prefix) {
+        let assigned = allocate_container_ipv6(container_id, gateway, prefix);
+        run_cmd(&ip_netns_exec(
+            netns_name,
+            &[
+                "ip",
+                "-6",
+                "addr",
+                "add",
+                &format!("{assigned}/{prefix}"),
+                "dev",
+                &cfg.iface,
+            ],
+        ))?;
+        Some(assigned)
+    } else {
+        None
+    };
+
+    run_cmd(&ip_netns_exec(
+        netns_name,
+        &["ip", "link", "set", &cfg.iface, "up"],
+    ))?;
+    run_cmd(&ip_netns_exec(
+        netns_name,
+        &["ip", "route", "replace", "default", "dev", &cfg.iface],
+    ))?;
+    Ok((Some(ipv4), ipv6))
 }
 
 fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
@@ -3057,6 +3165,46 @@ mod tests {
         assert!(message.contains("ebpf backend requested"));
         unsafe {
             std::env::remove_var("FERROCRATE_EBPF_STRICT");
+        }
+    }
+
+    #[test]
+    fn wireguard_config_defaults() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_WG_IFACE");
+            std::env::remove_var("FERROCRATE_WG_IPV4_CIDR");
+            std::env::remove_var("FERROCRATE_WG_IPV6_CIDR");
+        }
+        let cfg = super::wireguard_config().expect("wireguard config");
+        assert_eq!(cfg.iface, "wg0");
+        assert_eq!(cfg.ipv4_gateway, "10.44.0.1");
+        assert_eq!(cfg.ipv4_prefix, 24);
+        assert!(cfg.ipv6_gateway.is_none());
+        assert!(cfg.ipv6_prefix.is_none());
+    }
+
+    #[test]
+    fn wireguard_config_respects_env() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::set_var("FERROCRATE_WG_IFACE", "wg-app");
+            std::env::set_var("FERROCRATE_WG_IPV4_CIDR", "10.55.0.1/16");
+            std::env::set_var("FERROCRATE_WG_IPV6_CIDR", "fd00:55::1/64");
+        }
+        let cfg = super::wireguard_config().expect("wireguard config");
+        assert_eq!(cfg.iface, "wg-app");
+        assert_eq!(cfg.ipv4_gateway, "10.55.0.1");
+        assert_eq!(cfg.ipv4_prefix, 16);
+        assert_eq!(
+            cfg.ipv6_gateway.map(|ip| ip.to_string()),
+            Some("fd00:55::1".to_string())
+        );
+        assert_eq!(cfg.ipv6_prefix, Some(64));
+        unsafe {
+            std::env::remove_var("FERROCRATE_WG_IFACE");
+            std::env::remove_var("FERROCRATE_WG_IPV4_CIDR");
+            std::env::remove_var("FERROCRATE_WG_IPV6_CIDR");
         }
     }
 

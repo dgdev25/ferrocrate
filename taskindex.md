@@ -26,8 +26,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~NET-04 - Implement deterministic container-to-container DNS behavior beyond `/etc/hosts` fallback~~
 - [x] ~~NET-05 - Implement custom network/subnet execution (create/apply lifecycle)~~
 - [x] ~~NET-06 - Implement eBPF mode with explicit fallback semantics and visibility~~
-- [ ] NET-07 - Implement WireGuard overlay networking runtime path (IN PROGRESS)
-- [ ] NET-08 - Consolidate and harden real port-mapping execution paths
+- [x] ~~NET-07 - Implement WireGuard overlay networking runtime path~~
+- [ ] NET-08 - Consolidate and harden real port-mapping execution paths (IN PROGRESS)
 - [ ] NET-09 - Complete and verify IPv6 allocation/wiring behavior
 - [ ] NET-10 - Implement enforceable bandwidth limiting path
 

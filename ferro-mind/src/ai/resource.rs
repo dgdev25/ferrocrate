@@ -471,7 +471,7 @@ impl ResourcePredictor {
     }
 }
 
-/// Cgroup v2 metrics read from /sys/fs/cgroup/<cgroup>/.
+/// Cgroup v2 metrics read from `/sys/fs/cgroup/<cgroup>/`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CgroupMetrics {
     /// Current memory usage (memory.current)

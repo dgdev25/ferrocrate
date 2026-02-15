@@ -176,6 +176,20 @@ pub struct RvfLineage {
     pub is_root: bool,
 }
 
+/// Verification report for RVF lineage + storage invariants.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RvfVerificationReport {
+    pub path: PathBuf,
+    pub verified: bool,
+    pub checks: Vec<String>,
+    pub file_id_hex: String,
+    pub parent_id_hex: String,
+    pub lineage_depth: u32,
+    pub is_root: bool,
+    pub parent_path: Option<PathBuf>,
+    pub parent_match: Option<bool>,
+}
+
 /// Marketplace metadata for a shared community model.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommunityModel {
@@ -845,6 +859,98 @@ pub fn handle_rvf_lineage_command(path: &Path) -> Result<RvfLineage, TrainingErr
 }
 
 #[cfg(feature = "rvf-persistence")]
+pub fn handle_rvf_verify_command(
+    path: &Path,
+    parent_path: Option<&Path>,
+) -> Result<RvfVerificationReport, TrainingError> {
+    let store = RvfStore::open_readonly(path)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    let status = store.status();
+    let file_id = store.file_id();
+    let parent_id = store.parent_id();
+    let lineage_depth = store.lineage_depth();
+
+    let file_id_hex = bytes_to_hex(file_id);
+    let parent_id_hex = bytes_to_hex(parent_id);
+    let is_root = parent_id.iter().all(|byte| *byte == 0);
+
+    let mut verified = true;
+    let mut checks = Vec::new();
+
+    if file_id.iter().all(|byte| *byte == 0) {
+        verified = false;
+        checks.push("fail:file_id_non_zero".to_string());
+    } else {
+        checks.push("ok:file_id_non_zero".to_string());
+    }
+
+    if is_root {
+        if lineage_depth != 0 {
+            verified = false;
+            checks.push("fail:root_depth_zero".to_string());
+        } else {
+            checks.push("ok:root_depth_zero".to_string());
+        }
+    } else {
+        if lineage_depth == 0 {
+            verified = false;
+            checks.push("fail:non_root_depth_positive".to_string());
+        } else {
+            checks.push("ok:non_root_depth_positive".to_string());
+        }
+        if parent_id.iter().all(|byte| *byte == 0) {
+            verified = false;
+            checks.push("fail:non_root_parent_non_zero".to_string());
+        } else {
+            checks.push("ok:non_root_parent_non_zero".to_string());
+        }
+    }
+
+    if !(0.0..=1.0).contains(&status.dead_space_ratio) {
+        verified = false;
+        checks.push("fail:dead_space_ratio_range".to_string());
+    } else {
+        checks.push("ok:dead_space_ratio_range".to_string());
+    }
+
+    let mut parent_match = None;
+    let parent_path_out = parent_path.map(|p| p.to_path_buf());
+    if let Some(parent_path) = parent_path {
+        let parent_store = RvfStore::open_readonly(parent_path)
+            .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+        let parent_file_id = parent_store.file_id();
+        let ids_match = parent_file_id == parent_id;
+        parent_match = Some(ids_match);
+        if !ids_match {
+            verified = false;
+            checks.push("fail:parent_file_id_matches".to_string());
+        } else {
+            checks.push("ok:parent_file_id_matches".to_string());
+        }
+
+        let expected_depth = parent_store.lineage_depth().saturating_add(1);
+        if lineage_depth != expected_depth {
+            verified = false;
+            checks.push("fail:lineage_depth_parent_plus_one".to_string());
+        } else {
+            checks.push("ok:lineage_depth_parent_plus_one".to_string());
+        }
+    }
+
+    Ok(RvfVerificationReport {
+        path: path.to_path_buf(),
+        verified,
+        checks,
+        file_id_hex,
+        parent_id_hex,
+        lineage_depth,
+        is_root,
+        parent_path: parent_path_out,
+        parent_match,
+    })
+}
+
+#[cfg(feature = "rvf-persistence")]
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -954,6 +1060,16 @@ pub fn handle_rvf_branch_command(_source: &Path, _target: &Path) -> Result<PathB
 
 #[cfg(not(feature = "rvf-persistence"))]
 pub fn handle_rvf_lineage_command(_path: &Path) -> Result<RvfLineage, TrainingError> {
+    Err(TrainingError::TrainingFailed(
+        "rvf-persistence feature is not enabled".to_string(),
+    ))
+}
+
+#[cfg(not(feature = "rvf-persistence"))]
+pub fn handle_rvf_verify_command(
+    _path: &Path,
+    _parent_path: Option<&Path>,
+) -> Result<RvfVerificationReport, TrainingError> {
     Err(TrainingError::TrainingFailed(
         "rvf-persistence feature is not enabled".to_string(),
     ))
@@ -1186,5 +1302,34 @@ mod tests {
         let downloaded = temp.path().join("downloaded.rvf");
         handle_community_download_command("demo", &downloaded, &market).unwrap();
         assert!(downloaded.exists());
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn rvf_verify_accepts_parent_chain() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let parent_path = temp.path().join("parent.rvf");
+        let child_path = temp.path().join("child.rvf");
+
+        {
+            let mut store = RvfStore::create(
+                &parent_path,
+                RvfOptions {
+                    dimension: 3,
+                    metric: RvfDistanceMetric::Cosine,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let vectors: Vec<&[f32]> = vec![&[1.0, 0.0, 0.0]];
+            let ids: Vec<u64> = vec![1];
+            store.ingest_batch(&vectors, &ids, None).unwrap();
+            store.close().unwrap();
+        }
+
+        handle_rvf_branch_command(&parent_path, &child_path).unwrap();
+        let report = handle_rvf_verify_command(&child_path, Some(&parent_path)).unwrap();
+        assert!(report.verified);
+        assert_eq!(report.parent_match, Some(true));
     }
 }

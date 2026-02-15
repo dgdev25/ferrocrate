@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **41**
-- Partial tasks: **28**
+- Total remaining tasks: **40**
+- Partial tasks: **27**
 - Rework-needed tasks: **13**
 
 ---
@@ -51,7 +51,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 ## D) AI Stack Completion (10)
 
 - [x] ~~AI-01 - Replace no-op WASM inference path with real inference execution~~
-- [ ] AI-02 - Implement predictive resource allocation using non-trivial learned model
+- [x] ~~AI-02 - Implement predictive resource allocation using non-trivial learned model~~
 - [ ] AI-03 - Implement adaptive/intelligent restart decision engine
 - [ ] AI-04 - Implement functional cost-tiered AI routing with quality/cost controls
 - [ ] AI-05 - Wire claude-flow integration from scaffolding to active path

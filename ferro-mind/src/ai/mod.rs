@@ -1,4 +1,5 @@
 pub mod anomaly;
+pub mod agents;
 pub mod audit;
 pub mod config;
 pub mod explain;

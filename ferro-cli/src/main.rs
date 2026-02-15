@@ -17,6 +17,7 @@ use ferro_core::registry::{parse_image_reference, RegistryClient};
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 use ferro_core::runtime::ContainerRuntime;
 use ferro_core::volume_store::LocalVolumeStore;
+use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
@@ -365,6 +366,16 @@ pub enum NetworkCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum AiCommands {
+    Orchestrate {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(long, default_value_t = 15)]
+        timeout_secs: u64,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Train {
         #[arg(long = "model-type")]
         model_type: String,
@@ -709,6 +720,39 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
     let configured_backend = configured_ai_backend();
     let _backend_guard = ScopedEnv::set("FERROCRATE_AI_BACKEND", configured_backend.as_deref());
     match command {
+        AiCommands::Orchestrate {
+            task,
+            context,
+            timeout_secs,
+            format,
+        } => {
+            let response = orchestrate_task(
+                &OrchestrateRequest {
+                    task: task.clone(),
+                    context: context.clone(),
+                },
+                Some(Duration::from_secs(timeout_secs)),
+            )
+            .map_err(|err| format!("ai orchestrate: {err}"))?;
+            if format == "json" {
+                let payload = serde_json::json!({
+                    "task": task,
+                    "context": context,
+                    "raw_response": response.raw_response,
+                    "result": response.parsed_result,
+                });
+                let text = serde_json::to_string_pretty(&payload)
+                    .map_err(|err| format!("ai orchestrate: {err}"))?;
+                println!("{text}");
+                return Ok(());
+            }
+            if let Some(result) = response.parsed_result {
+                println!("ai orchestrate: {}", result);
+            } else {
+                println!("ai orchestrate: {}", response.raw_response);
+            }
+            Ok(())
+        }
         AiCommands::Train {
             model_type,
             data_dir,

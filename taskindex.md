@@ -33,8 +33,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## B) Security Hardening (4)
 
-- [ ] SEC-02 - Enforce seccomp profiles at runtime (not parse-only) (IN PROGRESS)
-- [ ] SEC-08 - Implement runtime eBPF security monitoring execution path
+- [x] ~~SEC-02 - Enforce seccomp profiles at runtime (not parse-only)~~
+- [ ] SEC-08 - Implement runtime eBPF security monitoring execution path (IN PROGRESS)
 - [ ] SEC-09 - Complete encrypted container communication behavior
 - [ ] SEC-03 - Rework AppArmor/SELinux integration to production-ready policy enforcement
 

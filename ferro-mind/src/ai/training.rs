@@ -266,11 +266,18 @@ pub struct RestartSample {
     pub container_id: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct OnlineLearningState {
+    sample_counts: HashMap<String, usize>,
+}
+
 /// Model training pipeline
 pub struct TrainingPipeline {
     config: TrainingConfig,
     versions: HashMap<ModelType, VecDeque<ModelVersion>>,
     online_running: Arc<AtomicBool>,
+    online_sample_cursor: HashMap<ModelType, usize>,
+    online_retrain_delta: usize,
 }
 
 impl TrainingPipeline {
@@ -280,8 +287,12 @@ impl TrainingPipeline {
             config,
             versions: HashMap::new(),
             online_running: Arc::new(AtomicBool::new(false)),
+            online_sample_cursor: HashMap::new(),
+            online_retrain_delta: 1,
         };
+        pipeline.online_retrain_delta = (pipeline.config.min_samples / 2).max(1);
         pipeline.load_version_history()?;
+        pipeline.load_online_state()?;
         Ok(pipeline)
     }
 
@@ -333,6 +344,56 @@ impl TrainingPipeline {
             serde_json::to_writer_pretty(writer, versions)?;
         }
         Ok(())
+    }
+
+    fn online_state_path(&self) -> PathBuf {
+        self.config.models_dir.join("online-learning-state.json")
+    }
+
+    fn load_online_state(&mut self) -> Result<(), TrainingError> {
+        let path = self.online_state_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let state: OnlineLearningState = serde_json::from_reader(reader)?;
+        for (model, count) in state.sample_counts {
+            if let Ok(model_type) = model.parse::<ModelType>() {
+                self.online_sample_cursor.insert(model_type, count);
+            }
+        }
+        Ok(())
+    }
+
+    fn save_online_state(&self) -> Result<(), TrainingError> {
+        let path = self.online_state_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut sample_counts = HashMap::new();
+        for (model_type, count) in &self.online_sample_cursor {
+            sample_counts.insert(model_type.to_string(), *count);
+        }
+        let state = OnlineLearningState { sample_counts };
+        let file = File::create(path)?;
+        serde_json::to_writer_pretty(BufWriter::new(file), &state)?;
+        Ok(())
+    }
+
+    fn sample_count_for_model(&self, model_type: ModelType) -> Result<usize, TrainingError> {
+        let data_dir = self.config.data_dir.join(model_type.to_string());
+        if !data_dir.exists() {
+            return Ok(0);
+        }
+        let mut total = 0usize;
+        for entry in fs::read_dir(data_dir)? {
+            let path = entry?.path();
+            if path.extension().map_or(false, |e| e == "json") {
+                total += 1;
+            }
+        }
+        Ok(total)
     }
 
     /// Train a model from data directory
@@ -539,19 +600,13 @@ impl TrainingPipeline {
     }
 
     /// Start online learning background process
-    pub fn start_online_learning(&self) -> Result<(), TrainingError> {
+    pub fn start_online_learning(&mut self) -> Result<(), TrainingError> {
         if !self.config.online_learning {
             return Ok(());
         }
 
         self.online_running.store(true, Ordering::SeqCst);
-
-        // In production, this would spawn a background thread that:
-        // 1. Monitors runtime data
-        // 2. Accumulates new samples
-        // 3. Periodically triggers incremental training via ruvector-sona's LoRA adapters
-        // 4. Applies EWC++ to prevent forgetting
-
+        let _ = self.run_online_learning_cycle()?;
         Ok(())
     }
 
@@ -565,9 +620,49 @@ impl TrainingPipeline {
         self.online_running.load(Ordering::SeqCst)
     }
 
+    /// Run one online learning cycle and retrain models with enough new data.
+    pub fn run_online_learning_cycle(&mut self) -> Result<Vec<TrainingResult>, TrainingError> {
+        if !self.config.online_learning || !self.is_online_learning() {
+            return Ok(Vec::new());
+        }
+        let mut trained = Vec::new();
+        for model_type in [
+            ModelType::ResourcePredictor,
+            ModelType::AnomalyDetector,
+            ModelType::RestartPolicy,
+        ] {
+            let current_samples = self.sample_count_for_model(model_type)?;
+            let seen_samples = self
+                .online_sample_cursor
+                .get(&model_type)
+                .copied()
+                .unwrap_or(0);
+
+            if current_samples < seen_samples {
+                self.online_sample_cursor.insert(model_type, current_samples);
+                continue;
+            }
+            let new_samples = current_samples.saturating_sub(seen_samples);
+            if current_samples >= self.config.min_samples
+                && new_samples >= self.online_retrain_delta
+            {
+                match self.train(model_type) {
+                    Ok(result) => {
+                        trained.push(result);
+                        self.online_sample_cursor.insert(model_type, current_samples);
+                    }
+                    Err(TrainingError::InsufficientData(_, _)) | Err(TrainingError::AiDisabled) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        self.save_online_state()?;
+        Ok(trained)
+    }
+
     /// Record a training sample for later use
     pub fn record_sample(
-        &self,
+        &mut self,
         model_type: ModelType,
         sample: &[u8],
     ) -> Result<(), TrainingError> {
@@ -579,6 +674,9 @@ impl TrainingPipeline {
         let path = data_dir.join(filename);
 
         fs::write(&path, sample)?;
+        if self.is_online_learning() && self.config.online_learning {
+            let _ = self.run_online_learning_cycle()?;
+        }
 
         Ok(())
     }
@@ -1253,12 +1351,50 @@ mod tests {
 
     #[test]
     fn online_learning_state() {
-        let (_temp, config) = setup_test_env();
+        let (_temp, mut config) = setup_test_env();
+        config.online_learning = true;
 
-        let pipeline = TrainingPipeline::new(config).unwrap();
+        let mut pipeline = TrainingPipeline::new(config).unwrap();
         assert!(!pipeline.is_online_learning());
+        pipeline.start_online_learning().unwrap();
+        assert!(pipeline.is_online_learning());
+        pipeline.stop_online_learning();
+        assert!(!pipeline.is_online_learning());
+    }
 
-        // Note: online learning requires config.online_learning = true
+    #[test]
+    fn online_learning_trains_on_new_samples() {
+        let (_temp, mut config) = setup_test_env();
+        config.online_learning = true;
+        config.min_samples = 3;
+
+        let previous_ai = std::env::var("FERROCRATE_AI").ok();
+        unsafe { std::env::set_var("FERROCRATE_AI", "1"); }
+        let mut pipeline = TrainingPipeline::new(config).unwrap();
+        pipeline.start_online_learning().unwrap();
+
+        for i in 0..4 {
+            let sample = serde_json::json!({
+                "sample": i,
+                "cpu": 10 + i,
+                "memory": 1024 + i * 16
+            });
+            pipeline
+                .record_sample(
+                    ModelType::ResourcePredictor,
+                    sample.to_string().as_bytes(),
+                )
+                .unwrap();
+        }
+
+        let versions = pipeline.list_versions(ModelType::ResourcePredictor);
+        assert!(!versions.is_empty());
+        assert!(versions.iter().any(|version| version.active));
+
+        match previous_ai {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value); },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI"); },
+        }
     }
 
     #[cfg(feature = "rvf-persistence")]

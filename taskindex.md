@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **37**
-- Partial tasks: **24**
+- Total remaining tasks: **36**
+- Partial tasks: **23**
 - Rework-needed tasks: **13**
 
 ---
@@ -58,7 +58,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [ ] AI-06 - Implement multi-variate anomaly detection beyond static z-score
 - [ ] AI-08 - Complete natural-language management path at scale (non-bruteforce behavior)
 - [ ] AI-09 - Implement real self-learning loop via vector/neural optimization path
-- [ ] AI-11 - Populate explainability artifacts with real decision evidence
+- [x] ~~AI-11 - Populate explainability artifacts with real decision evidence~~
 - [ ] AI-12 - Implement real GPU/VRAM-aware scheduling (device discovery + placement)
 
 ## E) Performance + Reliability (13)

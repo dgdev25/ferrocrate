@@ -423,10 +423,17 @@ impl ContainerAnomalyState {
             sample.network_normalized,
         ];
         let metric_names = ["cpu", "memory", "io", "network"];
+        let mut strongest_metric_idx = 0usize;
+        let mut strongest_z_ratio = 0.0f32;
 
         // Check z-score for each metric
         for (i, &value) in values.iter().enumerate() {
             let score = zscore(value, self.baseline_means[i], self.baseline_stddevs[i], self.zscore_threshold);
+            let z_ratio = score.score.abs() / self.zscore_threshold.max(0.001);
+            if z_ratio > strongest_z_ratio {
+                strongest_z_ratio = z_ratio;
+                strongest_metric_idx = i;
+            }
             if score.is_anomalous() {
                 return Some(AnomalyEvent {
                     container_id: self.container_id.clone(),
@@ -450,6 +457,21 @@ impl ContainerAnomalyState {
         ];
         let neural_score = self.neural_detector.detect(&features);
         self.last_score = Some(neural_score);
+        let neural_ratio = neural_score.score / neural_score.threshold.max(0.001);
+        let hybrid_ratio = (strongest_z_ratio + neural_ratio) / 2.0;
+
+        if hybrid_ratio > 1.0 {
+            return Some(AnomalyEvent {
+                container_id: self.container_id.clone(),
+                metric: format!("hybrid({}+multi-variate)", metric_names[strongest_metric_idx]),
+                current_value: hybrid_ratio,
+                baseline_mean: self.baseline_means[strongest_metric_idx],
+                baseline_stddev: self.baseline_stddevs[strongest_metric_idx],
+                zscore: strongest_z_ratio,
+                detection_method: DetectionMethod::Hybrid,
+                confidence: (0.65 + (hybrid_ratio / 10.0)).min(0.95),
+            });
+        }
 
         if neural_score.is_anomalous() {
             return Some(AnomalyEvent {
@@ -483,6 +505,7 @@ impl ContainerAnomalyState {
 pub enum DetectionMethod {
     Zscore,
     NeuralNetwork,
+    Hybrid,
 }
 
 /// Anomaly event for logging and alerts
@@ -644,5 +667,22 @@ mod tests {
         assert!(log.contains("cpu"));
         assert!(log.contains("95"));
         assert!(log.contains("Zscore"));
+    }
+
+    #[test]
+    fn anomaly_event_formatting_supports_hybrid_method() {
+        let event = AnomalyEvent {
+            container_id: "abc123".to_string(),
+            metric: "hybrid(cpu+multi-variate)".to_string(),
+            current_value: 1.2,
+            baseline_mean: 0.4,
+            baseline_stddev: 0.1,
+            zscore: 3.5,
+            detection_method: DetectionMethod::Hybrid,
+            confidence: 0.9,
+        };
+        let log = event.to_log_string();
+        assert!(log.contains("Hybrid"));
+        assert!(log.contains("hybrid(cpu+multi-variate)"));
     }
 }

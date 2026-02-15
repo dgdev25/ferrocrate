@@ -14,8 +14,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 ## Snapshot
 
-- Total remaining tasks: **35**
-- Partial tasks: **22**
+- Total remaining tasks: **34**
+- Partial tasks: **21**
 - Rework-needed tasks: **13**
 
 ---
@@ -55,7 +55,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~AI-03 - Implement adaptive/intelligent restart decision engine~~
 - [x] ~~AI-04 - Implement functional cost-tiered AI routing with quality/cost controls~~
 - [x] ~~AI-05 - Wire claude-flow integration from scaffolding to active path~~
-- [ ] AI-06 - Implement multi-variate anomaly detection beyond static z-score
+- [x] ~~AI-06 - Implement multi-variate anomaly detection beyond static z-score~~
 - [ ] AI-08 - Complete natural-language management path at scale (non-bruteforce behavior)
 - [ ] AI-09 - Implement real self-learning loop via vector/neural optimization path
 - [x] ~~AI-11 - Populate explainability artifacts with real decision evidence~~

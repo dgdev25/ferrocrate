@@ -12,6 +12,7 @@ service ImageService {
   rpc ImageStatus(ImageStatusRequest) returns (ImageStatusResponse);
   rpc PullImage(PullImageRequest) returns (PullImageResponse);
   rpc RemoveImage(RemoveImageRequest) returns (RemoveImageResponse);
+  rpc ImageFsInfo(ImageFsInfoRequest) returns (ImageFsInfoResponse);
 }
 
 message VersionRequest {
@@ -91,3 +92,17 @@ message RemoveImageRequest {
 }
 
 message RemoveImageResponse {}
+
+message ImageFsInfoRequest {}
+
+message FilesystemUsage {
+  uint64 timestamp = 1;
+  string fs_id = 2;
+  string mountpoint = 3;
+  uint64 used_bytes = 4;
+  uint64 inodes_used = 5;
+}
+
+message ImageFsInfoResponse {
+  repeated FilesystemUsage image_filesystems = 1;
+}

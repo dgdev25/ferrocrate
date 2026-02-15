@@ -491,11 +491,77 @@ pub enum ConfigCommands {
 }
 
 fn main() {
+    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    match maybe_windows_desktop_forward(&raw_args) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    }
     let cli = Cli::parse();
     if let Err(err) = dispatch(cli.command) {
         eprintln!("error: {err}");
         process::exit(1);
     }
+}
+
+#[cfg(any(test, windows))]
+fn desktop_forward_enabled() -> bool {
+    std::env::var("FERROCRATE_DESKTOP_FORWARD")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn maybe_windows_desktop_forward(raw_args: &[String]) -> Result<bool, String> {
+    if !desktop_forward_enabled() {
+        return Ok(false);
+    }
+    if raw_args.is_empty() {
+        return Ok(false);
+    }
+    // Avoid recursive loops if invoking ferro-desktop subcommands through ferrocrate.
+    if raw_args[0] == "desktop" {
+        return Ok(false);
+    }
+
+    let addr = std::env::var("FERROCRATE_DESKTOP_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:4288".to_string());
+    let wsl_distro = std::env::var("FERROCRATE_DESKTOP_WSL_DISTRO").ok();
+    let use_wsl = std::env::var("FERROCRATE_DESKTOP_USE_WSL")
+        .map(|value| !(value == "0" || value.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
+
+    let mut command = std::process::Command::new("ferro-desktop");
+    command.arg("exec").arg("--addr").arg(addr);
+    if use_wsl {
+        command.arg("--wsl");
+    }
+    if let Some(distro) = wsl_distro {
+        if !distro.trim().is_empty() {
+            command.arg("--wsl-distro").arg(distro);
+        }
+    }
+    command.arg("--").arg("ferrocrate");
+    for arg in raw_args {
+        command.arg(arg);
+    }
+
+    let status = command
+        .status()
+        .map_err(|err| format!("desktop forward: failed to launch ferro-desktop: {err}"))?;
+    let code = status.code().unwrap_or(1);
+    if code != 0 {
+        return Err(format!("desktop forward: remote exit status {code}"));
+    }
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn maybe_windows_desktop_forward(_raw_args: &[String]) -> Result<bool, String> {
+    Ok(false)
 }
 
 fn dispatch(command: Commands) -> Result<(), String> {
@@ -3810,7 +3876,8 @@ mod tests {
         handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
         handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_http_request, validate_network_backend,
+        parse_restart_policy, parse_tmpfs_mounts, read_http_request, desktop_forward_enabled,
+        validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         NetworkCommands, VolumeCommands,
     };
@@ -4627,6 +4694,29 @@ mod tests {
         validate_network_mode("encrypted").expect("ok");
         let err = validate_network_mode("bogus").expect_err("invalid mode");
         assert!(err.contains("network"));
+    }
+
+    #[test]
+    fn desktop_forward_env_defaults_disabled() {
+        unsafe {
+            std::env::remove_var("FERROCRATE_DESKTOP_FORWARD");
+        }
+        assert!(!desktop_forward_enabled());
+    }
+
+    #[test]
+    fn desktop_forward_env_enables_true_values() {
+        unsafe {
+            std::env::set_var("FERROCRATE_DESKTOP_FORWARD", "1");
+        }
+        assert!(desktop_forward_enabled());
+        unsafe {
+            std::env::set_var("FERROCRATE_DESKTOP_FORWARD", "true");
+        }
+        assert!(desktop_forward_enabled());
+        unsafe {
+            std::env::remove_var("FERROCRATE_DESKTOP_FORWARD");
+        }
     }
 
     struct TestRuntimeDir {

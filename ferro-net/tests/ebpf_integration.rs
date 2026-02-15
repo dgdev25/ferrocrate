@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_net::ebpf::{EbpfProgram, build_bpftool_load_cmd, build_xdp_attach_cmd};
 use ferro_net::netns::build_ip_netns_add_cmd;
 use ferro_net::veth::{VethConfig, VethPair, build_ip_link_add_veth_cmd};

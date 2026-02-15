@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_net::iptables::{IptablesRule, build_iptables_cmd};
 
 #[test]

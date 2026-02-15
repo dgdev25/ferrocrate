@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_net::ebpf::{EbpfProgram, build_bpftool_load_cmd};
 
 #[test]

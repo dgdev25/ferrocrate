@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_net::bridge::build_ip_link_add_bridge_cmd;
 use ferro_net::dns::{DnsConfig, render_resolv_conf};
 use ferro_net::netns::build_ip_netns_add_cmd;

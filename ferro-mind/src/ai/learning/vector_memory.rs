@@ -24,6 +24,8 @@ pub struct VectorMemory {
     default_dimensions: usize,
     #[cfg(feature = "rvf-persistence")]
     rvf: Option<RvfStore>,
+    #[cfg(feature = "rvf-persistence")]
+    entry_index: std::collections::HashMap<u64, usize>,
 }
 
 impl Default for VectorMemory {
@@ -34,6 +36,8 @@ impl Default for VectorMemory {
             default_dimensions: 384,  // Default embedding dimension
             #[cfg(feature = "rvf-persistence")]
             rvf: None,
+            #[cfg(feature = "rvf-persistence")]
+            entry_index: std::collections::HashMap::new(),
         }
     }
 }
@@ -47,6 +51,8 @@ impl VectorMemory {
             default_dimensions: dimensions,
             #[cfg(feature = "rvf-persistence")]
             rvf: None,
+            #[cfg(feature = "rvf-persistence")]
+            entry_index: std::collections::HashMap::new(),
         }
     }
 
@@ -73,6 +79,7 @@ impl VectorMemory {
             entries: Vec::new(),
             default_dimensions: dimensions,
             rvf: Some(rvf),
+            entry_index: std::collections::HashMap::new(),
         })
     }
 
@@ -96,12 +103,14 @@ impl VectorMemory {
     /// Insert a vector entry into memory
     pub fn insert(&mut self, entry: VectorEntry) {
         #[cfg(feature = "rvf-persistence")]
-        if let Some(rvf) = self.rvf.as_mut() {
+        if let Some(rvf) = self.rvf.as_ref() {
+            let stable = stable_id(entry.id.as_deref(), &entry.vector);
             if rvf
                 .insert(entry.id.as_deref(), &entry.vector)
                 .is_ok()
             {
                 self.entries.push(entry);
+                self.entry_index.insert(stable, self.entries.len() - 1);
             }
             return;
         }
@@ -151,9 +160,8 @@ impl VectorMemory {
                         .into_iter()
                         .map(|mut result| {
                             if let Ok(id_num) = result.id.parse::<u64>() {
-                                if let Some(entry) = self.entries.iter().find(|entry| {
-                                    stable_id(entry.id.as_deref(), &entry.vector) == id_num
-                                }) {
+                                if let Some(index) = self.entry_index.get(&id_num) {
+                                    let entry = &self.entries[*index];
                                     result.id = entry
                                         .id
                                         .clone()
@@ -356,5 +364,44 @@ mod tests {
         }
         let reopened = VectorMemory::persistent(&path, 3).expect("reopen");
         assert!(!reopened.is_empty());
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn backend_parity_workload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("parity.rvf");
+        let dims = 64usize;
+        let inserts = 1200usize;
+        let queries = 4000usize;
+
+        let mut memory = VectorMemory::with_backend(&path, dims).expect("backend");
+
+        for i in 0..inserts {
+            let mut vector = Vec::with_capacity(dims);
+            for d in 0..dims {
+                // Deterministic feature values to keep both backends comparable.
+                let value = (((i * 31 + d * 17) % 997) as f32) / 997.0;
+                vector.push(value);
+            }
+            memory.insert(VectorEntry {
+                id: Some(VectorId::from(format!("v{i}"))),
+                vector,
+                metadata: None,
+            });
+        }
+        assert_eq!(memory.len(), inserts);
+
+        let mut total_hits = 0usize;
+        for q in 0..queries {
+            let mut query = Vec::with_capacity(dims);
+            for d in 0..dims {
+                let value = (((q * 29 + d * 13 + 7) % 997) as f32) / 997.0;
+                query.push(value);
+            }
+            let hits = memory.search(&query, 8, DistanceMetric::Cosine);
+            total_hits += hits.len();
+        }
+        assert!(total_hits > 0);
     }
 }

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::process::Command;
 
 fn command_exists(bin: &str) -> bool {

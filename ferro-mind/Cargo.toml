@@ -24,7 +24,7 @@ rvf-runtime = { version = "0.1", optional = true }
 rvf-types = { version = "0.1", optional = true }
 
 [features]
-default = ["rvf-persistence"]
+default = []
 rvf-persistence = ["dep:rvf-runtime", "dep:rvf-types"]
 legacy-memory = []
 

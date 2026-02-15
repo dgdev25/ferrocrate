@@ -1,6 +1,8 @@
 use crate::executor::{ExecError, exec_cmd};
 use crate::validate::{validate_interface_name, ValidationError};
+#[cfg(target_os = "linux")]
 use nix::sched::{setns, CloneFlags};
+#[cfg(target_os = "linux")]
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -68,10 +70,20 @@ pub fn move_to_netns(link: &str, netns: &str) -> Result<(), NetnsError> {
 }
 
 /// Enter a network namespace by path (direct syscall, no shell-out).
+#[cfg(target_os = "linux")]
 pub fn enter_netns(path: &Path) -> Result<(), NetnsError> {
     let file = File::open(path).map_err(|err| NetnsError::Open(path.to_path_buf(), err))?;
     setns(file, CloneFlags::CLONE_NEWNET)?;
     Ok(())
+}
+
+/// Enter a network namespace by path - not available on macOS.
+#[cfg(not(target_os = "linux"))]
+pub fn enter_netns(_path: &Path) -> Result<(), NetnsError> {
+    Err(NetnsError::Exec(ExecError::CommandFailed {
+        cmd: "enter_netns".to_string(),
+        stderr: "enter_netns is only available on Linux".to_string(),
+    }))
 }
 
 #[cfg(test)]

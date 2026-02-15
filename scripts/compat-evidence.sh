@@ -33,7 +33,11 @@ else
 fi
 seccomp_security_status="$(run_check seccomp_security cargo test -p ferro-core --test security_tests -- --nocapture)"
 oci_smoke_status="$(run_check oci_smoke bash scripts/perf/oci-compat.sh)"
-dockerfile_build_status="$(run_check dockerfile_build env FERROCRATE_PERF_ALLOW_SKIP=1 bash scripts/perf/build.sh)"
+if [[ "$os_name" == "Linux" ]]; then
+  dockerfile_build_status="$(run_check dockerfile_build cargo test -p ferro-cli --test dockerfile_parity_integration -- --nocapture)"
+else
+  dockerfile_build_status="skipped"
+fi
 ai_latency_status="$(run_check ai_latency cargo run -p ferro-mind --example ai_latency)"
 ai_quality_status="$(run_check ai_quality cargo run -p ferro-mind --example ai_quality)"
 
@@ -76,18 +80,6 @@ if [[ -f "${OUT_DIR}/ai_quality.log" ]]; then
   fi
 fi
 
-dockerfile_build_ms="unknown"
-dockerfile_build_skip="false"
-if [[ -f "${OUT_DIR}/dockerfile_build.log" ]]; then
-  dockerfile_build_ms="$(rg -o 'perf\.build_ms=[0-9]+' "${OUT_DIR}/dockerfile_build.log" | tail -n1 | cut -d'=' -f2 || true)"
-  if rg -q 'perf\.build_skipped=1' "${OUT_DIR}/dockerfile_build.log"; then
-    dockerfile_build_skip="true"
-  fi
-  if [[ -z "${dockerfile_build_ms}" ]]; then
-    dockerfile_build_ms="unknown"
-  fi
-fi
-
 cat >"$REPORT_JSON" <<JSON
 {
   "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
@@ -101,8 +93,6 @@ cat >"$REPORT_JSON" <<JSON
     "ai_quality_example": "${ai_quality_status}"
   },
   "metrics": {
-    "dockerfile_build_ms": "${dockerfile_build_ms}",
-    "dockerfile_build_skipped": "${dockerfile_build_skip}",
     "ai_inference_ns": "${ai_latency_ns}",
     "ai_latency_max_ns": "${ai_latency_threshold_ns}",
     "ai_latency_threshold_status": "${ai_latency_threshold_status}",
@@ -125,8 +115,6 @@ cat >"$REPORT_MD" <<MD
 - Seccomp/security tests: ${seccomp_security_status}
 - OCI smoke: ${oci_smoke_status}
 - Dockerfile build smoke: ${dockerfile_build_status}
-- Dockerfile build ms: ${dockerfile_build_ms}
-- Dockerfile build skipped: ${dockerfile_build_skip}
 - AI latency example: ${ai_latency_status}
 - AI inference latency (ns): ${ai_latency_ns}
 - AI latency threshold (ns): ${ai_latency_threshold_ns}

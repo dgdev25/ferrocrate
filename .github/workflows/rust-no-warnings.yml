@@ -1,0 +1,16 @@
+name: Rust No Warnings
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  no-warnings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Enforce clippy and rustdoc warning-free workspace
+        run: scripts/verify-no-warnings.sh

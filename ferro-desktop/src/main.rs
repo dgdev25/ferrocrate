@@ -70,6 +70,10 @@ enum Commands {
         #[command(subcommand)]
         command: VmCommands,
     },
+    Autostart {
+        #[command(subcommand)]
+        command: AutostartCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -134,6 +138,28 @@ enum VmCommands {
         listen_port: u16,
         #[arg(long)]
         forward_state_file: Option<String>,
+    },
+    UpdateImage {
+        #[arg(long)]
+        image_path: String,
+        #[arg(long, default_value_t = false)]
+        no_backup: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutostartCommands {
+    InstallMacos {
+        #[arg(long)]
+        output_path: Option<String>,
+        #[arg(long, default_value = "127.0.0.1:4288")]
+        addr: String,
+    },
+    InstallWindows {
+        #[arg(long)]
+        output_path: Option<String>,
+        #[arg(long, default_value = "127.0.0.1:4288")]
+        addr: String,
     },
 }
 
@@ -232,6 +258,7 @@ fn main() {
             state_file,
             command,
         } => run_vm_command(state_file.as_deref(), command),
+        Commands::Autostart { command } => run_autostart_command(command),
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
@@ -920,7 +947,157 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             );
             Ok(())
         }
+        VmCommands::UpdateImage {
+            image_path,
+            no_backup,
+        } => {
+            let mut state = load_vm_state(&state_path)?;
+            let new_image = PathBuf::from(&image_path);
+            if !new_image.exists() {
+                return Err(DesktopError::Invalid(format!(
+                    "image path does not exist: {}",
+                    new_image.display()
+                )));
+            }
+            if let Some(pid) = state.pid {
+                if pid_alive(pid) {
+                    return Err(DesktopError::Invalid(
+                        "refusing VM image update while vm is running; stop vm first".to_string(),
+                    ));
+                }
+            }
+            let current_disk = PathBuf::from(&state.config.disk_path);
+            if !current_disk.exists() {
+                return Err(DesktopError::Invalid(format!(
+                    "current vm disk path does not exist: {}",
+                    current_disk.display()
+                )));
+            }
+
+            if !no_backup {
+                let backup_path = current_disk.with_extension("qcow2.bak");
+                fs::copy(&current_disk, &backup_path)?;
+            }
+            fs::copy(&new_image, &current_disk)?;
+            state.status = "initialized".to_string();
+            state.last_error = None;
+            save_vm_state(&state_path, &state)?;
+            println!(
+                "vm: image updated from {} to {}",
+                new_image.display(),
+                current_disk.display()
+            );
+            Ok(())
+        }
     }
+}
+
+fn run_autostart_command(command: AutostartCommands) -> Result<(), DesktopError> {
+    match command {
+        AutostartCommands::InstallMacos { output_path, addr } => {
+            let output = output_path
+                .map(PathBuf::from)
+                .unwrap_or_else(default_macos_launch_agent_path);
+            let exe_path = std::env::current_exe()?;
+            let content = render_macos_launch_agent_plist(
+                "io.ferrocrate.desktop",
+                exe_path.to_string_lossy().as_ref(),
+                &addr,
+            );
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&output, content)?;
+            println!(
+                "autostart: wrote macOS launch agent plist at {}",
+                output.display()
+            );
+            Ok(())
+        }
+        AutostartCommands::InstallWindows { output_path, addr } => {
+            let output = output_path
+                .map(PathBuf::from)
+                .unwrap_or_else(default_windows_service_script_path);
+            let exe_path = std::env::current_exe()?;
+            let content = render_windows_service_script(
+                "FerroDesktop",
+                exe_path.to_string_lossy().as_ref(),
+                &addr,
+            );
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&output, content)?;
+            println!(
+                "autostart: wrote Windows service install script at {}",
+                output.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn default_macos_launch_agent_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("LaunchAgents")
+            .join("io.ferrocrate.desktop.plist");
+    }
+    PathBuf::from("io.ferrocrate.desktop.plist")
+}
+
+fn default_windows_service_script_path() -> PathBuf {
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("ferrocrate")
+            .join("install-ferro-desktop-service.ps1");
+    }
+    PathBuf::from("install-ferro-desktop-service.ps1")
+}
+
+fn render_macos_launch_agent_plist(label: &str, ferro_desktop_bin: &str, addr: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>{ferro_desktop_bin}</string>
+      <string>daemon</string>
+      <string>--addr</string>
+      <string>{addr}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+  </dict>
+</plist>
+"#
+    )
+}
+
+fn render_windows_service_script(service_name: &str, ferro_desktop_bin: &str, addr: &str) -> String {
+    format!(
+        r#"$ErrorActionPreference = "Stop"
+$serviceName = "{service_name}"
+$binPath = '"{ferro_desktop_bin}" daemon --addr {addr}'
+
+if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {{
+  Write-Host "Service already exists: $serviceName"
+  exit 0
+}}
+
+sc.exe create $serviceName binPath= $binPath start= auto
+sc.exe description $serviceName "FerroCrate desktop daemon"
+sc.exe start $serviceName
+Write-Host "Installed and started service: $serviceName"
+"#
+    )
 }
 
 fn default_vm_state_path() -> PathBuf {
@@ -1208,7 +1385,8 @@ mod tests {
     use super::{
         build_vm_command, gather_phase0_check, load_forward_entries, load_vm_state, run_request,
         save_forward_entries, save_vm_state, upsert_forward_entry, validate_daemon_addr,
-        ExecRequest, ForwardEntry, VmConfig, VmState,
+        render_macos_launch_agent_plist, render_windows_service_script, ExecRequest,
+        ForwardEntry, VmConfig, VmState,
     };
     use std::path::PathBuf;
 
@@ -1365,5 +1543,30 @@ mod tests {
             .find(|arg| arg.contains("user,id=net0"))
             .expect("netdev arg");
         assert!(netdev.contains("hostfwd=tcp:127.0.0.1:8080-:80"));
+    }
+
+    #[test]
+    fn renders_macos_launch_agent_with_daemon_args() {
+        let plist = render_macos_launch_agent_plist(
+            "io.ferrocrate.desktop",
+            "/usr/local/bin/ferro-desktop",
+            "127.0.0.1:4288",
+        );
+        assert!(plist.contains("<string>io.ferrocrate.desktop</string>"));
+        assert!(plist.contains("<string>/usr/local/bin/ferro-desktop</string>"));
+        assert!(plist.contains("<string>daemon</string>"));
+        assert!(plist.contains("<string>127.0.0.1:4288</string>"));
+    }
+
+    #[test]
+    fn renders_windows_service_script_with_service_details() {
+        let script = render_windows_service_script(
+            "FerroDesktop",
+            "C:\\Program Files\\FerroCrate\\ferro-desktop.exe",
+            "127.0.0.1:4288",
+        );
+        assert!(script.contains("$serviceName = \"FerroDesktop\""));
+        assert!(script.contains("daemon --addr 127.0.0.1:4288"));
+        assert!(script.contains("sc.exe create $serviceName"));
     }
 }

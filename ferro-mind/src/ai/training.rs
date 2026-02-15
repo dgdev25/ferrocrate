@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(feature = "rvf-persistence")]
 use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 #[cfg(feature = "rvf-persistence")]
 use rvf_runtime::{RvfOptions, RvfStore};
 #[cfg(feature = "rvf-persistence")]
@@ -271,6 +273,12 @@ struct OnlineLearningState {
     sample_counts: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone)]
+struct TrainedModel {
+    loss: f32,
+    artifact: Value,
+}
+
 /// Model training pipeline
 pub struct TrainingPipeline {
     config: TrainingConfig,
@@ -420,7 +428,7 @@ impl TrainingPipeline {
         }
 
         // Perform training (simplified - in production would use ruv-fann/tract)
-        let loss = self.train_model(&samples)?;
+        let trained = self.train_model(model_type, &samples)?;
 
         // Create new version
         let version = self.get_next_version(model_type);
@@ -429,7 +437,7 @@ impl TrainingPipeline {
             .join(format!("model_v{}.bin", version));
 
         // Save model (placeholder - actual serialization depends on model type)
-        self.save_model(&model_path, model_type, &samples)?;
+        self.save_model(&model_path, model_type, &trained)?;
 
         // Update version history
         let model_version = ModelVersion {
@@ -437,7 +445,7 @@ impl TrainingPipeline {
             version,
             trained_at: chrono::Utc::now().to_rfc3339(),
             samples_count: samples.len(),
-            loss: Some(loss),
+            loss: Some(trained.loss),
             path: model_path.clone(),
             active: true,
         };
@@ -466,7 +474,7 @@ impl TrainingPipeline {
             version,
             samples_used: samples.len(),
             duration: start.elapsed(),
-            loss: Some(loss),
+            loss: Some(trained.loss),
             model_path,
         })
     }
@@ -492,27 +500,31 @@ impl TrainingPipeline {
         Ok(samples)
     }
 
-    /// Train model (simplified implementation)
-    fn train_model(&self, samples: &[Vec<u8>]) -> Result<f32, TrainingError> {
-        // In production, this would:
-        // 1. Parse samples into model-specific format
-        // 2. Train using ruv-fann (neural networks) or tract (ONNX)
-        // 3. Apply EWC++ for catastrophic forgetting prevention
-        // 4. Return final loss
+    /// Train model (lightweight implementation with real metrics)
+    fn train_model(
+        &self,
+        model_type: ModelType,
+        samples: &[Vec<u8>],
+    ) -> Result<TrainedModel, TrainingError> {
+        match model_type {
+            ModelType::ResourcePredictor => train_resource_predictor(samples),
+            ModelType::AnomalyDetector => train_anomaly_detector(samples),
+            ModelType::RestartPolicy => train_restart_policy(samples),
+        }
+    }
 
-        // Placeholder: simulate training
-        let base_loss = 0.5;
-        let sample_factor = 1.0 / (1.0 + samples.len() as f32 / 1000.0);
-        Ok(base_loss * sample_factor)
+    fn parse_samples<T: DeserializeOwned>(samples: &[Vec<u8>]) -> Result<Vec<T>, TrainingError> {
+        let mut out = Vec::with_capacity(samples.len());
+        for sample in samples {
+            let parsed = serde_json::from_slice::<T>(sample)
+                .map_err(|err| TrainingError::ParseError(format!("invalid sample json: {err}")))?;
+            out.push(parsed);
+        }
+        Ok(out)
     }
 
     /// Save model to disk
-    fn save_model(
-        &self,
-        path: &Path,
-        model_type: ModelType,
-        samples: &[Vec<u8>],
-    ) -> Result<(), TrainingError> {
+    fn save_model(&self, path: &Path, model_type: ModelType, model: &TrainedModel) -> Result<(), TrainingError> {
         // CQ-01: Handle paths without parent directory
         let parent = path.parent().ok_or_else(|| {
             TrainingError::Io(std::io::Error::new(
@@ -522,11 +534,11 @@ impl TrainingPipeline {
         })?;
         fs::create_dir_all(parent)?;
 
-        // Placeholder: save metadata about model
         let metadata = serde_json::json!({
             "model_type": model_type.to_string(),
-            "samples_count": samples.len(),
             "created_at": chrono::Utc::now().to_rfc3339(),
+            "loss": model.loss,
+            "artifact": model.artifact,
         });
 
         let file = File::create(path)?;
@@ -674,6 +686,212 @@ impl TrainingPipeline {
 
         Ok(())
     }
+}
+
+fn train_resource_predictor(samples: &[Vec<u8>]) -> Result<TrainedModel, TrainingError> {
+    let parsed = TrainingPipeline::parse_samples::<ResourceSample>(samples)?;
+    if parsed.is_empty() {
+        return Err(TrainingError::InsufficientData(0, 1));
+    }
+    let max_mem = parsed
+        .iter()
+        .map(|s| s.memory_bytes)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let max_pids = parsed
+        .iter()
+        .map(|s| s.pids_count)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let mut mean_cpu = 0.0f32;
+    let mut mean_mem = 0.0f32;
+    let mut mean_pids = 0.0f32;
+    for sample in &parsed {
+        mean_cpu += (sample.cpu_percent / 100.0).clamp(0.0, 1.0);
+        mean_mem += (sample.memory_bytes as f32 / max_mem).clamp(0.0, 1.0);
+        mean_pids += (sample.pids_count as f32 / max_pids).clamp(0.0, 1.0);
+    }
+    let count = parsed.len() as f32;
+    mean_cpu /= count;
+    mean_mem /= count;
+    mean_pids /= count;
+
+    let mut mse = 0.0f32;
+    for sample in &parsed {
+        let cpu = (sample.cpu_percent / 100.0).clamp(0.0, 1.0);
+        let mem = (sample.memory_bytes as f32 / max_mem).clamp(0.0, 1.0);
+        let pids = (sample.pids_count as f32 / max_pids).clamp(0.0, 1.0);
+        let err = (cpu - mean_cpu).powi(2) + (mem - mean_mem).powi(2) + (pids - mean_pids).powi(2);
+        mse += err / 3.0;
+    }
+    let loss = mse / count;
+
+    Ok(TrainedModel {
+        loss,
+        artifact: serde_json::json!({
+            "feature_means": {
+                "cpu_norm": mean_cpu,
+                "mem_norm": mean_mem,
+                "pids_norm": mean_pids
+            },
+            "feature_maxes": {
+                "memory_bytes": max_mem,
+                "pids_count": max_pids
+            },
+            "samples": parsed.len()
+        }),
+    })
+}
+
+fn train_anomaly_detector(samples: &[Vec<u8>]) -> Result<TrainedModel, TrainingError> {
+    let parsed = TrainingPipeline::parse_samples::<AnomalySample>(samples)?;
+    if parsed.is_empty() {
+        return Err(TrainingError::InsufficientData(0, 1));
+    }
+    let normals: Vec<_> = parsed.iter().filter(|s| !s.is_anomaly).collect();
+    if normals.is_empty() {
+        return Err(TrainingError::TrainingFailed(
+            "anomaly-detector requires at least one normal sample".to_string(),
+        ));
+    }
+    let feature_len = normals[0].features.len();
+    if feature_len == 0 {
+        return Err(TrainingError::TrainingFailed(
+            "anomaly-detector features cannot be empty".to_string(),
+        ));
+    }
+    let mut centroid = vec![0.0f32; feature_len];
+    for sample in &normals {
+        if sample.features.len() != feature_len {
+            return Err(TrainingError::TrainingFailed(
+                "inconsistent feature lengths in anomaly samples".to_string(),
+            ));
+        }
+        for (idx, value) in sample.features.iter().enumerate() {
+            centroid[idx] += *value;
+        }
+    }
+    let normal_count = normals.len() as f32;
+    for value in &mut centroid {
+        *value /= normal_count;
+    }
+
+    let mut normal_dist_sum = 0.0f32;
+    for sample in &normals {
+        normal_dist_sum += euclidean_distance(&centroid, &sample.features);
+    }
+    let normal_mean = normal_dist_sum / normal_count;
+
+    let anomalies: Vec<_> = parsed.iter().filter(|s| s.is_anomaly).collect();
+    let anomaly_mean = if anomalies.is_empty() {
+        0.0
+    } else {
+        let mut sum = 0.0f32;
+        for sample in &anomalies {
+            if sample.features.len() != feature_len {
+                return Err(TrainingError::TrainingFailed(
+                    "inconsistent feature lengths in anomaly samples".to_string(),
+                ));
+            }
+            sum += euclidean_distance(&centroid, &sample.features);
+        }
+        sum / anomalies.len() as f32
+    };
+
+    Ok(TrainedModel {
+        loss: normal_mean,
+        artifact: serde_json::json!({
+            "centroid": centroid,
+            "normal_mean_distance": normal_mean,
+            "anomaly_mean_distance": anomaly_mean,
+            "separation": anomaly_mean - normal_mean,
+            "normal_samples": normals.len(),
+            "anomaly_samples": anomalies.len()
+        }),
+    })
+}
+
+fn train_restart_policy(samples: &[Vec<u8>]) -> Result<TrainedModel, TrainingError> {
+    let parsed = TrainingPipeline::parse_samples::<RestartSample>(samples)?;
+    if parsed.is_empty() {
+        return Err(TrainingError::InsufficientData(0, 1));
+    }
+    let mut success = 0usize;
+    let mut accuracy_hits = 0usize;
+    let mut uptime_success = 0u64;
+    let mut uptime_failure = 0u64;
+    let mut success_zero = 0usize;
+    let mut total_zero = 0usize;
+    let mut success_nonzero = 0usize;
+    let mut total_nonzero = 0usize;
+    for sample in &parsed {
+        if sample.restart_success {
+            success += 1;
+            uptime_success = uptime_success.saturating_add(sample.uptime_secs);
+        } else {
+            uptime_failure = uptime_failure.saturating_add(sample.uptime_secs);
+        }
+        let predicted = sample.exit_code == 0;
+        if predicted == sample.restart_success {
+            accuracy_hits += 1;
+        }
+        if sample.exit_code == 0 {
+            total_zero += 1;
+            if sample.restart_success {
+                success_zero += 1;
+            }
+        } else {
+            total_nonzero += 1;
+            if sample.restart_success {
+                success_nonzero += 1;
+            }
+        }
+    }
+    let count = parsed.len() as f32;
+    let success_rate = success as f32 / count;
+    let accuracy = accuracy_hits as f32 / count;
+    let avg_uptime_success = if success == 0 {
+        0.0
+    } else {
+        uptime_success as f32 / success as f32
+    };
+    let failures = parsed.len().saturating_sub(success);
+    let avg_uptime_failure = if failures == 0 {
+        0.0
+    } else {
+        uptime_failure as f32 / failures as f32
+    };
+
+    Ok(TrainedModel {
+        loss: 1.0 - accuracy,
+        artifact: serde_json::json!({
+            "success_rate": success_rate,
+            "baseline_accuracy": accuracy,
+            "avg_uptime_success": avg_uptime_success,
+            "avg_uptime_failure": avg_uptime_failure,
+            "exit_code_success": {
+                "zero": {
+                    "success": success_zero,
+                    "total": total_zero
+                },
+                "nonzero": {
+                    "success": success_nonzero,
+                    "total": total_nonzero
+                }
+            },
+            "samples": parsed.len()
+        }),
+    })
+}
+
+fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt()
 }
 
 /// CLI command handler for training
@@ -1212,7 +1430,26 @@ mod tests {
             fs::create_dir_all(&data_dir).unwrap();
 
             for i in 0..5 {
-                let sample = serde_json::json!({"sample": i, "data": [1.0, 2.0, 3.0]});
+                let sample = match model_type {
+                    "resource-predictor" => serde_json::json!({
+                        "cpu_percent": 10.0 + i as f32,
+                        "memory_bytes": 1024 + (i as u64 * 128),
+                        "pids_count": 20 + i as u64,
+                        "timestamp_secs": 1_700_000_000 + i as u64
+                    }),
+                    "anomaly-detector" => serde_json::json!({
+                        "features": [i as f32, (i * 2) as f32, 1.0],
+                        "is_anomaly": i == 4,
+                        "container_id": format!("container-{i}")
+                    }),
+                    "restart-policy" => serde_json::json!({
+                        "exit_code": if i % 2 == 0 { 0 } else { 1 },
+                        "uptime_secs": 30 + i as u64,
+                        "restart_success": i % 3 != 0,
+                        "container_id": format!("container-{i}")
+                    }),
+                    _ => serde_json::json!({"sample": i}),
+                };
                 fs::write(data_dir.join(format!("sample_{}.json", i)), sample.to_string()).unwrap();
             }
         }
@@ -1379,9 +1616,10 @@ mod tests {
 
         for i in 0..4 {
             let sample = serde_json::json!({
-                "sample": i,
-                "cpu": 10 + i,
-                "memory": 1024 + i * 16
+                "cpu_percent": 10.0 + i as f32,
+                "memory_bytes": 1024 + (i as u64 * 16),
+                "pids_count": 20 + i as u64,
+                "timestamp_secs": 1_700_000_000 + i as u64
             });
             pipeline
                 .record_sample(

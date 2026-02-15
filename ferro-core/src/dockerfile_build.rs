@@ -606,6 +606,7 @@ struct StageSpec {
     user: Option<String>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
+    shell: Vec<String>,
     run: Vec<RunSpec>,
     exposed_ports: Vec<String>,
     volumes: Vec<String>,
@@ -647,6 +648,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 user: None,
                 entrypoint: None,
                 cmd: None,
+                shell: vec!["/bin/sh".to_string(), "-c".to_string()],
                 run: Vec::new(),
                 exposed_ports: Vec::new(),
                 volumes: Vec::new(),
@@ -679,7 +681,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 }
             }
             "RUN" => {
-                let run = parse_run(&interpolated)?;
+                let run = parse_run(&interpolated, &stage.shell)?;
                 stage.run.push(run);
             }
             "ARG" => {
@@ -711,15 +713,23 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 stage.volumes.extend(parse_volume_paths(&interpolated)?);
             }
             "ENTRYPOINT" => {
-                stage.entrypoint = Some(parse_exec_or_shell(&interpolated)?);
+                stage.entrypoint = Some(parse_exec_or_shell(&interpolated, &stage.shell)?);
             }
             "CMD" => {
-                stage.cmd = Some(parse_exec_or_shell(&interpolated)?);
+                stage.cmd = Some(parse_exec_or_shell(&interpolated, &stage.shell)?);
             }
             "HEALTHCHECK" => {
                 stage.healthcheck = parse_healthcheck(&interpolated)?;
             }
-            "SHELL" | "STOPSIGNAL" | "MAINTAINER" | "ONBUILD" => {
+            "SHELL" => {
+                stage.shell = parse_json_array(&interpolated)?;
+                if stage.shell.is_empty() {
+                    return Err(DockerfileBuildError::Invalid(
+                        "SHELL requires at least one argument".to_string(),
+                    ));
+                }
+            }
+            "STOPSIGNAL" | "MAINTAINER" | "ONBUILD" => {
                 // Accept but no-op for now to avoid failing common Dockerfiles.
             }
             other => {
@@ -959,14 +969,21 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
     }))
 }
 
-fn parse_run(raw: &str) -> Result<RunSpec, DockerfileBuildError> {
+fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildError> {
     let trimmed = raw.trim();
     if trimmed.starts_with('[') {
         let args = parse_json_array(trimmed)?;
         return Ok(RunSpec { args, _shell: false });
     }
+    if shell.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "SHELL requires at least one argument".to_string(),
+        ));
+    }
+    let mut args = shell.to_vec();
+    args.push(trimmed.to_string());
     Ok(RunSpec {
-        args: vec!["/bin/sh".to_string(), "-c".to_string(), trimmed.to_string()],
+        args,
         _shell: true,
     })
 }
@@ -1015,16 +1032,19 @@ fn parse_labels(raw: &str) -> Result<HashMap<String, String>, DockerfileBuildErr
     Ok(out)
 }
 
-fn parse_exec_or_shell(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
+fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, DockerfileBuildError> {
     let trimmed = raw.trim();
     if trimmed.starts_with('[') {
         return parse_json_array(trimmed);
     }
-    Ok(vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        trimmed.to_string(),
-    ])
+    if shell.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "SHELL requires at least one argument".to_string(),
+        ));
+    }
+    let mut args = shell.to_vec();
+    args.push(trimmed.to_string());
+    Ok(args)
 }
 
 fn parse_json_array(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
@@ -1317,7 +1337,7 @@ fn blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_from_dockerfile_with_store_and_compression, load_build_cache};
+    use super::{build_from_dockerfile_with_store_and_compression, load_build_cache, parse_stages};
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;
     use crate::layer_compression::CompressionFormat;
@@ -1366,5 +1386,31 @@ mod tests {
 
         let cache = load_build_cache(&runtime_dir).expect("load cache");
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn shell_instruction_applies_to_shell_form_run_cmd_and_entrypoint() {
+        let dockerfile = r#"
+        FROM scratch
+        SHELL ["/bin/bash", "-lc"]
+        RUN echo hi
+        CMD echo hello
+        ENTRYPOINT echo bye
+        "#;
+        let stages = parse_stages(dockerfile).expect("parse stages");
+        let stage = stages.last().expect("stage");
+        assert_eq!(stage.run.len(), 1);
+        assert_eq!(
+            stage.run[0].args,
+            vec!["/bin/bash", "-lc", "echo hi"]
+        );
+        assert_eq!(
+            stage.cmd.clone().expect("cmd"),
+            vec!["/bin/bash", "-lc", "echo hello"]
+        );
+        assert_eq!(
+            stage.entrypoint.clone().expect("entrypoint"),
+            vec!["/bin/bash", "-lc", "echo bye"]
+        );
     }
 }

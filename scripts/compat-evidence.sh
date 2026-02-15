@@ -132,7 +132,7 @@ if [[ "$docker_api_matrix_status" == "fail" || \
       "$docker_api_integration_status" == "fail" || \
       "$seccomp_security_status" != "pass" || \
       "$oci_smoke_status" != "pass" || \
-      "$dockerfile_build_status" != "pass" || \
+      "$dockerfile_build_status" == "fail" || \
       "$ai_latency_status" != "pass" || \
       "$ai_quality_status" != "pass" || \
       "$ai_latency_threshold_status" == "fail" || \

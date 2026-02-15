@@ -1,6 +1,6 @@
 use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
-use ferro_cri::runtime::{ListImagesRequest, StatusRequest, VersionRequest};
+use ferro_cri::runtime::{ImageFsInfoRequest, ListImagesRequest, StatusRequest, VersionRequest};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
@@ -76,6 +76,14 @@ async fn cri_socket_serves_runtime_and_image_requests() {
         .expect("list images rpc")
         .into_inner();
     assert!(listed.images.is_empty());
+
+    let fs_info = image_client
+        .image_fs_info(ImageFsInfoRequest {})
+        .await
+        .expect("image fs info rpc")
+        .into_inner();
+    assert_eq!(fs_info.image_filesystems.len(), 1);
+    assert!(fs_info.image_filesystems[0].mountpoint.ends_with("/images"));
 
     server.abort();
     let _ = server.await;

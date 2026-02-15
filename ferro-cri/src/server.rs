@@ -1,15 +1,16 @@
 use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
-    Image, ImageStatusRequest, ImageStatusResponse, ListImagesRequest,
-    ListImagesResponse, PullImageRequest, PullImageResponse, RemoveImageRequest,
-    RemoveImageResponse, RuntimeCondition, RuntimeStatus, StatusRequest, StatusResponse,
-    VersionRequest, VersionResponse,
+    FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
+    ImageStatusResponse, ListImagesRequest, ListImagesResponse, PullImageRequest,
+    PullImageResponse, RemoveImageRequest, RemoveImageResponse, RuntimeCondition,
+    RuntimeStatus, StatusRequest, StatusResponse, VersionRequest, VersionResponse,
 };
 use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -277,6 +278,17 @@ impl ImageService for CriRuntime {
 
         Ok(Response::new(RemoveImageResponse {}))
     }
+
+    async fn image_fs_info(
+        &self,
+        _request: Request<ImageFsInfoRequest>,
+    ) -> Result<Response<ImageFsInfoResponse>, Status> {
+        let images_dir = self.runtime_dir.join("images");
+        let usage = collect_fs_usage(&images_dir)?;
+        Ok(Response::new(ImageFsInfoResponse {
+            image_filesystems: vec![usage],
+        }))
+    }
 }
 
 fn map_image_fetch_error(err: ferro_core::image_fetch::ImageFetchError) -> Status {
@@ -286,6 +298,79 @@ fn map_image_fetch_error(err: ferro_core::image_fetch::ImageFetchError) -> Statu
     } else {
         Status::internal(msg)
     }
+}
+
+fn collect_fs_usage(path: &Path) -> Result<FilesystemUsage, Status> {
+    if !path.exists() {
+        fs::create_dir_all(path)
+            .map_err(|err| Status::internal(format!("create images dir: {err}")))?;
+    }
+    let (used_bytes, inodes_used) = measure_tree_usage(path)
+        .map_err(|err| Status::internal(format!("measure image filesystem usage: {err}")))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(FilesystemUsage {
+        timestamp,
+        fs_id: path.display().to_string(),
+        mountpoint: path.display().to_string(),
+        used_bytes,
+        inodes_used,
+    })
+}
+
+#[cfg(unix)]
+fn measure_tree_usage(path: &Path) -> Result<(u64, u64), std::io::Error> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::MetadataExt;
+
+    fn visit(path: &Path, bytes: &mut u64, inodes: &mut HashSet<u64>) -> Result<(), std::io::Error> {
+        let md = fs::symlink_metadata(path)?;
+        inodes.insert(md.ino());
+        if md.is_file() {
+            *bytes = bytes.saturating_add(md.len());
+            return Ok(());
+        }
+        if !md.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            visit(&entry.path(), bytes, inodes)?;
+        }
+        Ok(())
+    }
+
+    let mut used_bytes = 0u64;
+    let mut inodes = HashSet::new();
+    visit(path, &mut used_bytes, &mut inodes)?;
+    Ok((used_bytes, inodes.len() as u64))
+}
+
+#[cfg(not(unix))]
+fn measure_tree_usage(path: &Path) -> Result<(u64, u64), std::io::Error> {
+    fn visit(path: &Path, bytes: &mut u64, entries: &mut u64) -> Result<(), std::io::Error> {
+        let md = fs::symlink_metadata(path)?;
+        *entries = entries.saturating_add(1);
+        if md.is_file() {
+            *bytes = bytes.saturating_add(md.len());
+            return Ok(());
+        }
+        if !md.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            visit(&entry.path(), bytes, entries)?;
+        }
+        Ok(())
+    }
+
+    let mut used_bytes = 0u64;
+    let mut entries = 0u64;
+    visit(path, &mut used_bytes, &mut entries)?;
+    Ok((used_bytes, entries))
 }
 
 pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
@@ -317,7 +402,10 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{ImageSpec, ListImagesRequest, ImageStatusRequest, PullImageRequest, RemoveImageRequest};
+    use crate::runtime::{
+        ImageFsInfoRequest, ImageSpec, ImageStatusRequest, ListImagesRequest, PullImageRequest,
+        RemoveImageRequest,
+    };
     use tonic::Request;
 
     // Helper to create a test runtime with a temporary image store
@@ -780,5 +868,30 @@ mod tests {
         assert_eq!(inner.images[0].repo_tags[0], "alpine:latest");
         assert_eq!(inner.images[1].repo_tags[0], "mongo:latest");
         assert_eq!(inner.images[2].repo_tags[0], "zebra:latest");
+    }
+
+    #[tokio::test]
+    async fn image_fs_info_reports_runtime_images_usage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let images_root = temp.path().join("images");
+        fs::create_dir_all(images_root.join("sub")).expect("create images dirs");
+        fs::write(images_root.join("blob-a"), b"abcd").expect("write blob-a");
+        fs::write(images_root.join("sub/blob-b"), b"123456").expect("write blob-b");
+
+        let store = LocalImageStore::open(images_root.clone()).expect("open store");
+        let runtime = CriRuntime::with_runtime_dir(Arc::new(store), temp.path());
+
+        let response = runtime
+            .image_fs_info(Request::new(ImageFsInfoRequest {}))
+            .await
+            .expect("image_fs_info should succeed");
+
+        let inner = response.into_inner();
+        assert_eq!(inner.image_filesystems.len(), 1);
+        let fs_usage = &inner.image_filesystems[0];
+        assert_eq!(fs_usage.mountpoint, images_root.display().to_string());
+        assert_eq!(fs_usage.fs_id, images_root.display().to_string());
+        assert!(fs_usage.used_bytes >= 10);
+        assert!(fs_usage.inodes_used > 0);
     }
 }

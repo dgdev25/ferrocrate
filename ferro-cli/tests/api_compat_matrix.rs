@@ -67,8 +67,8 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "GET",
         path: "/networks",
-        coverage: Coverage::Unsupported,
-        expected_status: 404,
+        coverage: Coverage::Implemented,
+        expected_status: 200,
         body: "",
     },
 ];

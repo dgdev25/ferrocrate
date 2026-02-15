@@ -3634,6 +3634,7 @@ mod tests {
 
     #[test]
     fn runtime_dns_config_defaults() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
             std::env::remove_var("FERROCRATE_DNS_SERVERS");
             std::env::remove_var("FERROCRATE_DNS_SEARCH");
@@ -3645,6 +3646,7 @@ mod tests {
 
     #[test]
     fn runtime_dns_config_respects_env() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
             std::env::set_var("FERROCRATE_DNS_SERVERS", "9.9.9.9,1.0.0.1");
             std::env::set_var("FERROCRATE_DNS_SEARCH", "svc.local,cluster.local");

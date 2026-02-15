@@ -323,6 +323,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         fix: bool,
         #[arg(long, default_value_t = false)]
+        bootstrap: bool,
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     Entitlement {
@@ -949,7 +951,7 @@ fn doctor_guest_ferrocrate_installed(
     run_command_status(command)
 }
 
-fn handle_doctor(fix: bool, json: bool) -> Result<(), String> {
+fn handle_doctor(fix: bool, bootstrap: bool, json: bool) -> Result<(), String> {
     let mut checks = Vec::<DoctorCheck>::new();
 
     #[cfg(target_os = "macos")]
@@ -1121,10 +1123,69 @@ fn handle_doctor(fix: bool, json: bool) -> Result<(), String> {
     }
 
     let healthy = checks.iter().all(|check| check.ok);
+    #[cfg(target_os = "macos")]
+    let mut healthy = healthy;
+
+    #[cfg(target_os = "macos")]
+    if fix && bootstrap && !healthy {
+        let mut bootstrap_ok = false;
+        let mut bootstrap_msg = "bootstrap script not found".to_string();
+        let mut bootstrap_hint = Some(
+            "set paid installer env (`PAID_RELEASE_BASE_URL`, token/session vars) then re-run `ferrocrate doctor --fix --bootstrap`"
+                .to_string(),
+        );
+
+        let candidate_paths = vec![
+            PathBuf::from("scripts/install-macos.sh"),
+            PathBuf::from("../scripts/install-macos.sh"),
+            PathBuf::from("../../scripts/install-macos.sh"),
+        ];
+        for path in candidate_paths {
+            if !path.exists() {
+                continue;
+            }
+            let status = std::process::Command::new("bash")
+                .arg(path.as_os_str())
+                .arg("--channel")
+                .arg("paid")
+                .arg("--full-stack")
+                .status();
+            match status {
+                Ok(exit) if exit.success() => {
+                    bootstrap_ok = true;
+                    bootstrap_msg = format!("bootstrap succeeded via {}", path.display());
+                    bootstrap_hint = None;
+                    break;
+                }
+                Ok(exit) => {
+                    bootstrap_msg = format!(
+                        "bootstrap command failed via {} (status={})",
+                        path.display(),
+                        exit
+                    );
+                }
+                Err(err) => {
+                    bootstrap_msg =
+                        format!("bootstrap launch failed via {}: {err}", path.display());
+                }
+            }
+        }
+
+        checks.push(DoctorCheck {
+            id: "bootstrap".to_string(),
+            ok: bootstrap_ok,
+            message: bootstrap_msg,
+            hint: bootstrap_hint,
+            remediated: bootstrap_ok,
+        });
+        healthy = checks.iter().all(|check| check.ok);
+    }
+
     if json {
         let payload = serde_json::json!({
             "healthy": healthy,
             "fix": fix,
+            "bootstrap": bootstrap,
             "checks": checks,
         });
         println!(
@@ -1409,7 +1470,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 format,
             }),
             Commands::Entitlement { command } => handle_entitlement(command),
-            Commands::Doctor { fix, json } => handle_doctor(fix, json),
+            Commands::Doctor {
+                fix,
+                bootstrap,
+                json,
+            } => handle_doctor(fix, bootstrap, json),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -1483,7 +1548,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 format,
             }),
             Commands::Entitlement { command } => handle_entitlement(command),
-            Commands::Doctor { fix, json } => handle_doctor(fix, json),
+            Commands::Doctor {
+                fix,
+                bootstrap,
+                json,
+            } => handle_doctor(fix, bootstrap, json),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
@@ -4936,10 +5005,15 @@ mod tests {
 
     #[test]
     fn parses_doctor_command() {
-        let cli = Cli::parse_from(["ferrocrate", "doctor", "--fix", "--json"]);
+        let cli = Cli::parse_from(["ferrocrate", "doctor", "--fix", "--bootstrap", "--json"]);
         match cli.command {
-            Commands::Doctor { fix, json } => {
+            Commands::Doctor {
+                fix,
+                bootstrap,
+                json,
+            } => {
                 assert!(fix);
+                assert!(bootstrap);
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),

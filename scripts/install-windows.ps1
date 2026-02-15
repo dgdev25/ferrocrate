@@ -8,6 +8,7 @@ param(
   [string]$Prefix = "$env:ProgramFiles\FerroCrate\bin",
   [string]$PaidReleaseBaseUrl = $env:PAID_RELEASE_BASE_URL,
   [string]$PaidReleaseToken = $env:PAID_RELEASE_TOKEN,
+  [string]$PaidSessionToken = $env:PAID_SESSION_TOKEN,
   [string]$PaidReleaseTokenEndpoint = $env:PAID_RELEASE_TOKEN_ENDPOINT,
   [string]$PaidEntitlementFile = $(if ($env:PAID_ENTITLEMENT_FILE) { $env:PAID_ENTITLEMENT_FILE } else { Join-Path $HOME '.ferrocrate\entitlement.lic' }),
   [switch]$WithDesktopBin,
@@ -44,9 +45,23 @@ function Resolve-ReleaseTag {
 }
 
 function Resolve-PaidReleaseToken {
-  param([string]$Token,[string]$Endpoint,[string]$EntitlementFile,[string]$Tag = 'latest')
+  param([string]$Token,[string]$SessionToken,[string]$Endpoint,[string]$EntitlementFile,[string]$Tag = 'latest')
   if (-not [string]::IsNullOrWhiteSpace($Token)) {
     return $Token
+  }
+  if (-not [string]::IsNullOrWhiteSpace($SessionToken)) {
+    if ([string]::IsNullOrWhiteSpace($Endpoint)) {
+      throw 'Paid channel with -PaidSessionToken requires -PaidReleaseTokenEndpoint.'
+    }
+    $sessionHeaders = @{
+      Authorization = "Bearer $SessionToken"
+      'X-Ferrocrate-Tag' = $Tag
+    }
+    $sessionResp = Invoke-RestMethod -Uri $Endpoint -Method Post -Headers $sessionHeaders
+    if ([string]::IsNullOrWhiteSpace($sessionResp.token)) {
+      throw 'Token endpoint response did not contain a token for session auth'
+    }
+    return [string]$sessionResp.token
   }
   if ([string]::IsNullOrWhiteSpace($Endpoint)) {
     throw 'Paid channel requires -PaidReleaseToken (or PAID_RELEASE_TOKEN) or -PaidReleaseTokenEndpoint (or PAID_RELEASE_TOKEN_ENDPOINT).'
@@ -104,13 +119,13 @@ function Install-BinariesFromDir {
 }
 
 function Install-BinaryRelease {
-  param([string]$Repo,[string]$Version,[string]$Prefix,[string]$Channel,[string]$PaidReleaseBaseUrl,[string]$PaidReleaseToken,[string]$PaidReleaseTokenEndpoint,[string]$PaidEntitlementFile,[bool]$InstallDesktopBin,[switch]$Force)
+  param([string]$Repo,[string]$Version,[string]$Prefix,[string]$Channel,[string]$PaidReleaseBaseUrl,[string]$PaidReleaseToken,[string]$PaidSessionToken,[string]$PaidReleaseTokenEndpoint,[string]$PaidEntitlementFile,[bool]$InstallDesktopBin,[switch]$Force)
 
   Require-Command -Name 'Invoke-WebRequest'
   $arch = Get-ArchName
   $tag = Resolve-ReleaseTag -Repo $Repo -Version $Version
   if ($Channel -eq 'paid') {
-    $PaidReleaseToken = Resolve-PaidReleaseToken -Token $PaidReleaseToken -Endpoint $PaidReleaseTokenEndpoint -EntitlementFile $PaidEntitlementFile -Tag $tag
+    $PaidReleaseToken = Resolve-PaidReleaseToken -Token $PaidReleaseToken -SessionToken $PaidSessionToken -Endpoint $PaidReleaseTokenEndpoint -EntitlementFile $PaidEntitlementFile -Tag $tag
   }
 
   $assetName = "ferrocrate-$tag-windows-$arch.zip"
@@ -236,7 +251,7 @@ if ($installDesktopBin) {
 }
 
 switch ($Method) {
-  'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Channel $Channel -PaidReleaseBaseUrl $PaidReleaseBaseUrl -PaidReleaseToken $PaidReleaseToken -PaidReleaseTokenEndpoint $PaidReleaseTokenEndpoint -PaidEntitlementFile $PaidEntitlementFile -InstallDesktopBin:$installDesktopBin -Force:$Force }
+  'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Channel $Channel -PaidReleaseBaseUrl $PaidReleaseBaseUrl -PaidReleaseToken $PaidReleaseToken -PaidSessionToken $PaidSessionToken -PaidReleaseTokenEndpoint $PaidReleaseTokenEndpoint -PaidEntitlementFile $PaidEntitlementFile -InstallDesktopBin:$installDesktopBin -Force:$Force }
   'source' { Install-FromSource -Repo $Repo -Version $Version -Prefix $Prefix -InstallDesktopBin:$installDesktopBin -Force:$Force }
   default { throw "Invalid method: $Method" }
 }

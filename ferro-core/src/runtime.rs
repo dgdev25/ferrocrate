@@ -1189,6 +1189,7 @@ fn build_command(
 
     let caps = capabilities.to_vec();
     let seccomp = seccomp_profile.cloned();
+    let seccomp_strict = seccomp_strict_mode();
     unsafe {
         command.pre_exec(move || {
             if nix::unistd::Uid::effective().is_root() {
@@ -1204,9 +1205,15 @@ fn build_command(
             }
             // Apply seccomp profile AFTER capability drops (seccomp is last sandboxing step)
             if let Some(profile) = &seccomp {
-                apply_seccomp_profile(&profile).map_err(|err| {
-                    std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
-                })?;
+                if let Err(err) = apply_seccomp_profile(profile) {
+                    if nix::unistd::Uid::effective().is_root() || seccomp_strict {
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()));
+                    }
+                    eprintln!(
+                        "[seccomp] non-root seccomp apply failed; continuing without seccomp (set FERROCRATE_SECCOMP_STRICT=1 to fail-closed): {}",
+                        err
+                    );
+                }
             }
             Ok(())
         });
@@ -1709,6 +1716,12 @@ fn seccomp_enabled() -> bool {
     std::env::var("FERROCRATE_SECCOMP")
         .map(|val| !(val == "0" || val.eq_ignore_ascii_case("false")))
         .unwrap_or(true)
+}
+
+fn seccomp_strict_mode() -> bool {
+    std::env::var("FERROCRATE_SECCOMP_STRICT")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn load_seccomp_profile() -> Result<Option<SeccompProfile>, RuntimeError> {
@@ -3835,6 +3848,27 @@ mod tests {
         assert!(profile.is_none());
         unsafe {
             std::env::remove_var("FERROCRATE_SECCOMP");
+        }
+    }
+
+    #[test]
+    fn seccomp_strict_mode_defaults_to_false() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_SECCOMP_STRICT");
+        }
+        assert!(!super::seccomp_strict_mode());
+    }
+
+    #[test]
+    fn seccomp_strict_mode_respects_env() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::set_var("FERROCRATE_SECCOMP_STRICT", "1");
+        }
+        assert!(super::seccomp_strict_mode());
+        unsafe {
+            std::env::remove_var("FERROCRATE_SECCOMP_STRICT");
         }
     }
 

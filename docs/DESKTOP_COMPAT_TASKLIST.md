@@ -60,14 +60,17 @@ Evidence:
 - [ ] Reuse Linux VM image + proxy protocol from macOS path
 
 ## Phase 3: Packaging & UX
-- [ ] Windows MSI installer + service wiring
-- [ ] macOS package + launch agent wiring
+- [x] ~~Windows MSI installer + service wiring~~
+- [x] ~~macOS package + launch agent wiring~~
 - [x] ~~Auto-start/runtime lifecycle management in host daemon~~
 - [x] ~~Upgrade and rollback-safe VM image updates~~
 
 Evidence:
 - `ferro-desktop/src/main.rs` (`autostart` command family; `vm update-image`)
 - `docs/desktop-packaging-guide.md`
+- `scripts/package-macos-app.sh`
+- `scripts/package-windows-msi.ps1`
+- `.github/workflows/desktop-packaging.yml`
 
 ## What Not To Do
 - [x] ~~Do not port Linux isolation primitives directly to native macOS/Windows runtime paths~~

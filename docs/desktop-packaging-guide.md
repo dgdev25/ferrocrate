@@ -2,6 +2,31 @@
 
 This guide documents the current host-side desktop packaging and lifecycle wiring for FerroCrate.
 
+## Packaging Artifacts
+### macOS `.app` + `.dmg`
+Build release binary then package:
+
+```bash
+cargo build -p ferro-desktop --release
+scripts/package-macos-app.sh
+```
+
+Outputs:
+- `dist/macos/FerroCrate Desktop.app`
+- `dist/macos/ferro-desktop.dmg`
+
+### Windows `.msi`
+Build release binary and package with WiX:
+
+```powershell
+cargo build -p ferro-desktop --release
+scripts/package-windows-msi.ps1 -BinaryPath .\\target\\release\\ferro-desktop.exe -OutputDir .\\dist\\windows -ProductVersion 0.1.0
+```
+
+Outputs:
+- `dist/windows/ferro-desktop-0.1.0.msi`
+- `dist/windows/ferro-desktop.wxs`
+
 ## macOS Launch Agent
 Generate a launchd plist:
 
@@ -45,5 +70,6 @@ Behavior:
 - Copies new image into configured VM disk path and resets state to initialized.
 
 ## Remaining Packaging Work
-- Native Windows MSI bundle (script generation exists, MSI bundling still open).
-- Native macOS `.dmg` packaging and notarization pipeline (launch agent generation exists).
+- Signing and notarization for macOS package distribution.
+- Signing for Windows MSI and upgrade-code/versioning policy hardening.
+- Release-channel update policy (stable/canary) and automated rollback orchestration.

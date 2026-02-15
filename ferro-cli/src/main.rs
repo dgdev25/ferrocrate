@@ -30,10 +30,13 @@ use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
     handle_community_download_command, handle_community_list_command,
-    handle_community_publish_command, handle_export_command, handle_export_rvf_command,
-    handle_import_command, handle_rvf_branch_command, handle_rvf_lineage_command,
-    handle_rvf_stats_command, handle_rvf_verify_command, handle_stats_command,
-    handle_train_command,
+    handle_community_publish_command, handle_export_command, handle_import_command,
+    handle_stats_command, handle_train_command,
+};
+#[cfg(target_os = "linux")]
+use ferro_mind::ai::training::{
+    handle_export_rvf_command, handle_rvf_branch_command, handle_rvf_lineage_command,
+    handle_rvf_stats_command, handle_rvf_verify_command,
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
@@ -297,12 +300,14 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     AiBranch {
         source: String,
         target: String,
         #[arg(long)]
         force: bool,
     },
+    #[cfg(target_os = "linux")]
     AiLineage {
         path: String,
         #[arg(long = "parent-file")]
@@ -447,12 +452,14 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Branch {
         source: String,
         target: String,
         #[arg(long)]
         force: bool,
     },
+    #[cfg(target_os = "linux")]
     Lineage {
         path: String,
         #[arg(long = "parent-file")]
@@ -462,6 +469,7 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    #[cfg(target_os = "linux")]
     Migrate {
         #[arg(long)]
         source: Option<String>,
@@ -905,33 +913,12 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 models_dir,
                 format,
             }),
-            Commands::AiBranch {
-                source,
-                target,
-                force,
-            } => handle_ai(AiCommands::Branch {
-                source,
-                target,
-                force,
-            }),
-            Commands::AiLineage {
-                path,
-                parent_file,
-                verify,
-                format,
-            } => handle_ai(AiCommands::Lineage {
-                path,
-                parent_file,
-                verify,
-                format,
-            }),
             Commands::Config { command } => handle_config(command),
             Commands::AiAudit {
                 action,
                 summary,
                 evidence,
             } => handle_ai_audit(&action, &summary, &evidence),
-            Commands::Migrate { target } => handle_migrate(target),
             _ => Err("This command is not supported on this platform".to_string()),
         };
     }
@@ -1014,19 +1001,31 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 .map_err(|err| format!("ai train: {err}"))?;
             if let Some(output) = output {
                 let output_path = PathBuf::from(output);
-                let is_rvf = output_path
-                    .extension()
-                    .map(|ext| ext.eq_ignore_ascii_case("rvf"))
-                    .unwrap_or(false);
-                if is_rvf {
-                    handle_export_rvf_command(
-                        &model_type,
-                        &output_path,
-                        data_dir_path,
-                        models_dir_path,
-                    )
-                    .map_err(|err| format!("ai train: {err}"))?;
-                } else {
+                #[cfg(target_os = "linux")]
+                {
+                    let is_rvf = output_path
+                        .extension()
+                        .map(|ext| ext.eq_ignore_ascii_case("rvf"))
+                        .unwrap_or(false);
+                    if is_rvf {
+                        handle_export_rvf_command(
+                            &model_type,
+                            &output_path,
+                            data_dir_path,
+                            models_dir_path,
+                        )
+                        .map_err(|err| format!("ai train: {err}"))?;
+                    } else {
+                        if let Some(parent) = output_path.parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|err| format!("ai train: {err}"))?;
+                        }
+                        std::fs::copy(&result.model_path, &output_path)
+                            .map_err(|err| format!("ai train: {err}"))?;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
                     if let Some(parent) = output_path.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|err| format!("ai train: {err}"))?;
@@ -1071,10 +1070,18 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                 .extension()
                 .map(|ext| ext.eq_ignore_ascii_case("rvf"))
                 .unwrap_or(false);
-            let exported = if is_rvf {
-                handle_export_rvf_command(&model_type, &output_path, None, models_dir_path)
-                    .map_err(|err| format!("ai export: {err}"))?
-            } else {
+            #[cfg(target_os = "linux")]
+            let exported = {
+                if is_rvf {
+                    handle_export_rvf_command(&model_type, &output_path, None, models_dir_path)
+                        .map_err(|err| format!("ai export: {err}"))?
+                } else {
+                    handle_export_command(&model_type, &output_path, models_dir_path)
+                        .map_err(|err| format!("ai export: {err}"))?
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let exported = {
                 handle_export_command(&model_type, &output_path, models_dir_path)
                     .map_err(|err| format!("ai export: {err}"))?
             };
@@ -1123,6 +1130,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             format,
         } => {
             let models_dir_path = models_dir.as_deref().map(Path::new);
+            #[cfg(target_os = "linux")]
             if let Some(path) = path {
                 let rvf = handle_rvf_stats_command(Path::new(&path))
                     .map_err(|err| format!("ai stats: {err}"))?;
@@ -1179,6 +1187,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             );
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         AiCommands::Branch {
             source,
             target,
@@ -1194,6 +1203,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             println!("ai branch: wrote {}", out.display());
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         AiCommands::Lineage {
             path,
             parent_file,
@@ -1246,6 +1256,7 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             }
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         AiCommands::Migrate {
             source,
             target,

@@ -22,6 +22,9 @@ pub use validate::ValidationError;
 // Re-export bridge execution functions
 pub use bridge::{create_bridge, destroy_bridge, BridgeConfig};
 
+// Re-export eBPF execution functions
+pub use ebpf::{install_security_monitor, SecurityMonitorConfig};
+
 // Re-export veth execution functions
 pub use veth::{create_veth_pair, destroy_veth_pair, assign_ip, VethConfig, VethPair};
 

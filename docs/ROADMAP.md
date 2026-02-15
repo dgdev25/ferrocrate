@@ -191,7 +191,7 @@
 | COMPAT-06 | ~~Dockerfile syntax~~ | Done | Yes | Accepts additional common directives but still below 95% coverage. Rework Needed. |
 | COMPAT-07 | ~~Linux kernel 5.10+~~ | Done | No | Runtime enforces minimum kernel version unless `FERROCRATE_IGNORE_KERNEL_MIN=1`. |
 | COMPAT-08 | ~~x86_64, aarch64, riscv64~~ | Done | No | `scripts/build-targets.sh` builds release artifacts for all three targets; `ferro-desktop` crate added for host-side desktop integration scaffolding. |
-| COMPAT-09 | ~~Kubernetes CRI v1~~ | Partial | No | CRI shim (ferro-cri) implements only Version, Status, and basic ListImages. Missing: RunPodSandbox, StopPodSandbox, RemovePodSandbox, CreateContainer, StartContainer, StopContainer, RemoveContainer, ExecSync, PullImage, RemoveImage, and most other CRI operations. Minimal shim, not production-ready. |
+| COMPAT-09 | ~~Kubernetes CRI v1~~ | Partial | No | CRI shim (ferro-cri) implements Version, Status, ListImages (with filter), ImageStatus (with verbose info), PullImage, and RemoveImage. Still missing core pod/container runtime methods such as RunPodSandbox, StopPodSandbox, RemovePodSandbox, CreateContainer, StartContainer, StopContainer, RemoveContainer, ExecSync, and most remaining CRI operations. Partial shim, not production-ready. |
 
 ### 4.3 Reliability
 | ID | Requirement | Status | Rework Needed | Evidence / Notes |

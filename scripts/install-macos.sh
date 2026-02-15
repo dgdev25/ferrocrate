@@ -482,10 +482,10 @@ vm_backend_for_host() {
 base_cloud_image_url() {
   case "$(arch_name)" in
     aarch64)
-      echo "https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-arm64.img"
+      echo "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-arm64.img"
       ;;
     x86_64)
-      echo "https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+      echo "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
       ;;
     *)
       echo "unsupported architecture for vm image" >&2

@@ -35,6 +35,7 @@ use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -2255,6 +2256,13 @@ struct WireGuardConfig {
     ipv6_prefix: Option<u8>,
 }
 
+#[derive(Debug)]
+struct WireGuardPeerConfig {
+    public_key: String,
+    endpoint: String,
+    allowed_ips: String,
+}
+
 fn wireguard_config() -> Result<WireGuardConfig, RuntimeError> {
     let iface = std::env::var("FERROCRATE_WG_IFACE").unwrap_or_else(|_| "wg0".to_string());
     if iface.trim().is_empty() {
@@ -2299,11 +2307,80 @@ fn wireguard_config() -> Result<WireGuardConfig, RuntimeError> {
     })
 }
 
+fn wireguard_peer_config() -> Result<Option<WireGuardPeerConfig>, RuntimeError> {
+    let Some(public_key) = std::env::var("FERROCRATE_WG_PEER_PUBLIC_KEY").ok() else {
+        return Ok(None);
+    };
+    let endpoint = std::env::var("FERROCRATE_WG_PEER_ENDPOINT").map_err(|_| {
+        RuntimeError::Network(
+            "FERROCRATE_WG_PEER_ENDPOINT is required when peer public key is set".to_string(),
+        )
+    })?;
+    let allowed_ips =
+        std::env::var("FERROCRATE_WG_ALLOWED_IPS").unwrap_or_else(|_| "0.0.0.0/0".to_string());
+    Ok(Some(WireGuardPeerConfig {
+        public_key,
+        endpoint,
+        allowed_ips,
+    }))
+}
+
+fn run_cmd_capture_stdout(args: &[String]) -> Result<String, RuntimeError> {
+    let (bin, rest) = parse_cmd_args(args)?;
+    let output = Command::new(bin).args(rest).output()?;
+    if !output.status.success() {
+        return Err(RuntimeError::Network(format!(
+            "{}: {}",
+            bin,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_cmd_with_stdin_capture_stdout(args: &[String], stdin_data: &str) -> Result<String, RuntimeError> {
+    let (bin, rest) = parse_cmd_args(args)?;
+    let mut child = Command::new(bin)
+        .args(rest)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(stdin_data.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(RuntimeError::Network(format!(
+            "{}: {}",
+            bin,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn wireguard_listen_port(container_id: &str) -> u16 {
+    let base = std::env::var("FERROCRATE_WG_LISTEN_PORT_BASE")
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .unwrap_or(51820);
+    let hash = blake3::hash(container_id.as_bytes());
+    let offset = (u16::from(hash.as_bytes()[0]) << 8) | u16::from(hash.as_bytes()[1]);
+    base.saturating_add(offset % 1000)
+}
+
 fn setup_wireguard(
     netns_name: &str,
     container_id: &str,
 ) -> Result<(Option<String>, Option<String>), RuntimeError> {
+    if !command_available("wg") {
+        return Err(RuntimeError::Network(
+            "wireguard networking requires wg command".to_string(),
+        ));
+    }
     let cfg = wireguard_config()?;
+    let peer = wireguard_peer_config()?;
     let create_iface = ip_netns_exec(
         netns_name,
         &["ip", "link", "add", &cfg.iface, "type", "wireguard"],
@@ -2360,6 +2437,48 @@ fn setup_wireguard(
         netns_name,
         &["ip", "link", "set", &cfg.iface, "up"],
     ))?;
+
+    let private_key = if let Ok(key) = std::env::var("FERROCRATE_WG_PRIVATE_KEY") {
+        key
+    } else {
+        run_cmd_capture_stdout(&["wg".to_string(), "genkey".to_string()])?
+    };
+    let _public_key = run_cmd_with_stdin_capture_stdout(&["wg".to_string(), "pubkey".to_string()], &private_key)?;
+    let key_path = std::env::temp_dir().join(format!("ferrocrate-wg-{}.key", short_id(container_id, 12)));
+    std::fs::write(&key_path, format!("{private_key}\n"))?;
+    let key_path_str = key_path.display().to_string();
+    let listen_port = wireguard_listen_port(container_id).to_string();
+    run_cmd(&ip_netns_exec(
+        netns_name,
+        &[
+            "wg",
+            "set",
+            &cfg.iface,
+            "private-key",
+            &key_path_str,
+            "listen-port",
+            &listen_port,
+        ],
+    ))?;
+    let _ = std::fs::remove_file(&key_path);
+
+    if let Some(peer) = peer {
+        run_cmd(&ip_netns_exec(
+            netns_name,
+            &[
+                "wg",
+                "set",
+                &cfg.iface,
+                "peer",
+                &peer.public_key,
+                "endpoint",
+                &peer.endpoint,
+                "allowed-ips",
+                &peer.allowed_ips,
+            ],
+        ))?;
+    }
+
     run_cmd(&ip_netns_exec(
         netns_name,
         &["ip", "route", "replace", "default", "dev", &cfg.iface],
@@ -3518,6 +3637,29 @@ mod tests {
         unsafe {
             std::env::remove_var("FERROCRATE_EBPF_SECURITY_EVENTS");
         }
+    }
+
+    #[test]
+    fn wireguard_peer_config_requires_endpoint_when_key_present() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::set_var("FERROCRATE_WG_PEER_PUBLIC_KEY", "peer-key");
+            std::env::remove_var("FERROCRATE_WG_PEER_ENDPOINT");
+        }
+        let err = super::wireguard_peer_config().expect_err("missing endpoint");
+        assert!(err.to_string().contains("PEER_ENDPOINT"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_WG_PEER_PUBLIC_KEY");
+        }
+    }
+
+    #[test]
+    fn wireguard_listen_port_is_deterministic() {
+        let first = super::wireguard_listen_port("container-a");
+        let second = super::wireguard_listen_port("container-a");
+        let third = super::wireguard_listen_port("container-b");
+        assert_eq!(first, second);
+        assert_ne!(first, third);
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

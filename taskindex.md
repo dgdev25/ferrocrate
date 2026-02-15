@@ -46,7 +46,7 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~COMPAT-04 - Rework Docker API v1.45+ parity beyond current subset~~
 - [x] ~~COMPAT-06 - Rework Dockerfile syntax compatibility to high-parity target~~
 - [ ] COMPAT-09 - Expand CRI from partial shim to required Kubernetes runtime surface (IN PROGRESS)
-- [ ] IMG-06 - Rework Dockerfile build behavior for full-feature compatibility and stability
+- [x] ~~IMG-06 - Rework Dockerfile build behavior for full-feature compatibility and stability~~
 
 ## D) AI Stack Completion (10)
 

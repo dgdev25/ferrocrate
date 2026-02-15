@@ -140,6 +140,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
     let mut stage_roots: Vec<PathBuf> = Vec::new();
     let mut stage_names: HashMap<String, PathBuf> = HashMap::new();
     let mut final_result = None;
+    let ignore_patterns = load_dockerignore_patterns(context_dir)?;
 
     for (idx, stage) in stages.iter().enumerate() {
         if !stage.run.is_empty() && !nix::unistd::Uid::effective().is_root() {
@@ -164,7 +165,13 @@ pub fn build_from_dockerfile_with_store_and_compression(
 
         let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
         if stage.copy_paths.is_empty() {
-            copy_context_dir(context_dir, &context_root, dockerfile_path)?;
+            copy_context_dir(
+                context_dir,
+                context_dir,
+                &context_root,
+                dockerfile_path,
+                &ignore_patterns,
+            )?;
         } else {
             copy_from_context(context_dir, &context_root, &stage.copy_paths)?;
         }
@@ -521,8 +528,15 @@ fn hash_context_dir(
     context_dir: &Path,
     dockerfile_path: &Path,
 ) -> Result<String, DockerfileBuildError> {
+    let ignore_patterns = load_dockerignore_patterns(context_dir)?;
     let mut files = Vec::new();
-    collect_context_files(context_dir, context_dir, dockerfile_path, &mut files)?;
+    collect_context_files(
+        context_dir,
+        context_dir,
+        dockerfile_path,
+        &ignore_patterns,
+        &mut files,
+    )?;
     files.sort();
     let mut hasher = blake3::Hasher::new();
     for rel_path in files {
@@ -538,6 +552,7 @@ fn collect_context_files(
     base: &Path,
     path: &Path,
     dockerfile_path: &Path,
+    ignore_patterns: &[String],
     out: &mut Vec<PathBuf>,
 ) -> Result<(), DockerfileBuildError> {
     for entry in fs::read_dir(path)? {
@@ -550,6 +565,9 @@ fn collect_context_files(
             .strip_prefix(base)
             .unwrap_or(&entry_path)
             .to_path_buf();
+        if should_ignore_context_path(&relative, ignore_patterns) {
+            continue;
+        }
         if relative.components().next().map(|c| c.as_os_str()) == Some(".git".as_ref()) {
             continue;
         }
@@ -558,12 +576,80 @@ fn collect_context_files(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_context_files(base, &entry_path, dockerfile_path, out)?;
+            collect_context_files(base, &entry_path, dockerfile_path, ignore_patterns, out)?;
         } else if file_type.is_file() {
             out.push(relative);
         }
     }
     Ok(())
+}
+
+fn load_dockerignore_patterns(context_dir: &Path) -> Result<Vec<String>, DockerfileBuildError> {
+    let path = context_dir.join(".dockerignore");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)?;
+    Ok(content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn should_ignore_context_path(relative: &Path, patterns: &[String]) -> bool {
+    let path = relative.to_string_lossy();
+    patterns.iter().any(|pattern| dockerignore_matches(pattern, &path))
+}
+
+fn dockerignore_matches(pattern: &str, path: &str) -> bool {
+    let normalized = pattern.trim_start_matches("./");
+    if normalized.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = normalized.strip_suffix('/') {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if normalized.contains('*') {
+        return wildcard_match(normalized, path);
+    }
+    path == normalized || path.starts_with(&format!("{normalized}/"))
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let mut remainder = value;
+    let mut first = true;
+    for part in pattern.split('*').filter(|part| !part.is_empty()) {
+        if first {
+            if !pattern.starts_with('*') {
+                if !remainder.starts_with(part) {
+                    return false;
+                }
+                remainder = &remainder[part.len()..];
+            } else if let Some(pos) = remainder.find(part) {
+                remainder = &remainder[pos + part.len()..];
+            } else {
+                return false;
+            }
+            first = false;
+            continue;
+        }
+        if let Some(pos) = remainder.find(part) {
+            remainder = &remainder[pos + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    if pattern.ends_with('*') {
+        true
+    } else {
+        pattern
+            .split('*')
+            .last()
+            .map(|tail| tail.is_empty() || value.ends_with(tail))
+            .unwrap_or(false)
+    }
 }
 
 fn config_path(runtime_dir: &Path, digest: &str) -> PathBuf {
@@ -1245,9 +1331,11 @@ fn create_build_dir(_runtime_dir: &Path, name: &str) -> Result<PathBuf, Dockerfi
 }
 
 fn copy_context_dir(
+    root: &Path,
     src: &Path,
     dst: &Path,
     dockerfile_path: &Path,
+    ignore_patterns: &[String],
 ) -> Result<(), DockerfileBuildError> {
     fs::create_dir_all(dst)?;
     let mut entries = Vec::new();
@@ -1257,8 +1345,11 @@ fn copy_context_dir(
     entries.sort_by_key(|entry| entry.path());
     for entry in entries {
         let path = entry.path();
-        let relative = path.strip_prefix(src).unwrap_or(&path);
+        let relative = path.strip_prefix(root).unwrap_or(&path);
         if path == dockerfile_path {
+            continue;
+        }
+        if should_ignore_context_path(relative, ignore_patterns) {
             continue;
         }
         if relative.components().next().map(|c| c.as_os_str()) == Some(".git".as_ref()) {
@@ -1270,7 +1361,7 @@ fn copy_context_dir(
         let target = dst.join(relative);
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            copy_context_dir(&path, &target, dockerfile_path)?;
+            copy_context_dir(root, &path, &target, dockerfile_path, ignore_patterns)?;
         } else if file_type.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
@@ -1337,7 +1428,10 @@ fn blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_from_dockerfile_with_store_and_compression, load_build_cache, parse_stages};
+    use super::{
+        build_from_dockerfile_with_store_and_compression, dockerignore_matches, load_build_cache,
+        parse_stages,
+    };
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;
     use crate::layer_compression::CompressionFormat;
@@ -1412,5 +1506,14 @@ mod tests {
             stage.entrypoint.clone().expect("entrypoint"),
             vec!["/bin/bash", "-lc", "echo bye"]
         );
+    }
+
+    #[test]
+    fn dockerignore_pattern_matching_covers_exact_prefix_and_wildcards() {
+        assert!(dockerignore_matches("target", "target"));
+        assert!(dockerignore_matches("target", "target/file.txt"));
+        assert!(dockerignore_matches("logs/", "logs/app.log"));
+        assert!(dockerignore_matches("*.tmp", "cache/build.tmp"));
+        assert!(!dockerignore_matches("src/", "tests/main.rs"));
     }
 }

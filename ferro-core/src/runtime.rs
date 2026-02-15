@@ -1503,9 +1503,16 @@ fn setup_network(
         return Ok((None, None, None));
     }
     let effective_backend = resolve_network_backend(network_backend, container_id)?;
-    if !port_mappings.is_empty()
-        && effective_backend != "iptables"
-        && effective_backend != "nftables"
+    let portmap_backend = if effective_backend == "ebpf" {
+        if command_available("nft") {
+            "nftables"
+        } else {
+            "iptables"
+        }
+    } else {
+        effective_backend.as_str()
+    };
+    if !port_mappings.is_empty() && portmap_backend != "iptables" && portmap_backend != "nftables"
     {
         return Err(RuntimeError::Network(
             "port mapping requires network-backend=iptables or nftables".to_string(),
@@ -1552,7 +1559,9 @@ fn setup_network(
         &bridge_config.name,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    if ebpf_monitor_enabled() {
+    if effective_backend == "ebpf" {
+        setup_ebpf_monitor(&host_veth)?;
+    } else if ebpf_monitor_enabled() {
         setup_ebpf_monitor(&host_veth)?;
     }
     run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name)?)?;
@@ -1627,7 +1636,7 @@ fn setup_network(
     }
 
     if !port_mappings.is_empty() {
-        if effective_backend == "nftables" {
+        if portmap_backend == "nftables" {
             ensure_nftables_chains()?;
         }
         for mapping in port_mappings {
@@ -1636,7 +1645,7 @@ fn setup_network(
                 container_port: mapping.container_port,
                 protocol: mapping.protocol.clone(),
             };
-            if effective_backend == "nftables" {
+            if portmap_backend == "nftables" {
                 let prerouting = build_nft_prerouting_cmd(&map, &container_ip)?;
                 let forward = build_nft_forward_cmd(&map, &container_ip)?;
                 run_cmd_allow_exists(&prerouting)?;
@@ -2342,22 +2351,40 @@ fn ebpf_strict_mode() -> bool {
         .unwrap_or(false)
 }
 
+fn ebpf_backend_available() -> bool {
+    if std::env::var("FERROCRATE_EBPF_ASSUME_AVAILABLE")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    command_available("bpftool") && command_available("tc")
+}
+
 fn resolve_network_backend(requested: &str, container_id: &str) -> Result<String, RuntimeError> {
     if requested != "ebpf" {
         return Ok(requested.to_string());
     }
-    let reason = "ebpf data path is not implemented in runtime network setup";
+    if ebpf_backend_available() {
+        return Ok("ebpf".to_string());
+    }
+    let reason = "missing required host tools for eBPF datapath (need bpftool and tc)";
     if ebpf_strict_mode() {
         return Err(RuntimeError::Network(format!(
             "ebpf backend requested for {container_id} but unavailable: {reason}"
         )));
     }
+    let fallback = if command_available("nft") {
+        "nftables"
+    } else {
+        "iptables"
+    };
     let message = format!(
-        "eBPF backend requested for {container_id}; falling back to iptables ({reason}). Set FERROCRATE_EBPF_STRICT=1 to fail instead."
+        "eBPF backend requested for {container_id}; falling back to {fallback} ({reason}). Set FERROCRATE_EBPF_STRICT=1 to fail instead."
     );
     eprintln!("WARNING: {message}");
     log::warn!("{message}");
-    Ok("iptables".to_string())
+    Ok(fallback.to_string())
 }
 
 fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, prefix: u8) -> String {
@@ -3713,13 +3740,28 @@ mod tests {
     }
 
     #[test]
-    fn ebpf_backend_falls_back_to_iptables_by_default() {
+    fn ebpf_backend_falls_back_when_tools_missing() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
             std::env::remove_var("FERROCRATE_EBPF_STRICT");
+            std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
         }
         let backend = super::resolve_network_backend("ebpf", "c1").expect("fallback backend");
-        assert_eq!(backend, "iptables");
+        assert!(backend == "iptables" || backend == "nftables");
+    }
+
+    #[test]
+    fn ebpf_backend_can_be_forced_available_for_ci() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::set_var("FERROCRATE_EBPF_ASSUME_AVAILABLE", "1");
+            std::env::remove_var("FERROCRATE_EBPF_STRICT");
+        }
+        let backend = super::resolve_network_backend("ebpf", "c1").expect("ebpf backend");
+        assert_eq!(backend, "ebpf");
+        unsafe {
+            std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
+        }
     }
 
     #[test]
@@ -3727,6 +3769,7 @@ mod tests {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         unsafe {
             std::env::set_var("FERROCRATE_EBPF_STRICT", "1");
+            std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
         }
         let err = super::resolve_network_backend("ebpf", "c1").expect_err("strict failure");
         let message = err.to_string();

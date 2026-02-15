@@ -10,7 +10,10 @@ REPO="${REPO:-dgtise25/ferrocrate}"
 VERSION="${VERSION:-latest}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 METHOD="${METHOD:-binary}"
-DESKTOP_BOOTSTRAP="${DESKTOP_BOOTSTRAP:-1}"
+RELEASE_CHANNEL="${RELEASE_CHANNEL:-public}"
+INSTALL_DESKTOP_BIN="${INSTALL_DESKTOP_BIN:-0}"
+DESKTOP_BOOTSTRAP="${DESKTOP_BOOTSTRAP:-0}"
+PAID_RELEASE_BASE_URL="${PAID_RELEASE_BASE_URL:-}"
 VM_STATE_FILE="${VM_STATE_FILE:-$HOME/.ferrocrate/desktop-vm.json}"
 VM_DIR="${VM_DIR:-$HOME/.ferrocrate/vm}"
 VM_DISK_PATH="${VM_DISK_PATH:-$VM_DIR/ferrocrate-desktop.qcow2}"
@@ -30,9 +33,12 @@ Usage: install-macos.sh [options]
 
 Options:
   --method <binary|source>   Install method (default: binary)
+  --channel <public|paid>    Artifact channel (default: public)
   --version <tag|latest>     Release tag (default: latest)
   --repo <owner/name>        GitHub repo (default: dgtise25/ferrocrate)
   --prefix <path>            Install destination (default: /usr/local/bin)
+  --with-desktop-bin         Install ferro-desktop binary (paid channels)
+  --with-desktop-bootstrap   Initialize/start desktop VM (requires desktop binary)
   --no-desktop-bootstrap     Skip desktop VM/bootstrap setup
   --force                    Overwrite existing files without prompt
   -h, --help                 Show this help
@@ -40,6 +46,7 @@ Options:
 Examples:
   ./install-macos.sh
   ./install-macos.sh --version v0.1.0
+  ./install-macos.sh --with-desktop-bin --with-desktop-bootstrap
   ./install-macos.sh --no-desktop-bootstrap
   ./install-macos.sh --method source --prefix ~/.local/bin
 USAGE
@@ -59,6 +66,10 @@ parse_args() {
         METHOD="${2:-}"
         shift 2
         ;;
+      --channel)
+        RELEASE_CHANNEL="${2:-}"
+        shift 2
+        ;;
       --version)
         VERSION="${2:-}"
         shift 2
@@ -73,6 +84,15 @@ parse_args() {
         ;;
       --force)
         FORCE="1"
+        shift
+        ;;
+      --with-desktop-bin)
+        INSTALL_DESKTOP_BIN="1"
+        shift
+        ;;
+      --with-desktop-bootstrap)
+        INSTALL_DESKTOP_BIN="1"
+        DESKTOP_BOOTSTRAP="1"
         shift
         ;;
       --no-desktop-bootstrap)
@@ -133,6 +153,27 @@ resolve_release_tag() {
   echo "$RESOLVED_RELEASE_TAG"
 }
 
+release_base_url_for_tag() {
+  local tag="$1"
+  if [[ "$RELEASE_CHANNEL" == "public" ]]; then
+    echo "https://github.com/${REPO}/releases/download/${tag}"
+    return
+  fi
+  if [[ "$RELEASE_CHANNEL" != "paid" ]]; then
+    echo "invalid --channel: $RELEASE_CHANNEL (expected public or paid)" >&2
+    exit 1
+  fi
+  if [[ -z "$PAID_RELEASE_BASE_URL" ]]; then
+    echo "paid channel requires PAID_RELEASE_BASE_URL (can include {tag} placeholder)" >&2
+    exit 1
+  fi
+  if [[ "$PAID_RELEASE_BASE_URL" == *"{tag}"* ]]; then
+    echo "${PAID_RELEASE_BASE_URL//\{tag\}/$tag}"
+  else
+    echo "${PAID_RELEASE_BASE_URL%/}/${tag}"
+  fi
+}
+
 install_binary_release() {
   require_cmd curl
   require_cmd tar
@@ -143,9 +184,12 @@ install_binary_release() {
 
   tag="$(resolve_release_tag)"
 
-  base_url="https://github.com/${REPO}/releases/download/${tag}"
+  base_url="$(release_base_url_for_tag "$tag")"
   asset_name="ferrocrate-${tag}-macos-${arch}.tar.gz"
   checksum_name="ferrocrate-${tag}-checksums.txt"
+  if [[ "$RELEASE_CHANNEL" == "paid" ]]; then
+    checksum_name="ferrocrate-${tag}-paid-checksums.txt"
+  fi
 
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
@@ -195,11 +239,15 @@ install_from_source() {
     RESOLVED_RELEASE_TAG="$VERSION"
   fi
 
-  (cd "$tmpdir/src" && cargo build --release -p ferro-cli -p ferro-desktop)
+  local build_packages=(-p ferro-cli)
+  if [[ "$INSTALL_DESKTOP_BIN" == "1" ]]; then
+    build_packages+=(-p ferro-desktop)
+  fi
+  (cd "$tmpdir/src" && cargo build --release "${build_packages[@]}")
 
   mkdir -p "$tmpdir/unpack"
   cp "$tmpdir/src/target/release/ferro-cli" "$tmpdir/unpack/ferrocrate"
-  if [[ -f "$tmpdir/src/target/release/ferro-desktop" ]]; then
+  if [[ "$INSTALL_DESKTOP_BIN" == "1" && -f "$tmpdir/src/target/release/ferro-desktop" ]]; then
     cp "$tmpdir/src/target/release/ferro-desktop" "$tmpdir/unpack/ferro-desktop"
   fi
 
@@ -245,8 +293,11 @@ install_binaries_from_dir() {
 
   mkdir -p "$PREFIX"
   install_file "$ferrocrate_src" "$PREFIX/ferrocrate"
-  if [[ -n "$desktop_src" ]]; then
+  if [[ "$INSTALL_DESKTOP_BIN" == "1" && -n "$desktop_src" ]]; then
     install_file "$desktop_src" "$PREFIX/ferro-desktop"
+  elif [[ "$INSTALL_DESKTOP_BIN" == "1" ]]; then
+    echo "desktop binary requested but artifact did not contain ferro-desktop; use --channel paid with valid PAID_RELEASE_BASE_URL or install from source" >&2
+    exit 1
   fi
 }
 
@@ -527,6 +578,15 @@ bootstrap_desktop_vm() {
 main() {
   parse_args "$@"
   ensure_macos
+
+  if [[ "$DESKTOP_BOOTSTRAP" == "1" && "$INSTALL_DESKTOP_BIN" != "1" ]]; then
+    echo "--with-desktop-bootstrap requires --with-desktop-bin" >&2
+    exit 1
+  fi
+  if [[ "$RELEASE_CHANNEL" != "public" && "$RELEASE_CHANNEL" != "paid" ]]; then
+    echo "invalid --channel: $RELEASE_CHANNEL (expected public or paid)" >&2
+    exit 1
+  fi
 
   case "$METHOD" in
     binary)

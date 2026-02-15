@@ -14,6 +14,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --workspace
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+      - name: Enforce coverage gate
+        env:
+          FERROCRATE_COVERAGE_MIN: "90"
+          FERROCRATE_COVERAGE_ENFORCE: "1"
+        run: ./scripts/coverage.sh
       - name: Run API contract tests
         run: |
           cargo test -p ferro-cli --test docker_compat_integration

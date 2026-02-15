@@ -42,8 +42,8 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 
 - [x] ~~COMPAT-01 - Rework OCI Image Spec v1.1 compliance from smoke-level to full conformance~~
 - [x] ~~COMPAT-02 - Rework OCI Runtime Spec v1.2 compliance from smoke-level to full conformance~~
-- [ ] COMPAT-03 - Rework OCI Distribution Spec v1.1 compliance from smoke-level to full conformance (IN PROGRESS)
-- [ ] COMPAT-04 - Rework Docker API v1.45+ parity beyond current subset
+- [x] ~~COMPAT-03 - Rework OCI Distribution Spec v1.1 compliance from smoke-level to full conformance~~
+- [ ] COMPAT-04 - Rework Docker API v1.45+ parity beyond current subset (IN PROGRESS)
 - [ ] COMPAT-06 - Rework Dockerfile syntax compatibility to high-parity target
 - [ ] COMPAT-09 - Expand CRI from partial shim to required Kubernetes runtime surface
 - [ ] IMG-06 - Rework Dockerfile build behavior for full-feature compatibility and stability

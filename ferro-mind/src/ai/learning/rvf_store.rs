@@ -1,6 +1,7 @@
 //! RVF-backed persistent vector storage.
 
 use crate::ruv::types::SearchResult;
+use parking_lot::Mutex;
 use rvf_runtime::{QueryOptions, RvfOptions, RvfStore as BackendStore};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -32,12 +33,21 @@ pub(crate) fn stable_id(id: Option<&str>, vector: &[f32]) -> u64 {
 }
 
 pub struct RvfStore {
-    backend: BackendStore,
+    backend: Mutex<BackendStore>,
     _path: PathBuf,
     dimensions: usize,
+    pending: Mutex<PendingBatch>,
+}
+
+#[derive(Default)]
+struct PendingBatch {
+    vectors: Vec<Vec<f32>>,
+    ids: Vec<u64>,
 }
 
 impl RvfStore {
+    const FLUSH_BATCH_SIZE: usize = 256;
+
     pub fn open_or_create<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
         if dimensions == 0 || dimensions > u16::MAX as usize {
             return Err(RvfStoreError::InvalidDimensions(dimensions));
@@ -62,21 +72,28 @@ impl RvfStore {
         }
 
         Ok(Self {
-            backend,
+            backend: Mutex::new(backend),
             _path: path,
             dimensions,
+            pending: Mutex::new(PendingBatch::default()),
         })
     }
 
-    pub fn insert(&mut self, id: Option<&str>, vector: &[f32]) -> Result<()> {
+    pub fn insert(&self, id: Option<&str>, vector: &[f32]) -> Result<()> {
         if vector.len() != self.dimensions {
             return Err(RvfStoreError::InvalidDimensions(vector.len()));
         }
 
         let rvf_id = stable_id(id, vector);
-        self.backend
-            .ingest_batch(&[vector], &[rvf_id], None)
-            .map_err(|err| RvfStoreError::Runtime(err.to_string()))?;
+        {
+            let mut pending = self.pending.lock();
+            pending.vectors.push(vector.to_vec());
+            pending.ids.push(rvf_id);
+            if pending.vectors.len() >= Self::FLUSH_BATCH_SIZE {
+                drop(pending);
+                self.flush_pending()?;
+            }
+        }
         Ok(())
     }
 
@@ -84,9 +101,10 @@ impl RvfStore {
         if query.len() != self.dimensions {
             return Err(RvfStoreError::InvalidDimensions(query.len()));
         }
+        self.flush_pending()?;
 
-        let results = self
-            .backend
+        let backend = self.backend.lock();
+        let results = backend
             .query(query, k, &QueryOptions::default())
             .map_err(|err| RvfStoreError::Runtime(err.to_string()))?;
 
@@ -102,7 +120,32 @@ impl RvfStore {
     }
 
     pub fn len(&self) -> usize {
-        self.backend.status().total_vectors as usize
+        let committed = self.backend.lock().status().total_vectors as usize;
+        let buffered = self.pending.lock().vectors.len();
+        committed + buffered
+    }
+
+    fn flush_pending(&self) -> Result<()> {
+        let mut pending = self.pending.lock();
+        if pending.vectors.is_empty() {
+            return Ok(());
+        }
+
+        let refs: Vec<&[f32]> = pending.vectors.iter().map(|v| v.as_slice()).collect();
+        let ids = pending.ids.clone();
+        let mut backend = self.backend.lock();
+        backend
+            .ingest_batch(&refs, &ids, None)
+            .map_err(|err| RvfStoreError::Runtime(err.to_string()))?;
+        pending.vectors.clear();
+        pending.ids.clear();
+        Ok(())
+    }
+}
+
+impl Drop for RvfStore {
+    fn drop(&mut self) {
+        let _ = self.flush_pending();
     }
 }
 
@@ -116,7 +159,7 @@ mod tests {
         let path = tmp.path().join("memory.rvf");
 
         {
-            let mut store = RvfStore::open_or_create(&path, 3).expect("create");
+            let store = RvfStore::open_or_create(&path, 3).expect("create");
             store
                 .insert(Some("v1"), &[1.0, 0.0, 0.0])
                 .expect("insert");

@@ -4,6 +4,8 @@ fn bin() -> (Command, tempfile::TempDir) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferro-cli"));
     let temp = tempfile::tempdir().expect("tempdir");
     cmd.env("FERROCRATE_RUNTIME_DIR", temp.path());
+    cmd.env("FERROCRATE_IMAGE_STORE", temp.path().join("images"));
+    cmd.env("FERROCRATE_DESKTOP_FORWARD", "0");
     (cmd, temp)
 }
 
@@ -14,6 +16,7 @@ fn images_command_succeeds() {
     assert!(status.success());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn containers_command_succeeds() {
     let (mut cmd, _temp) = bin();
@@ -21,6 +24,7 @@ fn containers_command_succeeds() {
     assert!(status.success());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn logs_requires_container() {
     let (mut cmd, _temp) = bin();

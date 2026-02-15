@@ -4767,7 +4767,7 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
     Ok(env)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
         build_health_config, build_limits, desktop_forward_enabled, dispatch, effective_readonly,
@@ -5722,6 +5722,61 @@ mod tests {
                     std::env::remove_var("FERROCRATE_RUNTIME_DIR");
                 }
             }
+        }
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests_non_linux {
+    use super::{desktop_forward_enabled, should_desktop_forward, structured_desktop_error};
+
+    #[test]
+    fn desktop_forward_env_toggle() {
+        unsafe {
+            std::env::remove_var("FERROCRATE_DESKTOP_FORWARD");
+        }
+        #[cfg(target_os = "macos")]
+        assert!(desktop_forward_enabled());
+        #[cfg(not(target_os = "macos"))]
+        assert!(!desktop_forward_enabled());
+
+        unsafe {
+            std::env::set_var("FERROCRATE_DESKTOP_FORWARD", "1");
+        }
+        assert!(desktop_forward_enabled());
+        unsafe {
+            std::env::remove_var("FERROCRATE_DESKTOP_FORWARD");
+        }
+    }
+
+    #[test]
+    fn desktop_forward_runtime_command_detection() {
+        assert!(should_desktop_forward(&[
+            "run".to_string(),
+            "alpine:latest".to_string()
+        ]));
+        assert!(!should_desktop_forward(&["images".to_string()]));
+    }
+
+    #[test]
+    fn structured_desktop_error_text_and_json_modes() {
+        unsafe {
+            std::env::remove_var("FERROCRATE_ERROR_FORMAT");
+            std::env::remove_var("FERROCRATE_ERROR_JSON");
+        }
+        let text =
+            structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
+        assert!(text.contains("category=desktop_bridge_unavailable"));
+
+        unsafe {
+            std::env::set_var("FERROCRATE_ERROR_FORMAT", "json");
+        }
+        let json =
+            structured_desktop_error("desktop_bridge_unavailable", "bridge failed", "retry", true);
+        assert!(json.contains("\"category\":\"desktop_bridge_unavailable\""));
+        assert!(json.contains("\"retryable\":true"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_ERROR_FORMAT");
         }
     }
 }

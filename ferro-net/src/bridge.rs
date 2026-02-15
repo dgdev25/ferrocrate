@@ -5,6 +5,7 @@ use crate::validate::{validate_cidr, validate_interface_name, ValidationError};
 pub struct BridgeConfig {
     pub name: String,
     pub cidr: String,
+    pub ipv6_cidr: Option<String>,
 }
 
 // ============================================================================
@@ -100,7 +101,24 @@ pub fn create_bridge(config: &BridgeConfig) -> Result<(), ExecError> {
         )?;
     }
 
-    // Step 3: Bring the bridge up
+    // Step 3: Assign IPv6 address (if provided)
+    if let Some(ipv6_cidr) = config.ipv6_cidr.as_ref() {
+        if !ipv6_cidr.is_empty() {
+            txn.add(
+                build_ip_addr_add_ipv6_bridge_cmd(&config.name, ipv6_cidr).map_err(|e| ExecError::CommandFailed {
+                    cmd: format!("bridge ipv6 addr validation: {}", e),
+                    stderr: String::new(),
+                })?,
+                // IPv6 removal reuses generic ip addr del form.
+                build_ip_addr_del_bridge_cmd(&config.name, ipv6_cidr).map_err(|e| ExecError::CommandFailed {
+                    cmd: format!("bridge ipv6 addr rollback validation: {}", e),
+                    stderr: String::new(),
+                })?,
+            )?;
+        }
+    }
+
+    // Step 4: Bring the bridge up
     txn.add(
         build_ip_link_set_up_cmd(&config.name).map_err(|e| ExecError::CommandFailed {
             cmd: format!("bridge up validation: {}", e),
@@ -138,6 +156,7 @@ pub fn destroy_bridge(name: &str) -> Result<(), ExecError> {
 #[cfg(test)]
 mod tests {
     use super::{
+        BridgeConfig,
         build_ip_addr_add_bridge_cmd,
         build_ip_addr_add_ipv6_bridge_cmd,
         build_ip_link_add_bridge_cmd,
@@ -181,5 +200,15 @@ mod tests {
         assert!(build_ip_addr_add_bridge_cmd("ferro0", "not-a-cidr").is_err());
         assert!(build_ip_addr_add_bridge_cmd("ferro0", "10.0.0.0/33").is_err());
         assert!(build_ip_addr_add_bridge_cmd("ferro0", "10.0.0.0/24;cat /etc/passwd").is_err());
+    }
+
+    #[test]
+    fn bridge_config_supports_ipv6() {
+        let cfg = BridgeConfig {
+            name: "ferro0".to_string(),
+            cidr: "10.0.0.1/24".to_string(),
+            ipv6_cidr: Some("fd00::1/64".to_string()),
+        };
+        assert_eq!(cfg.ipv6_cidr.as_deref(), Some("fd00::1/64"));
     }
 }

@@ -1344,6 +1344,7 @@ fn setup_network(
     let bridge_exec_config = bridge::BridgeConfig {
         name: bridge_config.name.clone(),
         cidr: bridge_config.cidr.clone(),
+        ipv6_cidr: bridge_config.ipv6_cidr.clone(),
     };
     match bridge::create_bridge(&bridge_exec_config) {
         Ok(()) => {}
@@ -1355,14 +1356,6 @@ fn setup_network(
             }
         }
     }
-    if let Some(ipv6_cidr) = bridge_config.ipv6_cidr.as_ref() {
-        run_cmd_allow_exists(&bridge::build_ip_addr_add_ipv6_bridge_cmd(
-            &bridge_config.name,
-            ipv6_cidr,
-        )?)?;
-    }
-    run_cmd(&bridge::build_ip_link_set_up_cmd(&bridge_config.name)?)?;
-
     let netns_name = format!("ferro-{container_id}");
     run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
 

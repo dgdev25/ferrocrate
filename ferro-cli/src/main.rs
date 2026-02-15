@@ -1,4 +1,5 @@
 #![allow(clippy::items_after_test_module)]
+#![allow(missing_docs)]
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};

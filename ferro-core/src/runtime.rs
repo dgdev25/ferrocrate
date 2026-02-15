@@ -1680,6 +1680,32 @@ fn selinux_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn mac_permissive_mode() -> bool {
+    std::env::var("FERROCRATE_MAC_PERMISSIVE")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn mac_enforcement_result(feature: &str, detail: &str) -> Result<(), RuntimeError> {
+    if mac_permissive_mode() {
+        log::warn!("{feature}: {detail} (permissive mode)");
+        return Ok(());
+    }
+    Err(RuntimeError::InvalidCommand(format!("{feature}: {detail}")))
+}
+
+fn validate_selinux_type(selinux_type: &str) -> Result<(), RuntimeError> {
+    if selinux_type
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+    {
+        return Err(RuntimeError::InvalidCommand(
+            "selinux type contains invalid characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 // SEC-05: Default timeout for external commands (10 seconds)
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1748,6 +1774,10 @@ fn apply_apparmor_if_enabled(
         return Ok(cmd.to_vec());
     }
     if !command_available("apparmor_parser") || !command_available("aa-exec") {
+        mac_enforcement_result(
+            "apparmor",
+            "apparmor_parser and aa-exec are required when FERROCRATE_APPARMOR=1",
+        )?;
         return Ok(cmd.to_vec());
     }
     let profile_name = format!("ferrocrate-{container_id}");
@@ -1764,6 +1794,11 @@ fn apply_apparmor_if_enabled(
         Duration::from_secs(10),
     )?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        mac_enforcement_result(
+            "apparmor",
+            &format!("failed to load profile: {}", stderr.trim()),
+        )?;
         return Ok(cmd.to_vec());
     }
 
@@ -1784,10 +1819,15 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
         return Ok(cmd.to_vec());
     }
     if !command_available("runcon") {
+        mac_enforcement_result(
+            "selinux",
+            "runcon is required when FERROCRATE_SELINUX=1",
+        )?;
         return Ok(cmd.to_vec());
     }
     let selinux_type =
         std::env::var("FERROCRATE_SELINUX_TYPE").unwrap_or_else(|_| "container_t".to_string());
+    validate_selinux_type(&selinux_type)?;
     let mut wrapped = Vec::new();
     wrapped.push("runcon".to_string());
     wrapped.push("-t".to_string());
@@ -3660,6 +3700,29 @@ mod tests {
         let third = super::wireguard_listen_port("container-b");
         assert_eq!(first, second);
         assert_ne!(first, third);
+    }
+
+    #[test]
+    fn mac_permissive_mode_respects_env() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_MAC_PERMISSIVE");
+        }
+        assert!(!super::mac_permissive_mode());
+        unsafe {
+            std::env::set_var("FERROCRATE_MAC_PERMISSIVE", "1");
+        }
+        assert!(super::mac_permissive_mode());
+        unsafe {
+            std::env::remove_var("FERROCRATE_MAC_PERMISSIVE");
+        }
+    }
+
+    #[test]
+    fn selinux_type_validation_rejects_invalid_chars() {
+        let err = super::validate_selinux_type("container_t;bad").expect_err("invalid type");
+        assert!(err.to_string().contains("invalid characters"));
+        super::validate_selinux_type("container_t").expect("valid type");
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

@@ -36,11 +36,11 @@ Source: `docs/ROADMAP.md` remaining `Partial` + `Done/Rework Needed` items
 - [x] ~~SEC-02 - Enforce seccomp profiles at runtime (not parse-only)~~
 - [x] ~~SEC-08 - Implement runtime eBPF security monitoring execution path~~
 - [x] ~~SEC-09 - Complete encrypted container communication behavior~~
-- [ ] SEC-03 - Rework AppArmor/SELinux integration to production-ready policy enforcement (IN PROGRESS)
+- [x] ~~SEC-03 - Rework AppArmor/SELinux integration to production-ready policy enforcement~~
 
 ## C) Compatibility + CRI (7)
 
-- [ ] COMPAT-01 - Rework OCI Image Spec v1.1 compliance from smoke-level to full conformance
+- [ ] COMPAT-01 - Rework OCI Image Spec v1.1 compliance from smoke-level to full conformance (IN PROGRESS)
 - [ ] COMPAT-02 - Rework OCI Runtime Spec v1.2 compliance from smoke-level to full conformance
 - [ ] COMPAT-03 - Rework OCI Distribution Spec v1.1 compliance from smoke-level to full conformance
 - [ ] COMPAT-04 - Rework Docker API v1.45+ parity beyond current subset

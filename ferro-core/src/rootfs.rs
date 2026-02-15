@@ -73,11 +73,13 @@ pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), R
         }
 
         if entry.header().entry_type().is_dir() {
+            ensure_no_symlink_components(rootfs_dir, &normalized)?;
             fs::create_dir_all(rootfs_dir.join(&normalized))?;
             continue;
         }
 
         let destination = rootfs_dir.join(&normalized);
+        ensure_no_symlink_components(rootfs_dir, &normalized)?;
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -120,11 +122,13 @@ fn apply_layer_tar_with_dedup(
         }
 
         if entry.header().entry_type().is_dir() {
+            ensure_no_symlink_components(rootfs_dir, &normalized)?;
             fs::create_dir_all(rootfs_dir.join(&normalized))?;
             continue;
         }
 
         let destination = rootfs_dir.join(&normalized);
+        ensure_no_symlink_components(rootfs_dir, &normalized)?;
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -196,12 +200,31 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RootfsError> {
         return Ok(());
     }
 
-    if path.is_dir() {
+    let md = fs::symlink_metadata(path)?;
+    if md.file_type().is_symlink() {
+        fs::remove_file(path)?;
+    } else if md.is_dir() {
         fs::remove_dir_all(path)?;
     } else {
         fs::remove_file(path)?;
     }
 
+    Ok(())
+}
+
+fn ensure_no_symlink_components(rootfs_dir: &Path, rel_path: &Path) -> Result<(), RootfsError> {
+    let mut current = rootfs_dir.to_path_buf();
+    let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    for component in parent.components() {
+        if let Component::Normal(part) = component {
+            current.push(part);
+            if let Ok(md) = fs::symlink_metadata(&current) {
+                if md.file_type().is_symlink() {
+                    return Err(RootfsError::UnsafePath(rel_path.display().to_string()));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

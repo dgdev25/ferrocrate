@@ -32,6 +32,7 @@ async fn connect_channel(socket_path: std::path::PathBuf) -> Channel {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cri_socket_serves_runtime_and_image_requests() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
     let runtime = tempfile::tempdir().expect("runtime tempdir");

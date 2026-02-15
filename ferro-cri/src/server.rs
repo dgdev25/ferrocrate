@@ -300,6 +300,7 @@ fn map_image_fetch_error(err: ferro_core::image_fetch::ImageFetchError) -> Statu
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn collect_fs_usage(path: &Path) -> Result<FilesystemUsage, Status> {
     if !path.exists() {
         fs::create_dir_all(path)

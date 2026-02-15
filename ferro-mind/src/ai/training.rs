@@ -389,7 +389,7 @@ impl TrainingPipeline {
         let mut total = 0usize;
         for entry in fs::read_dir(data_dir)? {
             let path = entry?.path();
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 total += 1;
             }
         }
@@ -410,7 +410,7 @@ impl TrainingPipeline {
             return Err(TrainingError::DataDirNotFound(data_path));
         }
 
-        let samples = self.load_training_data(&data_path, model_type)?;
+        let samples = self.load_training_data(&data_path)?;
 
         if samples.len() < self.config.min_samples {
             return Err(TrainingError::InsufficientData(
@@ -420,7 +420,7 @@ impl TrainingPipeline {
         }
 
         // Perform training (simplified - in production would use ruv-fann/tract)
-        let loss = self.train_model(model_type, &samples)?;
+        let loss = self.train_model(&samples)?;
 
         // Create new version
         let version = self.get_next_version(model_type);
@@ -472,11 +472,7 @@ impl TrainingPipeline {
     }
 
     /// Load training data from directory
-    fn load_training_data(
-        &self,
-        data_path: &Path,
-        model_type: ModelType,
-    ) -> Result<Vec<Vec<u8>>, TrainingError> {
+    fn load_training_data(&self, data_path: &Path) -> Result<Vec<Vec<u8>>, TrainingError> {
         let mut samples = Vec::new();
 
         if !data_path.exists() {
@@ -487,7 +483,7 @@ impl TrainingPipeline {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 let data = fs::read(&path)?;
                 samples.push(data);
             }
@@ -497,9 +493,7 @@ impl TrainingPipeline {
     }
 
     /// Train model (simplified implementation)
-    fn train_model(&self, model_type: ModelType, samples: &[Vec<u8>]) -> Result<f32, TrainingError> {
-        // Suppress unused variable warning - model_type will be used in production
-        let _ = model_type;
+    fn train_model(&self, samples: &[Vec<u8>]) -> Result<f32, TrainingError> {
         // In production, this would:
         // 1. Parse samples into model-specific format
         // 2. Train using ruv-fann (neural networks) or tract (ONNX)
@@ -1121,7 +1115,7 @@ pub fn handle_export_rvf_command(
     if sample_dir.exists() {
         for entry in fs::read_dir(&sample_dir)? {
             let path = entry?.path();
-            if !path.extension().map(|ext| ext == "json").unwrap_or(false) {
+            if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
             let sample = fs::read_to_string(&path)?;
@@ -1197,6 +1191,9 @@ pub fn handle_export_rvf_command(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    static AI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_test_env() -> (tempfile::TempDir, TrainingConfig) {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -1249,6 +1246,7 @@ mod tests {
 
     #[test]
     fn train_with_ai_disabled() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, config) = setup_test_env();
         unsafe { std::env::remove_var("FERROCRATE_AI"); }
 
@@ -1263,6 +1261,7 @@ mod tests {
 
     #[test]
     fn train_with_sufficient_data() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, config) = setup_test_env();
 
         // Skip test if AI is not enabled
@@ -1283,6 +1282,7 @@ mod tests {
 
     #[test]
     fn version_increments_on_retrain() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, config) = setup_test_env();
 
         // Skip test if AI is not enabled
@@ -1302,6 +1302,7 @@ mod tests {
 
     #[test]
     fn rollback_to_previous_version() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, config) = setup_test_env();
 
         // Skip test if AI is not enabled
@@ -1327,6 +1328,7 @@ mod tests {
 
     #[test]
     fn version_pruning() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, mut config) = setup_test_env();
         config.max_versions = 2;
 
@@ -1351,6 +1353,7 @@ mod tests {
 
     #[test]
     fn online_learning_state() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, mut config) = setup_test_env();
         config.online_learning = true;
 
@@ -1364,6 +1367,7 @@ mod tests {
 
     #[test]
     fn online_learning_trains_on_new_samples() {
+        let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, mut config) = setup_test_env();
         config.online_learning = true;
         config.min_samples = 3;

@@ -618,7 +618,7 @@ mod tests {
         for i in 0..5 {
             p.push(ResourceSample {
                 cpu_percent: 10.0,
-                memory_bytes: 10_000 + i as u64 * 10_000,
+                memory_bytes: 10_000 + i * 10_000,
                 pids_count: 1,
                 timestamp: Instant::now() + Duration::from_millis(i * 250),
             });
@@ -654,7 +654,7 @@ mod tests {
         for i in 0..5 {
             p.push(ResourceSample {
                 cpu_percent: 10.0,
-                memory_bytes: 1000 + i as u64,
+                memory_bytes: 1000 + i,
                 pids_count: 1,
                 timestamp: Instant::now() + Duration::from_millis(i * 250),
             });

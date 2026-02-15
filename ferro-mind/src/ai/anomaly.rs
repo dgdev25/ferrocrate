@@ -77,7 +77,7 @@ impl NeuralAnomalyDetector {
     ///
     /// Architecture: input -> hidden (compressed) -> output (reconstructed)
     fn init_network(&mut self) {
-        let hidden_size = (self.input_size + 1) / 2;  // Compression layer
+        let hidden_size = self.input_size.div_ceil(2); // Compression layer
 
         self.network = Some(
             NetworkBuilder::new()

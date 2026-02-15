@@ -85,7 +85,7 @@ struct VolumeDriverRegistry {
 impl VolumeDriverRegistry {
     fn new() -> Self {
         let mut registry = Self::default();
-        registry.register(LocalVolumeDriver::default());
+        registry.register(LocalVolumeDriver);
         registry
     }
 

@@ -3,3 +3,6 @@
 
 # ONNX model files (download separately)
 ferro-mind/assets/
+
+# Throwaway local scenario workspace (manual testing only)
+tmp/ferro-scenario/

@@ -113,7 +113,7 @@ fn export_trace<T: Serialize>(kind: &str, payload: &T) -> Result<(), std::io::Er
     let client = reqwest::blocking::Client::builder()
         .timeout(config.timeout)
         .build()
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
     let mut attempts = 0_u32;
     let deadline = Instant::now() + config.timeout.saturating_mul(config.retries + 1);
     loop {
@@ -126,15 +126,14 @@ fn export_trace<T: Serialize>(kind: &str, payload: &T) -> Result<(), std::io::Er
             Ok(response) if response.status().is_success() => return Ok(()),
             Ok(response) => {
                 if attempts > config.retries {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(std::io::Error::other(
                         format!("trace export failed with status {}", response.status()),
                     ));
                 }
             }
             Err(err) => {
                 if attempts > config.retries || Instant::now() >= deadline {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()));
+                    return Err(std::io::Error::other(err.to_string()));
                 }
             }
         }

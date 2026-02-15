@@ -228,7 +228,9 @@ fn read_u64_allow_max(path: PathBuf) -> Result<Option<u64>, CgroupError> {
     Ok(trimmed.parse::<u64>().ok())
 }
 
-fn read_cpu_stat(path: PathBuf) -> Result<(Option<u64>, Option<u64>, Option<u64>), CgroupError> {
+type CpuStat = (Option<u64>, Option<u64>, Option<u64>);
+
+fn read_cpu_stat(path: PathBuf) -> Result<CpuStat, CgroupError> {
     if !path.exists() {
         return Ok((None, None, None));
     }

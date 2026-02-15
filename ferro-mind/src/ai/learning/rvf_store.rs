@@ -125,6 +125,10 @@ impl RvfStore {
         committed + buffered
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn flush_pending(&self) -> Result<()> {
         let mut pending = self.pending.lock();
         if pending.vectors.is_empty() {

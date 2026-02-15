@@ -7,16 +7,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
 // SEC-02: Scoped environment variable guard for safe test environment manipulation
+#[allow(dead_code)]
 struct ScopedEnvVar {
     key: String,
     _old_value: Option<String>,
 }
 
+#[allow(dead_code)]
 impl ScopedEnvVar {
     fn set(key: &str, value: &str) -> Self {
         let old_value = std::env::var(key).ok();
@@ -258,9 +260,10 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, DockerAuthError> {
     let helper_bin = format!("docker-credential-{helper}");
+    let helper_path = resolve_helper_path(&helper_bin);
 
     // SEC-05: Execute credential helper with timeout to prevent blocking indefinitely
-    let output = execute_helper_with_timeout(&helper_bin, registry)?;
+    let output = execute_helper_with_timeout(&helper_path, registry)?;
 
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).to_string();
@@ -273,6 +276,16 @@ fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, Doc
         username: resp.username,
         password: resp.secret,
     })
+}
+
+fn resolve_helper_path(helper_bin: &str) -> String {
+    if let Ok(config_dir) = std::env::var("DOCKER_CONFIG") {
+        let candidate = PathBuf::from(config_dir).join("bin").join(helper_bin);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    helper_bin.to_string()
 }
 
 /// SEC-05: Execute credential helper with timeout to prevent blocking indefinitely

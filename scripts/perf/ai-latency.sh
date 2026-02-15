@@ -1,28 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ ! -x ./target/release/ai-latency ]; then
-  cargo build -p ferro-mind --release
-  cat <<'RS' > /tmp/ai-latency.rs
-use std::time::Instant;
-use ferro_mind::ai::restart::{decide_restart, RestartSignal};
+MAX_AI_NS=${FERROCRATE_PERF_AI_MAX_NS:-5000000}
+ENFORCE=${FERROCRATE_PERF_ENFORCE:-1}
+ALLOW_SKIP=${FERROCRATE_PERF_ALLOW_SKIP:-0}
 
-fn main() {
-    let iterations: u64 = std::env::var("FERROCRATE_AI_ITER")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10000);
-    let signal = RestartSignal { exit_code: 1, recent_failures: 0 };
-    let start = Instant::now();
-    for _ in 0..iterations {
-        let _ = decide_restart(signal);
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let per = elapsed / iterations as u128;
-    println!("perf.ai_decision_ns={}", per);
-}
-RS
-  rustc /tmp/ai-latency.rs -o ./target/release/ai-latency -L target/release -L target/release/deps -C opt-level=3
+out=$(cargo run --release -p ferro-mind --example ai_latency --quiet 2>/dev/null || true)
+if [ -z "${out}" ]; then
+  if [ "${ALLOW_SKIP}" = "1" ]; then
+    echo "perf.ai_skipped=1"
+    echo "perf.ai_skip_reason=run_failed"
+    exit 0
+  fi
+  echo "error: failed to run ai latency benchmark example" >&2
+  exit 1
+fi
+echo "${out}"
+echo "perf.ai_max_ns_slo=${MAX_AI_NS}"
+
+value=$(echo "${out}" | awk -F= '/perf.ai_inference_ns=/{print $2}' | tail -n1)
+if [ -z "${value}" ]; then
+  if [ "${ALLOW_SKIP}" = "1" ]; then
+    echo "perf.ai_skipped=1"
+    echo "perf.ai_skip_reason=missing_metric"
+    exit 0
+  fi
+  echo "error: ai latency benchmark did not produce perf.ai_inference_ns metric" >&2
+  exit 1
 fi
 
-./target/release/ai-latency
+if [ "${ENFORCE}" = "1" ] && [ "${value}" -gt "${MAX_AI_NS}" ]; then
+  echo "error: AI inference latency SLO violation (${value}ns > ${MAX_AI_NS}ns)" >&2
+  exit 1
+fi

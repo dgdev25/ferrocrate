@@ -1826,6 +1826,7 @@ fn update_container_hosts(
     }
 
     let hosts_body = render_hosts(&entries);
+    let resolv_body = ferro_net::dns::render_resolv_conf(&runtime_dns_config());
     for record in containers {
         if record.status != "running" && record.status != "paused" {
             continue;
@@ -1843,8 +1844,46 @@ fn update_container_hosts(
             fs::create_dir_all(parent)?;
         }
         fs::write(&hosts_path, &hosts_body)?;
+
+        let resolv_path = runtime_dir
+            .join("containers")
+            .join(&record.id)
+            .join("rootfs")
+            .join("etc")
+            .join("resolv.conf");
+        if let Some(parent) = resolv_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&resolv_path, &resolv_body)?;
     }
     Ok(())
+}
+
+fn runtime_dns_config() -> ferro_net::dns::DnsConfig {
+    let servers = std::env::var("FERROCRATE_DNS_SERVERS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|entries| !entries.is_empty())
+        .unwrap_or_else(|| vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]);
+    let search = std::env::var("FERROCRATE_DNS_SEARCH")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["ferro.local".to_string()]);
+    ferro_net::dns::DnsConfig { servers, search }
 }
 
 fn render_hosts(entries: &BTreeMap<String, BTreeSet<String>>) -> String {
@@ -2822,6 +2861,32 @@ mod tests {
         assert_eq!(resumed.status, "running");
 
         unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT"); }
+    }
+
+    #[test]
+    fn runtime_dns_config_defaults() {
+        unsafe {
+            std::env::remove_var("FERROCRATE_DNS_SERVERS");
+            std::env::remove_var("FERROCRATE_DNS_SEARCH");
+        }
+        let cfg = super::runtime_dns_config();
+        assert_eq!(cfg.servers, vec!["1.1.1.1", "8.8.8.8"]);
+        assert_eq!(cfg.search, vec!["ferro.local"]);
+    }
+
+    #[test]
+    fn runtime_dns_config_respects_env() {
+        unsafe {
+            std::env::set_var("FERROCRATE_DNS_SERVERS", "9.9.9.9,1.0.0.1");
+            std::env::set_var("FERROCRATE_DNS_SEARCH", "svc.local,cluster.local");
+        }
+        let cfg = super::runtime_dns_config();
+        assert_eq!(cfg.servers, vec!["9.9.9.9", "1.0.0.1"]);
+        assert_eq!(cfg.search, vec!["svc.local", "cluster.local"]);
+        unsafe {
+            std::env::remove_var("FERROCRATE_DNS_SERVERS");
+            std::env::remove_var("FERROCRATE_DNS_SEARCH");
+        }
     }
 
     fn seed_image_store(runtime_dir: &std::path::Path, image: &str) {

@@ -19,3 +19,7 @@ caps = "0.5"
 ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
 
 [dev-dependencies]
+
+[[test]]
+name = "macos_compatibility_tests"
+path = "../tests/macos_compatibility_tests.rs"

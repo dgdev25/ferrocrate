@@ -17,7 +17,7 @@ pub fn render_resolv_conf(config: &DnsConfig) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DnsConfig, render_resolv_conf};
+    use super::{render_resolv_conf, DnsConfig};
 
     #[test]
     fn renders_resolv_conf() {

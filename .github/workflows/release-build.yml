@@ -1,0 +1,81 @@
+name: Build Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy --all -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all
+
+  build-linux:
+    needs: [lint, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libsoup-3.0-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libssl-dev \
+            curl \
+            wget \
+            openssl \
+            libssl-dev \
+            pkg-config
+
+      - name: Build Rust binaries
+        run: cargo build --release
+
+      - name: Build desktop UI
+        working-directory: apps/ferro-desktop-ui
+        run: |
+          npm install
+          npm run tauri:build
+
+      - name: Create release artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp target/release/ferro-cli release-artifacts/ 2>/dev/null || true
+          cp target/release/ferro-mind release-artifacts/ 2>/dev/null || true
+          cp apps/ferro-desktop-ui/src-tauri/target/release/ferrocrate release-artifacts/ 2>/dev/null || true
+          ls -lh release-artifacts/
+
+      - name: Create checksums
+        run: |
+          cd release-artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

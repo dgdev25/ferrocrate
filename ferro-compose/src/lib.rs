@@ -119,8 +119,8 @@ pub struct Volume {
     pub driver: Option<String>,
 }
 
-pub mod service_graph;
 pub mod compose;
+pub mod service_graph;
 
 impl ComposeFile {
     pub fn parse(content: &str, env: &HashMap<String, String>) -> ComposeResult<Self> {
@@ -133,7 +133,9 @@ impl ComposeFile {
 
     pub fn validate(&self) -> ComposeResult<()> {
         if self.services.is_empty() {
-            return Err(ComposeError::Validation("services must not be empty".to_string()));
+            return Err(ComposeError::Validation(
+                "services must not be empty".to_string(),
+            ));
         }
 
         if let Some(version) = &self.version {

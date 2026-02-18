@@ -57,14 +57,16 @@ impl LocalImageStore {
         Ok(())
     }
 
-    pub fn resolve_reference(&self, reference: &str) -> Result<Option<ImageRecord>, ImageStoreError> {
+    pub fn resolve_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Option<ImageRecord>, ImageStoreError> {
         let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
 
         let maybe_record = tree.get(reference.as_bytes())?;
         maybe_record
             .map(|bytes| {
-                serde_json::from_slice::<ImageRecord>(&bytes)
-                    .map_err(ImageStoreError::Decode)
+                serde_json::from_slice::<ImageRecord>(&bytes).map_err(ImageStoreError::Decode)
             })
             .transpose()
     }
@@ -82,8 +84,8 @@ impl LocalImageStore {
 
         for item in &tree {
             let (_, value) = item?;
-            let decoded = serde_json::from_slice::<ImageRecord>(&value)
-                .map_err(ImageStoreError::Decode)?;
+            let decoded =
+                serde_json::from_slice::<ImageRecord>(&value).map_err(ImageStoreError::Decode)?;
             out.push(decoded);
         }
 

@@ -12,7 +12,11 @@ pub enum ExecError {
     #[error("command failed: {cmd} — {stderr}")]
     CommandFailed { cmd: String, stderr: String },
     #[error("io error running {cmd}: {source}")]
-    Io { cmd: String, #[source] source: std::io::Error },
+    Io {
+        cmd: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Execute a command vector, returning Ok(()) on success or ExecError on failure.
@@ -41,7 +45,10 @@ pub fn exec_cmd(args: &[String]) -> Result<(), ExecError> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(ExecError::CommandFailed { cmd: cmd_str, stderr })
+        Err(ExecError::CommandFailed {
+            cmd: cmd_str,
+            stderr,
+        })
     }
 }
 
@@ -71,7 +78,10 @@ pub fn exec_cmd_capture(args: &[String]) -> Result<String, ExecError> {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(ExecError::CommandFailed { cmd: cmd_str, stderr })
+        Err(ExecError::CommandFailed {
+            cmd: cmd_str,
+            stderr,
+        })
     }
 }
 
@@ -88,7 +98,9 @@ pub struct Transaction {
 impl Transaction {
     /// Create a new empty transaction.
     pub fn new() -> Self {
-        Self { executed: Vec::new() }
+        Self {
+            executed: Vec::new(),
+        }
     }
 
     /// Execute a forward command and register its rollback.

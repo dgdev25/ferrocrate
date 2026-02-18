@@ -39,7 +39,7 @@ pub fn build_bpftool_map_pin_cmd(map_id: u32, pin_path: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EbpfMap, build_bpftool_map_create_cmd, build_bpftool_map_pin_cmd};
+    use super::{build_bpftool_map_create_cmd, build_bpftool_map_pin_cmd, EbpfMap};
 
     #[test]
     fn builds_map_commands() {
@@ -54,14 +54,33 @@ mod tests {
         assert_eq!(
             build_bpftool_map_create_cmd(&map, "/sys/fs/bpf/ferro/conntrack"),
             vec![
-                "bpftool", "map", "create", "/sys/fs/bpf/ferro/conntrack", "type", "hash",
-                "key", "16", "value", "8", "entries", "1024", "name", "conntrack"
+                "bpftool",
+                "map",
+                "create",
+                "/sys/fs/bpf/ferro/conntrack",
+                "type",
+                "hash",
+                "key",
+                "16",
+                "value",
+                "8",
+                "entries",
+                "1024",
+                "name",
+                "conntrack"
             ]
         );
 
         assert_eq!(
             build_bpftool_map_pin_cmd(42, "/sys/fs/bpf/ferro/conntrack"),
-            vec!["bpftool", "map", "pin", "id", "42", "/sys/fs/bpf/ferro/conntrack"]
+            vec![
+                "bpftool",
+                "map",
+                "pin",
+                "id",
+                "42",
+                "/sys/fs/bpf/ferro/conntrack"
+            ]
         );
     }
 }

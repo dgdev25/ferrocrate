@@ -1,11 +1,13 @@
-use crate::image_manifest::{ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
+use crate::image_manifest::{parse_image_manifest, ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE, HeaderValue};
+use reqwest::header::{
+    HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE,
+};
 use reqwest::Method;
-use std::time::Duration;
-use std::path::Path;
 use std::fs::File;
 use std::io::{copy, Read};
+use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,7 +127,8 @@ impl RegistryClient {
                 Some(req) => req.send(),
                 None => {
                     return Err(RegistryError::InvalidReference(
-                        "request body cannot be retried - streaming bodies not supported".to_string()
+                        "request body cannot be retried - streaming bodies not supported"
+                            .to_string(),
                     ));
                 }
             };
@@ -154,9 +157,8 @@ impl RegistryClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            RegistryError::InvalidReference("max retries exceeded".to_string())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| RegistryError::InvalidReference("max retries exceeded".to_string())))
     }
 
     /// Pull and parse OCI image manifest from registry using optional basic auth.
@@ -190,13 +192,7 @@ impl RegistryClient {
         let header_value = HeaderValue::from_str(&accept)
             .map_err(|err| RegistryError::InvalidReference(format!("accept header: {err}")))?;
         let headers = vec![(ACCEPT, header_value.clone())];
-        let response = self.send_request_with_auth(
-            Method::GET,
-            &url,
-            headers,
-            None,
-            auth,
-        )?;
+        let response = self.send_request_with_auth(Method::GET, &url, headers, None, auth)?;
         let status = response.status();
         let body = response.text().map_err(RegistryError::Request)?;
 
@@ -204,7 +200,14 @@ impl RegistryClient {
             if let Some(challenge) = self.ping_bearer_challenge(&image_ref, auth)? {
                 let token = self.fetch_bearer_token(&challenge, auth)?;
                 let retry = self
-                    .build_request(&Method::GET, &url, &[(ACCEPT, header_value)], None, None, Some(&token))
+                    .build_request(
+                        &Method::GET,
+                        &url,
+                        &[(ACCEPT, header_value)],
+                        None,
+                        None,
+                        Some(&token),
+                    )
                     .send()
                     .map_err(RegistryError::Request)?;
                 let retry_status = retry.status();
@@ -267,9 +270,8 @@ impl RegistryClient {
         parse_image_manifest(manifest_json)?;
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
-        let content_type = HeaderValue::from_str(media_type).map_err(|err| {
-            RegistryError::InvalidReference(format!("content-type: {err}"))
-        })?;
+        let content_type = HeaderValue::from_str(media_type)
+            .map_err(|err| RegistryError::InvalidReference(format!("content-type: {err}")))?;
         let response = self.send_request_with_auth(
             Method::PUT,
             &url,
@@ -299,7 +301,8 @@ impl RegistryClient {
     ) -> Result<(), RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = blob_url(&image_ref, digest);
-        let mut response = self.send_request_with_auth(Method::GET, &url, Vec::new(), None, auth)?;
+        let mut response =
+            self.send_request_with_auth(Method::GET, &url, Vec::new(), None, auth)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -313,10 +316,7 @@ impl RegistryClient {
             std::fs::create_dir_all(parent).map_err(RegistryError::Io)?;
         }
         // Security: Use UUID-based temp file name to prevent symlink attacks
-        let tmp_path = dest.with_extension(format!(
-            "tmp-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp_path = dest.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
         let mut file = File::create(&tmp_path).map_err(RegistryError::Io)?;
         copy(&mut response, &mut file).map_err(RegistryError::Io)?;
         file.sync_all().map_err(RegistryError::Io)?;
@@ -348,7 +348,9 @@ impl RegistryClient {
             .headers()
             .get(LOCATION)
             .and_then(|val| val.to_str().ok())
-            .ok_or_else(|| RegistryError::InvalidReference("missing upload location".to_string()))?;
+            .ok_or_else(|| {
+                RegistryError::InvalidReference("missing upload location".to_string())
+            })?;
 
         let upload_url = normalize_location(location, &image_ref);
         let upload_url = format!("{upload_url}?digest={digest}");
@@ -357,13 +359,8 @@ impl RegistryClient {
         let mut body = Vec::new();
         file.read_to_end(&mut body).map_err(RegistryError::Io)?;
 
-        let response = self.send_request_with_auth(
-            Method::PUT,
-            &upload_url,
-            Vec::new(),
-            Some(body),
-            auth,
-        )?;
+        let response =
+            self.send_request_with_auth(Method::PUT, &upload_url, Vec::new(), Some(body), auth)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -516,7 +513,11 @@ fn parse_bearer_challenge(header: &str) -> Option<BearerChallenge> {
             _ => {}
         }
     }
-    realm.map(|realm| BearerChallenge { realm, service, scope })
+    realm.map(|realm| BearerChallenge {
+        realm,
+        service,
+        scope,
+    })
 }
 
 pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryError> {
@@ -738,9 +739,9 @@ fn normalize_location(location: &str, image_ref: &ImageReference) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReferenceSeparator, RegistryAuth, RegistryClient, parse_image_reference};
-    use base64::Engine;
+    use super::{parse_image_reference, ReferenceSeparator, RegistryAuth, RegistryClient};
     use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use httptest::matchers::{all_of, contains, request};
     use httptest::responders::status_code;
     use httptest::{Expectation, Server};
@@ -786,7 +787,8 @@ mod tests {
         let err = parse_image_reference("ghcr.io/acme/app:bad tag").expect_err("invalid tag");
         assert!(err.to_string().contains("invalid tag"));
 
-        let err = parse_image_reference("ghcr.io/acme/app@sha256:deadbeef").expect_err("invalid digest");
+        let err =
+            parse_image_reference("ghcr.io/acme/app@sha256:deadbeef").expect_err("invalid digest");
         assert!(err.to_string().contains("invalid digest"));
     }
 
@@ -837,7 +839,10 @@ mod tests {
             Expectation::matching(all_of![
                 request::method_path("PUT", "/v2/test/image/manifests/latest"),
                 request::headers(contains(("authorization", auth_value.clone()))),
-                request::headers(contains(("content-type", "application/vnd.oci.image.manifest.v1+json")))
+                request::headers(contains((
+                    "content-type",
+                    "application/vnd.oci.image.manifest.v1+json"
+                )))
             ])
             .respond_with(status_code(201)),
         );
@@ -864,8 +869,11 @@ mod tests {
         );
 
         server.expect(
-            Expectation::matching(request::method_path("GET", "/v2/test/image/manifests/latest"))
-                .respond_with(status_code(401).append_header("WWW-Authenticate", challenge)),
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/test/image/manifests/latest",
+            ))
+            .respond_with(status_code(401).append_header("WWW-Authenticate", challenge)),
         );
 
         server.expect(
@@ -900,9 +908,7 @@ mod tests {
 
         server.expect(
             Expectation::matching(request::method_path("POST", "/v2/myorg/app/blobs/uploads/"))
-                .respond_with(
-                    status_code(202).append_header("Location", upload_location),
-                ),
+                .respond_with(status_code(202).append_header("Location", upload_location)),
         );
 
         server.expect(

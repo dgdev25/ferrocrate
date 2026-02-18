@@ -1,5 +1,5 @@
-use crate::{ComposeError, ComposeFile, ComposeResult};
 use crate::service_graph::ServiceGraph;
+use crate::{ComposeError, ComposeFile, ComposeResult};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,8 +20,8 @@ pub struct ComposeProject {
 
 impl ComposeProject {
     pub fn load(path: &Path) -> ComposeResult<Self> {
-        let content = fs::read_to_string(path)
-            .map_err(|err| ComposeError::Parse(err.to_string()))?;
+        let content =
+            fs::read_to_string(path).map_err(|err| ComposeError::Parse(err.to_string()))?;
         let mut env = load_env_file(path.parent().unwrap_or_else(|| Path::new(".")))?;
         for (key, value) in std::env::vars() {
             env.insert(key, value);
@@ -55,7 +55,12 @@ pub fn find_compose_file(explicit: Option<&str>) -> ComposeResult<PathBuf> {
         )));
     }
 
-    for name in ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"] {
+    for name in [
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+    ] {
         let candidate = PathBuf::from(name);
         if candidate.exists() {
             return Ok(candidate);
@@ -123,7 +128,10 @@ fn load_env_file(dir: &Path) -> ComposeResult<HashMap<String, String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComposeCommand, ComposeProject, compose_down, compose_logs, compose_ps, compose_up, find_compose_file};
+    use super::{
+        compose_down, compose_logs, compose_ps, compose_up, find_compose_file, ComposeCommand,
+        ComposeProject,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -147,8 +155,11 @@ services:
         let path = dir.path().join("compose.yaml");
         write_compose(&path);
         // CQ-01: Use expect with context instead of bare unwrap()
-        let found = find_compose_file(Some(path.to_str()
-            .expect("compose file path should be valid UTF-8"))).expect("found");
+        let found = find_compose_file(Some(
+            path.to_str()
+                .expect("compose file path should be valid UTF-8"),
+        ))
+        .expect("found");
         assert_eq!(found, path);
     }
 

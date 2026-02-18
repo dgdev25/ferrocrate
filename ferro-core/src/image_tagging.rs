@@ -1,5 +1,5 @@
 use crate::image_store::{ImageRecord, ImageStoreError, LocalImageStore};
-use crate::registry::{RegistryError, parse_image_reference};
+use crate::registry::{parse_image_reference, RegistryError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

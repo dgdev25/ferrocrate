@@ -14,7 +14,7 @@ pub mod validate;
 pub mod veth;
 
 // Re-export executor types
-pub use executor::{ExecError, Transaction, exec_cmd, exec_cmd_capture};
+pub use executor::{exec_cmd, exec_cmd_capture, ExecError, Transaction};
 
 // Re-export validation types
 pub use validate::ValidationError;
@@ -26,7 +26,7 @@ pub use bridge::{create_bridge, destroy_bridge, BridgeConfig};
 pub use ebpf::{install_security_monitor, SecurityMonitorConfig};
 
 // Re-export veth execution functions
-pub use veth::{create_veth_pair, destroy_veth_pair, assign_ip, VethConfig, VethPair};
+pub use veth::{assign_ip, create_veth_pair, destroy_veth_pair, VethConfig, VethPair};
 
 // Re-export netns execution functions
-pub use netns::{create_netns, destroy_netns, move_to_netns, enter_netns, netns_path, NetnsError};
+pub use netns::{create_netns, destroy_netns, enter_netns, move_to_netns, netns_path, NetnsError};

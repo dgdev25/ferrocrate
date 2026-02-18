@@ -1,8 +1,6 @@
 use crate::dockerfile_build::{
-    build_from_dockerfile_with_compression,
-    build_from_dockerfile_with_store_and_compression,
-    BuildResult,
-    DockerfileBuildError,
+    build_from_dockerfile_with_compression, build_from_dockerfile_with_store_and_compression,
+    BuildResult, DockerfileBuildError,
 };
 use crate::image_store::LocalImageStore;
 use crate::layer_compression::CompressionFormat;
@@ -116,7 +114,10 @@ tag = "local/ferrofile:latest"
             &runtime_dir,
             CompressionFormat::Gzip,
         )
-            .expect("build");
-        assert_eq!(result.reference, "registry-1.docker.io/local/ferrofile:latest");
+        .expect("build");
+        assert_eq!(
+            result.reference,
+            "registry-1.docker.io/local/ferrofile:latest"
+        );
     }
 }

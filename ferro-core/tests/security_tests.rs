@@ -4,7 +4,7 @@
 
 #![cfg(target_os = "linux")]
 
-use ferro_core::seccomp::{default_seccomp_profile, parse_seccomp_profile, apply_seccomp_profile};
+use ferro_core::seccomp::{apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile};
 
 #[test]
 fn parses_default_seccomp_profile() {

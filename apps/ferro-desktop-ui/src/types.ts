@@ -10,3 +10,80 @@ export type DesktopSnapshot = {
   containers: CommandResult;
   images: CommandResult;
 };
+
+export type DesktopAction =
+  | "vm_start"
+  | "vm_stop"
+  | "pull_image"
+  | "remove_image"
+  | "start_container"
+  | "stop_container"
+  | "remove_container"
+  | "container_logs"
+  | "image_prune";
+
+export type PaidBackendConfig = {
+  release_base_url: string;
+  token_endpoint: string;
+  issuance_endpoint?: string | null;
+};
+
+export type SessionSummary = {
+  token_present: boolean;
+  subject: string | null;
+  plan: string | null;
+  expires_at: number | null;
+  expired: boolean | null;
+};
+
+export type EntitlementSummary = {
+  status: string;
+  plan: string | null;
+  subject: string | null;
+  expires_at: number | null;
+  features: string[];
+  message: string | null;
+};
+
+export type PaidAuthState = {
+  config: PaidBackendConfig | null;
+  session: SessionSummary;
+  entitlement: EntitlementSummary | null;
+};
+
+export type InstallerRunSummary = {
+  dry_run: boolean;
+  ok: boolean;
+  command: string;
+  result: CommandResult | null;
+};
+
+export type DoctorAction = {
+  id: string;
+  description: string;
+  command: string | null;
+  requires_confirmation: boolean;
+};
+
+export type DoctorCheck = {
+  id: string;
+  ok: boolean;
+  message: string;
+  hint: string | null;
+  remediated: boolean;
+};
+
+export type DoctorPayload = {
+  healthy: boolean;
+  fix: boolean;
+  bootstrap: boolean;
+  dry_run: boolean;
+  confirmed: boolean;
+  actions: DoctorAction[];
+  checks: DoctorCheck[];
+};
+
+export type DoctorSummary = {
+  ok: boolean;
+  raw: DoctorPayload;
+};

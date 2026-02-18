@@ -1,25 +1,25 @@
+#[cfg(target_os = "linux")]
+use crate::capabilities::drop_all_capabilities;
+use crate::image_fetch::{pull_image_with_store, resolve_layer_paths_with_store};
+use crate::image_manifest::parse_image_manifest;
 use crate::image_manifest::{
     Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE, OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE,
     OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
-use crate::image_fetch::{pull_image_with_store, resolve_layer_paths_with_store};
-use crate::image_manifest::parse_image_manifest;
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::{canonicalize_reference, resolve_reference};
+use crate::layer_compression::{
+    compress_bytes_gzip, compress_bytes_zstd, CompressionFormat, LayerCompressionError,
+};
 #[cfg(target_os = "linux")]
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
-use crate::capabilities::drop_all_capabilities;
-use crate::layer_compression::{
-    CompressionFormat, LayerCompressionError, compress_bytes_gzip, compress_bytes_zstd,
-};
-#[cfg(target_os = "linux")]
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use serde_json::json;
-use std::ffi::CString;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs;
 use std::io;
 #[cfg(target_os = "linux")]
@@ -83,7 +83,12 @@ pub fn build_from_dockerfile(
     tag: Option<&str>,
     runtime_dir: &Path,
 ) -> Result<BuildResult, DockerfileBuildError> {
-    build_from_dockerfile_with_compression(dockerfile_path, tag, runtime_dir, CompressionFormat::Gzip)
+    build_from_dockerfile_with_compression(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        CompressionFormat::Gzip,
+    )
 }
 
 pub fn build_from_dockerfile_with_compression(
@@ -182,10 +187,12 @@ pub fn build_from_dockerfile_with_store_and_compression(
 
         for copy in &stage.copy_from {
             let source_root = resolve_stage_root(&stage_roots, &stage_names, &copy.from)
-                .ok_or_else(|| DockerfileBuildError::Invalid(format!(
-                    "unknown COPY --from stage: {}",
-                    copy.from
-                )))?;
+                .ok_or_else(|| {
+                    DockerfileBuildError::Invalid(format!(
+                        "unknown COPY --from stage: {}",
+                        copy.from
+                    ))
+                })?;
             let source = source_root.join(copy.src.trim_start_matches('/'));
             let dest = context_root.join(copy.dest.trim_start_matches('/'));
             copy_path_recursive(&source, &dest)?;
@@ -210,8 +217,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
                 stage.workdir.as_deref(),
                 stage.user.as_deref(),
             )?;
-            let (rebuilt, media_type) =
-                build_layer_from_dir(&stage_root, None, compression)?;
+            let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
             layer_bytes = rebuilt;
             layer_media_type = media_type;
             layer_digest = sha256_digest_bytes(&layer_bytes);
@@ -267,9 +273,8 @@ pub fn build_from_dockerfile_with_store_and_compression(
                 subject: None,
                 annotations: Default::default(),
             };
-            let manifest_json = serde_json::to_string(&manifest).map_err(|err| {
-                io::Error::other(err.to_string())
-            })?;
+            let manifest_json = serde_json::to_string(&manifest)
+                .map_err(|err| io::Error::other(err.to_string()))?;
 
             let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
             store.put_reference(
@@ -312,9 +317,9 @@ fn build_layer_from_dir(
 ) -> Result<(Vec<u8>, String), DockerfileBuildError> {
     let mut tar_builder = Builder::new(Vec::new());
     add_directory(&mut tar_builder, source_dir, source_dir, dockerfile_path)?;
-    let tar_bytes = tar_builder.into_inner().map_err(|err| {
-        io::Error::other(err.to_string())
-    })?;
+    let tar_bytes = tar_builder
+        .into_inner()
+        .map_err(|err| io::Error::other(err.to_string()))?;
 
     // Security: Check layer size to prevent memory exhaustion
     if tar_bytes.len() > MAX_LAYER_SIZE {
@@ -459,9 +464,9 @@ fn write_cas_blob(
     digest: &str,
     bytes: &[u8],
 ) -> Result<(), DockerfileBuildError> {
-    let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+    let cas_root = runtime_dir.join("images").join("cas").join("shake256");
     fs::create_dir_all(&cas_root)?;
-    let hash = blake3::hash(bytes).to_hex().to_string();
+    let hash = hex::encode(rvf_crypto::shake256_256(bytes));
     let cas_path = cas_root.join(hash);
     if !cas_path.exists() {
         fs::write(&cas_path, bytes)?;
@@ -505,8 +510,7 @@ fn save_build_cache(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec(cache)
-        .map_err(|err| io::Error::other(err.to_string()))?;
+    let bytes = serde_json::to_vec(cache).map_err(|err| io::Error::other(err.to_string()))?;
     fs::write(&path, bytes)?;
     Ok(())
 }
@@ -517,16 +521,16 @@ fn build_cache_key(
     context_hash: &str,
     base_infos: &[BaseImageInfo],
 ) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(dockerfile.as_bytes());
-    hasher.update(context_hash.as_bytes());
-    hasher.update(format!("{compression:?}").as_bytes());
+    let mut buf = Vec::new();
+    buf.extend_from_slice(dockerfile.as_bytes());
+    buf.extend_from_slice(context_hash.as_bytes());
+    buf.extend_from_slice(format!("{compression:?}").as_bytes());
     for info in base_infos {
         if let Some(digest) = &info.digest {
-            hasher.update(digest.as_bytes());
+            buf.extend_from_slice(digest.as_bytes());
         }
     }
-    hasher.finalize().to_hex().to_string()
+    hex::encode(rvf_crypto::shake256_256(&buf))
 }
 
 fn hash_context_dir(
@@ -543,14 +547,14 @@ fn hash_context_dir(
         &mut files,
     )?;
     files.sort();
-    let mut hasher = blake3::Hasher::new();
+    let mut buf = Vec::new();
     for rel_path in files {
         let full_path = context_dir.join(&rel_path);
-        hasher.update(rel_path.to_string_lossy().as_bytes());
+        buf.extend_from_slice(rel_path.to_string_lossy().as_bytes());
         let bytes = fs::read(&full_path)?;
-        hasher.update(&bytes);
+        buf.extend_from_slice(&bytes);
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(hex::encode(rvf_crypto::shake256_256(&buf)))
 }
 
 fn collect_context_files(
@@ -605,7 +609,9 @@ fn load_dockerignore_patterns(context_dir: &Path) -> Result<Vec<String>, Dockerf
 
 fn should_ignore_context_path(relative: &Path, patterns: &[String]) -> bool {
     let path = relative.to_string_lossy();
-    patterns.iter().any(|pattern| dockerignore_matches(pattern, &path))
+    patterns
+        .iter()
+        .any(|pattern| dockerignore_matches(pattern, &path))
 }
 
 fn dockerignore_matches(pattern: &str, path: &str) -> bool {
@@ -753,9 +759,9 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             continue;
         }
 
-        let stage = current.as_mut().ok_or_else(|| {
-            DockerfileBuildError::Invalid("missing FROM instruction".to_string())
-        })?;
+        let stage = current
+            .as_mut()
+            .ok_or_else(|| DockerfileBuildError::Invalid("missing FROM instruction".to_string()))?;
         let interpolated = interpolate_value(&value, &stage.env, &stage.args);
 
         match keyword.as_str() {
@@ -794,11 +800,9 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 stage.user = Some(interpolated.to_string());
             }
             "EXPOSE" => {
-                stage.exposed_ports.extend(
-                    interpolated
-                        .split_whitespace()
-                        .map(|val| val.to_string())
-                );
+                stage
+                    .exposed_ports
+                    .extend(interpolated.split_whitespace().map(|val| val.to_string()));
             }
             "VOLUME" => {
                 stage.volumes.extend(parse_volume_paths(&interpolated)?);
@@ -911,10 +915,14 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         ));
     }
     // CQ-01: Use checked index access instead of unwrap()
-    let dest = args.last()
+    let dest = args
+        .last()
         .ok_or_else(|| DockerfileBuildError::Invalid("COPY dest missing".to_string()))?
         .to_string();
-    let srcs = args[..args.len() - 1].iter().map(|s| s.to_string()).collect();
+    let srcs = args[..args.len() - 1]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     Ok(Some(CopySpec { srcs, dest }))
 }
 
@@ -951,7 +959,8 @@ fn interpolate_value(value: &str, env: &[String], args: &HashMap<String, String>
         }
     }
     for (key, val) in args {
-        map.entry(key.to_string()).or_insert_with(|| val.to_string());
+        map.entry(key.to_string())
+            .or_insert_with(|| val.to_string());
     }
     let mut out = String::new();
     let mut chars = value.chars().peekable();
@@ -1064,7 +1073,10 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     let trimmed = raw.trim();
     if trimmed.starts_with('[') {
         let args = parse_json_array(trimmed)?;
-        return Ok(RunSpec { args, _shell: false });
+        return Ok(RunSpec {
+            args,
+            _shell: false,
+        });
     }
     if shell.is_empty() {
         return Err(DockerfileBuildError::Invalid(
@@ -1073,10 +1085,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     }
     let mut args = shell.to_vec();
     args.push(trimmed.to_string());
-    Ok(RunSpec {
-        args,
-        _shell: true,
-    })
+    Ok(RunSpec { args, _shell: true })
 }
 
 fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
@@ -1139,9 +1148,8 @@ fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, Docke
 }
 
 fn parse_json_array(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
-    let parsed: Vec<String> = serde_json::from_str(raw).map_err(|err| {
-        DockerfileBuildError::Invalid(format!("invalid JSON array: {err}"))
-    })?;
+    let parsed: Vec<String> = serde_json::from_str(raw)
+        .map_err(|err| DockerfileBuildError::Invalid(format!("invalid JSON array: {err}")))?;
     Ok(parsed)
 }
 
@@ -1229,7 +1237,10 @@ fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
     }
     let mut parts = trimmed.splitn(2, ':');
     let uid = parts.next()?.parse::<u32>().ok()?;
-    let gid = parts.next().and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
+    let gid = parts
+        .next()
+        .and_then(|g| g.parse::<u32>().ok())
+        .unwrap_or(uid);
     Some((uid, gid))
 }
 
@@ -1246,7 +1257,7 @@ fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuil
 }
 
 fn setup_build_namespace() -> io::Result<()> {
-    use nix::sched::{CloneFlags, unshare};
+    use nix::sched::{unshare, CloneFlags};
     unshare(
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
@@ -1341,10 +1352,7 @@ fn parse_duration_to_nanos(value: &str) -> Option<u64> {
             .ok()
             .map(|v| v * 60 * 60 * 1_000_000_000)
     } else {
-        trimmed
-            .parse::<u64>()
-            .ok()
-            .map(|v| v * 1_000_000_000)
+        trimmed.parse::<u64>().ok().map(|v| v * 1_000_000_000)
     }
 }
 
@@ -1525,9 +1533,9 @@ mod tests {
             CompressionFormat::Gzip,
             &store,
         )
-            .expect("build");
-        let layers =
-            resolve_layer_paths_with_store(&runtime_dir, &result.reference, &store).expect("layers");
+        .expect("build");
+        let layers = resolve_layer_paths_with_store(&runtime_dir, &result.reference, &store)
+            .expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
     }
@@ -1566,10 +1574,7 @@ mod tests {
         let stages = parse_stages(dockerfile).expect("parse stages");
         let stage = stages.last().expect("stage");
         assert_eq!(stage.run.len(), 1);
-        assert_eq!(
-            stage.run[0].args,
-            vec!["/bin/bash", "-lc", "echo hi"]
-        );
+        assert_eq!(stage.run[0].args, vec!["/bin/bash", "-lc", "echo hi"]);
         assert_eq!(
             stage.cmd.clone().expect("cmd"),
             vec!["/bin/bash", "-lc", "echo hello"]

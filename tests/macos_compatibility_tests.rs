@@ -586,16 +586,21 @@ mod macos_tests {
             .env("FERROCRATE_IMAGE_STORE", &image_store)
             .env("FERROCRATE_ENTITLEMENT_FILE", &entitlement)
             .env("FERROCRATE_ENTITLEMENT_PUBKEY", &pubkey)
-            .env("FERROCRATE_CLAUDE_FLOW_CMD", "/definitely/missing/claude-flow")
+            .env(
+                "FERROCRATE_CLAUDE_FLOW_CMD",
+                "/definitely/missing/claude-flow",
+            )
             .env("FERROCRATE_AI_DEGRADE", "1")
             .output()
             .expect("run ferrocrate ai orchestrate with entitlement");
 
-        assert!(out.status.success(), "expected success with valid entitlement");
+        assert!(
+            out.status.success(),
+            "expected success with valid entitlement"
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("degraded mode enabled")
-                || stdout.contains("claude-flow unavailable"),
+            stdout.contains("degraded mode enabled") || stdout.contains("claude-flow unavailable"),
             "expected degraded orchestration output, got: {stdout}"
         );
     }

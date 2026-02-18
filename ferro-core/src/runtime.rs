@@ -443,7 +443,7 @@ impl ContainerRuntime {
                 .runtime_dir
                 .join("images")
                 .join("file-cas")
-                .join("blake3");
+                .join("shake256");
             construct_rootfs_with_dedup(&rootfs_dir, &layer_paths, &cas_root)?;
         } else {
             fs::create_dir_all(&rootfs_dir)?;
@@ -1313,6 +1313,10 @@ fn supervise_child(
     netns_name: Option<String>,
     seccomp_profile: Option<SeccompProfile>,
 ) {
+    let mut adaptive_policy = ferro_mind::ai::restart::AdaptiveRestartPolicy::new(&container_id);
+    let mut restart_count: u32 = 0;
+    let mut container_start_time = std::time::Instant::now();
+
     loop {
         let status = child.wait();
         let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
@@ -1321,11 +1325,28 @@ fn supervise_child(
             Err(_) => "exited".to_string(),
         };
 
+        let uptime_secs = container_start_time.elapsed().as_secs();
+        adaptive_policy.record_restart(exit_code, uptime_secs);
+
         if !should_restart(&restart_policy, &current_status, exit_code) {
             break;
         }
 
-        thread::sleep(Duration::from_secs(1));
+        // Get adaptive delay (respects learned patterns)
+        let adaptive_signal = ferro_mind::ai::restart::RestartSignal {
+            exit_code,
+            recent_failures: restart_count,
+            uptime_secs,
+        };
+        let delay_secs = match adaptive_policy.decide(&adaptive_signal) {
+            ferro_mind::ai::restart::RestartDecision::RestartAfterDelay { delay_secs } => delay_secs,
+            ferro_mind::ai::restart::RestartDecision::DoNotRestart => {
+                // Adaptive policy says don't restart, but honor the existing policy too
+                1 // Fall back to minimum delay; should_restart check above already handles the quit case
+            }
+            ferro_mind::ai::restart::RestartDecision::Restart => 1,
+        };
+        thread::sleep(Duration::from_secs(delay_secs.max(1)));
         let command = match build_command(
             &cmd,
             &env,
@@ -1341,15 +1362,18 @@ fn supervise_child(
             Ok(cmd) => cmd,
             Err(_) => break,
         };
-        let (pid, new_child) = match spawn_child_with_logs(command, &stdout_path, &stderr_path, append)
-        {
-            Ok(tuple) => tuple,
-            Err(_) => break,
-        };
+        let (pid, new_child) =
+            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append) {
+                Ok(tuple) => tuple,
+                Err(_) => break,
+            };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             eprintln!("[supervisor] failed to update pid status for {container_id}: {e}");
         }
         child = new_child;
+        container_start_time = std::time::Instant::now();
+        adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
+        restart_count += 1;
     }
 }
 
@@ -1874,12 +1898,14 @@ fn execute_with_timeout(
     loop {
         if let Some(status) = child.try_wait()? {
             // Process completed - collect output
-            let mut stdout = child.stdout.take().ok_or_else(|| {
-                std::io::Error::other("failed to capture stdout")
-            })?;
-            let mut stderr = child.stderr.take().ok_or_else(|| {
-                std::io::Error::other("failed to capture stderr")
-            })?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| std::io::Error::other("failed to capture stdout"))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| std::io::Error::other("failed to capture stderr"))?;
 
             let mut stdout_buf = Vec::new();
             let mut stderr_buf = Vec::new();
@@ -1966,10 +1992,7 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
         return Ok(cmd.to_vec());
     }
     if !command_available("runcon") {
-        mac_enforcement_result(
-            "selinux",
-            "runcon is required when FERROCRATE_SELINUX=1",
-        )?;
+        mac_enforcement_result("selinux", "runcon is required when FERROCRATE_SELINUX=1")?;
         return Ok(cmd.to_vec());
     }
     let selinux_type =
@@ -2350,8 +2373,8 @@ fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, Ru
         .parse()
         .map_err(|_| RuntimeError::Network("invalid bridge gateway".to_string()))?;
     let mut octets = gateway_ip.octets();
-    let hash = blake3::hash(container_id.as_bytes());
-    let byte = hash.as_bytes()[0];
+    let hash = rvf_crypto::shake256_256(container_id.as_bytes());
+    let byte = hash[0];
     let host = 2 + (byte % 200);
     octets[3] = host;
     Ok(Ipv4Addr::from(octets).to_string())
@@ -2422,9 +2445,9 @@ fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, prefix: u8) -
     if host_bits == 0 {
         return gateway.to_string();
     }
-    let hash = blake3::hash(container_id.as_bytes());
+    let hash = rvf_crypto::shake256_256(container_id.as_bytes());
     let mut hash_bytes = [0u8; 16];
-    hash_bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    hash_bytes.copy_from_slice(&hash[..16]);
     let hash_num = u128::from_be_bytes(hash_bytes);
     let host_space = if host_bits >= 128 {
         u128::MAX
@@ -2465,10 +2488,12 @@ struct WireGuardPeerConfig {
 fn wireguard_config() -> Result<WireGuardConfig, RuntimeError> {
     let iface = std::env::var("FERROCRATE_WG_IFACE").unwrap_or_else(|_| "wg0".to_string());
     if iface.trim().is_empty() {
-        return Err(RuntimeError::Network("invalid wireguard interface".to_string()));
+        return Err(RuntimeError::Network(
+            "invalid wireguard interface".to_string(),
+        ));
     }
-    let cidr = std::env::var("FERROCRATE_WG_IPV4_CIDR")
-        .unwrap_or_else(|_| "10.44.0.1/24".to_string());
+    let cidr =
+        std::env::var("FERROCRATE_WG_IPV4_CIDR").unwrap_or_else(|_| "10.44.0.1/24".to_string());
     let mut parts = cidr.split('/');
     let ipv4_gateway = parts
         .next()
@@ -2537,7 +2562,10 @@ fn run_cmd_capture_stdout(args: &[String]) -> Result<String, RuntimeError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn run_cmd_with_stdin_capture_stdout(args: &[String], stdin_data: &str) -> Result<String, RuntimeError> {
+fn run_cmd_with_stdin_capture_stdout(
+    args: &[String],
+    stdin_data: &str,
+) -> Result<String, RuntimeError> {
     let (bin, rest) = parse_cmd_args(args)?;
     let mut child = Command::new(bin)
         .args(rest)
@@ -2564,8 +2592,8 @@ fn wireguard_listen_port(container_id: &str) -> u16 {
         .ok()
         .and_then(|raw| raw.parse::<u16>().ok())
         .unwrap_or(51820);
-    let hash = blake3::hash(container_id.as_bytes());
-    let offset = (u16::from(hash.as_bytes()[0]) << 8) | u16::from(hash.as_bytes()[1]);
+    let hash = rvf_crypto::shake256_256(container_id.as_bytes());
+    let offset = (u16::from(hash[0]) << 8) | u16::from(hash[1]);
     base.saturating_add(offset % 1000)
 }
 
@@ -2642,8 +2670,10 @@ fn setup_wireguard(
     } else {
         run_cmd_capture_stdout(&["wg".to_string(), "genkey".to_string()])?
     };
-    let _public_key = run_cmd_with_stdin_capture_stdout(&["wg".to_string(), "pubkey".to_string()], &private_key)?;
-    let key_path = std::env::temp_dir().join(format!("ferrocrate-wg-{}.key", short_id(container_id, 12)));
+    let _public_key =
+        run_cmd_with_stdin_capture_stdout(&["wg".to_string(), "pubkey".to_string()], &private_key)?;
+    let key_path =
+        std::env::temp_dir().join(format!("ferrocrate-wg-{}.key", short_id(container_id, 12)));
     std::fs::write(&key_path, format!("{private_key}\n"))?;
     let key_path_str = key_path.display().to_string();
     let listen_port = wireguard_listen_port(container_id).to_string();
@@ -2721,7 +2751,9 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
     let (bin, rest) = parse_cmd_args(&verify)?;
     let output = Command::new(bin).args(rest).output()?;
     if !output.status.success() {
-        return Err(RuntimeError::Network("failed to verify bandwidth limit".to_string()));
+        return Err(RuntimeError::Network(
+            "failed to verify bandwidth limit".to_string(),
+        ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.contains("tbf") {
@@ -3051,6 +3083,10 @@ fn run_resource_monitor(
         ferro_mind::ai::resource::ResourcePredictor::new(60).with_memory_limit(memory_limit);
     let ai_logger = ferro_mind::ai::audit::AuditLogger::from_env();
 
+    let mut anomaly_detector = ferro_mind::ai::anomaly::NeuralAnomalyDetector::new(3, 0.5);
+    let mut anomaly_training_samples: Vec<Vec<f32>> = Vec::new();
+    let anomaly_train_after = 20usize; // Train after 20 samples of normal behavior
+
     let sample_interval = Duration::from_secs(30);
     let oom_horizon = Duration::from_secs(1200); // 20 minutes
 
@@ -3081,6 +3117,36 @@ fn run_resource_monitor(
             };
 
             predictor.push(sample);
+
+            // Build normalized feature vector for anomaly detection
+            // Features: [cpu_norm, mem_norm, pids_norm] normalized 0-1
+            let mem_norm = if memory_limit > 0 {
+                metrics.memory_current as f32 / memory_limit as f32
+            } else {
+                0.0f32
+            };
+            let cpu_norm = (sample.cpu_percent / 100.0).clamp(0.0, 1.0);
+            let pids_norm = (metrics.pids_current as f32 / 1000.0).clamp(0.0, 1.0);
+            let features = vec![cpu_norm, mem_norm, pids_norm];
+
+            // Accumulate training samples during initial "normal" phase
+            if !anomaly_detector.is_trained() {
+                anomaly_training_samples.push(features.clone());
+                if anomaly_training_samples.len() >= anomaly_train_after {
+                    anomaly_detector.train(&anomaly_training_samples, 50);
+                    eprintln!("[ai] container {}: anomaly detector trained on {} samples", id, anomaly_training_samples.len());
+                }
+            } else {
+                // Detect anomalies once trained
+                let score = anomaly_detector.detect(&features);
+                if score.is_anomalous() {
+                    eprintln!(
+                        "[ai] container {}: anomaly detected (score={:.3}, threshold={:.3})",
+                        id, score.score, score.threshold
+                    );
+                }
+            }
+
             let latest_prediction = predictor.predict();
 
             // Predict OOM
@@ -3127,9 +3193,15 @@ fn run_resource_monitor(
                         ),
                     )
                     .with_evidence("container_id", id.clone())
-                    .with_evidence("current_memory_bytes", prediction.current_memory.to_string())
+                    .with_evidence(
+                        "current_memory_bytes",
+                        prediction.current_memory.to_string(),
+                    )
                     .with_evidence("memory_limit_bytes", prediction.memory_limit.to_string())
-                    .with_evidence("predicted_peak_bytes", prediction.predicted_peak.to_string())
+                    .with_evidence(
+                        "predicted_peak_bytes",
+                        prediction.predicted_peak.to_string(),
+                    )
                     .with_evidence(
                         "time_to_oom_secs",
                         prediction.time_to_oom.as_secs().to_string(),
@@ -3139,7 +3211,10 @@ fn run_resource_monitor(
                     .with_evidence("memory_current_cgroup", metrics.memory_current.to_string());
                     if let Some(pred) = latest_prediction {
                         trace = trace
-                            .with_evidence("predicted_cpu_percent", format!("{:.2}", pred.cpu_percent))
+                            .with_evidence(
+                                "predicted_cpu_percent",
+                                format!("{:.2}", pred.cpu_percent),
+                            )
                             .with_evidence("predicted_memory_bytes", pred.memory_bytes.to_string())
                             .with_evidence(
                                 "memory_growth_rate_bytes_per_sec",

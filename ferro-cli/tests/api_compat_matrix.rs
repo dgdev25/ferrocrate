@@ -121,7 +121,10 @@ impl DaemonHarness {
 
         let _ = child.kill();
         let _ = child.wait();
-        panic!("daemon socket did not become ready: {}", socket_path.display());
+        panic!(
+            "daemon socket did not become ready: {}",
+            socket_path.display()
+        );
     }
 
     fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {

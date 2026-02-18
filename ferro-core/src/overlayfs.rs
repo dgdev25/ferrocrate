@@ -1,5 +1,5 @@
 use nix::errno::Errno;
-use nix::mount::{MntFlags, MsFlags, mount, umount2};
+use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -60,7 +60,10 @@ impl OverlayFsManager {
                 if err == Errno::EPERM
                     || err == Errno::EINVAL
                     || err == Errno::ENODEV
-                    || err == Errno::EOPNOTSUPP => Err(OverlayFsError::RootlessKernelUnsupported),
+                    || err == Errno::EOPNOTSUPP =>
+            {
+                Err(OverlayFsError::RootlessKernelUnsupported)
+            }
             Err(err) => Err(OverlayFsError::Mount(err)),
         }
     }
@@ -71,7 +74,9 @@ impl OverlayFsManager {
     }
 
     /// Mount rootfs and automatically fallback to fuse-overlayfs when kernel overlayfs is unavailable.
-    pub fn mount_with_fallback(config: &OverlayMountConfig) -> Result<OverlayBackend, OverlayFsError> {
+    pub fn mount_with_fallback(
+        config: &OverlayMountConfig,
+    ) -> Result<OverlayBackend, OverlayFsError> {
         match Self::mount_rootless(config) {
             Ok(()) => Ok(OverlayBackend::KernelOverlayFs),
             Err(OverlayFsError::RootlessKernelUnsupported) => {
@@ -89,11 +94,11 @@ impl OverlayFsManager {
         validate_config(config)?;
 
         // SEC-04: Canonicalize and validate all paths before use
-        let upperdir = config.upperdir.canonicalize()
-            .map_err(OverlayFsError::Io)?;
-        let workdir = config.workdir.canonicalize()
-            .map_err(OverlayFsError::Io)?;
-        let merged_dir = config.merged_dir.canonicalize()
+        let upperdir = config.upperdir.canonicalize().map_err(OverlayFsError::Io)?;
+        let workdir = config.workdir.canonicalize().map_err(OverlayFsError::Io)?;
+        let merged_dir = config
+            .merged_dir
+            .canonicalize()
             .map_err(OverlayFsError::Io)?;
 
         // Check for null bytes in paths
@@ -108,7 +113,11 @@ impl OverlayFsManager {
         let args = build_fuse_overlayfs_args(config);
 
         // SEC-05: Execute fuse-overlayfs with timeout to prevent hanging
-        let output = Self::execute_fuse_command_with_timeout("fuse-overlayfs", &args, Self::FUSE_OVERLAY_TIMEOUT)?;
+        let output = Self::execute_fuse_command_with_timeout(
+            "fuse-overlayfs",
+            &args,
+            Self::FUSE_OVERLAY_TIMEOUT,
+        )?;
 
         if !output.status.success() {
             return Err(OverlayFsError::FuseOverlayFailed {
@@ -144,21 +153,21 @@ impl OverlayFsManager {
             if let Some(status) = child.try_wait().map_err(OverlayFsError::Io)? {
                 // Process completed - collect output
                 let mut stdout = child.stdout.take().ok_or_else(|| {
-                    OverlayFsError::Io(std::io::Error::other(
-                        "failed to capture stdout",
-                    ))
+                    OverlayFsError::Io(std::io::Error::other("failed to capture stdout"))
                 })?;
                 let mut stderr = child.stderr.take().ok_or_else(|| {
-                    OverlayFsError::Io(std::io::Error::other(
-                        "failed to capture stderr",
-                    ))
+                    OverlayFsError::Io(std::io::Error::other("failed to capture stderr"))
                 })?;
 
                 use std::io::Read;
                 let mut stdout_buf = Vec::new();
                 let mut stderr_buf = Vec::new();
-                stdout.read_to_end(&mut stdout_buf).map_err(OverlayFsError::Io)?;
-                stderr.read_to_end(&mut stderr_buf).map_err(OverlayFsError::Io)?;
+                stdout
+                    .read_to_end(&mut stdout_buf)
+                    .map_err(OverlayFsError::Io)?;
+                stderr
+                    .read_to_end(&mut stderr_buf)
+                    .map_err(OverlayFsError::Io)?;
 
                 return Ok(std::process::Output {
                     status,
@@ -229,7 +238,7 @@ fn validate_config(config: &OverlayMountConfig) -> Result<(), OverlayFsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OverlayMountConfig, build_fuse_overlayfs_args, build_mount_options, validate_config,
+        build_fuse_overlayfs_args, build_mount_options, validate_config, OverlayMountConfig,
     };
     use std::path::PathBuf;
 

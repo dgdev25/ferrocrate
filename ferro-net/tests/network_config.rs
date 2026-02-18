@@ -1,10 +1,10 @@
 #![cfg(target_os = "linux")]
 
 use ferro_net::bridge::build_ip_link_add_bridge_cmd;
-use ferro_net::dns::{DnsConfig, render_resolv_conf};
+use ferro_net::dns::{render_resolv_conf, DnsConfig};
 use ferro_net::netns::build_ip_netns_add_cmd;
-use ferro_net::portmap::{PortMapping, build_iptables_forward_cmd};
-use ferro_net::veth::{VethConfig, VethPair, build_ip_link_add_veth_cmd};
+use ferro_net::portmap::{build_iptables_forward_cmd, PortMapping};
+use ferro_net::veth::{build_ip_link_add_veth_cmd, VethConfig, VethPair};
 
 #[test]
 fn network_config_builders_work() {
@@ -47,8 +47,8 @@ fn network_config_builders_work() {
     assert_eq!(
         build_iptables_forward_cmd(&mapping, "10.0.0.2").unwrap(),
         vec![
-            "iptables", "-A", "FORWARD", "-p", "tcp", "-d", "10.0.0.2", "--dport", "80",
-            "-j", "ACCEPT"
+            "iptables", "-A", "FORWARD", "-p", "tcp", "-d", "10.0.0.2", "--dport", "80", "-j",
+            "ACCEPT"
         ]
     );
 }

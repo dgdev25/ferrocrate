@@ -1,4 +1,4 @@
-use crate::executor::{ExecError, exec_cmd};
+use crate::executor::{exec_cmd, ExecError};
 use crate::validate::{validate_interface_name, ValidationError};
 #[cfg(target_os = "linux")]
 use nix::sched::{setns, CloneFlags};
@@ -37,7 +37,10 @@ pub fn build_ip_netns_del_cmd(name: &str) -> Result<Vec<String>, ValidationError
     Ok(vec!["ip".into(), "netns".into(), "del".into(), name.into()])
 }
 
-pub fn build_ip_link_set_netns_cmd(link: &str, netns: &str) -> Result<Vec<String>, ValidationError> {
+pub fn build_ip_link_set_netns_cmd(
+    link: &str,
+    netns: &str,
+) -> Result<Vec<String>, ValidationError> {
     validate_interface_name(link)?;
     validate_interface_name(netns)?;
     Ok(vec![
@@ -88,7 +91,9 @@ pub fn enter_netns(_path: &Path) -> Result<(), NetnsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ip_link_set_netns_cmd, build_ip_netns_add_cmd, build_ip_netns_del_cmd, netns_path};
+    use super::{
+        build_ip_link_set_netns_cmd, build_ip_netns_add_cmd, build_ip_netns_del_cmd, netns_path,
+    };
 
     #[test]
     fn builds_netns_paths() {

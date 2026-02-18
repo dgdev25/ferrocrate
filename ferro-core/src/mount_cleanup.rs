@@ -11,7 +11,10 @@ pub enum MountCleanupError {
 
 /// Cleanup mount-related paths for a container.
 /// This attempts unmount first and then removes mount state directories.
-pub fn cleanup_container_mount(runtime_dir: &Path, container_id: &str) -> Result<(), MountCleanupError> {
+pub fn cleanup_container_mount(
+    runtime_dir: &Path,
+    container_id: &str,
+) -> Result<(), MountCleanupError> {
     let container_dir = runtime_dir.join("containers").join(container_id);
     let merged = container_dir.join("rootfs");
 

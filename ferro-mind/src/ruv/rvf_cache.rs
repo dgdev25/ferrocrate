@@ -19,7 +19,12 @@ pub struct RvfDedupCache {
 
 #[cfg(feature = "rvf-persistence")]
 impl RvfDedupCache {
-    pub fn open(path: &Path, dimensions: usize, threshold: f32, metric: DistanceMetric) -> Result<Self, String> {
+    pub fn open(
+        path: &Path,
+        dimensions: usize,
+        threshold: f32,
+        metric: DistanceMetric,
+    ) -> Result<Self, String> {
         let memory = VectorMemory::with_backend(path, dimensions)?;
         Ok(Self {
             memory,
@@ -30,7 +35,10 @@ impl RvfDedupCache {
     }
 
     pub fn record(&mut self, key: &str, payload: &str) -> Result<(), String> {
-        let vector = self.embedder.embed(payload).map_err(|err| err.to_string())?;
+        let vector = self
+            .embedder
+            .embed(payload)
+            .map_err(|err| err.to_string())?;
         let mut metadata = HashMap::new();
         metadata.insert("key".to_string(), serde_json::json!(key));
         self.memory.insert(VectorEntry {
@@ -42,7 +50,10 @@ impl RvfDedupCache {
     }
 
     pub fn nearest_duplicate_key(&self, payload: &str) -> Result<Option<String>, String> {
-        let vector = self.embedder.embed(payload).map_err(|err| err.to_string())?;
+        let vector = self
+            .embedder
+            .embed(payload)
+            .map_err(|err| err.to_string())?;
         let results = self.memory.search(&vector, 1, self.metric);
         let Some(result) = results.first() else {
             return Ok(None);

@@ -126,9 +126,10 @@ fn export_trace<T: Serialize>(kind: &str, payload: &T) -> Result<(), std::io::Er
             Ok(response) if response.status().is_success() => return Ok(()),
             Ok(response) => {
                 if attempts > config.retries {
-                    return Err(std::io::Error::other(
-                        format!("trace export failed with status {}", response.status()),
-                    ));
+                    return Err(std::io::Error::other(format!(
+                        "trace export failed with status {}",
+                        response.status()
+                    )));
                 }
             }
             Err(err) => {
@@ -169,8 +170,8 @@ fn load_trace_export_config() -> Option<TraceExportConfig> {
         .unwrap_or(2);
     let service_name =
         std::env::var("FERROCRATE_OTEL_SERVICE_NAME").unwrap_or_else(|_| "ferrocrate".to_string());
-    let service_namespace =
-        std::env::var("FERROCRATE_OTEL_SERVICE_NAMESPACE").unwrap_or_else(|_| "runtime".to_string());
+    let service_namespace = std::env::var("FERROCRATE_OTEL_SERVICE_NAMESPACE")
+        .unwrap_or_else(|_| "runtime".to_string());
     let headers = parse_otel_headers(std::env::var("FERROCRATE_OTEL_HEADERS").ok().as_deref());
     Some(TraceExportConfig {
         endpoint,

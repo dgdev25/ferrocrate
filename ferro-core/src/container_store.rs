@@ -72,7 +72,6 @@ pub enum RestartPolicy {
     UnlessStopped,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthConfig {
     pub cmd: Vec<String>,

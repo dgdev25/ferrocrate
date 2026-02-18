@@ -1,10 +1,10 @@
 use crate::ruv::distance;
 use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
+#[cfg(feature = "rvf-persistence")]
+use crate::ruv::rvf_cache::RvfDedupCache;
 use crate::ruv::types::DistanceMetric;
 #[cfg(feature = "rvf-persistence")]
 use std::path::Path;
-#[cfg(feature = "rvf-persistence")]
-use crate::ruv::rvf_cache::RvfDedupCache;
 
 #[derive(Debug, Clone)]
 pub struct DedupConfig {
@@ -46,7 +46,12 @@ pub fn is_duplicate_with_cache(
     cache_path: &Path,
     provider: Option<&dyn EmbeddingProvider>,
 ) -> Result<bool, String> {
-    let mut cache = RvfDedupCache::open(cache_path, config.dimensions, config.threshold, config.metric)?;
+    let mut cache = RvfDedupCache::open(
+        cache_path,
+        config.dimensions,
+        config.threshold,
+        config.metric,
+    )?;
     cache.record(a_key, a)?;
     if cache.nearest_duplicate_key(b)?.is_some() {
         return Ok(true);

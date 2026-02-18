@@ -103,7 +103,7 @@ impl AdaptiveRestartPolicy {
             container_id: container_id.to_string(),
             max_retries: 5,
             base_backoff_secs: 1,
-            max_backoff_secs: 300, // 5 minutes max
+            max_backoff_secs: 300,        // 5 minutes max
             observation_window_secs: 300, // 5 minutes to observe success
             restart_history: VecDeque::with_capacity(50),
             detected_pattern: CrashPattern::Unknown,
@@ -142,7 +142,8 @@ impl AdaptiveRestartPolicy {
         }
 
         // Immediate failure pattern detected - don't keep retrying
-        if self.detected_pattern == CrashPattern::ImmediateFailure && self.pattern_confidence > 0.7 {
+        if self.detected_pattern == CrashPattern::ImmediateFailure && self.pattern_confidence > 0.7
+        {
             return RestartDecision::DoNotRestart;
         }
 
@@ -164,12 +165,17 @@ impl AdaptiveRestartPolicy {
         }
 
         // Time-based pattern - proactive restart suggestion (logged but not enforced)
-        if let CrashPattern::TimeBased { typical_uptime_secs } = self.detected_pattern {
+        if let CrashPattern::TimeBased {
+            typical_uptime_secs,
+        } = self.detected_pattern
+        {
             if self.pattern_confidence > 0.5 && signal.uptime_secs > 0 {
                 // Container crashed near its typical failure time
                 if signal.uptime_secs >= typical_uptime_secs.saturating_sub(600) {
                     // Could suggest proactive restart before crash, but for now just adjust backoff
-                    return RestartDecision::RestartAfterDelay { delay_secs: backoff / 2 };
+                    return RestartDecision::RestartAfterDelay {
+                        delay_secs: backoff / 2,
+                    };
                 }
             }
         }
@@ -180,7 +186,9 @@ impl AdaptiveRestartPolicy {
         }
 
         // Subsequent failures - backoff
-        RestartDecision::RestartAfterDelay { delay_secs: backoff }
+        RestartDecision::RestartAfterDelay {
+            delay_secs: backoff,
+        }
     }
 
     /// Calculate exponential backoff with learned adjustment
@@ -248,7 +256,8 @@ impl AdaptiveRestartPolicy {
 
     /// Detect crash patterns from history
     fn detect_patterns(&mut self) {
-        let records: Vec<_> = self.restart_history
+        let records: Vec<_> = self
+            .restart_history
             .iter()
             .filter(|r| r.outcome.is_some())
             .collect();
@@ -265,9 +274,14 @@ impl AdaptiveRestartPolicy {
         let variance: f64 = uptimes
             .iter()
             .map(|&u| (u as f64 - avg_uptime).powi(2))
-            .sum::<f64>() / uptimes.len() as f64;
+            .sum::<f64>()
+            / uptimes.len() as f64;
         let stddev = variance.sqrt();
-        let cv = if avg_uptime > 0.0 { stddev / avg_uptime } else { 1.0 };
+        let cv = if avg_uptime > 0.0 {
+            stddev / avg_uptime
+        } else {
+            1.0
+        };
 
         // Check for time-based pattern FIRST (higher priority if variance is low)
         // This catches memory leak patterns before checking immediate failures
@@ -316,8 +330,10 @@ impl AdaptiveRestartPolicy {
     }
 
     fn build_decision_features(&self, signal: &RestartSignal) -> [f32; 5] {
-        let failure_norm = (signal.recent_failures as f32 / self.max_retries.max(1) as f32).clamp(0.0, 1.0);
-        let uptime_norm = (signal.uptime_secs as f32 / self.observation_window_secs.max(1) as f32).clamp(0.0, 1.0);
+        let failure_norm =
+            (signal.recent_failures as f32 / self.max_retries.max(1) as f32).clamp(0.0, 1.0);
+        let uptime_norm = (signal.uptime_secs as f32 / self.observation_window_secs.max(1) as f32)
+            .clamp(0.0, 1.0);
         let exit_severity = match signal.exit_code {
             137 | 139 => 1.0,
             125..=255 => 0.8,
@@ -326,7 +342,13 @@ impl AdaptiveRestartPolicy {
         };
         let success_rate = self.success_rate().clamp(0.0, 1.0);
         let pattern_conf = self.pattern_confidence.clamp(0.0, 1.0);
-        [1.0 - failure_norm, uptime_norm, 1.0 - exit_severity, success_rate, pattern_conf]
+        [
+            1.0 - failure_norm,
+            uptime_norm,
+            1.0 - exit_severity,
+            success_rate,
+            pattern_conf,
+        ]
     }
 
     fn predict_success_probability(&self, features: [f32; 5]) -> f32 {
@@ -367,7 +389,8 @@ impl AdaptiveRestartPolicy {
 
     /// Get success rate
     pub fn success_rate(&self) -> f32 {
-        let completed: Vec<_> = self.restart_history
+        let completed: Vec<_> = self
+            .restart_history
             .iter()
             .filter(|r| r.outcome.is_some())
             .collect();
@@ -519,9 +542,21 @@ mod tests {
     fn adaptive_policy_backoff_increases() {
         let mut policy = AdaptiveRestartPolicy::new("test");
 
-        let signal1 = RestartSignal { exit_code: 1, recent_failures: 1, uptime_secs: 100 };
-        let signal2 = RestartSignal { exit_code: 1, recent_failures: 2, uptime_secs: 100 };
-        let signal3 = RestartSignal { exit_code: 1, recent_failures: 3, uptime_secs: 100 };
+        let signal1 = RestartSignal {
+            exit_code: 1,
+            recent_failures: 1,
+            uptime_secs: 100,
+        };
+        let signal2 = RestartSignal {
+            exit_code: 1,
+            recent_failures: 2,
+            uptime_secs: 100,
+        };
+        let signal3 = RestartSignal {
+            exit_code: 1,
+            recent_failures: 3,
+            uptime_secs: 100,
+        };
 
         let backoff1 = match policy.decide(&signal1) {
             RestartDecision::RestartAfterDelay { delay_secs } => delay_secs,
@@ -620,7 +655,10 @@ mod tests {
         }
 
         let final_decision = policy.decide(&signal);
-        assert!(matches!(final_decision, RestartDecision::DoNotRestart | RestartDecision::RestartAfterDelay { .. }));
+        assert!(matches!(
+            final_decision,
+            RestartDecision::DoNotRestart | RestartDecision::RestartAfterDelay { .. }
+        ));
     }
 
     #[test]
@@ -636,11 +674,17 @@ mod tests {
         }
 
         // Should detect time-based pattern
-        if let CrashPattern::TimeBased { typical_uptime_secs } = policy.get_pattern() {
+        if let CrashPattern::TimeBased {
+            typical_uptime_secs,
+        } = policy.get_pattern()
+        {
             assert!(typical_uptime_secs > 3000 && typical_uptime_secs < 4000);
         } else {
             // Might be random if variance is too high
-            assert!(matches!(policy.get_pattern(), CrashPattern::TimeBased { .. } | CrashPattern::Random));
+            assert!(matches!(
+                policy.get_pattern(),
+                CrashPattern::TimeBased { .. } | CrashPattern::Random
+            ));
         }
     }
 }

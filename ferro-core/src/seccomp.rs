@@ -1,4 +1,6 @@
-use libseccomp::{ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall};
+use libseccomp::{
+    ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -37,11 +39,9 @@ impl SeccompProfile {
         // Validate architectures are known SCMP_ARCH_* constants
         for arch in &self.architectures {
             match arch.as_str() {
-                "SCMP_ARCH_X86_64" | "SCMP_ARCH_X86" | "SCMP_ARCH_X32"
-                | "SCMP_ARCH_ARM" | "SCMP_ARCH_AARCH64"
-                | "SCMP_ARCH_MIPS" | "SCMP_ARCH_MIPS64"
-                | "SCMP_ARCH_PPC" | "SCMP_ARCH_PPC64" | "SCMP_ARCH_PPC64LE"
-                | "SCMP_ARCH_S390X" => {}
+                "SCMP_ARCH_X86_64" | "SCMP_ARCH_X86" | "SCMP_ARCH_X32" | "SCMP_ARCH_ARM"
+                | "SCMP_ARCH_AARCH64" | "SCMP_ARCH_MIPS" | "SCMP_ARCH_MIPS64" | "SCMP_ARCH_PPC"
+                | "SCMP_ARCH_PPC64" | "SCMP_ARCH_PPC64LE" | "SCMP_ARCH_S390X" => {}
                 _ => return Err(SeccompError::UnknownArch(arch.clone())),
             }
         }
@@ -55,25 +55,32 @@ impl SeccompProfile {
             if let Some(args) = &rule.args {
                 for arg in args {
                     if arg.index > 5 {
-                        return Err(SeccompError::InvalidJson(
-                            format!("arg index {} out of range 0..5", arg.index)
-                        ));
+                        return Err(SeccompError::InvalidJson(format!(
+                            "arg index {} out of range 0..5",
+                            arg.index
+                        )));
                     }
                 }
             }
         }
 
         // Check for contradictory rules (same syscall with both ALLOW and KILL)
-        let mut syscall_actions: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        let mut syscall_actions: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
         for rule in &self.syscalls {
             for name in &rule.names {
                 if let Some(existing) = syscall_actions.get(name.as_str()) {
-                    let is_kill = *existing == "SCMP_ACT_KILL" || *existing == "SCMP_ACT_KILL_PROCESS";
-                    let new_kill = rule.action == "SCMP_ACT_KILL" || rule.action == "SCMP_ACT_KILL_PROCESS";
-                    if (is_kill && rule.action == "SCMP_ACT_ALLOW") || (new_kill && *existing == "SCMP_ACT_ALLOW") {
-                        return Err(SeccompError::InvalidJson(
-                            format!("contradictory rules for syscall {}: both KILL and ALLOW", name)
-                        ));
+                    let is_kill =
+                        *existing == "SCMP_ACT_KILL" || *existing == "SCMP_ACT_KILL_PROCESS";
+                    let new_kill =
+                        rule.action == "SCMP_ACT_KILL" || rule.action == "SCMP_ACT_KILL_PROCESS";
+                    if (is_kill && rule.action == "SCMP_ACT_ALLOW")
+                        || (new_kill && *existing == "SCMP_ACT_ALLOW")
+                    {
+                        return Err(SeccompError::InvalidJson(format!(
+                            "contradictory rules for syscall {}: both KILL and ALLOW",
+                            name
+                        )));
                     }
                 }
                 syscall_actions.insert(name.as_str(), &rule.action);
@@ -101,8 +108,8 @@ pub struct SyscallArg {
 }
 
 pub fn parse_seccomp_profile(json: &str) -> Result<SeccompProfile, SeccompError> {
-    let profile: SeccompProfile = serde_json::from_str(json)
-        .map_err(|e| SeccompError::InvalidJson(format!("{}", e)))?;
+    let profile: SeccompProfile =
+        serde_json::from_str(json).map_err(|e| SeccompError::InvalidJson(format!("{}", e)))?;
     // SEC-06: Validate semantic correctness immediately after parsing
     profile.validate()?;
     Ok(profile)
@@ -187,16 +194,26 @@ pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompErro
                         "SCMP_CMP_MASKED_EQ" => {
                             // For masked equality, use the value as mask
                             let mask = arg.value;
-                            filter.add_rule_conditional(action, syscall, &[
-                                ScmpArgCompare::new(arg.index, ScmpCompareOp::MaskedEqual(mask), arg.value_two.unwrap_or(0))
-                            ])?;
+                            filter.add_rule_conditional(
+                                action,
+                                syscall,
+                                &[ScmpArgCompare::new(
+                                    arg.index,
+                                    ScmpCompareOp::MaskedEqual(mask),
+                                    arg.value_two.unwrap_or(0),
+                                )],
+                            )?;
                             continue;
                         }
-                        _ => return Err(SeccompError::UnknownAction(format!("cmp_op: {}", arg.op))),
+                        _ => {
+                            return Err(SeccompError::UnknownAction(format!("cmp_op: {}", arg.op)))
+                        }
                     };
-                    filter.add_rule_conditional(action, syscall, &[
-                        ScmpArgCompare::new(arg.index, cmp_op, arg.value)
-                    ])?;
+                    filter.add_rule_conditional(
+                        action,
+                        syscall,
+                        &[ScmpArgCompare::new(arg.index, cmp_op, arg.value)],
+                    )?;
                 }
             } else {
                 // No argument rules - add simple rule

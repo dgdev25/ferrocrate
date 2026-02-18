@@ -313,10 +313,7 @@ mod tests {
 
         assert_eq!(parsed.oci_version, "1.2.0");
         assert_eq!(parsed.mounts.len(), 1);
-        assert_eq!(
-            parsed.linux.expect("linux section").namespaces.len(),
-            3
-        );
+        assert_eq!(parsed.linux.expect("linux section").namespaces.len(), 3);
     }
 
     #[test]

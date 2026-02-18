@@ -3,7 +3,6 @@
 // Re-exports from ruvector-core
 use ferro_mind::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
 
-
 /// Test that HashEmbedding (from ruvector-core) produces normalized vectors
 #[test]
 fn test_hash_embedding_normalized() {
@@ -16,7 +15,10 @@ fn test_hash_embedding_normalized() {
 
     // Check L2 norm is 1.0 (or very close)
     let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-    assert!((norm - 1.0).abs() < 0.0001, "Embedding should be normalized");
+    assert!(
+        (norm - 1.0).abs() < 0.0001,
+        "Embedding should be normalized"
+    );
 }
 
 /// Test that HashEmbedding produces consistent results
@@ -56,6 +58,9 @@ fn test_hash_embedding_name() {
     let embedder = HashEmbedding::new(128);
     // ruvector-core uses "HashEmbedding" as name
     let name = embedder.name();
-    assert!(name.contains("ash") || name.contains("Hash") || name.contains("hash"),
-        "Name should indicate it's a hash embedding, got: {}", name);
+    assert!(
+        name.contains("ash") || name.contains("Hash") || name.contains("hash"),
+        "Name should indicate it's a hash embedding, got: {}",
+        name
+    );
 }

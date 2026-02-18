@@ -7,7 +7,11 @@ pub struct PacketRule {
 }
 
 pub fn build_iptables_forward_rule(rule: &PacketRule) -> Vec<String> {
-    let mut cmd = vec!["iptables".to_string(), "-A".to_string(), "FORWARD".to_string()];
+    let mut cmd = vec![
+        "iptables".to_string(),
+        "-A".to_string(),
+        "FORWARD".to_string(),
+    ];
     cmd.push("-p".to_string());
     cmd.push(rule.protocol.clone());
     if let Some(src) = &rule.source {
@@ -25,7 +29,7 @@ pub fn build_iptables_forward_rule(rule: &PacketRule) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PacketRule, build_iptables_forward_rule};
+    use super::{build_iptables_forward_rule, PacketRule};
 
     #[test]
     fn builds_forward_rule() {
@@ -39,8 +43,17 @@ mod tests {
         assert_eq!(
             build_iptables_forward_rule(&rule),
             vec![
-                "iptables", "-A", "FORWARD", "-p", "tcp", "-s", "10.0.0.0/24", "-d",
-                "10.1.0.0/24", "-j", "ACCEPT"
+                "iptables",
+                "-A",
+                "FORWARD",
+                "-p",
+                "tcp",
+                "-s",
+                "10.0.0.0/24",
+                "-d",
+                "10.1.0.0/24",
+                "-j",
+                "ACCEPT"
             ]
         );
     }

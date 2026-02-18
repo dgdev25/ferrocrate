@@ -52,13 +52,15 @@ impl DaemonHarness {
 
         let _ = child.kill();
         let _ = child.wait();
-        panic!("daemon socket did not become ready: {}", socket_path.display());
+        panic!(
+            "daemon socket did not become ready: {}",
+            socket_path.display()
+        );
     }
 
     fn request(&self, method: &str, path: &str) -> (u16, String) {
-        let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
-        );
+        let request =
+            format!("{method} {path} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n");
         self.request_raw(&request)
     }
 
@@ -126,7 +128,8 @@ fn docker_compat_unknown_route_returns_docker_json_error() {
 #[test]
 fn docker_compat_malformed_content_length_returns_400_json_error() {
     let harness = DaemonHarness::spawn();
-    let raw = "POST /v1.45/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: nope\r\n\r\n";
+    let raw =
+        "POST /v1.45/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: nope\r\n\r\n";
     let (status, body) = harness.request_raw(raw);
     assert_eq!(status, 400);
     assert!(
@@ -150,11 +153,17 @@ fn docker_compat_network_create_list_delete_routes_work() {
     );
     let (create_status, create_resp) = harness.request_raw(&create_request);
     assert_eq!(create_status, 201, "create body={create_resp}");
-    assert!(create_resp.contains("\"Id\":\"compat-net\""), "body={create_resp}");
+    assert!(
+        create_resp.contains("\"Id\":\"compat-net\""),
+        "body={create_resp}"
+    );
 
     let (list_status, list_resp) = harness.request("GET", "/v1.45/networks");
     assert_eq!(list_status, 200, "list body={list_resp}");
-    assert!(list_resp.contains("\"Name\":\"compat-net\""), "body={list_resp}");
+    assert!(
+        list_resp.contains("\"Name\":\"compat-net\""),
+        "body={list_resp}"
+    );
 
     let (delete_status, delete_resp) = harness.request("DELETE", "/v1.45/networks/compat-net");
     assert_eq!(delete_status, 204, "delete body={delete_resp}");

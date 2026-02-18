@@ -2,10 +2,10 @@
 //!
 //! Provides intelligent automation, anomaly detection, model training, and optimization.
 
-/// Anomaly detection in container behavior
-pub mod anomaly;
 /// Autonomous AI agents for orchestration
 pub mod agents;
+/// Anomaly detection in container behavior
+pub mod anomaly;
 /// Audit logging and decision tracing
 pub mod audit;
 /// Configuration management
@@ -16,11 +16,15 @@ pub mod explain;
 pub mod gpu;
 /// Machine learning and pattern recognition
 pub mod learning;
-/// Intelligent restart policies
-pub mod restart;
 /// Resource prediction and OOM prevention
 pub mod resource;
+/// Intelligent restart policies
+pub mod restart;
 /// Request routing optimization
 pub mod routing;
 /// Model training and export
 pub mod training;
+/// Telemetry collection for AI training data
+pub mod collector;
+/// Online learning scheduler for incremental model updates
+pub mod online_learner;

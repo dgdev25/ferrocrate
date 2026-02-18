@@ -3,8 +3,8 @@ use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServe
 use crate::runtime::{
     FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
     ImageStatusResponse, ListImagesRequest, ListImagesResponse, PullImageRequest,
-    PullImageResponse, RemoveImageRequest, RemoveImageResponse, RuntimeCondition,
-    RuntimeStatus, StatusRequest, StatusResponse, VersionRequest, VersionResponse,
+    PullImageResponse, RemoveImageRequest, RemoveImageResponse, RuntimeCondition, RuntimeStatus,
+    StatusRequest, StatusResponse, VersionRequest, VersionResponse,
 };
 use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use std::fs;
@@ -89,8 +89,14 @@ impl RuntimeService for CriRuntime {
         let info = if req.verbose {
             let mut map = std::collections::HashMap::new();
             map.insert("runtimeName".to_string(), RUNTIME_NAME.to_string());
-            map.insert("runtimeVersion".to_string(), env!("CARGO_PKG_VERSION").to_string());
-            map.insert("runtimeApiVersion".to_string(), RUNTIME_API_VERSION.to_string());
+            map.insert(
+                "runtimeVersion".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            );
+            map.insert(
+                "runtimeApiVersion".to_string(),
+                RUNTIME_API_VERSION.to_string(),
+            );
             map.insert(
                 "runtimeDir".to_string(),
                 self.runtime_dir.display().to_string(),
@@ -153,17 +159,19 @@ impl ImageService for CriRuntime {
         request: Request<ImageStatusRequest>,
     ) -> Result<Response<ImageStatusResponse>, Status> {
         let req = request.into_inner();
-        let image_spec = req.image.ok_or_else(|| {
-            Status::invalid_argument("image spec is required")
-        })?;
+        let image_spec = req
+            .image
+            .ok_or_else(|| Status::invalid_argument("image spec is required"))?;
 
         // Try to find image by reference or digest
-        let images = self.store.list_references()
+        let images = self
+            .store
+            .list_references()
             .map_err(|err| Status::internal(err.to_string()))?;
 
-        let found = images.iter().find(|img| {
-            img.digest == image_spec.image || img.reference == image_spec.image
-        });
+        let found = images
+            .iter()
+            .find(|img| img.digest == image_spec.image || img.reference == image_spec.image);
 
         match found {
             Some(record) => {
@@ -220,12 +228,9 @@ impl ImageService for CriRuntime {
             return Err(Status::invalid_argument("image spec is required"));
         }
 
-        let pulled = ferro_core::image_fetch::pull_image_with_store(
-            &self.runtime_dir,
-            &image,
-            &self.store,
-        )
-        .map_err(map_image_fetch_error)?;
+        let pulled =
+            ferro_core::image_fetch::pull_image_with_store(&self.runtime_dir, &image, &self.store)
+                .map_err(map_image_fetch_error)?;
 
         Ok(Response::new(PullImageResponse {
             image_ref: pulled.reference,
@@ -326,7 +331,11 @@ fn measure_tree_usage(path: &Path) -> Result<(u64, u64), std::io::Error> {
     use std::collections::HashSet;
     use std::os::unix::fs::MetadataExt;
 
-    fn visit(path: &Path, bytes: &mut u64, inodes: &mut HashSet<u64>) -> Result<(), std::io::Error> {
+    fn visit(
+        path: &Path,
+        bytes: &mut u64,
+        inodes: &mut HashSet<u64>,
+    ) -> Result<(), std::io::Error> {
         let md = fs::symlink_metadata(path)?;
         inodes.insert(md.ino());
         if md.is_file() {
@@ -412,8 +421,7 @@ mod tests {
     // Helper to create a test runtime with a temporary image store
     async fn create_test_runtime() -> CriRuntime {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         CriRuntime::new(Arc::new(store))
     }
 
@@ -452,7 +460,9 @@ mod tests {
         let runtime = create_test_runtime().await;
         let request = Request::new(VersionRequest::default());
 
-        let response = runtime.version(request).await
+        let response = runtime
+            .version(request)
+            .await
             .expect("version should succeed");
 
         let inner = response.into_inner();
@@ -465,11 +475,11 @@ mod tests {
     #[tokio::test]
     async fn status_returns_runtime_ready_condition() {
         let runtime = create_test_runtime().await;
-        let request = Request::new(StatusRequest {
-            verbose: false,
-        });
+        let request = Request::new(StatusRequest { verbose: false });
 
-        let response = runtime.status(request).await
+        let response = runtime
+            .status(request)
+            .await
             .expect("status should succeed");
 
         let inner = response.into_inner();
@@ -488,17 +498,20 @@ mod tests {
     #[tokio::test]
     async fn status_returns_runtime_ready_condition_with_verbose() {
         let runtime = create_test_runtime().await;
-        let request = Request::new(StatusRequest {
-            verbose: true,
-        });
+        let request = Request::new(StatusRequest { verbose: true });
 
-        let response = runtime.status(request).await
+        let response = runtime
+            .status(request)
+            .await
             .expect("status should succeed");
 
         let inner = response.into_inner();
         assert!(inner.status.is_some());
         assert_eq!(inner.status.unwrap().conditions.len(), 1);
-        assert_eq!(inner.info.get("runtimeName"), Some(&"ferrocrate".to_string()));
+        assert_eq!(
+            inner.info.get("runtimeName"),
+            Some(&"ferrocrate".to_string())
+        );
         assert!(inner.info.contains_key("runtimeVersion"));
         assert_eq!(inner.info.get("runtimeApiVersion"), Some(&"v1".to_string()));
         assert!(inner.info.contains_key("runtimeDir"));
@@ -509,7 +522,9 @@ mod tests {
         let runtime = create_test_runtime().await;
         let request = Request::new(ListImagesRequest::default());
 
-        let response = runtime.list_images(request).await
+        let response = runtime
+            .list_images(request)
+            .await
             .expect("list_images should succeed");
 
         let inner = response.into_inner();
@@ -519,14 +534,15 @@ mod tests {
     #[tokio::test]
     async fn list_images_returns_all_stored_images() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
         let runtime = CriRuntime::new(Arc::new(store));
         let request = Request::new(ListImagesRequest::default());
 
-        let response = runtime.list_images(request).await
+        let response = runtime
+            .list_images(request)
+            .await
             .expect("list_images should succeed");
 
         let inner = response.into_inner();
@@ -534,7 +550,10 @@ mod tests {
 
         // Verify alpine:latest appears with tag
         let alpine = &inner.images[0];
-        assert_eq!(alpine.id, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            alpine.id,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(alpine.repo_tags, vec!["alpine:latest"]);
         assert_eq!(alpine.size, 0);
 
@@ -545,15 +564,17 @@ mod tests {
 
         // Verify ghcr.io/test/app:v1.0 appears with tag
         let test_app = &inner.images[2];
-        assert_eq!(test_app.id, "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(
+            test_app.id,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
         assert_eq!(test_app.repo_tags, vec!["ghcr.io/test/app:v1.0"]);
     }
 
     #[tokio::test]
     async fn list_images_handles_filter_parameter() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
         let runtime = CriRuntime::new(Arc::new(store));
@@ -562,7 +583,9 @@ mod tests {
             filter: "alpine".to_string(),
         });
 
-        let response = runtime.list_images(request).await
+        let response = runtime
+            .list_images(request)
+            .await
             .expect("list_images with filter should succeed");
 
         let inner = response.into_inner();
@@ -607,8 +630,7 @@ mod tests {
     #[tokio::test]
     async fn image_status_finds_image_by_reference() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
         let runtime = CriRuntime::new(Arc::new(store));
@@ -619,14 +641,19 @@ mod tests {
             verbose: false,
         });
 
-        let response = runtime.image_status(request).await
+        let response = runtime
+            .image_status(request)
+            .await
             .expect("image_status should succeed");
 
         let inner = response.into_inner();
         assert!(inner.image.is_some());
 
         let image = inner.image.unwrap();
-        assert_eq!(image.id, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            image.id,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(image.repo_tags, vec!["alpine:latest"]);
         assert_eq!(image.size, 0);
     }
@@ -634,34 +661,38 @@ mod tests {
     #[tokio::test]
     async fn image_status_finds_image_by_digest() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
         let runtime = CriRuntime::new(Arc::new(store));
         let request = Request::new(ImageStatusRequest {
             image: Some(ImageSpec {
-                image: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                image: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
             }),
             verbose: false,
         });
 
-        let response = runtime.image_status(request).await
+        let response = runtime
+            .image_status(request)
+            .await
             .expect("image_status should succeed");
 
         let inner = response.into_inner();
         assert!(inner.image.is_some());
 
         let image = inner.image.unwrap();
-        assert_eq!(image.id, "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(
+            image.id,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
         assert_eq!(image.repo_tags, vec!["ghcr.io/test/app:v1.0"]);
     }
 
     #[tokio::test]
     async fn image_status_returns_no_tags_for_digest_reference() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
         let runtime = CriRuntime::new(Arc::new(store));
@@ -672,14 +703,19 @@ mod tests {
             verbose: false,
         });
 
-        let response = runtime.image_status(request).await
+        let response = runtime
+            .image_status(request)
+            .await
             .expect("image_status should succeed");
 
         let inner = response.into_inner();
         assert!(inner.image.is_some());
 
         let image = inner.image.unwrap();
-        assert_eq!(image.id, "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        assert_eq!(
+            image.id,
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
         assert_eq!(image.repo_tags, vec!["digest-only"]); // Has tag because reference doesn't start with "sha256:"
         assert!(image.repo_digests.is_empty());
     }
@@ -704,8 +740,7 @@ mod tests {
     #[tokio::test]
     async fn remove_image_removes_existing_reference() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
         let runtime = CriRuntime::new(Arc::new(store));
 
@@ -715,7 +750,10 @@ mod tests {
             }),
         });
 
-        runtime.remove_image(request).await.expect("remove_image should succeed");
+        runtime
+            .remove_image(request)
+            .await
+            .expect("remove_image should succeed");
 
         let status = runtime
             .image_status(Request::new(ImageStatusRequest {
@@ -756,15 +794,16 @@ mod tests {
     #[tokio::test]
     async fn cri_runtime_new_with_arc_store() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         let arc_store = Arc::new(store);
 
         let runtime = CriRuntime::new(arc_store.clone());
         let request = Request::new(VersionRequest::default());
 
         // Verify runtime works with Arc store
-        let response = runtime.version(request).await
+        let response = runtime
+            .version(request)
+            .await
             .expect("version should succeed");
         assert_eq!(response.into_inner().runtime_name, "ferrocrate");
     }
@@ -772,8 +811,7 @@ mod tests {
     #[tokio::test]
     async fn list_images_with_digest_references_only() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
 
         // Only add digest-based references
         store
@@ -788,7 +826,9 @@ mod tests {
         let runtime = CriRuntime::new(Arc::new(store));
         let request = Request::new(ListImagesRequest::default());
 
-        let response = runtime.list_images(request).await
+        let response = runtime
+            .list_images(request)
+            .await
             .expect("list_images should succeed");
 
         let inner = response.into_inner();
@@ -800,8 +840,7 @@ mod tests {
     #[tokio::test]
     async fn image_status_with_verbose_flag() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
         let runtime = CriRuntime::new(Arc::new(store));
@@ -812,12 +851,17 @@ mod tests {
             verbose: true, // Verbose flag
         });
 
-        let response = runtime.image_status(request).await
+        let response = runtime
+            .image_status(request)
+            .await
             .expect("image_status should succeed");
 
         let inner = response.into_inner();
         assert!(inner.image.is_some());
-        assert_eq!(inner.info.get("reference"), Some(&"alpine:latest".to_string()));
+        assert_eq!(
+            inner.info.get("reference"),
+            Some(&"alpine:latest".to_string())
+        );
         assert!(inner.info.contains_key("digest"));
         assert!(inner.info.contains_key("manifestMediaType"));
         assert!(inner.info.contains_key("createdAtUnix"));
@@ -826,8 +870,7 @@ mod tests {
     #[tokio::test]
     async fn list_images_returns_images_sorted_by_reference() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = LocalImageStore::open(temp.path())
-            .expect("open test store");
+        let store = LocalImageStore::open(temp.path()).expect("open test store");
 
         // Add images in non-alphabetical order
         store
@@ -860,7 +903,9 @@ mod tests {
         let runtime = CriRuntime::new(Arc::new(store));
         let request = Request::new(ListImagesRequest::default());
 
-        let response = runtime.list_images(request).await
+        let response = runtime
+            .list_images(request)
+            .await
             .expect("list_images should succeed");
 
         let inner = response.into_inner();

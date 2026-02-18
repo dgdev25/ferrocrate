@@ -1,5 +1,5 @@
-use crate::layer_mount::{LayerMountError, LayerMountPlan, build_layer_mount_plan};
-use crate::rootfs::{RootfsError, apply_layer_tar};
+use crate::layer_mount::{build_layer_mount_plan, LayerMountError, LayerMountPlan};
+use crate::rootfs::{apply_layer_tar, RootfsError};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -65,12 +65,8 @@ mod tests {
         create_tar(&l1, &["etc/base.txt", "usr/bin/tool"]);
         create_tar(&l2, &["etc/top.txt"]);
 
-        let prep = prepare_container_rootfs(
-            &runtime_dir,
-            "c123",
-            &[l1.clone(), l2.clone()],
-        )
-        .expect("prep should succeed");
+        let prep = prepare_container_rootfs(&runtime_dir, "c123", &[l1.clone(), l2.clone()])
+            .expect("prep should succeed");
 
         assert_eq!(prep.extracted_layer_dirs.len(), 2);
         assert!(prep.extracted_layer_dirs[0].join("etc/base.txt").exists());

@@ -20,12 +20,14 @@ dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 
 # RVF persistence layer (optional)
-rvf-runtime = { version = "0.1", optional = true }
-rvf-types = { version = "0.1", optional = true }
+rvf-runtime = { version = "0.2", default-features = false, features = ["std"], optional = true }
+rvf-types = { version = "0.2" }
+rvf-quant = { version = "0.1" }
+rvf-index = { version = "0.1" }
 
 [features]
-default = []
-rvf-persistence = ["dep:rvf-runtime", "dep:rvf-types"]
+default = ["rvf-persistence"]
+rvf-persistence = ["dep:rvf-runtime"]
 legacy-memory = []
 
 [dev-dependencies]

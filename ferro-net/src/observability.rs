@@ -30,7 +30,7 @@ pub fn format_conntrack_event(event: &ConntrackEvent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConntrackEvent, NetworkMetrics, format_conntrack_event, format_metrics};
+    use super::{format_conntrack_event, format_metrics, ConntrackEvent, NetworkMetrics};
 
     #[test]
     fn formats_metrics() {

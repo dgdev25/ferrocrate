@@ -56,7 +56,10 @@ pub fn validate_interface_name(name: &str) -> Result<(), ValidationError> {
         });
     }
     // Check for valid characters: alphanumeric, dash, underscore, dot
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
         return Err(ValidationError::InvalidInterfaceName {
             name: name.to_string(),
         });
@@ -171,7 +174,9 @@ fn check_shell_safe(value: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::NullByte);
     }
     // Shell metacharacters that could be dangerous
-    let dangerous = [';', '|', '`', '$', '(', ')', '{', '}', '[', ']', '<', '>', '&', '\n', '\r'];
+    let dangerous = [
+        ';', '|', '`', '$', '(', ')', '{', '}', '[', ']', '<', '>', '&', '\n', '\r',
+    ];
     for c in dangerous {
         if value.contains(c) {
             return Err(ValidationError::ShellInjection {

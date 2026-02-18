@@ -1,7 +1,7 @@
 use crate::fs_atomic::write_atomic;
-use crate::registry::{RegistryAuth, parse_image_reference};
-use base64::Engine;
+use crate::registry::{parse_image_reference, RegistryAuth};
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -80,7 +80,6 @@ struct FerrocrateAuthEntry {
     password: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct HelperResponse {
     #[serde(rename = "Username")]
@@ -112,10 +111,10 @@ pub fn resolve_auth_for_registry(registry: &str) -> Result<Option<RegistryAuth>,
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&config_path)
-        .map_err(|err| DockerAuthError::Read(err.to_string()))?;
-    let config: DockerConfig = serde_json::from_str(&content)
-        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+    let content =
+        fs::read_to_string(&config_path).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let config: DockerConfig =
+        serde_json::from_str(&content).map_err(|err| DockerAuthError::Parse(err.to_string()))?;
 
     let target = normalize_registry_key(registry);
     if let Some(helper) = resolve_helper(&config, &target) {
@@ -147,10 +146,10 @@ pub fn export_docker_auths() -> Result<HashMap<String, RegistryAuth>, DockerAuth
         return Ok(HashMap::new());
     }
 
-    let content = fs::read_to_string(&config_path)
-        .map_err(|err| DockerAuthError::Read(err.to_string()))?;
-    let config: DockerConfig = serde_json::from_str(&content)
-        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+    let content =
+        fs::read_to_string(&config_path).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let config: DockerConfig =
+        serde_json::from_str(&content).map_err(|err| DockerAuthError::Parse(err.to_string()))?;
 
     let mut out = HashMap::new();
 
@@ -193,8 +192,8 @@ pub fn write_ferrocrate_auth_file(
         );
     }
     let file = FerrocrateAuthFile { auths: entries };
-    let bytes = serde_json::to_vec_pretty(&file)
-        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(&file).map_err(|err| DockerAuthError::Parse(err.to_string()))?;
     write_atomic(path, &bytes).map_err(|err| DockerAuthError::Read(err.to_string()))?;
 
     // Set restrictive permissions (0o600) on auth file to prevent credential exposure
@@ -220,7 +219,10 @@ pub fn ferrocrate_auth_path() -> Option<PathBuf> {
     )
 }
 
-fn decode_auth_entry(registry: &str, entry: &DockerAuthEntry) -> Result<RegistryAuth, DockerAuthError> {
+fn decode_auth_entry(
+    registry: &str,
+    entry: &DockerAuthEntry,
+) -> Result<RegistryAuth, DockerAuthError> {
     if let (Some(username), Some(password)) = (&entry.username, &entry.password) {
         return Ok(RegistryAuth {
             username: username.clone(),
@@ -304,31 +306,38 @@ fn execute_helper_with_timeout(
     // Write registry to stdin
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(registry.as_bytes())
+        stdin
+            .write_all(registry.as_bytes())
             .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
-        stdin.write_all(b"\n")
+        stdin
+            .write_all(b"\n")
             .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
     }
 
     // Wait for completion with timeout
     let start = Instant::now();
     loop {
-        if let Some(status) = child.try_wait()
+        if let Some(status) = child
+            .try_wait()
             .map_err(|e| DockerAuthError::Helper(e.to_string()))?
         {
             // Process completed - collect output
-            let mut stdout = child.stdout.take().ok_or_else(|| {
-                DockerAuthError::Helper("failed to capture stdout".to_string())
-            })?;
-            let mut stderr = child.stderr.take().ok_or_else(|| {
-                DockerAuthError::Helper("failed to capture stderr".to_string())
-            })?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| DockerAuthError::Helper("failed to capture stdout".to_string()))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| DockerAuthError::Helper("failed to capture stderr".to_string()))?;
 
             let mut stdout_buf = Vec::new();
             let mut stderr_buf = Vec::new();
-            stdout.read_to_end(&mut stdout_buf)
+            stdout
+                .read_to_end(&mut stdout_buf)
                 .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
-            stderr.read_to_end(&mut stderr_buf)
+            stderr
+                .read_to_end(&mut stderr_buf)
                 .map_err(|e| DockerAuthError::Helper(e.to_string()))?;
 
             return Ok(std::process::Output {
@@ -383,10 +392,10 @@ fn load_ferrocrate_auths() -> Result<Option<HashMap<String, RegistryAuth>>, Dock
         }
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|err| DockerAuthError::Read(err.to_string()))?;
-    let file: FerrocrateAuthFile = serde_json::from_str(&content)
-        .map_err(|err| DockerAuthError::Parse(err.to_string()))?;
+    let content =
+        fs::read_to_string(&path).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let file: FerrocrateAuthFile =
+        serde_json::from_str(&content).map_err(|err| DockerAuthError::Parse(err.to_string()))?;
     let mut out = HashMap::new();
     for (registry, entry) in file.auths {
         out.insert(
@@ -425,17 +434,23 @@ fn normalize_registry_key(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DockerAuthError, normalize_registry_key, resolve_auth_for_registry, ScopedEnvVar};
+    use super::{normalize_registry_key, resolve_auth_for_registry, DockerAuthError, ScopedEnvVar};
     use std::fs;
-    use std::sync::Mutex;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
 
     static DOCKER_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn normalizes_registry_keys() {
-        assert_eq!(normalize_registry_key("https://index.docker.io/v1/"), "registry-1.docker.io");
-        assert_eq!(normalize_registry_key("registry-1.docker.io"), "registry-1.docker.io");
+        assert_eq!(
+            normalize_registry_key("https://index.docker.io/v1/"),
+            "registry-1.docker.io"
+        );
+        assert_eq!(
+            normalize_registry_key("registry-1.docker.io"),
+            "registry-1.docker.io"
+        );
         assert_eq!(normalize_registry_key("ghcr.io"), "ghcr.io");
     }
 
@@ -455,7 +470,8 @@ mod tests {
         )
         .expect("write config");
 
-        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
+        let _config_guard =
+            ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
         let auth = resolve_auth_for_registry("registry-1.docker.io")
             .expect("auth resolves")
             .expect("auth present");
@@ -484,7 +500,8 @@ mod tests {
         )
         .expect("write config");
 
-        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
+        let _config_guard =
+            ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
         let auth = resolve_auth_for_registry("registry.example.com")
             .expect("auth resolves")
             .expect("auth present");
@@ -524,7 +541,8 @@ mod tests {
 
         // SEC-02: Use scoped environment guards for proper cleanup even on panic
         let _path_guard = ScopedEnvVar::set("PATH", &new_path);
-        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
+        let _config_guard =
+            ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
 
         let auth = resolve_auth_for_registry("ghcr.io")
             .expect("auth resolves")
@@ -546,9 +564,13 @@ mod tests {
         let _guard = DOCKER_ENV_LOCK.lock().expect("lock env");
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.json");
-        fs::write(&config_path, r#"{"auths": {"ghcr.io": {"auth": "broken"}}}"#)
-            .expect("write config");
-        let _config_guard = ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
+        fs::write(
+            &config_path,
+            r#"{"auths": {"ghcr.io": {"auth": "broken"}}}"#,
+        )
+        .expect("write config");
+        let _config_guard =
+            ScopedEnvVar::set("DOCKER_CONFIG", dir.path().to_str().expect("valid path"));
 
         let err = resolve_auth_for_registry("ghcr.io").expect_err("should error");
         match err {

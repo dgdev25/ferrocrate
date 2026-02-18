@@ -64,7 +64,10 @@ pub enum EntitlementError {
     #[error("entitlement expired")]
     Expired,
     #[error("feature `{feature}` requires paid entitlement (current plan: {plan})")]
-    NotEntitled { feature: &'static str, plan: &'static str },
+    NotEntitled {
+        feature: &'static str,
+        plan: &'static str,
+    },
 }
 
 impl Plan {
@@ -170,8 +173,10 @@ fn verify_signed_entitlement(raw: &str) -> Result<Entitlement, EntitlementError>
     let pubkey = entitlement_public_key()?;
     let payload_bytes = decode_b64(&envelope.payload)
         .map_err(|err| EntitlementError::InvalidPayload(err.to_string()))?;
-    let signature_bytes = decode_b64(&envelope.signature).map_err(|_| EntitlementError::InvalidSignature)?;
-    let signature = Signature::from_slice(&signature_bytes).map_err(|_| EntitlementError::InvalidSignature)?;
+    let signature_bytes =
+        decode_b64(&envelope.signature).map_err(|_| EntitlementError::InvalidSignature)?;
+    let signature =
+        Signature::from_slice(&signature_bytes).map_err(|_| EntitlementError::InvalidSignature)?;
     pubkey
         .verify(&payload_bytes, &signature)
         .map_err(|_| EntitlementError::SignatureVerificationFailed)?;

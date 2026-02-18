@@ -44,15 +44,17 @@ fn ebpf_userns_smoke() {
     }
 
     let pin_path = "/sys/fs/bpf/ferro-userns-test";
-    let cmd = format!(
-        "set -e; mkdir -p {pin_path}; bpftool prog load {obj_path} {pin_path} type xdp"
-    );
+    let cmd =
+        format!("set -e; mkdir -p {pin_path}; bpftool prog load {obj_path} {pin_path} type xdp");
     let result = run_cmd("unshare", &["-Urn", "sh", "-c", &cmd]);
     if let Err(err) = result {
         panic!("userns eBPF test failed: {err}");
     }
 
-    let _ = run_cmd("unshare", &["-Urn", "sh", "-c", "rm -rf /sys/fs/bpf/ferro-userns-test"]);
+    let _ = run_cmd(
+        "unshare",
+        &["-Urn", "sh", "-c", "rm -rf /sys/fs/bpf/ferro-userns-test"],
+    );
 }
 
 #[test]

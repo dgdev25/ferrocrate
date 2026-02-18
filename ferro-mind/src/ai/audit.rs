@@ -1,5 +1,5 @@
-use crate::ai::explain::DecisionTrace;
 use crate::ai::config::AiConfig;
+use crate::ai::explain::DecisionTrace;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -94,12 +94,17 @@ fn now_unix() -> u64 {
 fn default_component_name() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
         .unwrap_or_else(|| "ferrocrate".to_string())
 }
 
 fn parse_confidence(evidence: &BTreeMap<String, String>) -> Option<f64> {
-    evidence.get("confidence").and_then(|value| value.parse::<f64>().ok())
+    evidence
+        .get("confidence")
+        .and_then(|value| value.parse::<f64>().ok())
 }
 
 #[cfg(test)]

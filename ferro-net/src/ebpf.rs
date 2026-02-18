@@ -1,4 +1,4 @@
-use crate::executor::{ExecError, exec_cmd, exec_cmd_capture};
+use crate::executor::{exec_cmd, exec_cmd_capture, ExecError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EbpfProgram {
@@ -126,8 +126,8 @@ fn default_security_events() -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::{
-        EbpfProgram, build_bpftool_load_cmd, build_tc_attach_cmd, build_tracepoint_attach_cmd,
-        build_xdp_attach_cmd, sanitize_event,
+        build_bpftool_load_cmd, build_tc_attach_cmd, build_tracepoint_attach_cmd,
+        build_xdp_attach_cmd, sanitize_event, EbpfProgram,
     };
 
     #[test]
@@ -141,8 +141,13 @@ mod tests {
         assert_eq!(
             build_bpftool_load_cmd(&prog, "/sys/fs/bpf/ferro"),
             vec![
-                "bpftool", "prog", "load", "/opt/ferro/xdp.o", "/sys/fs/bpf/ferro",
-                "type", "xdp"
+                "bpftool",
+                "prog",
+                "load",
+                "/opt/ferro/xdp.o",
+                "/sys/fs/bpf/ferro",
+                "type",
+                "xdp"
             ]
         );
     }
@@ -152,13 +157,29 @@ mod tests {
         assert_eq!(
             build_tc_attach_cmd("eth0", "/sys/fs/bpf/ferro", "ingress"),
             vec![
-                "tc", "filter", "add", "dev", "eth0", "ingress", "bpf", "da", "pinned",
+                "tc",
+                "filter",
+                "add",
+                "dev",
+                "eth0",
+                "ingress",
+                "bpf",
+                "da",
+                "pinned",
                 "/sys/fs/bpf/ferro"
             ]
         );
         assert_eq!(
             build_xdp_attach_cmd("eth0", "/sys/fs/bpf/ferro"),
-            vec!["ip", "link", "set", "eth0", "xdp", "pinned", "/sys/fs/bpf/ferro"]
+            vec![
+                "ip",
+                "link",
+                "set",
+                "eth0",
+                "xdp",
+                "pinned",
+                "/sys/fs/bpf/ferro"
+            ]
         );
         assert_eq!(
             build_tracepoint_attach_cmd("/sys/fs/bpf/ferro-sec", "syscalls", "sys_enter_execve"),

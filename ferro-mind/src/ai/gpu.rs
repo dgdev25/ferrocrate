@@ -21,8 +21,8 @@ pub enum GpuDiscoveryError {
 ///
 /// Command can be overridden with `FERROCRATE_GPU_DISCOVERY_CMD`.
 pub fn discover_gpus() -> Result<Vec<GpuInfo>, GpuDiscoveryError> {
-    let cmd = std::env::var("FERROCRATE_GPU_DISCOVERY_CMD")
-        .unwrap_or_else(|_| "nvidia-smi".to_string());
+    let cmd =
+        std::env::var("FERROCRATE_GPU_DISCOVERY_CMD").unwrap_or_else(|_| "nvidia-smi".to_string());
     let output = Command::new(&cmd)
         .args([
             "--query-gpu=index,name,memory.total,memory.free,utilization.gpu",

@@ -134,7 +134,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
     let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
     let mut cache = load_build_cache(runtime_dir)?;
     if let Some(entry) = cache.get(&cache_key).cloned() {
-        let layer_path = blob_path(runtime_dir, &entry.layer_digest);
+        let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
         let config_path = config_path(runtime_dir, &entry.config_digest);
         if layer_path.exists() && config_path.exists() {
             let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
@@ -204,7 +204,7 @@ pub fn build_from_dockerfile_with_store_and_compression(
         let mut layer_size = layer_bytes.len() as i64;
         write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
 
-        let layer_path = blob_path(runtime_dir, &layer_digest);
+        let layer_path = layer_blob_path(runtime_dir, &layer_digest);
         apply_layer_tar(&stage_root, &layer_path)
             .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
 
@@ -1499,7 +1499,7 @@ fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), DockerfileBuildErro
     Ok(())
 }
 
-fn blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
+pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
     runtime_dir
         .join("images")
         .join("blobs")

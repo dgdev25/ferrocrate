@@ -162,6 +162,12 @@ pub enum Commands {
         tag: Option<String>,
         #[arg(long, default_value = "gzip", value_parser = validate_compression)]
         compress: String,
+        /// Output image format: `oci` (default) or `rvf` (RVF native container).
+        #[arg(long, default_value = "oci", value_parser = validate_image_format)]
+        image_format: String,
+        /// Path to a vector/embedding model to embed in the `.rvf` image (only with `--image-format rvf`).
+        #[arg(long)]
+        embed_model: Option<String>,
     },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -1500,12 +1506,16 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 ferrofile,
                 tag,
                 compress,
+                image_format,
+                embed_model,
             } => handle_build(
                 &image_store,
                 dockerfile.as_deref(),
                 ferrofile.as_deref(),
                 tag.as_deref(),
                 compress.as_str(),
+                image_format.as_str(),
+                embed_model.as_deref(),
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image),
@@ -2283,6 +2293,15 @@ fn handle_run(
         effective_backend = "iptables".to_string();
     }
     validate_network_backend(&effective_backend)?;
+    // Provide a clear error when a user accidentally passes a .rvf file to `run`.
+    if ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
+        return Err(format!(
+            "run: '{}' is an RVF image file. \
+             Use `ferrocrate build --image-format oci` to convert it to an OCI image first, \
+             or wait for native RVF runtime support.",
+            image
+        ));
+    }
     ensure_image_present(store, image)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
@@ -2825,42 +2844,108 @@ fn handle_build(
     ferrofile: Option<&str>,
     tag: Option<&str>,
     compression: &str,
+    image_format: &str,
+    embed_model: Option<&str>,
 ) -> Result<(), String> {
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
-    if let Some(ferrofile_path) = ferrofile {
-        let result = ferro_core::ferrofile_build::build_from_ferrofile_with_store(
+
+    let (result, source_desc) = if let Some(ferrofile_path) = ferrofile {
+        let r = ferro_core::ferrofile_build::build_from_ferrofile_with_store(
             Path::new(ferrofile_path),
             &runtime_dir,
             compression,
             Some(store),
         )
         .map_err(|err| err.to_string())?;
+        let desc = format!("ferrofile={}", ferrofile_path);
+        (r, desc)
+    } else {
+        let dockerfile = dockerfile.unwrap_or("Dockerfile");
+        let tag = tag.unwrap_or("local/build:latest");
+        parse_image_reference(tag).map_err(|err| err.to_string())?;
+        let r = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
+            Path::new(dockerfile),
+            Some(tag),
+            &runtime_dir,
+            compression,
+            store,
+        )
+        .map_err(|err| err.to_string())?;
+        let desc = format!("dockerfile={}", dockerfile);
+        (r, desc)
+    };
+
+    if image_format == "rvf" {
+        let reference = result.reference.as_str();
+        let (img_name, img_tag) = split_reference(reference);
+        let output_name = reference.replace(':', "-").replace('/', "_");
+        let output_path_str = format!("{}.rvf", output_name);
+        let output_path = Path::new(&output_path_str);
+
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+
+        let manifest = ferro_core::rvf_image::FerroImageManifest {
+            name: img_name.to_string(),
+            tag: img_tag.to_string(),
+            entrypoint: vec![],
+            cmd: vec![],
+            env: vec![],
+            arch: std::env::consts::ARCH.to_string(),
+            os: "linux".to_string(),
+            created_at,
+            format_version: 1,
+            layer_digest: result.layer_digest.clone(),
+            layer_size: 0,
+            overlay_model_type: None,
+        };
+
+        let params = ferro_core::rvf_image::RvfBuildParams {
+            manifest,
+            layer_digest: &result.layer_digest,
+            runtime_dir: &runtime_dir,
+            embed_model_path: embed_model.map(Path::new),
+            output_path,
+        };
+
+        let rvf = ferro_core::rvf_image::build_rvf_image(&params).map_err(|e| e.to_string())?;
+
         println!(
-            "build: ferrofile={} tag={} layer_digest={} config_digest={}",
-            ferrofile_path, result.reference, result.layer_digest, result.config_digest
+            "build: {} tag={} format=rvf output={} digest={} size={} segments={}",
+            source_desc,
+            reference,
+            rvf.output_path.display(),
+            rvf.file_digest,
+            rvf.file_size,
+            rvf.segment_count,
         );
         return Ok(());
     }
 
-    let dockerfile = dockerfile.unwrap_or("Dockerfile");
-    let tag = tag.unwrap_or("local/build:latest");
-    parse_image_reference(tag).map_err(|err| err.to_string())?;
-
-    let result = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
-        Path::new(dockerfile),
-        Some(tag),
-        &runtime_dir,
-        compression,
-        store,
-    )
-    .map_err(|err| err.to_string())?;
-
     println!(
-        "build: dockerfile={} tag={} layer_digest={} config_digest={}",
-        dockerfile, result.reference, result.layer_digest, result.config_digest
+        "build: {} tag={} layer_digest={} config_digest={}",
+        source_desc, result.reference, result.layer_digest, result.config_digest
     );
     Ok(())
+}
+
+fn validate_image_format(value: &str) -> Result<(), String> {
+    match value {
+        "oci" | "rvf" => Ok(()),
+        _ => Err("image-format must be one of: oci, rvf".to_string()),
+    }
+}
+
+/// Split a `name:tag` reference. Returns `(name, tag)`.
+/// If no `:` is present, tag defaults to `"latest"`.
+fn split_reference(reference: &str) -> (&str, &str) {
+    match reference.rsplit_once(':') {
+        Some((name, tag)) => (name, tag),
+        None => (reference, "latest"),
+    }
 }
 
 fn validate_network_backend(value: &str) -> Result<(), String> {

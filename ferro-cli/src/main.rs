@@ -1498,6 +1498,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     cpu_period,
                     pids_max,
                     ai_model.as_deref(),
+                    None,
                 )
             }
             #[cfg(target_os = "linux")]
@@ -2250,6 +2251,7 @@ fn handle_run(
     cpu_period: Option<u64>,
     pids_max: Option<u64>,
     ai_model: Option<&str>,
+    ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
 ) -> Result<(), String> {
     let mut effective_network = network.to_string();
     if effective_network == "encrypted" {
@@ -2310,6 +2312,26 @@ fn handle_run(
     mounts.extend(volume_mounts);
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
     let env = parse_env_entries(env)?;
+    // Resolve ai_runtime config: caller-supplied takes precedence over ferrofile.toml.
+    let ferrofile_ai_config;
+    let effective_ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig> =
+        if ai_config.is_some() {
+            ai_config
+        } else {
+            let ferrofile_path = std::env::current_dir()
+                .ok()
+                .map(|d| d.join("ferrofile.toml"));
+            ferrofile_ai_config = ferrofile_path.as_deref().and_then(|p| {
+                ferro_core::ferrofile_build::ai_runtime_config_from_ferrofile(p)
+                    .ok()
+                    .flatten()
+            });
+            ferrofile_ai_config.as_ref()
+        };
+    if let Some(ai) = effective_ai_config {
+        ferro_core::ai_runtime::check_coherence_gates(&ai.coherence_gates, &env)
+            .map_err(|e| e.to_string())?;
+    }
     let labels = parse_key_values("label", labels)?;
     let annotations = parse_key_values("annotation", annotations)?;
     let caps = parse_capabilities(cap_add)?;
@@ -2352,6 +2374,7 @@ fn handle_run(
             &port_mappings,
             &effective_network,
             &effective_backend,
+            effective_ai_config,
         )
         .map_err(|err| err.to_string())?;
     println!(
@@ -4016,6 +4039,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            None,
         )?;
     }
     Ok(())
@@ -4568,6 +4592,7 @@ fn handle_docker_compat_connection(
                     None,
                     "no",
                     false,
+                    None,
                     None,
                     None,
                     None,
@@ -5686,6 +5711,7 @@ mod tests {
             None,
             "no",
             false,
+            None,
             None,
             None,
             None,

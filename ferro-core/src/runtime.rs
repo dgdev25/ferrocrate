@@ -23,6 +23,8 @@ use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
+use crate::ai_runtime::AiRuntimeConfig;
+#[cfg(target_os = "linux")]
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile};
 use ferro_net::bridge;
 use ferro_net::ebpf::{
@@ -331,6 +333,7 @@ impl ContainerRuntime {
         port_mappings: &[crate::container_store::PortMappingRecord],
         network_mode: &str,
         network_backend: &str,
+        ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
         let store = LocalImageStore::open(self.runtime_dir.join("images"))?;
         self.run_with_store(
@@ -354,6 +357,7 @@ impl ContainerRuntime {
             port_mappings,
             network_mode,
             network_backend,
+            ai_config,
         )
     }
 
@@ -380,6 +384,7 @@ impl ContainerRuntime {
         port_mappings: &[crate::container_store::PortMappingRecord],
         network_mode: &str,
         network_backend: &str,
+        ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         ensure_kernel_min_version()?;
@@ -411,6 +416,9 @@ impl ContainerRuntime {
             Vec::new()
         };
         merged_env.extend(env.iter().cloned());
+        if let Some(ai) = ai_config {
+            merged_env.extend(crate::ai_runtime::ai_runtime_env(ai));
+        }
         let merged_env = dedup_env(merged_env);
 
         let resolved_workdir = workdir
@@ -473,9 +481,9 @@ impl ContainerRuntime {
         let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
 
-        // Load default seccomp profile for container isolation.
-        // Fail closed by default if the profile cannot be loaded.
-        let seccomp_profile = load_seccomp_profile()?;
+        // Load seccomp profile for container isolation.
+        // Guest authority uses the restricted guest profile; others use the default.
+        let seccomp_profile = resolve_seccomp_profile(ai_config)?;
 
         let child_id = spawn_process_with_logs(
             &exec_cmd,
@@ -581,6 +589,7 @@ impl ContainerRuntime {
                     protocol: mapping.protocol.clone(),
                 })
                 .collect(),
+            ai_runtime: ai_config.cloned(),
         };
 
         self.store.put(&record)?;
@@ -848,9 +857,9 @@ impl ContainerRuntime {
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
 
-        // Load default seccomp profile for restarted container.
-        // Fail closed by default if the profile cannot be loaded.
-        let seccomp_profile = load_seccomp_profile()?;
+        // Load seccomp profile for restarted container.
+        // Uses the authority stored in the container record, if present.
+        let seccomp_profile = resolve_seccomp_profile(record.ai_runtime.as_ref())?;
 
         let child_id = spawn_process_with_logs(
             &record.command,
@@ -1802,6 +1811,24 @@ fn seccomp_permissive_mode() -> bool {
     std::env::var("FERROCRATE_SECCOMP_PERMISSIVE")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Resolves the seccomp profile to apply.
+///
+/// If `ai_config` is `Some` with `authority = Guest`, returns the guest restricted
+/// profile. Otherwise falls back to `load_seccomp_profile()` (default or env-override).
+fn resolve_seccomp_profile(
+    ai_config: Option<&AiRuntimeConfig>,
+) -> Result<Option<SeccompProfile>, RuntimeError> {
+    if let Some(ai) = ai_config {
+        if let Some(profile) =
+            crate::ai_runtime::seccomp_profile_for_authority(&ai.authority)
+                .map_err(|err| RuntimeError::InvalidCommand(format!("ai_runtime seccomp: {err}")))?
+        {
+            return Ok(Some(profile));
+        }
+    }
+    load_seccomp_profile()
 }
 
 fn load_seccomp_profile() -> Result<Option<SeccompProfile>, RuntimeError> {
@@ -3340,6 +3367,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3379,6 +3407,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3422,6 +3451,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3474,6 +3504,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3529,6 +3560,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3574,6 +3606,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3624,6 +3657,7 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            ai_runtime: None,
         };
         store.put(&record).expect("seed stale record");
         drop(store);
@@ -3669,6 +3703,7 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            ai_runtime: None,
         };
         store.put(&record).expect("seed live record");
         drop(store);
@@ -3730,6 +3765,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3798,6 +3834,7 @@ mod tests {
                 &[],
                 "bridge",
                 "ebpf",
+                None,
             )
             .expect("run");
 
@@ -3957,6 +3994,7 @@ mod tests {
                 container_port: 80,
                 protocol: "tcp".to_string(),
             }],
+            ai_runtime: None,
         };
         store.put(&existing).expect("put existing");
 

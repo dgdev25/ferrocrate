@@ -123,6 +123,15 @@ pub fn default_seccomp_profile() -> Result<SeccompProfile, SeccompError> {
     parse_seccomp_profile(default_seccomp_profile_json())
 }
 
+pub fn guest_seccomp_profile_json() -> &'static str {
+    include_str!("seccomp_guest.json")
+}
+
+/// Returns the restricted guest seccomp profile (blocks network and process-creation syscalls).
+pub fn guest_seccomp_profile() -> Result<SeccompProfile, SeccompError> {
+    parse_seccomp_profile(guest_seccomp_profile_json())
+}
+
 /// Converts a string action name to libseccomp action.
 fn parse_action(action: &str) -> Result<ScmpAction, SeccompError> {
     match action {

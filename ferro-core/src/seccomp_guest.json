@@ -1,0 +1,47 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 1,
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": ["read", "write", "open", "openat", "close", "exit", "exit_group",
+                "fstat", "stat", "lstat", "mmap", "mprotect", "munmap", "brk",
+                "lseek", "pread64", "pwrite64", "readv", "writev",
+                "ioctl", "fcntl", "dup", "dup2", "dup3",
+                "getpid", "getppid", "getuid", "geteuid", "getgid", "getegid",
+                "getrlimit", "setrlimit", "clock_gettime", "nanosleep",
+                "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack",
+                "futex", "set_tid_address", "set_robust_list", "get_robust_list",
+                "arch_prctl", "madvise", "prctl",
+                "getrandom", "rseq",
+                "epoll_create", "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
+                "poll", "ppoll", "select", "pselect6",
+                "pipe", "pipe2", "eventfd", "eventfd2",
+                "wait4", "waitid",
+                "access", "faccessat", "getcwd", "chdir", "mkdir", "mkdirat",
+                "rmdir", "unlink", "unlinkat", "rename", "renameat", "renameat2",
+                "readlink", "readlinkat", "symlink", "symlinkat", "link", "linkat",
+                "chmod", "fchmod", "fchmodat", "chown", "fchown", "lchown", "fchownat",
+                "getdents", "getdents64", "sendfile",
+                "clock_nanosleep", "sched_yield", "sched_getaffinity"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["socket", "bind", "connect", "listen", "accept", "accept4",
+                "getsockname", "getpeername", "socketpair", "getsockopt", "setsockopt",
+                "sendto", "sendmsg", "sendmmsg", "recvfrom", "recvmsg", "recvmmsg",
+                "shutdown"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "names": ["kexec_load", "kexec_file_load", "init_module", "finit_module", "delete_module",
+                "reboot", "ptrace", "bpf", "perf_event_open",
+                "mount", "umount2", "pivot_root", "chroot",
+                "clone", "fork", "vfork",
+                "execve", "execveat",
+                "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid",
+                "capset", "capget"],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}

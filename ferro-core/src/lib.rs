@@ -30,6 +30,7 @@ pub mod overlayfs;
 pub mod process_lifecycle;
 pub mod registry;
 pub mod runtime_config;
+pub mod rvf_image;
 pub mod volume_store;
 
 #[cfg(target_os = "linux")]

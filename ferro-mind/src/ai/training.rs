@@ -22,14 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-#[cfg(feature = "rvf-persistence")]
-use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-#[cfg(feature = "rvf-persistence")]
-use rvf_runtime::{RvfOptions, RvfStore};
-#[cfg(feature = "rvf-persistence")]
-use rvf_runtime::options::DistanceMetric as RvfDistanceMetric;
 
 /// Model types that can be trained
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

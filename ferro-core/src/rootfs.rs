@@ -1,4 +1,4 @@
-use crate::layer_compression::{LayerCompressionError, open_decompressed_layer_reader};
+use crate::layer_compression::{open_decompressed_layer_reader, LayerCompressionError};
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -147,7 +147,7 @@ fn dedup_file(path: &Path, cas_root: &Path) -> Result<(), RootfsError> {
     if bytes.is_empty() {
         return Ok(());
     }
-    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let hash = hex::encode(rvf_crypto::shake256_256(&bytes));
     let cas_path = cas_root.join(hash);
     let metadata = fs::metadata(path)?;
     let mode = metadata.permissions().mode();
@@ -231,8 +231,8 @@ fn ensure_no_symlink_components(rootfs_dir: &Path, rel_path: &Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{construct_rootfs, construct_rootfs_with_dedup};
-    use flate2::Compression;
     use flate2::write::GzEncoder;
+    use flate2::Compression;
     use std::fs;
     use std::io::{Cursor, Write};
     use std::os::unix::fs::MetadataExt;

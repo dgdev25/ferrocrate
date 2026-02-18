@@ -4,25 +4,27 @@
 //! Uses HNSW (Hierarchical Navigable Small World) algorithm for efficient similarity search.
 
 use crate::ruv::types::{DistanceMetric, SearchResult, VectorEntry, VectorId};
-use ruvector_core::{VectorDB, types::{DbOptions, HnswConfig, SearchQuery}};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use ruvector_core::{
+    types::{DbOptions, HnswConfig, SearchQuery},
+    VectorDB,
+};
 #[cfg(feature = "rvf-persistence")]
 use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(feature = "rvf-persistence")]
-use crate::ai::learning::rvf_store::{RvfStore, stable_id};
+use crate::ai::learning::rvf_store::{stable_id, RvfStore};
 
 /// Vector Memory backed by ruvector-core with HNSW indexing
 ///
-/// Provides O(log n) search complexity vs O(n) brute-force.
-/// Suitable for large-scale vector similarity search in container
-/// memory patterns, anomaly detection, and resource prediction.
+/// Provides O(log n) search complexity vs O(n) brute-force for cosine similarity.
+/// Euclidean and Manhattan metrics fall back to brute-force O(n), which is
+/// acceptable because those callers (anomaly detector) operate on windows of
+/// at most 100 entries.
 pub struct VectorMemory {
     db_cosine: Arc<RwLock<Option<VectorDB>>>,
-    db_euclidean: Arc<RwLock<Option<VectorDB>>>,
-    db_manhattan: Arc<RwLock<Option<VectorDB>>>,
-    entries: Vec<VectorEntry>,  // Fallback storage for when db not initialized
+    entries: Vec<VectorEntry>, // Fallback storage and brute-force source
     default_dimensions: usize,
     #[cfg(feature = "rvf-persistence")]
     rvf: Option<RvfStore>,
@@ -34,10 +36,8 @@ impl Default for VectorMemory {
     fn default() -> Self {
         Self {
             db_cosine: Arc::new(RwLock::new(None)),
-            db_euclidean: Arc::new(RwLock::new(None)),
-            db_manhattan: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
-            default_dimensions: 384,  // Default embedding dimension
+            default_dimensions: 384, // Default embedding dimension
             #[cfg(feature = "rvf-persistence")]
             rvf: None,
             #[cfg(feature = "rvf-persistence")]
@@ -51,8 +51,6 @@ impl VectorMemory {
     pub fn with_dimensions(dimensions: usize) -> Self {
         Self {
             db_cosine: Arc::new(RwLock::new(None)),
-            db_euclidean: Arc::new(RwLock::new(None)),
-            db_manhattan: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: dimensions,
             #[cfg(feature = "rvf-persistence")]
@@ -82,8 +80,6 @@ impl VectorMemory {
         let rvf = RvfStore::open_or_create(path, dimensions).map_err(|err| err.to_string())?;
         Ok(Self {
             db_cosine: Arc::new(RwLock::new(None)),
-            db_euclidean: Arc::new(RwLock::new(None)),
-            db_manhattan: Arc::new(RwLock::new(None)),
             entries: Vec::new(),
             default_dimensions: dimensions,
             rvf: Some(rvf),
@@ -96,7 +92,7 @@ impl VectorMemory {
         let options = DbOptions {
             dimensions,
             distance_metric: metric,
-            storage_path: ":memory:".to_string(),  // In-memory for vector memory
+            storage_path: ":memory:".to_string(), // In-memory for vector memory
             hnsw_config: Some(HnswConfig {
                 m: 16,                // Number of connections per node
                 ef_construction: 100, // Construction-time search depth
@@ -113,10 +109,7 @@ impl VectorMemory {
         #[cfg(feature = "rvf-persistence")]
         if let Some(rvf) = self.rvf.as_ref() {
             let stable = stable_id(entry.id.as_deref(), &entry.vector);
-            if rvf
-                .insert(entry.id.as_deref(), &entry.vector)
-                .is_ok()
-            {
+            if rvf.insert(entry.id.as_deref(), &entry.vector).is_ok() {
                 self.entries.push(entry);
                 self.entry_index.insert(stable, self.entries.len() - 1);
             }
@@ -129,21 +122,17 @@ impl VectorMemory {
             entry.vector.len()
         };
 
-        // Initialize metric indexes on first insert.
-        for (guard, metric) in [
-            (&self.db_cosine, ruvector_core::types::DistanceMetric::Cosine),
-            (&self.db_euclidean, ruvector_core::types::DistanceMetric::Euclidean),
-            (&self.db_manhattan, ruvector_core::types::DistanceMetric::Manhattan),
-        ] {
-            let mut db_guard = guard.write();
+        // Initialize the cosine HNSW index on first insert.
+        {
+            let mut db_guard = self.db_cosine.write();
             if db_guard.is_none() {
-                *db_guard = Some(self.init_db(dimensions, metric));
+                *db_guard = Some(self.init_db(dimensions, ruvector_core::types::DistanceMetric::Cosine));
             }
         }
 
-        // Insert into each metric index so all query types remain sublinear.
-        for guard in [&self.db_cosine, &self.db_euclidean, &self.db_manhattan] {
-            let db_guard = guard.read();
+        // Insert into cosine index for sublinear cosine search.
+        {
+            let db_guard = self.db_cosine.read();
             if let Some(db) = db_guard.as_ref() {
                 let ruv_entry = ruvector_core::types::VectorEntry {
                     id: entry.id.clone(),
@@ -154,7 +143,7 @@ impl VectorMemory {
             }
         }
 
-        // Also keep in local storage for fallback
+        // Keep in local storage for brute-force fallback (Euclidean/Manhattan).
         self.entries.push(entry);
     }
 
@@ -174,10 +163,8 @@ impl VectorMemory {
                             if let Ok(id_num) = result.id.parse::<u64>() {
                                 if let Some(index) = self.entry_index.get(&id_num) {
                                     let entry = &self.entries[*index];
-                                    result.id = entry
-                                        .id
-                                        .clone()
-                                        .unwrap_or_else(|| result.id.clone());
+                                    result.id =
+                                        entry.id.clone().unwrap_or_else(|| result.id.clone());
                                     result.metadata = entry.metadata.clone();
                                 }
                             }
@@ -188,40 +175,43 @@ impl VectorMemory {
             }
         }
 
-        let db_for_metric = match metric {
-            DistanceMetric::Cosine => &self.db_cosine,
-            DistanceMetric::Euclidean => &self.db_euclidean,
-            DistanceMetric::Manhattan => &self.db_manhattan,
-            _ => &self.db_cosine,
-        };
-        let db_guard = db_for_metric.read();
-        if let Some(db) = db_guard.as_ref() {
-            let search_query = SearchQuery {
-                vector: query.to_vec(),
-                k,
-                filter: None,
-                ef_search: Some(50),
-            };
-
-            if let Ok(results) = db.search(search_query) {
-                return results
-                    .into_iter()
-                    .map(|r| SearchResult {
-                        id: VectorId::from(r.id),
-                        score: r.score,
-                        vector: r.vector,
-                        metadata: r.metadata,
-                    })
-                    .collect();
+        // Only Cosine benefits from the HNSW index. Euclidean and Manhattan
+        // use brute-force, which is fine because those callers (anomaly detector)
+        // operate on windows of at most 100 entries.
+        if metric == DistanceMetric::Cosine {
+            let db_guard = self.db_cosine.read();
+            if let Some(db) = db_guard.as_ref() {
+                let search_query = SearchQuery {
+                    vector: query.to_vec(),
+                    k,
+                    filter: None,
+                    ef_search: Some(50),
+                };
+                if let Ok(results) = db.search(search_query) {
+                    return results
+                        .into_iter()
+                        .map(|r| SearchResult {
+                            id: VectorId::from(r.id),
+                            score: r.score,
+                            vector: r.vector,
+                            metadata: r.metadata,
+                        })
+                        .collect();
+                }
             }
         }
 
-        // Fallback to brute-force O(n) only if index search fails.
+        // Brute-force O(n) for non-cosine metrics, or as fallback on index failure.
         self.search_bruteforce(query, k, metric)
     }
 
     /// Brute-force O(n) search as fallback
-    fn search_bruteforce(&self, query: &[f32], k: usize, metric: DistanceMetric) -> Vec<SearchResult> {
+    fn search_bruteforce(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+    ) -> Vec<SearchResult> {
         use crate::ruv::distance;
 
         let mut scored = Vec::new();
@@ -231,14 +221,21 @@ impl VectorMemory {
                 Err(_) => continue,
             };
             scored.push(SearchResult {
-                id: entry.id.clone().unwrap_or_else(|| VectorId::from("unknown")),
+                id: entry
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| VectorId::from("unknown")),
                 score,
                 vector: None,
                 metadata: entry.metadata.clone(),
             });
         }
         // Handle NaN gracefully - use Equal ordering for NaN comparisons
-        scored.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(k);
         scored
     }
@@ -328,7 +325,9 @@ mod tests {
     fn backend_selector_respects_legacy_env() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("backend.rvf");
-        unsafe { std::env::set_var("FERROCRATE_AI_BACKEND", "legacy"); }
+        unsafe {
+            std::env::set_var("FERROCRATE_AI_BACKEND", "legacy");
+        }
         let mut memory = VectorMemory::with_backend(&path, 3).expect("backend");
         memory.insert(VectorEntry {
             id: Some(VectorId::from("legacy")),
@@ -337,7 +336,9 @@ mod tests {
         });
         let results = memory.search(&[0.0, 0.0, 1.0], 1, DistanceMetric::Cosine);
         assert_eq!(results.len(), 1);
-        unsafe { std::env::remove_var("FERROCRATE_AI_BACKEND"); }
+        unsafe {
+            std::env::remove_var("FERROCRATE_AI_BACKEND");
+        }
     }
 
     #[cfg(feature = "rvf-persistence")]

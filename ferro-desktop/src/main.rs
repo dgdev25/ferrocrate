@@ -2047,17 +2047,20 @@ fn run_request(request: &ExecRequest) -> Result<std::process::Output, DesktopErr
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ExecMode {
     Auto,
     Host,
     Guest,
 }
 
+#[allow(dead_code)]
 fn exec_mode_from_env() -> ExecMode {
     let value = std::env::var("FERROCRATE_DESKTOP_EXEC_MODE").ok();
     parse_exec_mode(value.as_deref())
 }
 
+#[allow(dead_code)]
 fn parse_exec_mode(value: Option<&str>) -> ExecMode {
     match value.unwrap_or("auto").to_ascii_lowercase().as_str() {
         "host" | "local" => ExecMode::Host,
@@ -2066,6 +2069,7 @@ fn parse_exec_mode(value: Option<&str>) -> ExecMode {
     }
 }
 
+#[allow(dead_code)]
 fn should_route_to_macos_guest(cmd: &[String], mode: ExecMode) -> bool {
     match mode {
         ExecMode::Host => false,
@@ -2074,6 +2078,7 @@ fn should_route_to_macos_guest(cmd: &[String], mode: ExecMode) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn command_targets_ferrocrate(cmd: &[String]) -> bool {
     let Some(program) = cmd.first() else {
         return false;
@@ -2112,6 +2117,7 @@ fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output
     cmd.output().map_err(DesktopError::Io)
 }
 
+#[allow(dead_code)]
 fn vm_state_running(state: &VmState) -> bool {
     if state.status.eq_ignore_ascii_case("running") {
         return true;
@@ -2192,7 +2198,7 @@ mod tests {
         load_forward_entries, load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
         render_windows_service_script, run_request, save_forward_entries, save_vm_state,
         should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr, vm_state_running,
-        Commands, ExecMode, ExecRequest, ForwardCommands, ForwardEntry, VmConfig, VmCommands,
+        Commands, ExecMode, ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig,
         VmState,
     };
     use std::path::PathBuf;

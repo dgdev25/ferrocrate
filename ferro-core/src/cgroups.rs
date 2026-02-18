@@ -1,7 +1,7 @@
+use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use serde::Serialize;
 use thiserror::Error;
 
 const CGROUP_CONTROLLERS: &str = "cgroup.controllers";
@@ -185,10 +185,7 @@ impl CgroupV2Manager {
             if new_limit < current {
                 return Err(CgroupError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "new limit {} is below current usage {}",
-                        new_limit, current
-                    ),
+                    format!("new limit {} is below current usage {}", new_limit, current),
                 )));
             }
         }
@@ -267,7 +264,9 @@ mod tests {
         fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
 
         let manager = CgroupV2Manager::new(root);
-        let group = manager.create_group("containers/test").expect("group created");
+        let group = manager
+            .create_group("containers/test")
+            .expect("group created");
 
         let limits = ResourceLimits {
             memory_max: Some(536_870_912),
@@ -305,7 +304,9 @@ mod tests {
         fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
 
         let manager = CgroupV2Manager::new(root);
-        let group = manager.create_group("containers/test").expect("group created");
+        let group = manager
+            .create_group("containers/test")
+            .expect("group created");
 
         manager.add_pid(&group, 4242).expect("add pid");
         assert_eq!(
@@ -323,7 +324,9 @@ mod tests {
         fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
 
         let manager = CgroupV2Manager::new(root);
-        let group = manager.create_group("containers/test").expect("group created");
+        let group = manager
+            .create_group("containers/test")
+            .expect("group created");
 
         manager.freeze(&group).expect("freeze");
         assert_eq!(

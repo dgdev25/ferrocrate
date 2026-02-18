@@ -1,4 +1,4 @@
-use crate::linux_namespaces::{NamespaceError, NamespaceType, create_namespaces};
+use crate::linux_namespaces::{create_namespaces, NamespaceError, NamespaceType};
 use nix::unistd::{Gid, Uid, User};
 use std::fs;
 use std::io;
@@ -116,11 +116,7 @@ pub fn apply_user_namespace_mappings(
 ) -> Result<(), RootlessError> {
     let proc_pid_dir = proc_root.join(pid.to_string());
 
-    write_file(
-        &proc_pid_dir.join("setgroups"),
-        b"deny\n",
-        true,
-    )?;
+    write_file(&proc_pid_dir.join("setgroups"), b"deny\n", true)?;
     write_file(
         &proc_pid_dir.join("uid_map"),
         config.uid_mapping.as_uid_map_entry().as_bytes(),
@@ -194,21 +190,24 @@ fn parse_subid_line(line: &str) -> Result<(String, u32, u32), RootlessError> {
     // SEC-07: Prevent integer overflow - validate ranges are reasonable
     // start should be well below u32::MAX to prevent overflow in start + count
     if start > u32::MAX - 1_000_000 {
-        return Err(RootlessError::InvalidSubIdLine(
-            format!("start value {} is too large", start)
-        ));
+        return Err(RootlessError::InvalidSubIdLine(format!(
+            "start value {} is too large",
+            start
+        )));
     }
     // count should be reasonably bounded (max ~1M subuids)
     if count > 1_000_000 {
-        return Err(RootlessError::InvalidSubIdLine(
-            format!("count value {} is too large", count)
-        ));
+        return Err(RootlessError::InvalidSubIdLine(format!(
+            "count value {} is too large",
+            count
+        )));
     }
     // Verify start + count doesn't overflow
     if start.checked_add(count).is_none() {
-        return Err(RootlessError::InvalidSubIdLine(
-            format!("start + count would overflow: {} + {}", start, count)
-        ));
+        return Err(RootlessError::InvalidSubIdLine(format!(
+            "start + count would overflow: {} + {}",
+            start, count
+        )));
     }
 
     Ok((name.to_string(), start, count))
@@ -216,9 +215,7 @@ fn parse_subid_line(line: &str) -> Result<(String, u32, u32), RootlessError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RootlessConfig, RootlessMapping, apply_user_namespace_mappings, parse_subid_line,
-    };
+    use super::{apply_user_namespace_mappings, parse_subid_line, RootlessConfig, RootlessMapping};
     use std::fs;
     const DEFAULT_SUBID_SIZE: u32 = 65_536;
 
@@ -233,7 +230,9 @@ mod tests {
     #[test]
     fn rejects_invalid_subuid_line() {
         let err = parse_subid_line("lyle:not-a-number:65536").expect_err("invalid line");
-        assert!(err.to_string().contains("failed to parse subordinate id line"));
+        assert!(err
+            .to_string()
+            .contains("failed to parse subordinate id line"));
     }
 
     #[test]

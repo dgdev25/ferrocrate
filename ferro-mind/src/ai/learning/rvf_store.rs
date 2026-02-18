@@ -177,9 +177,7 @@ mod tests {
 
         {
             let store = RvfStore::open_or_create(&path, 3).expect("create");
-            store
-                .insert(Some("v1"), &[1.0, 0.0, 0.0])
-                .expect("insert");
+            store.insert(Some("v1"), &[1.0, 0.0, 0.0]).expect("insert");
             assert_eq!(store.len(), 1);
         }
 

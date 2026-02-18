@@ -42,21 +42,17 @@ pub fn detect_format(bytes: &[u8]) -> CompressionFormat {
 pub fn open_decompressed_layer_reader(
     layer_path: &Path,
 ) -> Result<Box<dyn Read>, LayerCompressionError> {
-    let mut file = File::open(layer_path).map_err(|err| {
-        LayerCompressionError::Open(layer_path.display().to_string(), err)
-    })?;
+    let mut file = File::open(layer_path)
+        .map_err(|err| LayerCompressionError::Open(layer_path.display().to_string(), err))?;
 
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|err| {
-        LayerCompressionError::Read(layer_path.display().to_string(), err)
-    })?;
+    file.read_to_end(&mut bytes)
+        .map_err(|err| LayerCompressionError::Read(layer_path.display().to_string(), err))?;
 
     decompress_bytes_to_reader(bytes)
 }
 
-pub fn decompress_bytes_to_reader(
-    bytes: Vec<u8>,
-) -> Result<Box<dyn Read>, LayerCompressionError> {
+pub fn decompress_bytes_to_reader(bytes: Vec<u8>) -> Result<Box<dyn Read>, LayerCompressionError> {
     match detect_format(&bytes) {
         CompressionFormat::None => Ok(Box::new(Cursor::new(bytes))),
         CompressionFormat::Gzip => {
@@ -90,8 +86,8 @@ pub fn compress_bytes_zstd(bytes: &[u8]) -> Result<Vec<u8>, LayerCompressionErro
 #[cfg(test)]
 mod tests {
     use super::{
-        CompressionFormat, compress_bytes_gzip, compress_bytes_zstd, decompress_bytes_to_reader,
-        detect_format,
+        compress_bytes_gzip, compress_bytes_zstd, decompress_bytes_to_reader, detect_format,
+        CompressionFormat,
     };
     use std::io::Read;
 

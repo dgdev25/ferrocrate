@@ -1,5 +1,5 @@
 use nix::errno::Errno;
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::process::{Child, Command, ExitStatus};
 use std::thread;
@@ -172,7 +172,7 @@ impl ManagedProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManagedProcess, ProcessState, kill_pid, stop_pid};
+    use super::{kill_pid, stop_pid, ManagedProcess, ProcessState};
     use std::path::Path;
     use std::time::Duration;
 
@@ -204,7 +204,9 @@ mod tests {
         proc.resume().expect("resume succeeds");
         assert_eq!(proc.state(), ProcessState::Running);
 
-        let status = proc.stop(Duration::from_millis(150)).expect("stop succeeds");
+        let status = proc
+            .stop(Duration::from_millis(150))
+            .expect("stop succeeds");
         assert!(!status.success());
         assert_eq!(proc.state(), ProcessState::Exited);
     }

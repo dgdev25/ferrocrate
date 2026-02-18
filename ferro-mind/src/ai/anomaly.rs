@@ -5,10 +5,10 @@
 //!
 //! Task 5.2: Runtime Anomaly Detection Integration
 
+use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
+use ruv_fann::{Network, NetworkBuilder};
 use std::collections::VecDeque;
 use std::time::Instant;
-use ruv_fann::{Network, NetworkBuilder};
-use ruv_fann::training::{TrainingData, IncrementalBackprop, TrainingAlgorithm};
 
 /// Anomaly score with threshold comparison
 #[derive(Debug, Clone, Copy)]
@@ -25,7 +25,11 @@ impl AnomalyScore {
 
 /// Calculate z-score for basic anomaly detection
 pub fn zscore(current: f32, mean: f32, stddev: f32, threshold: f32) -> AnomalyScore {
-    let score = if stddev > 0.0 { (current - mean) / stddev } else { 0.0 };
+    let score = if stddev > 0.0 {
+        (current - mean) / stddev
+    } else {
+        0.0
+    };
     AnomalyScore { score, threshold }
 }
 
@@ -54,7 +58,7 @@ impl std::fmt::Debug for NeuralAnomalyDetector {
 
 impl Default for NeuralAnomalyDetector {
     fn default() -> Self {
-        Self::new(5, 0.5)  // 5 inputs: cpu, mem, io_read, io_write, network
+        Self::new(5, 0.5) // 5 inputs: cpu, mem, io_read, io_write, network
     }
 }
 
@@ -83,8 +87,8 @@ impl NeuralAnomalyDetector {
             NetworkBuilder::new()
                 .input_layer(self.input_size)
                 .hidden_layer(hidden_size)
-                .output_layer(self.input_size)  // Autoencoder: reconstruct input
-                .build()
+                .output_layer(self.input_size) // Autoencoder: reconstruct input
+                .build(),
         );
     }
 
@@ -114,7 +118,7 @@ impl NeuralAnomalyDetector {
         for sample in normal_samples {
             if sample.len() == self.input_size {
                 inputs.push(sample.clone());
-                outputs.push(sample.clone());  // Autoencoder reconstructs input
+                outputs.push(sample.clone()); // Autoencoder reconstructs input
             }
         }
 
@@ -150,18 +154,29 @@ impl NeuralAnomalyDetector {
     /// AnomalyScore with reconstruction error as score
     pub fn detect(&mut self, features: &[f32]) -> AnomalyScore {
         if !self.trained || features.len() != self.input_size {
-            return AnomalyScore { score: 0.0, threshold: self.threshold };
+            return AnomalyScore {
+                score: 0.0,
+                threshold: self.threshold,
+            };
         }
 
         let Some(ref mut network) = self.network else {
-            return AnomalyScore { score: 0.0, threshold: self.threshold };
+            return AnomalyScore {
+                score: 0.0,
+                threshold: self.threshold,
+            };
         };
 
         // Run the autoencoder
         // Handle both Vec<T> and Result<Vec<T>, E> return types depending on version
         let outputs: Vec<f32> = match network.run(features) {
             Ok(v) => v,
-            Err(_) => return AnomalyScore { score: f32::MAX, threshold: self.threshold },
+            Err(_) => {
+                return AnomalyScore {
+                    score: f32::MAX,
+                    threshold: self.threshold,
+                }
+            }
         };
 
         // Calculate reconstruction error (MSE)
@@ -205,8 +220,16 @@ impl ContainerMetrics {
         vec![
             self.cpu_percent / 100.0,
             self.memory_percent / 100.0,
-            if max_io > 0 { (self.io_read_bytes + self.io_write_bytes) as f32 / max_io as f32 } else { 0.0 },
-            if max_network > 0 { self.network_bytes as f32 / max_network as f32 } else { 0.0 },
+            if max_io > 0 {
+                (self.io_read_bytes + self.io_write_bytes) as f32 / max_io as f32
+            } else {
+                0.0
+            },
+            if max_network > 0 {
+                self.network_bytes as f32 / max_network as f32
+            } else {
+                0.0
+            },
             // Derived feature: cpu to memory ratio (anomalous if very high or low)
             if self.memory_percent > 0.0 {
                 (self.cpu_percent / self.memory_percent).min(10.0) / 10.0
@@ -246,7 +269,7 @@ pub struct ContainerAnomalyState {
     /// Maximum samples to keep for baseline
     max_baseline_samples: usize,
     /// Statistical baseline (mean, stddev per metric)
-    baseline_means: [f32; 4],  // cpu, memory, io, network
+    baseline_means: [f32; 4], // cpu, memory, io, network
     baseline_stddevs: [f32; 4],
     /// Z-score threshold for single-metric anomalies
     zscore_threshold: f32,
@@ -272,12 +295,12 @@ impl ContainerAnomalyState {
             container_id: container_id.to_string(),
             phase: DetectionPhase::Learning,
             learning_start: Instant::now(),
-            learning_duration_secs: 600,  // 10 minutes default
+            learning_duration_secs: 600, // 10 minutes default
             baseline_samples: VecDeque::with_capacity(200),
             max_baseline_samples: 200,
             baseline_means: [0.0; 4],
             baseline_stddevs: [0.0; 4],
-            zscore_threshold: 3.0,  // Standard z-score threshold
+            zscore_threshold: 3.0, // Standard z-score threshold
             neural_detector: NeuralAnomalyDetector::new(4, 0.3),
             last_score: None,
         }
@@ -355,9 +378,17 @@ impl ContainerAnomalyState {
         self.calculate_baseline_stats();
 
         // Train neural detector on baseline samples
-        let training_samples: Vec<Vec<f32>> = self.baseline_samples
+        let training_samples: Vec<Vec<f32>> = self
+            .baseline_samples
             .iter()
-            .map(|s| vec![s.cpu_percent / 100.0, s.memory_percent / 100.0, s.io_normalized, s.network_normalized])
+            .map(|s| {
+                vec![
+                    s.cpu_percent / 100.0,
+                    s.memory_percent / 100.0,
+                    s.io_normalized,
+                    s.network_normalized,
+                ]
+            })
             .collect();
 
         if training_samples.len() >= 10 {
@@ -379,32 +410,39 @@ impl ContainerAnomalyState {
         let sum_cpu: f32 = self.baseline_samples.iter().map(|s| s.cpu_percent).sum();
         let sum_mem: f32 = self.baseline_samples.iter().map(|s| s.memory_percent).sum();
         let sum_io: f32 = self.baseline_samples.iter().map(|s| s.io_normalized).sum();
-        let sum_net: f32 = self.baseline_samples.iter().map(|s| s.network_normalized).sum();
+        let sum_net: f32 = self
+            .baseline_samples
+            .iter()
+            .map(|s| s.network_normalized)
+            .sum();
 
-        self.baseline_means = [
-            sum_cpu / n,
-            sum_mem / n,
-            sum_io / n,
-            sum_net / n,
-        ];
+        self.baseline_means = [sum_cpu / n, sum_mem / n, sum_io / n, sum_net / n];
 
         // Calculate stddevs
-        let var_cpu: f32 = self.baseline_samples
+        let var_cpu: f32 = self
+            .baseline_samples
             .iter()
             .map(|s| (s.cpu_percent - self.baseline_means[0]).powi(2))
-            .sum::<f32>() / n;
-        let var_mem: f32 = self.baseline_samples
+            .sum::<f32>()
+            / n;
+        let var_mem: f32 = self
+            .baseline_samples
             .iter()
             .map(|s| (s.memory_percent - self.baseline_means[1]).powi(2))
-            .sum::<f32>() / n;
-        let var_io: f32 = self.baseline_samples
+            .sum::<f32>()
+            / n;
+        let var_io: f32 = self
+            .baseline_samples
             .iter()
             .map(|s| (s.io_normalized - self.baseline_means[2]).powi(2))
-            .sum::<f32>() / n;
-        let var_net: f32 = self.baseline_samples
+            .sum::<f32>()
+            / n;
+        let var_net: f32 = self
+            .baseline_samples
             .iter()
             .map(|s| (s.network_normalized - self.baseline_means[3]).powi(2))
-            .sum::<f32>() / n;
+            .sum::<f32>()
+            / n;
 
         self.baseline_stddevs = [
             var_cpu.sqrt(),
@@ -428,7 +466,12 @@ impl ContainerAnomalyState {
 
         // Check z-score for each metric
         for (i, &value) in values.iter().enumerate() {
-            let score = zscore(value, self.baseline_means[i], self.baseline_stddevs[i], self.zscore_threshold);
+            let score = zscore(
+                value,
+                self.baseline_means[i],
+                self.baseline_stddevs[i],
+                self.zscore_threshold,
+            );
             let z_ratio = score.score.abs() / self.zscore_threshold.max(0.001);
             if z_ratio > strongest_z_ratio {
                 strongest_z_ratio = z_ratio;
@@ -443,7 +486,7 @@ impl ContainerAnomalyState {
                     baseline_stddev: self.baseline_stddevs[i],
                     zscore: score.score,
                     detection_method: DetectionMethod::Zscore,
-                    confidence: 0.8,  // Reasonable confidence for z-score
+                    confidence: 0.8, // Reasonable confidence for z-score
                 });
             }
         }
@@ -463,7 +506,10 @@ impl ContainerAnomalyState {
         if hybrid_ratio > 1.0 {
             return Some(AnomalyEvent {
                 container_id: self.container_id.clone(),
-                metric: format!("hybrid({}+multi-variate)", metric_names[strongest_metric_idx]),
+                metric: format!(
+                    "hybrid({}+multi-variate)",
+                    metric_names[strongest_metric_idx]
+                ),
                 current_value: hybrid_ratio,
                 baseline_mean: self.baseline_means[strongest_metric_idx],
                 baseline_stddev: self.baseline_stddevs[strongest_metric_idx],
@@ -619,10 +665,10 @@ mod tests {
         let features = metrics.to_features(2000, 4000);
 
         assert_eq!(features.len(), 5);
-        assert!((features[0] - 0.5).abs() < 0.01);  // cpu
+        assert!((features[0] - 0.5).abs() < 0.01); // cpu
         assert!((features[1] - 0.25).abs() < 0.01); // memory
         assert!((features[2] - 0.75).abs() < 0.01); // io
-        assert!((features[3] - 0.5).abs() < 0.01);  // network
+        assert!((features[3] - 0.5).abs() < 0.01); // network
     }
 
     // Task 5.2 Tests
@@ -635,8 +681,7 @@ mod tests {
 
     #[test]
     fn learning_phase_no_anomalies() {
-        let mut state = ContainerAnomalyState::new("test")
-            .with_learning_duration(0);  // Immediate transition
+        let mut state = ContainerAnomalyState::new("test").with_learning_duration(0); // Immediate transition
 
         // Even with immediate transition, first call should collect sample
         let metrics = ContainerMetrics {

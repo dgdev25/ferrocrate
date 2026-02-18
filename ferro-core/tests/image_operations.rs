@@ -1,6 +1,6 @@
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use ferro_core::image_manifest::{OCI_IMAGE_MANIFEST_MEDIA_TYPE, parse_image_manifest};
+use base64::Engine;
+use ferro_core::image_manifest::{parse_image_manifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{resolve_reference, tag_image};
 use ferro_core::registry::{RegistryAuth, RegistryClient};

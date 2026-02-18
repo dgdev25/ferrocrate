@@ -37,8 +37,8 @@ pub fn orchestrate_task(
         return Err(AgentError::EmptyTask);
     }
 
-    let command = std::env::var("FERROCRATE_CLAUDE_FLOW_CMD")
-        .unwrap_or_else(|_| "claude-flow".to_string());
+    let command =
+        std::env::var("FERROCRATE_CLAUDE_FLOW_CMD").unwrap_or_else(|_| "claude-flow".to_string());
     let args_raw = std::env::var("FERROCRATE_CLAUDE_FLOW_ARGS").unwrap_or_default();
     let args = split_args(&args_raw);
 
@@ -60,9 +60,10 @@ pub fn orchestrate_task(
         }
     });
     let request_line = format!("{}\n", payload);
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        AgentError::StdinWrite("missing stdin handle".to_string())
-    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AgentError::StdinWrite("missing stdin handle".to_string()))?;
     stdin
         .write_all(request_line.as_bytes())
         .map_err(|err| AgentError::StdinWrite(err.to_string()))?;
@@ -89,9 +90,7 @@ pub fn orchestrate_task(
     }
 
     let parsed = serde_json::from_str::<Value>(&stdout).ok();
-    let result = parsed
-        .as_ref()
-        .and_then(|json| json.get("result").cloned());
+    let result = parsed.as_ref().and_then(|json| json.get("result").cloned());
 
     Ok(OrchestrateResponse {
         raw_response: stdout,
@@ -169,8 +168,8 @@ mod tests {
             task: "diagnose high memory".to_string(),
             context: Some("container=api".to_string()),
         };
-        let out = orchestrate_task(&req, Some(Duration::from_secs(2)))
-            .expect("mock claude-flow output");
+        let out =
+            orchestrate_task(&req, Some(Duration::from_secs(2))).expect("mock claude-flow output");
         assert!(out.raw_response.contains("\"result\""));
         assert_eq!(
             out.parsed_result

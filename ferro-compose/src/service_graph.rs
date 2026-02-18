@@ -34,7 +34,13 @@ impl ServiceGraph {
 
         let mut queue: VecDeque<String> = indegree
             .iter()
-            .filter_map(|(name, count)| if *count == 0 { Some(name.clone()) } else { None })
+            .filter_map(|(name, count)| {
+                if *count == 0 {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let mut order = Vec::new();

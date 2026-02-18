@@ -1,6 +1,6 @@
 // Adapted from MIT-licensed ruvector-core (https://github.com/ruvnet/ruvector)
 
-use crate::ruv::error::{RuvError, Result};
+use crate::ruv::error::{Result, RuvError};
 use crate::ruv::types::DistanceMetric;
 
 #[inline]

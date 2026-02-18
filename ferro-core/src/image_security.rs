@@ -1,6 +1,6 @@
-use std::process::{Command, Child};
-use std::time::Duration;
+use std::process::{Child, Command};
 use std::thread;
+use std::time::Duration;
 
 /// Validates that an image reference matches OCI specification format.
 /// Pattern: [registry/]repository[:tag|@sha256:digest]
@@ -16,11 +16,20 @@ fn validate_image_reference(image: &str) -> Result<(), String> {
     }
 
     if !image.chars().all(valid_chars) {
-        return Err(format!("image reference contains invalid characters: {}", image));
+        return Err(format!(
+            "image reference contains invalid characters: {}",
+            image
+        ));
     }
 
     // Must have at least one repository component
-    let repo_part = image.split('@').next().unwrap_or(image).split(':').next().unwrap_or(image);
+    let repo_part = image
+        .split('@')
+        .next()
+        .unwrap_or(image)
+        .split(':')
+        .next()
+        .unwrap_or(image);
     if repo_part.is_empty() || repo_part.contains("//") {
         return Err("image reference must have valid repository name".to_string());
     }
@@ -46,7 +55,8 @@ fn run_with_timeout(child: &mut Child, timeout: Duration) -> Result<std::process
             Ok(Some(_status)) => {
                 // Process has exited, collect output
                 // Use wait() instead of wait_with_output() to avoid move issues
-                let status = child.wait()
+                let status = child
+                    .wait()
                     .map_err(|e| format!("failed to wait for process: {}", e))?;
                 // Since we can't get stdout/stderr after wait(), we need a different approach
                 // For now, return empty output on success
@@ -128,7 +138,14 @@ fn command_exists(bin: &str) -> bool {
     // Fall back to standard Unix binary locations for deterministic behavior.
     #[cfg(unix)]
     {
-        for dir in ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"] {
+        for dir in [
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        ] {
             let candidate = format!("{dir}/{bin}");
             if std::path::Path::new(&candidate).exists()
                 && Command::new(&candidate).arg("--version").output().is_ok()
@@ -264,20 +281,20 @@ esac
     #[test]
     fn validate_image_reference_rejects_invalid_characters() {
         let invalid_images = vec![
-            "my image",           // space
-            "my\nimage",          // newline
-            "my\timage",          // tab
-            "my;image",           // semicolon
-            "my&image",           // ampersand
-            "my|image",           // pipe
-            "my$image",           // dollar
-            "my%image",           // percent
-            "my!image",           // exclamation
-            "my*image",           // asterisk
-            "my?image",           // question mark
-            "my[image]",          // brackets
-            "my{image}",          // braces
-            "my(image)",          // parentheses
+            "my image",  // space
+            "my\nimage", // newline
+            "my\timage", // tab
+            "my;image",  // semicolon
+            "my&image",  // ampersand
+            "my|image",  // pipe
+            "my$image",  // dollar
+            "my%image",  // percent
+            "my!image",  // exclamation
+            "my*image",  // asterisk
+            "my?image",  // question mark
+            "my[image]", // brackets
+            "my{image}", // braces
+            "my(image)", // parentheses
         ];
 
         for image in invalid_images {
@@ -317,8 +334,10 @@ esac
         env::remove_var("COSIGN_PUBLIC_KEY");
         env::remove_var("FERROCRATE_SIGNATURE_KEY");
 
-        assert!(!signature_verification_enabled(),
-                 "signature verification should be disabled by default");
+        assert!(
+            !signature_verification_enabled(),
+            "signature verification should be disabled by default"
+        );
     }
 
     #[test]
@@ -336,9 +355,9 @@ esac
         env::set_var("FERROCRATE_SIGNATURE_VERIFY", "true");
         assert!(signature_verification_enabled());
         env::set_var("FERROCRATE_SIGNATURE_VERIFY", "TRUE");
-        assert!(signature_verification_enabled());  // eq_ignore_ascii_case handles uppercase
+        assert!(signature_verification_enabled()); // eq_ignore_ascii_case handles uppercase
         env::set_var("FERROCRATE_SIGNATURE_VERIFY", "TrUe");
-        assert!(signature_verification_enabled());  // eq_ignore_ascii_case handles mixed case
+        assert!(signature_verification_enabled()); // eq_ignore_ascii_case handles mixed case
         env::remove_var("FERROCRATE_SIGNATURE_VERIFY");
     }
 
@@ -374,7 +393,10 @@ esac
 
         // Should return Ok even without cosign
         let result = verify_image_signature("alpine:latest");
-        assert!(result.is_ok(), "should return Ok when verification disabled");
+        assert!(
+            result.is_ok(),
+            "should return Ok when verification disabled"
+        );
 
         env::remove_var("FERROCRATE_SIGNATURE_VERIFY");
         env::remove_var("FERROCRATE_SIGNATURE_KEY");
@@ -393,7 +415,9 @@ esac
 
         let result = verify_image_signature("alpine:latest");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("signature verification requires cosign"));
+        assert!(result
+            .unwrap_err()
+            .contains("signature verification requires cosign"));
 
         // Restore PATH
         if let Some(path) = old_path {
@@ -413,7 +437,9 @@ esac
 
         let result = verify_image_signature("alpine:latest");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("signature verification requires"));
+        assert!(result
+            .unwrap_err()
+            .contains("signature verification requires"));
 
         env::remove_var("FERROCRATE_SIGNATURE_VERIFY");
     }
@@ -476,9 +502,7 @@ esac
     fn run_with_timeout_returns_output_for_quick_process() {
         // Create a quick process
         let mut child = if cfg!(unix) {
-            Command::new("true")
-                .spawn()
-                .expect("true should spawn")
+            Command::new("true").spawn().expect("true should spawn")
         } else {
             // Windows equivalent
             Command::new("cmd")
@@ -498,9 +522,7 @@ esac
     fn run_with_timeout_handles_immediate_exit() {
         // Create a process that exits immediately
         let mut child = if cfg!(unix) {
-            Command::new("false")
-                .spawn()
-                .expect("false should spawn")
+            Command::new("false").spawn().expect("false should spawn")
         } else {
             Command::new("cmd")
                 .args(["/C", "exit", "1"])
@@ -533,7 +555,11 @@ esac
 
         // Test successful verification
         let result = verify_image_signature("registry.io/myapp:v1.0");
-        assert!(result.is_ok(), "fake cosign should succeed for valid image: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "fake cosign should succeed for valid image: {:?}",
+            result
+        );
 
         // Cleanup
         env::set_var("PATH", old_path);
@@ -556,9 +582,16 @@ esac
 
         // Test failed verification (using ":invalid" suffix triggers failure in our fake cosign)
         let result = verify_image_signature("registry.io/myapp:invalid");
-        assert!(result.is_err(), "fake cosign should fail for :invalid image");
+        assert!(
+            result.is_err(),
+            "fake cosign should fail for :invalid image"
+        );
         let err = result.unwrap_err();
-        assert!(err.contains("signature verification failed"), "error should mention verification failure: {}", err);
+        assert!(
+            err.contains("signature verification failed"),
+            "error should mention verification failure: {}",
+            err
+        );
 
         env::set_var("PATH", old_path);
         env::remove_var("FERROCRATE_SIGNATURE_VERIFY");

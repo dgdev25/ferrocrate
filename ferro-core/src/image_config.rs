@@ -8,9 +8,7 @@ const DEFAULT_HEALTH_START_PERIOD_SECS: u64 = 0;
 
 pub fn healthcheck_from_config(json: &str) -> Option<HealthConfig> {
     let value: Value = serde_json::from_str(json).ok()?;
-    let health = value
-        .get("config")
-        .and_then(|cfg| cfg.get("Healthcheck"))?;
+    let health = value.get("config").and_then(|cfg| cfg.get("Healthcheck"))?;
 
     let test = health.get("Test")?.as_array()?;
     if test.is_empty() {
@@ -48,8 +46,7 @@ pub fn healthcheck_from_config(json: &str) -> Option<HealthConfig> {
         cmd,
         interval_secs: nanos_to_secs(health.get("Interval"))
             .unwrap_or(DEFAULT_HEALTH_INTERVAL_SECS),
-        timeout_secs: nanos_to_secs(health.get("Timeout"))
-            .unwrap_or(DEFAULT_HEALTH_TIMEOUT_SECS),
+        timeout_secs: nanos_to_secs(health.get("Timeout")).unwrap_or(DEFAULT_HEALTH_TIMEOUT_SECS),
         retries: health
             .get("Retries")
             .and_then(|v| v.as_u64())
@@ -70,7 +67,9 @@ pub fn command_from_config(json: &str) -> Option<Vec<String>> {
     if let Some(entrypoint) = entrypoint {
         out.extend(entrypoint);
     }
-    if let Some(cmd) = cmd { out.extend(cmd); }
+    if let Some(cmd) = cmd {
+        out.extend(cmd);
+    }
     if out.is_empty() {
         None
     } else {
@@ -109,7 +108,11 @@ fn parse_string_array(value: Option<&Value>) -> Option<Vec<String>> {
         .iter()
         .filter_map(|item| item.as_str().map(|s| s.to_string()))
         .collect::<Vec<_>>();
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn nanos_to_secs(value: Option<&Value>) -> Option<u64> {
@@ -118,7 +121,11 @@ fn nanos_to_secs(value: Option<&Value>) -> Option<u64> {
         return Some(0);
     }
     let secs = nanos / 1_000_000_000;
-    if secs == 0 { Some(1) } else { Some(secs) }
+    if secs == 0 {
+        Some(1)
+    } else {
+        Some(secs)
+    }
 }
 
 #[cfg(test)]
@@ -182,7 +189,15 @@ mod tests {
             }
         }"#;
         let cmd = command_from_config(json).expect("cmd");
-        assert_eq!(cmd, vec!["/bin/sh".to_string(), "-c".to_string(), "echo".to_string(), "ok".to_string()]);
+        assert_eq!(
+            cmd,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo".to_string(),
+                "ok".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -205,7 +220,10 @@ mod tests {
                 "User": "1001:1002"
             }
         }"#;
-        assert_eq!(env_from_config(json), vec!["A=1".to_string(), "B=2".to_string()]);
+        assert_eq!(
+            env_from_config(json),
+            vec!["A=1".to_string(), "B=2".to_string()]
+        );
         assert_eq!(working_dir_from_config(json), Some("/app".to_string()));
         assert_eq!(user_from_config(json), Some("1001:1002".to_string()));
     }

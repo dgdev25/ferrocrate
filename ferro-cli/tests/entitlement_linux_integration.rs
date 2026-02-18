@@ -45,7 +45,7 @@ mod linux_tests {
     fn ai_orchestrate_requires_entitlement_on_linux() {
         let (mut cmd, _runtime_dir, _image_store) = cmd_with_isolated_state();
         let output = cmd
-            .args(["ai", "orchestrate", "--task", "linux-entitlement-gate"]) 
+            .args(["ai", "orchestrate", "--task", "linux-entitlement-gate"])
             .env("FERROCRATE_AI_DEGRADE", "1")
             .output()
             .expect("run ferro-cli");
@@ -69,10 +69,13 @@ mod linux_tests {
         let pubkey = write_signed_entitlement(&entitlement_path, &["ai_advanced"]);
 
         let output = cmd
-            .args(["ai", "orchestrate", "--task", "linux-entitlement-ok"]) 
+            .args(["ai", "orchestrate", "--task", "linux-entitlement-ok"])
             .env("FERROCRATE_ENTITLEMENT_FILE", &entitlement_path)
             .env("FERROCRATE_ENTITLEMENT_PUBKEY", &pubkey)
-            .env("FERROCRATE_CLAUDE_FLOW_CMD", "/definitely/missing/claude-flow")
+            .env(
+                "FERROCRATE_CLAUDE_FLOW_CMD",
+                "/definitely/missing/claude-flow",
+            )
             .env("FERROCRATE_AI_DEGRADE", "1")
             .output()
             .expect("run ferro-cli with entitlement");

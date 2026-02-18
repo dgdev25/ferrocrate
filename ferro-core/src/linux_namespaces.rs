@@ -1,4 +1,4 @@
-use nix::sched::{CloneFlags, unshare};
+use nix::sched::{unshare, CloneFlags};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl NamespaceType {
 
 #[cfg(test)]
 mod tests {
-    use super::{NamespaceType, namespace_flags};
+    use super::{namespace_flags, NamespaceType};
     use nix::sched::CloneFlags;
 
     #[test]

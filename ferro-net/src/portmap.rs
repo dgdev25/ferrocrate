@@ -7,7 +7,10 @@ pub struct PortMapping {
     pub protocol: String,
 }
 
-pub fn build_iptables_prerouting_cmd(mapping: &PortMapping, container_ip: &str) -> Result<Vec<String>, ValidationError> {
+pub fn build_iptables_prerouting_cmd(
+    mapping: &PortMapping,
+    container_ip: &str,
+) -> Result<Vec<String>, ValidationError> {
     validate_port(mapping.host_port)?;
     validate_port(mapping.container_port)?;
     validate_protocol(&mapping.protocol)?;
@@ -29,7 +32,10 @@ pub fn build_iptables_prerouting_cmd(mapping: &PortMapping, container_ip: &str) 
     ])
 }
 
-pub fn build_iptables_forward_cmd(mapping: &PortMapping, container_ip: &str) -> Result<Vec<String>, ValidationError> {
+pub fn build_iptables_forward_cmd(
+    mapping: &PortMapping,
+    container_ip: &str,
+) -> Result<Vec<String>, ValidationError> {
     validate_port(mapping.container_port)?;
     validate_protocol(&mapping.protocol)?;
     validate_ip(container_ip)?;
@@ -50,7 +56,7 @@ pub fn build_iptables_forward_cmd(mapping: &PortMapping, container_ip: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{PortMapping, build_iptables_forward_cmd, build_iptables_prerouting_cmd};
+    use super::{build_iptables_forward_cmd, build_iptables_prerouting_cmd, PortMapping};
 
     #[test]
     fn builds_portmap_commands() {
@@ -64,8 +70,19 @@ mod tests {
         assert_eq!(
             prerouting,
             vec![
-                "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport",
-                "8080", "-j", "DNAT", "--to-destination", "10.0.0.2:80"
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                "tcp",
+                "--dport",
+                "8080",
+                "-j",
+                "DNAT",
+                "--to-destination",
+                "10.0.0.2:80"
             ]
         );
 
@@ -73,8 +90,8 @@ mod tests {
         assert_eq!(
             forward,
             vec![
-                "iptables", "-A", "FORWARD", "-p", "tcp", "-d", "10.0.0.2", "--dport", "80",
-                "-j", "ACCEPT"
+                "iptables", "-A", "FORWARD", "-p", "tcp", "-d", "10.0.0.2", "--dport", "80", "-j",
+                "ACCEPT"
             ]
         );
     }

@@ -18,7 +18,10 @@ pub enum ContainerExecError {
 }
 
 /// Build nsenter arguments for executing a command in all namespaces of target pid.
-pub fn build_nsenter_args(target_pid: u32, command: &[String]) -> Result<Vec<String>, ContainerExecError> {
+pub fn build_nsenter_args(
+    target_pid: u32,
+    command: &[String],
+) -> Result<Vec<String>, ContainerExecError> {
     if command.is_empty() {
         return Err(ContainerExecError::EmptyCommand);
     }
@@ -35,7 +38,10 @@ pub fn build_nsenter_args(target_pid: u32, command: &[String]) -> Result<Vec<Str
 }
 
 /// Execute command inside an existing container process namespace set via `nsenter`.
-pub fn exec_in_container(target_pid: u32, command: &[String]) -> Result<ExecResult, ContainerExecError> {
+pub fn exec_in_container(
+    target_pid: u32,
+    command: &[String],
+) -> Result<ExecResult, ContainerExecError> {
     let args = build_nsenter_args(target_pid, command)?;
     execute_command("nsenter", &args)
 }
@@ -120,8 +126,15 @@ mod tests {
 
     #[test]
     fn builds_nsenter_args_for_exec() {
-        let args = build_nsenter_args(1234, &["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()])
-            .expect("args should build");
+        let args = build_nsenter_args(
+            1234,
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ],
+        )
+        .expect("args should build");
 
         assert_eq!(
             args,

@@ -900,6 +900,7 @@ struct DoctorAction {
     requires_confirmation: bool,
 }
 
+#[allow(dead_code)]
 fn run_command_status(mut cmd: std::process::Command) -> bool {
     cmd.status().map(|status| status.success()).unwrap_or(false)
 }
@@ -4956,6 +4957,10 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
     use super::{
         build_health_config, build_limits, desktop_forward_enabled, dispatch, effective_readonly,
         handle_build, handle_containers, handle_exec, handle_image_prune, handle_images,
@@ -5818,6 +5823,7 @@ mod tests {
 
     #[test]
     fn desktop_forward_env_defaults_disabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
             std::env::remove_var("FERROCRATE_DESKTOP_FORWARD");
         }
@@ -5826,6 +5832,7 @@ mod tests {
 
     #[test]
     fn desktop_forward_env_enables_true_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
             std::env::set_var("FERROCRATE_DESKTOP_FORWARD", "1");
         }

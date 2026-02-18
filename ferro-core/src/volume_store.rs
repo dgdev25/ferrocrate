@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use tar::{Archive, Builder};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tar::{Archive, Builder};
 use thiserror::Error;
 
 const VOLUME_INDEX_TREE: &str = "volume_index";
@@ -154,8 +154,8 @@ impl LocalVolumeStore {
         let mut out = Vec::new();
         for entry in &tree {
             let (_, value) = entry?;
-            let record = serde_json::from_slice::<VolumeRecord>(&value)
-                .map_err(VolumeStoreError::Decode)?;
+            let record =
+                serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
             out.push(record);
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -167,8 +167,8 @@ impl LocalVolumeStore {
         let Some(value) = tree.get(name.as_bytes())? else {
             return Ok(None);
         };
-        let record = serde_json::from_slice::<VolumeRecord>(&value)
-            .map_err(VolumeStoreError::Decode)?;
+        let record =
+            serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
         Ok(Some(record))
     }
 
@@ -177,8 +177,8 @@ impl LocalVolumeStore {
         let Some(value) = tree.get(name.as_bytes())? else {
             return Ok(false);
         };
-        let record = serde_json::from_slice::<VolumeRecord>(&value)
-            .map_err(VolumeStoreError::Decode)?;
+        let record =
+            serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
         if let Some(driver) = self.drivers.get(&record.driver) {
             driver.remove(&self.root, &record)?;
         } else {

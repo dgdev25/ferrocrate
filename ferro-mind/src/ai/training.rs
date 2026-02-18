@@ -5,9 +5,15 @@
 //! - Online learning via background process (opt-in)
 //! - Model versioning and rollback support
 
-use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "rvf-persistence")]
+use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
+#[cfg(feature = "rvf-persistence")]
+use rvf_runtime::options::DistanceMetric as RvfDistanceMetric;
+#[cfg(feature = "rvf-persistence")]
+use rvf_runtime::{RvfOptions, RvfStore};
 #[cfg(feature = "rvf-persistence")]
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 #[cfg(feature = "rvf-persistence")]
 use std::hash::{Hash, Hasher};
@@ -325,8 +331,13 @@ impl TrainingPipeline {
     }
 
     /// Load versions for a specific model type
-    fn load_versions_for_model(&self, model_type: ModelType) -> Result<VecDeque<ModelVersion>, TrainingError> {
-        let versions_file = self.config.models_dir
+    fn load_versions_for_model(
+        &self,
+        model_type: ModelType,
+    ) -> Result<VecDeque<ModelVersion>, TrainingError> {
+        let versions_file = self
+            .config
+            .models_dir
             .join(model_type.to_string())
             .join("versions.json");
 
@@ -432,7 +443,9 @@ impl TrainingPipeline {
 
         // Create new version
         let version = self.get_next_version(model_type);
-        let model_path = self.config.models_dir
+        let model_path = self
+            .config
+            .models_dir
             .join(model_type.to_string())
             .join(format!("model_v{}.bin", version));
 
@@ -464,7 +477,8 @@ impl TrainingPipeline {
                 let _ = fs::remove_file(&removed.path);
             }
         } else {
-            self.versions.insert(model_type, VecDeque::from(vec![model_version]));
+            self.versions
+                .insert(model_type, VecDeque::from(vec![model_version]));
         }
 
         self.save_versions(model_type)?;
@@ -559,7 +573,10 @@ impl TrainingPipeline {
     pub fn rollback(&mut self, model_type: ModelType) -> Result<ModelVersion, TrainingError> {
         // First, find the index to rollback to
         let rollback_idx = {
-            let versions = self.versions.get(&model_type).ok_or(TrainingError::NoActiveModel)?;
+            let versions = self
+                .versions
+                .get(&model_type)
+                .ok_or(TrainingError::NoActiveModel)?;
             let active_idx = versions.iter().position(|v| v.active);
 
             match active_idx {
@@ -571,7 +588,9 @@ impl TrainingPipeline {
         // Now perform the mutation
         if let Some(target_idx) = rollback_idx {
             // CQ-01: Use expect with context instead of unwrap()
-            let versions = self.versions.get_mut(&model_type)
+            let versions = self
+                .versions
+                .get_mut(&model_type)
                 .expect("versions should exist (checked above)");
 
             // Deactivate all and activate target
@@ -591,10 +610,7 @@ impl TrainingPipeline {
 
     /// Get active model version
     pub fn get_active_version(&self, model_type: ModelType) -> Option<&ModelVersion> {
-        self.versions
-            .get(&model_type)?
-            .iter()
-            .find(|v| v.active)
+        self.versions.get(&model_type)?.iter().find(|v| v.active)
     }
 
     /// List all versions for a model
@@ -645,7 +661,8 @@ impl TrainingPipeline {
                 .unwrap_or(0);
 
             if current_samples < seen_samples {
-                self.online_sample_cursor.insert(model_type, current_samples);
+                self.online_sample_cursor
+                    .insert(model_type, current_samples);
                 continue;
             }
             let new_samples = current_samples.saturating_sub(seen_samples);
@@ -655,9 +672,11 @@ impl TrainingPipeline {
                 match self.train(model_type) {
                     Ok(result) => {
                         trained.push(result);
-                        self.online_sample_cursor.insert(model_type, current_samples);
+                        self.online_sample_cursor
+                            .insert(model_type, current_samples);
                     }
-                    Err(TrainingError::InsufficientData(_, _)) | Err(TrainingError::AiDisabled) => {}
+                    Err(TrainingError::InsufficientData(_, _)) | Err(TrainingError::AiDisabled) => {
+                    }
                     Err(err) => return Err(err),
                 }
             }
@@ -1327,7 +1346,10 @@ pub fn handle_export_rvf_command(
         .embed(&model_payload)
         .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
     vectors.push(vec);
-    ids.push(hash_to_u64(&format!("model:{}:{}", active.model_type, active.version)));
+    ids.push(hash_to_u64(&format!(
+        "model:{}:{}",
+        active.model_type, active.version
+    )));
 
     let sample_dir = config.data_dir.join(model_type.to_string());
     if sample_dir.exists() {
@@ -1485,13 +1507,18 @@ mod tests {
     fn train_with_ai_disabled() {
         let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, config) = setup_test_env();
-        unsafe { std::env::remove_var("FERROCRATE_AI"); }
+        unsafe {
+            std::env::remove_var("FERROCRATE_AI");
+        }
 
         let mut pipeline = TrainingPipeline::new(config).unwrap();
         let result = pipeline.train(ModelType::ResourcePredictor);
 
         // Should fail if AI is disabled
-        if !std::env::var("FERROCRATE_AI").unwrap_or_default().starts_with("1") {
+        if !std::env::var("FERROCRATE_AI")
+            .unwrap_or_default()
+            .starts_with("1")
+        {
             assert!(matches!(result, Err(TrainingError::AiDisabled)));
         }
     }
@@ -1553,13 +1580,17 @@ mod tests {
         pipeline.train(ModelType::ResourcePredictor).unwrap();
         pipeline.train(ModelType::ResourcePredictor).unwrap();
 
-        let active = pipeline.get_active_version(ModelType::ResourcePredictor).unwrap();
+        let active = pipeline
+            .get_active_version(ModelType::ResourcePredictor)
+            .unwrap();
         assert_eq!(active.version, 2);
 
         let rolled_back = pipeline.rollback(ModelType::ResourcePredictor).unwrap();
         assert_eq!(rolled_back.version, 1);
 
-        let active = pipeline.get_active_version(ModelType::ResourcePredictor).unwrap();
+        let active = pipeline
+            .get_active_version(ModelType::ResourcePredictor)
+            .unwrap();
         assert_eq!(active.version, 1);
     }
 
@@ -1610,7 +1641,9 @@ mod tests {
         config.min_samples = 3;
 
         let previous_ai = std::env::var("FERROCRATE_AI").ok();
-        unsafe { std::env::set_var("FERROCRATE_AI", "1"); }
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+        }
         let mut pipeline = TrainingPipeline::new(config).unwrap();
         pipeline.start_online_learning().unwrap();
 
@@ -1622,10 +1655,7 @@ mod tests {
                 "timestamp_secs": 1_700_000_000 + i as u64
             });
             pipeline
-                .record_sample(
-                    ModelType::ResourcePredictor,
-                    sample.to_string().as_bytes(),
-                )
+                .record_sample(ModelType::ResourcePredictor, sample.to_string().as_bytes())
                 .unwrap();
         }
 
@@ -1634,8 +1664,12 @@ mod tests {
         assert!(versions.iter().any(|version| version.active));
 
         match previous_ai {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value); },
-            None => unsafe { std::env::remove_var("FERROCRATE_AI"); },
+            Some(value) => unsafe {
+                std::env::set_var("FERROCRATE_AI", value);
+            },
+            None => unsafe {
+                std::env::remove_var("FERROCRATE_AI");
+            },
         }
     }
 
@@ -1709,5 +1743,95 @@ mod tests {
         let report = handle_rvf_verify_command(&child_path, Some(&parent_path)).unwrap();
         assert!(report.verified);
         assert_eq!(report.parent_match, Some(true));
+    }
+}
+
+/// Quantization helpers for compressing trained RVF model stores.
+///
+/// Uses `rvf-quant` scalar quantization (int8) to reduce store memory
+/// footprint by ~4x with minimal accuracy loss for typical embedding ranges.
+#[cfg(feature = "rvf-persistence")]
+pub mod quantize {
+    use rvf_quant::ScalarQuantizer;
+
+    /// Quantization method for model compression.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Method {
+        /// Scalar int8 quantization — 4x compression, minimal accuracy loss.
+        /// Recommended for most use cases.
+        Scalar8bit,
+    }
+
+    /// Summary returned after training a quantizer over an in-memory vector set.
+    #[derive(Debug)]
+    pub struct QuantSummary {
+        /// The trained scalar quantizer (encode/decode vectors with it).
+        pub quantizer: ScalarQuantizer,
+        /// Number of training vectors used.
+        pub training_vectors: usize,
+        /// Vector dimensionality.
+        pub dim: usize,
+    }
+
+    /// Train a scalar quantizer over a slice of f32 vectors.
+    ///
+    /// Typical use: collect vectors from `RvfStore` via your query path,
+    /// then call this to get a quantizer you can use to encode future inserts.
+    ///
+    /// # Arguments
+    /// * `vectors` - Training data. Must be non-empty, all same length.
+    /// * `_method` - Reserved for future method variants; currently only Scalar8bit exists.
+    ///
+    /// # Errors
+    /// Returns `Err` if `vectors` is empty.
+    pub fn train_quantizer(
+        vectors: &[Vec<f32>],
+        _method: Method,
+    ) -> Result<QuantSummary, String> {
+        if vectors.is_empty() {
+            return Err("cannot train quantizer: no vectors provided".to_string());
+        }
+        let dim = vectors[0].len();
+        if dim == 0 {
+            return Err("cannot train quantizer: zero-dimensional vectors".to_string());
+        }
+
+        let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
+        let quantizer = ScalarQuantizer::train(&refs);
+
+        Ok(QuantSummary {
+            training_vectors: vectors.len(),
+            dim,
+            quantizer,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn train_scalar_quantizer_roundtrip() {
+            let vectors: Vec<Vec<f32>> = (0..20)
+                .map(|i| (0..8).map(|d| ((i * 7 + d * 3) as f32) / 50.0).collect())
+                .collect();
+
+            let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
+            assert_eq!(summary.training_vectors, 20);
+            assert_eq!(summary.dim, 8);
+
+            // Verify encode/decode roundtrip is within 4x quantization error.
+            let encoded = summary.quantizer.encode_vec(&vectors[0]);
+            let decoded = summary.quantizer.decode_vec(&encoded);
+            for (orig, recon) in vectors[0].iter().zip(decoded.iter()) {
+                assert!((orig - recon).abs() < 0.05, "roundtrip error too large");
+            }
+        }
+
+        #[test]
+        fn train_quantizer_rejects_empty() {
+            let err = train_quantizer(&[], Method::Scalar8bit).unwrap_err();
+            assert!(err.contains("no vectors provided"));
+        }
     }
 }

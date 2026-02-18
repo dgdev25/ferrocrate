@@ -10,12 +10,10 @@ impl RootlessNetConfig {
     /// Validate the rootless network configuration for security (SEC-03)
     pub fn validate(&self) -> Result<(), String> {
         // Validate tap_name using validate module
-        validate_interface_name(&self.tap_name)
-            .map_err(|e| format!("Invalid tap name: {}", e))?;
+        validate_interface_name(&self.tap_name).map_err(|e| format!("Invalid tap name: {}", e))?;
 
         // Validate cidr using validate module
-        validate_cidr(&self.cidr)
-            .map_err(|e| format!("Invalid CIDR: {}", e))?;
+        validate_cidr(&self.cidr).map_err(|e| format!("Invalid CIDR: {}", e))?;
 
         Ok(())
     }
@@ -38,7 +36,7 @@ pub fn build_slirp4netns_cmd(pid: u32, config: &RootlessNetConfig) -> Result<Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{RootlessNetConfig, build_slirp4netns_cmd};
+    use super::{build_slirp4netns_cmd, RootlessNetConfig};
 
     #[test]
     fn builds_slirp4netns_cmd() {
@@ -50,8 +48,13 @@ mod tests {
         assert_eq!(
             cmd,
             vec![
-                "slirp4netns", "--configure", "--mtu=65520", "--cidr", "10.0.2.0/24",
-                "1234", "tap0"
+                "slirp4netns",
+                "--configure",
+                "--mtu=65520",
+                "--cidr",
+                "10.0.2.0/24",
+                "1234",
+                "tap0"
             ]
         );
     }
@@ -66,8 +69,13 @@ mod tests {
         assert_eq!(
             cmd,
             vec![
-                "slirp4netns", "--configure", "--mtu=65520", "--cidr", "192.168.0.0/16",
-                "9999", "tap-long-name1"
+                "slirp4netns",
+                "--configure",
+                "--mtu=65520",
+                "--cidr",
+                "192.168.0.0/16",
+                "9999",
+                "tap-long-name1"
             ]
         );
     }
@@ -75,7 +83,7 @@ mod tests {
     #[test]
     fn rejects_invalid_tap_name() {
         let config = RootlessNetConfig {
-            tap_name: "tap@0".to_string(),  // Invalid character
+            tap_name: "tap@0".to_string(), // Invalid character
             cidr: "10.0.2.0/24".to_string(),
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
@@ -85,7 +93,7 @@ mod tests {
     fn rejects_invalid_cidr() {
         let config = RootlessNetConfig {
             tap_name: "tap0".to_string(),
-            cidr: "invalid-cidr".to_string(),  // Invalid CIDR
+            cidr: "invalid-cidr".to_string(), // Invalid CIDR
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
     }

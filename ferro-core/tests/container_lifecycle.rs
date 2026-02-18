@@ -37,7 +37,11 @@ fn lifecycle_exec_command_builder_targets_process() {
     let mut proc = ManagedProcess::start("sh", &["-c", "sleep 3"]).expect("process starts");
     let args = build_nsenter_args(
         proc.pid(),
-        &["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()],
+        &[
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo hi".to_string(),
+        ],
     )
     .expect("args build");
 

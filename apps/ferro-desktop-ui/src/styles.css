@@ -72,6 +72,32 @@ body {
   gap: 0.6rem;
 }
 
+.panel-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.field-row {
+  display: flex;
+  margin-bottom: 0.6rem;
+}
+
+.field-row input {
+  width: 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  color: var(--text-primary);
+  padding: 0.5rem 0.7rem;
+  font-family: "Outfit", sans-serif;
+}
+
+.field-row input::placeholder {
+  color: var(--text-muted);
+}
+
 .btn {
   border-radius: var(--radius-md);
   padding: 0.5rem 0.9rem;
@@ -102,6 +128,12 @@ body {
   transform: translateY(-1px);
 }
 
+.btn-danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ff7373;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -122,10 +154,29 @@ body {
   backdrop-filter: blur(18px);
 }
 
+.panel-wide {
+  grid-column: 1 / -1;
+}
+
 .panel h2 {
   margin-top: 0;
   font-family: "Sora", "Outfit", sans-serif;
   font-size: 1.05rem;
+}
+
+.check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin-bottom: 0.7rem;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.check-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 pre {

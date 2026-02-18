@@ -5,10 +5,7 @@ use crate::validate::validate_nft_family;
 const ALLOWED_TABLES: &[&str] = &["filter", "nat", "mangle", "raw", "security", "bridge"];
 
 /// Allowed nftables chains for security validation
-const ALLOWED_CHAINS: &[&str] = &[
-    "input", "output", "forward",
-    "prerouting", "postrouting",
-];
+const ALLOWED_CHAINS: &[&str] = &["input", "output", "forward", "prerouting", "postrouting"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NftRule {
@@ -22,8 +19,7 @@ impl NftRule {
     /// Validate the rule for security - prevent injection attacks (SEC-03)
     pub fn validate(&self) -> Result<(), String> {
         // Validate family using validate module
-        validate_nft_family(&self.family)
-            .map_err(|e| format!("Invalid nftables family: {}", e))?;
+        validate_nft_family(&self.family).map_err(|e| format!("Invalid nftables family: {}", e))?;
 
         // Validate table name
         if !ALLOWED_TABLES.contains(&self.table.to_lowercase().as_str())
@@ -41,9 +37,15 @@ impl NftRule {
 
         // Validate expr don't contain shell metacharacters
         for expr in &self.expr {
-            if expr.contains('\0') || expr.contains('|') || expr.contains(';')
-                || expr.contains('`') || expr.contains('$') || expr.contains('\n')
-                || expr.contains('&') || expr.contains('(') || expr.contains(')')
+            if expr.contains('\0')
+                || expr.contains('|')
+                || expr.contains(';')
+                || expr.contains('`')
+                || expr.contains('$')
+                || expr.contains('\n')
+                || expr.contains('&')
+                || expr.contains('(')
+                || expr.contains(')')
             {
                 return Err("Invalid characters in nftables expression".to_string());
             }
@@ -93,7 +95,7 @@ pub fn delete_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NftRule, build_nft_add_rule_cmd, build_nft_delete_rule_cmd};
+    use super::{build_nft_add_rule_cmd, build_nft_delete_rule_cmd, NftRule};
 
     #[test]
     fn builds_nft_add_rule_command() {
@@ -101,22 +103,49 @@ mod tests {
             family: "ip".to_string(),
             table: "nat".to_string(),
             chain: "prerouting".to_string(),
-            expr: vec!["tcp".to_string(), "dport".to_string(), "80".to_string(), "dnat".to_string(), "to".to_string(), "10.0.0.2:80".to_string()],
+            expr: vec![
+                "tcp".to_string(),
+                "dport".to_string(),
+                "80".to_string(),
+                "dnat".to_string(),
+                "to".to_string(),
+                "10.0.0.2:80".to_string(),
+            ],
         };
 
         assert_eq!(
             build_nft_add_rule_cmd(&rule).unwrap(),
             vec![
-                "nft", "add", "rule", "ip", "nat", "prerouting", "tcp", "dport", "80", "dnat",
-                "to", "10.0.0.2:80"
+                "nft",
+                "add",
+                "rule",
+                "ip",
+                "nat",
+                "prerouting",
+                "tcp",
+                "dport",
+                "80",
+                "dnat",
+                "to",
+                "10.0.0.2:80"
             ]
         );
 
         assert_eq!(
             build_nft_delete_rule_cmd(&rule).unwrap(),
             vec![
-                "nft", "delete", "rule", "ip", "nat", "prerouting", "tcp", "dport", "80", "dnat",
-                "to", "10.0.0.2:80"
+                "nft",
+                "delete",
+                "rule",
+                "ip",
+                "nat",
+                "prerouting",
+                "tcp",
+                "dport",
+                "80",
+                "dnat",
+                "to",
+                "10.0.0.2:80"
             ]
         );
     }

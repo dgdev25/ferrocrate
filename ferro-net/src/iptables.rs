@@ -2,10 +2,7 @@
 const ALLOWED_TABLES: &[&str] = &["filter", "nat", "mangle", "raw", "security"];
 
 /// Allowed iptables chains for security validation
-const ALLOWED_CHAINS: &[&str] = &[
-    "INPUT", "OUTPUT", "FORWARD",
-    "PREROUTING", "POSTROUTING",
-];
+const ALLOWED_CHAINS: &[&str] = &["INPUT", "OUTPUT", "FORWARD", "PREROUTING", "POSTROUTING"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IptablesRule {
@@ -24,14 +21,23 @@ impl IptablesRule {
 
         // Validate chain name (must be alphanumeric or known chain)
         if !ALLOWED_CHAINS.contains(&self.chain.to_uppercase().as_str())
-            && !self.chain.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            && !self
+                .chain
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
             return Err(format!("Invalid iptables chain: {}", self.chain));
         }
 
         // Validate args don't contain shell metacharacters
         for arg in &self.args {
-            if arg.contains('\0') || arg.contains('|') || arg.contains(';')
-                || arg.contains('`') || arg.contains('$') || arg.contains('\n') {
+            if arg.contains('\0')
+                || arg.contains('|')
+                || arg.contains(';')
+                || arg.contains('`')
+                || arg.contains('$')
+                || arg.contains('\n')
+            {
                 return Err("Invalid characters in iptables arguments".to_string());
             }
         }
@@ -80,24 +86,49 @@ pub fn delete_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IptablesRule, build_iptables_cmd, build_iptables_delete_cmd};
+    use super::{build_iptables_cmd, build_iptables_delete_cmd, IptablesRule};
 
     #[test]
     fn builds_iptables_command() {
         let rule = IptablesRule {
             table: "nat".to_string(),
             chain: "PREROUTING".to_string(),
-            args: vec!["-p".to_string(), "tcp".to_string(), "--dport".to_string(), "80".to_string()],
+            args: vec![
+                "-p".to_string(),
+                "tcp".to_string(),
+                "--dport".to_string(),
+                "80".to_string(),
+            ],
         };
 
         assert_eq!(
             build_iptables_cmd(&rule).unwrap(),
-            vec!["iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "80"]
+            vec![
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                "tcp",
+                "--dport",
+                "80"
+            ]
         );
 
         assert_eq!(
             build_iptables_delete_cmd(&rule).unwrap(),
-            vec!["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", "80"]
+            vec![
+                "iptables",
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                "tcp",
+                "--dport",
+                "80"
+            ]
         );
     }
 

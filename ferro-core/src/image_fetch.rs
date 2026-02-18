@@ -2,8 +2,8 @@ use crate::docker_auth::resolve_registry_auth;
 use crate::image_manifest::{parse_image_index, parse_image_manifest};
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::ImageTaggingError;
-use crate::registry::RegistryClient;
 use crate::registry::parse_image_reference;
+use crate::registry::RegistryClient;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -63,7 +63,12 @@ pub fn pull_image_with_store(
     let config_digest = manifest.config.digest.replace(':', "_");
     let config_path = config_root.join(&config_digest);
     if !config_path.exists() {
-        client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
+        client.pull_blob_to_file(
+            &canonical,
+            &manifest.config.digest,
+            auth.as_ref(),
+            &config_path,
+        )?;
     }
     verify_digest(&config_path, &manifest.config.digest)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
@@ -119,7 +124,12 @@ pub fn pull_manifest_only_with_store(
     let config_digest = manifest.config.digest.replace(':', "_");
     let config_path = config_root.join(&config_digest);
     if !config_path.exists() {
-        client.pull_blob_to_file(&canonical, &manifest.config.digest, auth.as_ref(), &config_path)?;
+        client.pull_blob_to_file(
+            &canonical,
+            &manifest.config.digest,
+            auth.as_ref(),
+            &config_path,
+        )?;
     }
     verify_digest(&config_path, &manifest.config.digest)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
@@ -168,12 +178,19 @@ fn select_platform_manifest(manifests: &[crate::image_manifest::Descriptor]) -> 
                 .map(|platform| platform.os == os && platform.architecture == arch)
                 .unwrap_or(false)
         })
-        .or_else(|| manifests.iter().find(|descriptor| descriptor.platform.is_some()))
+        .or_else(|| {
+            manifests
+                .iter()
+                .find(|descriptor| descriptor.platform.is_some())
+        })
         .or_else(|| manifests.first())
         .map(|descriptor| descriptor.digest.clone())
 }
 
-pub fn resolve_layer_paths(runtime_dir: &Path, image: &str) -> Result<Vec<PathBuf>, ImageFetchError> {
+pub fn resolve_layer_paths(
+    runtime_dir: &Path,
+    image: &str,
+) -> Result<Vec<PathBuf>, ImageFetchError> {
     parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     resolve_layer_paths_with_store(runtime_dir, image, &store)
@@ -247,9 +264,9 @@ pub fn resolve_config_path_with_store(
 }
 
 fn ensure_cas_blob(runtime_dir: &Path, blob_path: &Path) -> Result<PathBuf, ImageFetchError> {
-    let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+    let cas_root = runtime_dir.join("images").join("cas").join("shake256");
     fs::create_dir_all(&cas_root)?;
-    let hash = hash_file_blake3(blob_path)?;
+    let hash = hash_file_shake256(blob_path)?;
     let cas_path = cas_root.join(hash);
 
     if !cas_path.exists() {
@@ -271,18 +288,11 @@ fn ensure_cas_blob(runtime_dir: &Path, blob_path: &Path) -> Result<PathBuf, Imag
     Ok(cas_path)
 }
 
-fn hash_file_blake3(path: &Path) -> Result<String, ImageFetchError> {
+fn hash_file_shake256(path: &Path) -> Result<String, ImageFetchError> {
     let mut file = fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(hex::encode(rvf_crypto::shake256_256(&buf)))
 }
 
 fn verify_digest(path: &Path, digest: &str) -> Result<(), ImageFetchError> {
@@ -325,8 +335,11 @@ mod tests {
         let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2","size":4}]}"#;
 
         server.expect(
-            Expectation::matching(request::method_path("GET", "/v2/library/alpine/manifests/latest"))
-                .respond_with(status_code(200).body(manifest_json)),
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/library/alpine/manifests/latest",
+            ))
+            .respond_with(status_code(200).body(manifest_json)),
         );
         server.expect(
             Expectation::matching(request::method_path("GET", "/v2/library/alpine/blobs/sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be"))
@@ -344,8 +357,13 @@ mod tests {
         let content = fs::read_to_string(&result.layer_paths[0]).expect("blob content");
         assert_eq!(content, "TEST");
 
-        let hash = blake3::hash(b"TEST").to_hex().to_string();
-        let cas_path = temp.path().join("images").join("cas").join("blake3").join(hash);
+        let hash = hex::encode(rvf_crypto::shake256_256(b"TEST"));
+        let cas_path = temp
+            .path()
+            .join("images")
+            .join("cas")
+            .join("shake256")
+            .join(hash);
         assert!(cas_path.exists());
     }
 
@@ -355,8 +373,11 @@ mod tests {
         let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4}]}"#;
 
         server.expect(
-            Expectation::matching(request::method_path("GET", "/v2/library/busybox/manifests/latest"))
-                .respond_with(status_code(200).body(manifest_json)),
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/library/busybox/manifests/latest",
+            ))
+            .respond_with(status_code(200).body(manifest_json)),
         );
         server.expect(
             Expectation::matching(request::method_path("GET", "/v2/library/busybox/blobs/sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be"))
@@ -367,7 +388,8 @@ mod tests {
         let image = format!("{}/library/busybox", server.addr());
         pull_manifest_only(temp.path(), &image).expect("pull manifest only");
         let blob_root = temp.path().join("images").join("blobs");
-        let layer_path = blob_root.join("sha256_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        let layer_path = blob_root
+            .join("sha256_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
         assert!(!layer_path.exists());
     }
 }

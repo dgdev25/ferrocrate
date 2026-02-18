@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use ferro_net::ebpf::{EbpfProgram, build_bpftool_load_cmd};
+use ferro_net::ebpf::{build_bpftool_load_cmd, EbpfProgram};
 
 #[test]
 fn ebpf_program_builder_is_deterministic() {
@@ -13,8 +13,13 @@ fn ebpf_program_builder_is_deterministic() {
     assert_eq!(
         cmd,
         vec![
-            "bpftool", "prog", "load", "/opt/ferro/xdp.o", "/sys/fs/bpf/ferro/xdp",
-            "type", "xdp"
+            "bpftool",
+            "prog",
+            "load",
+            "/opt/ferro/xdp.o",
+            "/sys/fs/bpf/ferro/xdp",
+            "type",
+            "xdp"
         ]
     );
 }

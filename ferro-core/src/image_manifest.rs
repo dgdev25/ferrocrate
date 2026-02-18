@@ -8,14 +8,12 @@ pub const OCI_IMAGE_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.
 pub const OCI_IMAGE_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 pub const OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 pub const OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
-pub const DOCKER_MANIFEST_MEDIA_TYPE: &str =
-    "application/vnd.docker.distribution.manifest.v2+json";
+pub const DOCKER_MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 pub const DOCKER_MANIFEST_LIST_MEDIA_TYPE: &str =
     "application/vnd.docker.distribution.manifest.list.v2+json";
 pub const DOCKER_IMAGE_CONFIG_MEDIA_TYPE: &str = "application/vnd.docker.container.image.v1+json";
 pub const DOCKER_LAYER_MEDIA_TYPE: &str = "application/vnd.docker.image.rootfs.diff.tar";
-pub const DOCKER_LAYER_GZIP_MEDIA_TYPE: &str =
-    "application/vnd.docker.image.rootfs.diff.tar.gzip";
+pub const DOCKER_LAYER_GZIP_MEDIA_TYPE: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
 #[derive(Debug, Error)]
 pub enum ImageManifestParseError {
@@ -158,7 +156,9 @@ impl ImageIndex {
 
 fn validate_descriptor(descriptor: &Descriptor) -> Result<(), ImageManifestParseError> {
     if descriptor.size < 0 {
-        return Err(ImageManifestParseError::InvalidDescriptorSize(descriptor.size));
+        return Err(ImageManifestParseError::InvalidDescriptorSize(
+            descriptor.size,
+        ));
     }
     let digest = descriptor.digest.as_str();
     let Some(value) = digest.strip_prefix("sha256:") else {
@@ -249,9 +249,7 @@ mod tests {
         "#;
 
         let err = parse_image_manifest(manifest).expect_err("should reject unknown media type");
-        assert!(err
-            .to_string()
-            .contains("unsupported manifest mediaType"));
+        assert!(err.to_string().contains("unsupported manifest mediaType"));
     }
 
     #[test]
@@ -275,7 +273,8 @@ mod tests {
         }
         "#;
 
-        let err = parse_image_manifest(manifest).expect_err("should reject unknown layer media type");
+        let err =
+            parse_image_manifest(manifest).expect_err("should reject unknown layer media type");
         assert!(err.to_string().contains("unsupported layer mediaType"));
     }
 

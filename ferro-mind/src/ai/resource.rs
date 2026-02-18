@@ -5,14 +5,14 @@
 //! 2. Analyzing memory growth trends
 //! 3. Predicting when memory will exceed limits
 
-use std::collections::VecDeque;
+use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
+use ruv_fann::{Network, NetworkBuilder};
 #[cfg(feature = "rvf-persistence")]
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use ruv_fann::{Network, NetworkBuilder};
-use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
+use std::collections::VecDeque;
 #[cfg(feature = "rvf-persistence")]
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "rvf-persistence")]
 use crate::ai::learning::vector_memory::VectorMemory;
@@ -132,9 +132,18 @@ impl ResourcePredictor {
         #[cfg(feature = "rvf-persistence")]
         if let Some(memory) = self.memory.as_mut() {
             let mut metadata = HashMap::new();
-            metadata.insert("cpu_percent".to_string(), serde_json::json!(sample.cpu_percent));
-            metadata.insert("memory_bytes".to_string(), serde_json::json!(sample.memory_bytes));
-            metadata.insert("pids_count".to_string(), serde_json::json!(sample.pids_count));
+            metadata.insert(
+                "cpu_percent".to_string(),
+                serde_json::json!(sample.cpu_percent),
+            );
+            metadata.insert(
+                "memory_bytes".to_string(),
+                serde_json::json!(sample.memory_bytes),
+            );
+            metadata.insert(
+                "pids_count".to_string(),
+                serde_json::json!(sample.pids_count),
+            );
             let id = format!("sample-{:?}", sample.timestamp);
             memory.insert(VectorEntry {
                 id: Some(VectorId::from(id)),
@@ -171,7 +180,10 @@ impl ResourcePredictor {
             // Calculate growth rate between consecutive samples
             if i > 0 {
                 let prev = &self.window[i - 1];
-                let time_diff = sample.timestamp.duration_since(prev.timestamp).as_secs_f64();
+                let time_diff = sample
+                    .timestamp
+                    .duration_since(prev.timestamp)
+                    .as_secs_f64();
                 if time_diff > 0.0 {
                     let mem_diff = sample.memory_bytes.saturating_sub(prev.memory_bytes) as f64;
                     growth_rates.push(mem_diff / time_diff);
@@ -199,15 +211,22 @@ impl ResourcePredictor {
         #[cfg(feature = "rvf-persistence")]
         if let Some(memory) = self.memory.as_ref() {
             if let Some(latest) = self.window.back() {
-                let neighbors = memory.search(&Self::sample_vector(latest), 3, DistanceMetric::Cosine);
+                let neighbors =
+                    memory.search(&Self::sample_vector(latest), 3, DistanceMetric::Cosine);
                 if !neighbors.is_empty() {
                     let mut mem_sum = prediction.memory_bytes as f64;
                     let mut cpu_sum = prediction.cpu_percent as f64;
                     let mut count = 1.0;
                     for neighbor in neighbors {
-                        let Some(meta) = neighbor.metadata else { continue };
-                        let Some(mem) = meta.get("memory_bytes").and_then(|v| v.as_u64()) else { continue };
-                        let Some(cpu) = meta.get("cpu_percent").and_then(|v| v.as_f64()) else { continue };
+                        let Some(meta) = neighbor.metadata else {
+                            continue;
+                        };
+                        let Some(mem) = meta.get("memory_bytes").and_then(|v| v.as_u64()) else {
+                            continue;
+                        };
+                        let Some(cpu) = meta.get("cpu_percent").and_then(|v| v.as_f64()) else {
+                            continue;
+                        };
                         mem_sum += mem as f64;
                         cpu_sum += cpu;
                         count += 1.0;
@@ -296,7 +315,10 @@ impl ResourcePredictor {
         }
 
         // CQ-01: Safe to unwrap because we check len() >= 2 above
-        let first = self.window.front().expect("window should have first element");
+        let first = self
+            .window
+            .front()
+            .expect("window should have first element");
         let last = self.window.back().expect("window should have last element");
 
         let time_diff = last.timestamp.duration_since(first.timestamp).as_secs_f64();
@@ -627,7 +649,9 @@ mod tests {
             });
         }
 
-        let pred = p.predict_oom(Duration::from_secs(300)).expect("should predict OOM");
+        let pred = p
+            .predict_oom(Duration::from_secs(300))
+            .expect("should predict OOM");
         assert!(pred.time_to_oom < Duration::from_secs(10));
         assert!(pred.confidence > 0.0);
     }
@@ -680,7 +704,9 @@ mod tests {
             });
         }
 
-        let pred = p.predict_oom(Duration::from_secs(300)).expect("should predict OOM");
+        let pred = p
+            .predict_oom(Duration::from_secs(300))
+            .expect("should predict OOM");
         assert_eq!(pred.time_to_oom, Duration::ZERO);
         assert_eq!(pred.confidence, 1.0);
     }

@@ -42,8 +42,18 @@ pub fn choose_provider<'a>(
         .iter()
         .filter(|p| p.quality.is_finite() && p.cost_per_1k_tokens.is_finite())
         .filter(|p| p.quality >= policy.min_quality)
-        .filter(|p| policy.max_cost_per_1k_tokens.map(|max| p.cost_per_1k_tokens <= max).unwrap_or(true))
-        .filter(|p| policy.max_latency_ms.map(|max| p.avg_latency_ms <= max).unwrap_or(true))
+        .filter(|p| {
+            policy
+                .max_cost_per_1k_tokens
+                .map(|max| p.cost_per_1k_tokens <= max)
+                .unwrap_or(true)
+        })
+        .filter(|p| {
+            policy
+                .max_latency_ms
+                .map(|max| p.avg_latency_ms <= max)
+                .unwrap_or(true)
+        })
         .collect();
 
     if valid.is_empty() {
@@ -62,15 +72,13 @@ pub fn choose_provider<'a>(
         .unwrap_or(1)
         .max(1) as f32;
 
-    valid
-        .into_iter()
-        .max_by(|a, b| {
-            let score_a = provider_score(a, policy, max_cost, max_latency);
-            let score_b = provider_score(b, policy, max_cost, max_latency);
-            score_a
-                .partial_cmp(&score_b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+    valid.into_iter().max_by(|a, b| {
+        let score_a = provider_score(a, policy, max_cost, max_latency);
+        let score_b = provider_score(b, policy, max_cost, max_latency);
+        score_a
+            .partial_cmp(&score_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 fn provider_score(

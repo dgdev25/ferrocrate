@@ -41,7 +41,8 @@ pub struct WasmRegistry {
 impl WasmRegistry {
     /// Register a new inference engine
     pub fn register<E: WasmInferenceEngine + 'static>(&mut self, engine: E) {
-        self.engines.insert(engine.name().to_string(), Box::new(engine));
+        self.engines
+            .insert(engine.name().to_string(), Box::new(engine));
     }
 
     /// Run inference using the specified engine

@@ -1,3 +1,4 @@
+use crate::ai_runtime::AiRuntimeConfig;
 use crate::dockerfile_build::{
     build_from_dockerfile_with_compression, build_from_dockerfile_with_store_and_compression,
     BuildResult, DockerfileBuildError,
@@ -26,6 +27,7 @@ pub enum FerrofileBuildError {
 #[derive(Debug, Deserialize)]
 struct Ferrofile {
     build: Option<BuildSpec>,
+    ai_runtime: Option<AiRuntimeConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +89,18 @@ pub fn build_from_ferrofile_with_store(
         build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression)
     };
     result.map_err(Into::into)
+}
+
+/// Parses the `[ai_runtime]` section from a ferrofile.toml, if present.
+pub fn ai_runtime_config_from_ferrofile(
+    ferrofile_path: &Path,
+) -> Result<Option<AiRuntimeConfig>, FerrofileBuildError> {
+    if !ferrofile_path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(ferrofile_path)?;
+    let ferrofile: Ferrofile = toml::from_str(&contents)?;
+    Ok(ferrofile.ai_runtime)
 }
 
 #[cfg(test)]

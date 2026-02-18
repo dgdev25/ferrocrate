@@ -1,3 +1,4 @@
+use crate::ai_runtime::AiRuntimeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -52,6 +53,8 @@ pub struct ContainerRecord {
     pub ipv6_address: Option<String>,
     #[serde(default)]
     pub ports: Vec<PortMappingRecord>,
+    #[serde(default)]
+    pub ai_runtime: Option<AiRuntimeConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +257,7 @@ mod tests {
                 container_port: 80,
                 protocol: "tcp".to_string(),
             }],
+            ai_runtime: None,
         };
 
         store.put(&record).expect("store record");
@@ -294,6 +298,7 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            ai_runtime: None,
         };
 
         store.put(&record).expect("store record");

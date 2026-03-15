@@ -19,6 +19,7 @@ use crate::mounts::{
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
+use tracing::{info, warn};
 use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
@@ -39,6 +40,7 @@ use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
 use ferro_net::veth;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use dashmap::DashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -242,9 +244,9 @@ pub struct ContainerRuntime {
     store: LocalContainerStore,
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
-    health_cancel: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
+    health_cancel: DashMap<String, Arc<AtomicBool>>,
     /// Cancellation tokens for resource monitor threads (Task 5.1)
-    resource_cancel: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
+    resource_cancel: DashMap<String, Arc<AtomicBool>>,
 }
 
 impl ContainerRuntime {
@@ -258,8 +260,8 @@ impl ContainerRuntime {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
-            health_cancel: std::sync::Mutex::new(HashMap::new()),
-            resource_cancel: std::sync::Mutex::new(HashMap::new()),
+            health_cancel: DashMap::new(),
+            resource_cancel: DashMap::new(),
         };
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
@@ -630,9 +632,7 @@ impl ContainerRuntime {
             let pid = record.pid;
             let cancel = Arc::new(AtomicBool::new(false));
             // Store cancellation token for later signaling
-            if let Ok(mut map) = self.health_cancel.lock() {
-                map.insert(id.clone(), cancel.clone());
-            }
+            self.health_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
                 run_health_checks(store, id, pid, config, cancel);
             });
@@ -645,9 +645,7 @@ impl ContainerRuntime {
             let cgroup_root = self.cgroup_root.clone();
             let memory_limit = limits.and_then(|l| l.memory_max).unwrap_or(0);
             let cancel = Arc::new(AtomicBool::new(false));
-            if let Ok(mut map) = self.resource_cancel.lock() {
-                map.insert(id.clone(), cancel.clone());
-            }
+            self.resource_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
                 run_resource_monitor(store, id, cgroup_root, memory_limit, cancel);
             });
@@ -683,6 +681,7 @@ impl ContainerRuntime {
         Ok(result)
     }
 
+    #[inline]
     pub fn logs(&self, id: &str) -> Result<String, RuntimeError> {
         let record = self
             .store
@@ -698,16 +697,19 @@ impl ContainerRuntime {
         Ok(output)
     }
 
+    #[inline]
     pub fn list(&self) -> Result<Vec<ContainerRecord>, RuntimeError> {
         Ok(self.store.list()?)
     }
 
+    #[inline]
     pub fn inspect(&self, id: &str) -> Result<ContainerRecord, RuntimeError> {
         self.store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))
     }
 
+    #[inline]
     pub fn stats(&self, id: &str) -> Result<CgroupStats, RuntimeError> {
         let _record = self
             .store
@@ -782,16 +784,12 @@ impl ContainerRuntime {
 
     pub fn stop(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
         // Signal health check thread to stop
-        if let Ok(mut map) = self.health_cancel.lock() {
-            if let Some(cancel) = map.remove(id) {
-                cancel.store(true, Ordering::Relaxed);
-            }
+        if let Some((_, cancel)) = self.health_cancel.remove(id) {
+            cancel.store(true, Ordering::Relaxed);
         }
         // Signal resource monitor thread to stop (Task 5.1)
-        if let Ok(mut map) = self.resource_cancel.lock() {
-            if let Some(cancel) = map.remove(id) {
-                cancel.store(true, Ordering::Relaxed);
-            }
+        if let Some((_, cancel)) = self.resource_cancel.remove(id) {
+            cancel.store(true, Ordering::Relaxed);
         }
 
         let record = self
@@ -914,9 +912,7 @@ impl ContainerRuntime {
             let pid = record.pid;
             let cancel = Arc::new(AtomicBool::new(false));
             // Store cancellation token for later signaling
-            if let Ok(mut map) = self.health_cancel.lock() {
-                map.insert(id.clone(), cancel.clone());
-            }
+            self.health_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
                 run_health_checks(store, id, pid, config, cancel);
             });
@@ -940,9 +936,7 @@ impl ContainerRuntime {
                 })
                 .unwrap_or(0);
             let cancel = Arc::new(AtomicBool::new(false));
-            if let Ok(mut map) = self.resource_cancel.lock() {
-                map.insert(id.clone(), cancel.clone());
-            }
+            self.resource_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
                 run_resource_monitor(store, id, cgroup_root, memory_limit, cancel);
             });
@@ -952,16 +946,12 @@ impl ContainerRuntime {
 
     pub fn remove(&self, id: &str) -> Result<(), RuntimeError> {
         // Clean up health check cancellation token if present
-        if let Ok(mut map) = self.health_cancel.lock() {
-            if let Some(cancel) = map.remove(id) {
-                cancel.store(true, Ordering::Relaxed);
-            }
+        if let Some((_, cancel)) = self.health_cancel.remove(id) {
+            cancel.store(true, Ordering::Relaxed);
         }
         // Clean up resource monitor cancellation token (Task 5.1)
-        if let Ok(mut map) = self.resource_cancel.lock() {
-            if let Some(cancel) = map.remove(id) {
-                cancel.store(true, Ordering::Relaxed);
-            }
+        if let Some((_, cancel)) = self.resource_cancel.remove(id) {
+            cancel.store(true, Ordering::Relaxed);
         }
 
         let record = self
@@ -984,7 +974,7 @@ impl ContainerRuntime {
         self.store.remove(id)?;
         if let Ok(containers) = self.store.list() {
             if let Err(e) = update_container_hosts(&self.runtime_dir, &containers) {
-                eprintln!("[cleanup] failed to update hosts file: {e}");
+                warn!("failed to update hosts file: {e}");
             }
         }
         // Logging is best-effort - don't fail if logging fails
@@ -1231,8 +1221,8 @@ fn build_command(
                             err.to_string(),
                         ));
                     }
-                    eprintln!(
-                        "[seccomp] permissive mode: seccomp apply failed, continuing without seccomp: {}",
+                    warn!(
+                        "permissive mode: seccomp apply failed, continuing without seccomp: {}",
                         err
                     );
                 }
@@ -1377,7 +1367,7 @@ fn supervise_child(
                 Err(_) => break,
             };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
-            eprintln!("[supervisor] failed to update pid status for {container_id}: {e}");
+            warn!("failed to update pid status for {container_id}: {e}");
         }
         child = new_child;
         container_start_time = std::time::Instant::now();
@@ -1402,11 +1392,10 @@ fn parse_capabilities(entries: &[String]) -> Vec<caps::Capability> {
 }
 
 fn dedup_env(entries: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashMap::new();
-    let mut order = Vec::new();
+    let mut seen: HashMap<String, String> = HashMap::with_capacity(entries.len());
+    let mut order: Vec<String> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let mut parts = entry.splitn(2, '=');
-        let key = parts.next().unwrap_or("").trim().to_string();
+        let key = entry.split('=').next().unwrap_or("").trim().to_string();
         if key.is_empty() {
             continue;
         }
@@ -1803,6 +1792,7 @@ fn seccomp_enabled() -> bool {
         .unwrap_or(true)
 }
 
+#[allow(dead_code)]
 fn seccomp_strict_mode() -> bool {
     !seccomp_permissive_mode()
 }
@@ -2430,6 +2420,13 @@ fn ebpf_strict_mode() -> bool {
 }
 
 fn ebpf_backend_available() -> bool {
+    // Allow tests to force unavailability even when tools exist
+    if std::env::var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
     if std::env::var("FERROCRATE_EBPF_ASSUME_AVAILABLE")
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -2460,8 +2457,7 @@ fn resolve_network_backend(requested: &str, container_id: &str) -> Result<String
     let message = format!(
         "eBPF backend requested for {container_id}; falling back to {fallback} ({reason}). Set FERROCRATE_EBPF_STRICT=1 to fail instead."
     );
-    eprintln!("WARNING: {message}");
-    log::warn!("{message}");
+    warn!("{message}");
     Ok(fallback.to_string())
 }
 
@@ -3031,7 +3027,7 @@ fn run_health_checks(
             Ok(exec) if exec.exit_code == 0 => {
                 failures = 0;
                 if let Err(e) = update_health(&store, &id, "healthy", failures, now) {
-                    eprintln!("[health] failed to update health for {id}: {e}");
+                    warn!("failed to update health for {id}: {e}");
                 }
             }
             Ok(_) | Err(_) => {
@@ -3161,15 +3157,17 @@ fn run_resource_monitor(
                 anomaly_training_samples.push(features.clone());
                 if anomaly_training_samples.len() >= anomaly_train_after {
                     anomaly_detector.train(&anomaly_training_samples, 50);
-                    eprintln!("[ai] container {}: anomaly detector trained on {} samples", id, anomaly_training_samples.len());
+                    info!(container = %id, samples = anomaly_training_samples.len(), "anomaly detector trained");
                 }
             } else {
                 // Detect anomalies once trained
                 let score = anomaly_detector.detect(&features);
                 if score.is_anomalous() {
-                    eprintln!(
-                        "[ai] container {}: anomaly detected (score={:.3}, threshold={:.3})",
-                        id, score.score, score.threshold
+                    warn!(
+                        container = %id,
+                        score = format!("{:.3}", score.score),
+                        threshold = format!("{:.3}", score.threshold),
+                        "anomaly detected"
                     );
                 }
             }
@@ -3183,10 +3181,14 @@ fn run_resource_monitor(
                 let limit_mb = prediction.memory_limit as f64 / 1024.0 / 1024.0;
                 let confidence_pct = prediction.confidence * 100.0;
 
-                // v0.1: Log to stderr (observe only)
-                eprintln!(
-                    "[ai] container {}: memory projected to exceed limit ({:.1}MB/{:.1}MB) in ~{}min (confidence: {:.0}%)",
-                    id, current_mb, limit_mb, minutes, confidence_pct
+                // v0.1: Log via tracing (observe only)
+                warn!(
+                    container = %id,
+                    current_mb = format!("{:.1}", current_mb),
+                    limit_mb = format!("{:.1}", limit_mb),
+                    minutes = minutes,
+                    confidence = format!("{:.0}%", confidence_pct),
+                    "memory projected to exceed limit"
                 );
 
                 // Log to audit log for AI explainability (AI-11)
@@ -3256,9 +3258,10 @@ fn run_resource_monitor(
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
                 {
-                    eprintln!(
-                        "[ai] suggestion: consider increasing memory limit with 'ferrocrate update --memory {}M {}'",
-                        (limit_mb * 1.5) as u64, id
+                    info!(
+                        container = %id,
+                        suggested_limit_mb = (limit_mb * 1.5) as u64,
+                        "suggestion: consider increasing memory limit with 'ferrocrate update --memory'"
                     );
                 }
 
@@ -3277,17 +3280,18 @@ fn run_resource_monitor(
                     let adjusted_limit = new_limit.min(ceiling);
                     match manager.adjust_memory_limit(&cgroup_path, adjusted_limit) {
                         Ok(()) => {
-                            eprintln!(
-                                "[ai] container {}: increased memory limit to {}MB",
-                                id,
-                                adjusted_limit / 1024 / 1024
+                            info!(
+                                container = %id,
+                                new_limit_mb = adjusted_limit / 1024 / 1024,
+                                "increased memory limit"
                             );
                             predictor.set_memory_limit(adjusted_limit);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[ai] container {}: failed to adjust memory limit: {}",
-                                id, e
+                            warn!(
+                                container = %id,
+                                error = %e,
+                                "failed to adjust memory limit"
                             );
                         }
                     }
@@ -3885,9 +3889,13 @@ mod tests {
         unsafe {
             std::env::remove_var("FERROCRATE_EBPF_STRICT");
             std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
+            std::env::set_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE", "1");
         }
         let backend = super::resolve_network_backend("ebpf", "c1").expect("fallback backend");
-        assert!(backend == "iptables" || backend == "nftables");
+        assert!(backend == "iptables" || backend == "nftables", "expected iptables or nftables, got {backend}");
+        unsafe {
+            std::env::remove_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE");
+        }
     }
 
     #[test]
@@ -3910,12 +3918,14 @@ mod tests {
         unsafe {
             std::env::set_var("FERROCRATE_EBPF_STRICT", "1");
             std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
+            std::env::set_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE", "1");
         }
         let err = super::resolve_network_backend("ebpf", "c1").expect_err("strict failure");
         let message = err.to_string();
         assert!(message.contains("ebpf backend requested"));
         unsafe {
             std::env::remove_var("FERROCRATE_EBPF_STRICT");
+            std::env::remove_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE");
         }
     }
 

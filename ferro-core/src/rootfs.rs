@@ -19,6 +19,8 @@ pub enum RootfsError {
     ReadLayer(#[from] io::Error),
     #[error("unsafe layer path in tar entry: {0}")]
     UnsafePath(String),
+    #[error("invalid hard link target in tar entry: {0}")]
+    InvalidHardLink(String),
 }
 
 /// Construct a root filesystem by applying OCI layers in order.
@@ -84,6 +86,11 @@ pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), R
             fs::create_dir_all(parent)?;
         }
 
+        if entry.header().entry_type().is_hard_link() {
+            apply_hard_link_entry(rootfs_dir, &entry, &destination)?;
+            continue;
+        }
+
         entry.unpack(&destination)?;
     }
 
@@ -133,6 +140,11 @@ fn apply_layer_tar_with_dedup(
             fs::create_dir_all(parent)?;
         }
 
+        if entry.header().entry_type().is_hard_link() {
+            apply_hard_link_entry(rootfs_dir, &entry, &destination)?;
+            continue;
+        }
+
         entry.unpack(&destination)?;
         if entry.header().entry_type().is_file() {
             dedup_file(&destination, cas_root)?;
@@ -165,6 +177,31 @@ fn dedup_file(path: &Path, cas_root: &Path) -> Result<(), RootfsError> {
     let _ = fs::remove_file(path);
     if fs::hard_link(&cas_path, path).is_err() {
         fs::copy(&cas_path, path)?;
+    }
+    Ok(())
+}
+
+/// Materialize a hard-link tar entry inside `rootfs_dir`.
+///
+/// The `tar` crate resolves hard-link targets relative to the current working
+/// directory, which breaks rootfs extraction for any image containing hard
+/// links (zoneinfo, busybox applets, libc). We resolve the target inside the
+/// rootfs ourselves, falling back to a copy when hard linking is rejected
+/// (e.g. across filesystems).
+fn apply_hard_link_entry<R: io::Read>(
+    rootfs_dir: &Path,
+    entry: &tar::Entry<R>,
+    destination: &Path,
+) -> Result<(), RootfsError> {
+    let link = entry
+        .link_name()?
+        .ok_or_else(|| RootfsError::InvalidHardLink("missing target".to_string()))?;
+    let link_target = sanitize_archive_path(&link)?;
+    ensure_no_symlink_components(rootfs_dir, &link_target)?;
+    let source = rootfs_dir.join(&link_target);
+    remove_path_if_exists(destination)?;
+    if fs::hard_link(&source, destination).is_err() {
+        fs::copy(&source, destination)?;
     }
     Ok(())
 }
@@ -367,6 +404,39 @@ mod tests {
         }
 
         builder.finish().expect("finish tar");
+    }
+
+    #[test]
+    fn applies_hard_link_entries_into_rootfs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rootfs = temp.path().join("rootfs");
+        let layer = temp.path().join("layer.tar");
+
+        {
+            let file = fs::File::create(&layer).expect("create tar");
+            let mut builder = Builder::new(file);
+            append_data(&mut builder, "usr/bin/orig", b"shared-content");
+            let mut header = Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::hard_link());
+            builder
+                .append_link(&mut header, "usr/bin/link", "usr/bin/orig")
+                .expect("append hard link");
+            builder.finish().expect("finish tar");
+        }
+
+        construct_rootfs(&rootfs, &[layer]).expect("rootfs should construct");
+
+        let orig = rootfs.join("usr/bin/orig");
+        let link = rootfs.join("usr/bin/link");
+        assert!(link.exists(), "hard link must be materialized inside the rootfs");
+        assert_eq!(fs::read(&link).expect("read link"), b"shared-content");
+        assert_eq!(
+            fs::metadata(&orig).expect("orig meta").ino(),
+            fs::metadata(&link).expect("link meta").ino(),
+            "hard link should share an inode with its target"
+        );
     }
 
     fn append_data(builder: &mut Builder<fs::File>, path: &str, content: &[u8]) {

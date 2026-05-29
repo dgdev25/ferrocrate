@@ -1,3 +1,24 @@
+//! FerroCrate Core - AI-native container runtime library.
+//!
+//! This crate provides the core container runtime functionality including:
+//! - Container lifecycle management (creation, execution, stopping)
+//! - Image handling (pull, store, layer management)
+//! - Security (capabilities, seccomp, entitlements)
+//! - AI runtime integration (anomaly detection, OOM prediction)
+//!
+//! ## Feature Flags
+//!
+//! - `linux` (enabled by default on Linux targets): Full container runtime support
+//!
+//! ## Example
+//!
+//! ```ignore
+//! use ferro_core::runtime::FerroRuntime;
+//!
+//! let runtime = FerroRuntime::new()?;
+//! runtime.create_container("my-container", config)?;
+//! ```
+
 pub mod ai_runtime;
 pub mod cgroups;
 #[cfg(target_os = "linux")]

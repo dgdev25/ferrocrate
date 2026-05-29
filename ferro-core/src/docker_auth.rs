@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tracing::warn;
 
 // SEC-02: Scoped environment variable guard for safe test environment manipulation
 #[allow(dead_code)]
@@ -382,10 +383,10 @@ fn load_ferrocrate_auths() -> Result<Option<HashMap<String, RegistryAuth>>, Dock
         if let Ok(metadata) = fs::metadata(&path) {
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
-                eprintln!(
-                    "WARNING: {} is accessible by other users (mode {:o}). Run: chmod 600 {}",
-                    path.display(),
-                    mode & 0o777,
+                warn!(
+                    path = %path.display(),
+                    mode = format!("{:o}", mode & 0o777),
+                    "auth file has overly permissive mode, run: chmod 600 {}",
                     path.display()
                 );
             }

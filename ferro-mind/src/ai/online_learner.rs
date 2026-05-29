@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+use tracing::{info, warn};
 
 use super::anomaly::NeuralAnomalyDetector;
 use super::collector::TelemetryEvent;
@@ -81,20 +82,18 @@ fn run_online_learner(config: &OnlineLearnerConfig) {
         let sample_count = count_new_samples(&config.telemetry_dir);
 
         if sample_count >= config.min_events_to_retrain {
-            eprintln!(
-                "[ai] online learner: {} new samples found, triggering incremental retrain",
-                sample_count
+            info!(
+                samples = sample_count,
+                "online learner: new samples found, triggering incremental retrain"
             );
 
             match run_incremental_retrain(config) {
                 Ok(()) => {
-                    eprintln!("[ai] online learner: retrain complete");
+                    info!("online learner: retrain complete");
                     archive_telemetry(&config.telemetry_dir, &config.models_dir);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[ai] online learner: retrain failed: {e}. Keeping previous model."
-                    );
+                    warn!(error = %e, "online learner: retrain failed, keeping previous model");
                 }
             }
         }
@@ -157,9 +156,9 @@ fn run_incremental_retrain(config: &OnlineLearnerConfig) -> Result<(), String> {
         return Err("neural training returned false".to_string());
     }
 
-    eprintln!(
-        "[ai] online learner: trained anomaly detector on {} healthy samples",
-        healthy_samples.len()
+    info!(
+        healthy_samples = healthy_samples.len(),
+        "online learner: trained anomaly detector"
     );
 
     Ok(())

@@ -9,6 +9,7 @@ use std::io::{copy, Read};
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
+use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryAuth {
@@ -179,9 +180,7 @@ impl RegistryClient {
     ) -> Result<String, RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = manifest_url(&image_ref);
-        if std::env::var("FERROCRATE_DEBUG_REGISTRY").is_ok() {
-            eprintln!("registry: GET {}", url);
-        }
+        debug!(url = %url, "registry: GET manifest");
         let accept = [
             OCI_IMAGE_MANIFEST_MEDIA_TYPE,
             crate::image_manifest::OCI_IMAGE_INDEX_MEDIA_TYPE,

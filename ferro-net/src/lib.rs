@@ -10,6 +10,7 @@ pub mod observability;
 pub mod packet_rules;
 pub mod portmap;
 pub mod rootless;
+pub mod subnet;
 pub mod validate;
 pub mod veth;
 

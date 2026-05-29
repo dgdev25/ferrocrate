@@ -39,10 +39,10 @@
 ### Networking
 - ✅ **Bridge networking** — Default container networking with port mapping
 - ✅ **Host and none modes** — Full control over network isolation
-- ✅ **Container DNS** — Automatic container-to-container name resolution
+- ✅ **Container DNS** — Container name/ID resolution via generated /etc/hosts, refreshed on every container start/stop (no standalone DNS server)
 - ✅ **Custom networks** — Named networks with configurable subnets
-- ✅ **eBPF + fallback** — eBPF packet forwarding with iptables/nftables fallback
-- ✅ **Port mapping** — TCP/UDP port forwarding to host
+- ⚠️ **eBPF (optional)** — Requires an externally provided eBPF object; iptables/nftables is the default and fully supported path
+- ✅ **Port mapping** — TCP/UDP port forwarding to host (host-localhost access to published ports requires the iptables backend; the nftables backend reaches them via the external interface only)
 - ⚠️ **IPv6 support** — Dual-stack networking (in progress)
 - ⚠️ **WireGuard overlay** — Encrypted cross-host communication (planned)
 
@@ -65,8 +65,8 @@
 - ⚠️ **eBPF security monitoring** — Runtime syscall auditing (planned)
 
 ### AI/Intelligence Layer (ferro-mind)
-- ✅ **WASM-based inference** — 1-5ms prediction latency, zero external API calls
-- ✅ **Predictive resource allocation** — Memory/CPU pre-allocation based on learned patterns
+- ✅ **Local model inference** — In-process linear model (JSON weights) + ruv-fann neural anomaly detection; no external API calls
+- ⚠️ **Resource hints** — Blended linear-trend + small neural predictor (heuristic-weighted)
 - ✅ **Anomaly detection** — Resource usage anomalies with severity and recommendations
 - ✅ **Intelligent restart** — Diagnostic analysis before restart with config adjustment
 - ✅ **Cost-tiered routing** — WASM (free) → local LLM (cheap) → Claude API (complex)
@@ -79,7 +79,7 @@
 - ✅ **docker-compose.yml compatibility** — Version 3.x files work without modification
 - ✅ **Native compose subcommand** — No separate tool installation required
 - ✅ **Service dependencies** — depends_on with condition support
-- ✅ **Service scaling** — ferrocrate compose up --scale web=3
+- ⚠️ **Service scaling** — Planned (--scale not yet implemented)
 - ✅ **Environment files** — .env support with variable substitution
 - ✅ **Profiles** — Named profiles for selective service activation
 - ✅ **Watch mode** — Automatic rebuild on source file changes

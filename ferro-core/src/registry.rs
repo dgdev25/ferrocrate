@@ -538,7 +538,20 @@ pub fn parse_image_reference(input: &str) -> Result<ImageReference, RegistryErro
         if parts.len() < 2 {
             return Err(RegistryError::InvalidReference(raw.to_string()));
         }
-        (parts[0].to_string(), parts[1..].join("/"))
+        let mut registry = parts[0].to_string();
+        let mut repository = parts[1..].join("/");
+        // `docker.io` / `index.docker.io` are Docker Hub aliases, not the registry
+        // API endpoint (which is `registry-1.docker.io`). Hitting `docker.io`
+        // directly redirects to the marketing site and returns HTML, not a manifest.
+        // Normalize the host and apply the implicit `library/` namespace for
+        // single-segment repositories, matching the bare-name default below.
+        if registry == "docker.io" || registry == "index.docker.io" {
+            registry = "registry-1.docker.io".to_string();
+            if !repository.contains('/') {
+                repository = format!("library/{repository}");
+            }
+        }
+        (registry, repository)
     } else if parts.len() == 1 {
         (
             "registry-1.docker.io".to_string(),
@@ -752,6 +765,26 @@ mod tests {
         assert_eq!(parsed.repository, "library/alpine");
         assert_eq!(parsed.reference, "latest");
         assert_eq!(parsed.separator, ReferenceSeparator::Tag);
+    }
+
+    #[test]
+    fn normalizes_explicit_docker_hub_host_to_registry_endpoint() {
+        // Explicit `docker.io` must resolve to the registry API endpoint,
+        // not the literal host (which redirects to the marketing site).
+        let parsed = parse_image_reference("docker.io/library/nginx:alpine").expect("should parse");
+        assert_eq!(parsed.registry, "registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/nginx");
+        assert_eq!(parsed.reference, "alpine");
+
+        // Single-segment repo under docker.io gets the implicit `library/` namespace.
+        let parsed = parse_image_reference("docker.io/nginx:alpine").expect("should parse");
+        assert_eq!(parsed.registry, "registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/nginx");
+
+        // index.docker.io is the same alias.
+        let parsed = parse_image_reference("index.docker.io/library/alpine").expect("should parse");
+        assert_eq!(parsed.registry, "registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/alpine");
     }
 
     #[test]

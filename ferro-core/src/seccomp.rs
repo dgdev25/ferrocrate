@@ -270,10 +270,23 @@ mod tests {
     use super::{default_seccomp_profile, parse_seccomp_profile};
 
     #[test]
-    fn loads_default_profile() {
+    fn default_profile_is_denylist_blocking_dangerous_syscalls() {
         let profile = default_seccomp_profile().expect("default profile should parse");
-        assert_eq!(profile.default_action, "SCMP_ACT_ERRNO");
-        assert!(!profile.syscalls.is_empty());
+        // Denylist model (per README): allow ordinary syscalls by default so a
+        // container's entrypoint can exec, while explicitly blocking dangerous ones.
+        assert_eq!(profile.default_action, "SCMP_ACT_ALLOW");
+        let denied: Vec<&str> = profile
+            .syscalls
+            .iter()
+            .filter(|r| r.action == "SCMP_ACT_ERRNO")
+            .flat_map(|r| r.names.iter().map(String::as_str))
+            .collect();
+        for syscall in ["kexec_load", "init_module", "ptrace", "bpf"] {
+            assert!(
+                denied.contains(&syscall),
+                "{syscall} must be explicitly denied by the default profile"
+            );
+        }
     }
 
     #[test]

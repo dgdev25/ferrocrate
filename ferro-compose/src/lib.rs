@@ -1,74 +1,162 @@
+//! FerroCrate Compose - Docker Compose file parser and orchestrator.
+//!
+//! This crate provides Docker Compose file parsing, validation, and orchestration:
+//! - YAML parsing with variable interpolation
+//! - Dependency graph analysis and cycle detection
+//! - Service startup ordering and shutdown sequencing
+//!
+//! ## Example
+//!
+//! ```ignore
+//! use ferro_compose::{ComposeFile, ComposeProject};
+//! use std::path::Path;
+//!
+//! let project = ComposeProject::load(Path::new("compose.yaml"))?;
+//! let services = compose_up(&project)?;
+//! println!("Start order: {:?}", services);
+//! ```
+
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// Errors that can occur during compose file parsing or validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
+    /// Failed to parse compose YAML or resolve variables.
     #[error("compose parse error: {0}")]
     Parse(String),
+
+    /// Compose file failed validation (invalid structure, cycles, etc).
     #[error("compose validation error: {0}")]
     Validation(String),
 }
 
+/// Result type for compose operations.
 pub type ComposeResult<T> = Result<T, ComposeError>;
 
+/// Parsed Docker Compose file with services, networks, and volumes.
+///
+/// This is the root structure representing a compose.yaml file.
+/// Supports version 3.x format with variable interpolation.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ComposeFile {
+    /// Compose file format version (e.g., "3.8").
     pub version: Option<String>,
+
+    /// Service definitions indexed by name.
     pub services: HashMap<String, Service>,
+
+    /// Named network definitions.
     pub networks: Option<HashMap<String, Network>>,
+
+    /// Named volume definitions.
     pub volumes: Option<HashMap<String, Volume>>,
 }
 
+/// Docker Compose service definition.
+///
+/// Represents a single service within a compose file with its configuration
+/// including image, build context, networking, and deployment options.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Service {
+    /// Container image to use (e.g., "nginx:latest").
     pub image: Option<String>,
+
+    /// Build configuration for local image builds.
     pub build: Option<Build>,
+
+    /// Command to run in the container (overrides image CMD).
     pub command: Option<Command>,
+
+    /// Entrypoint to use (overrides image ENTRYPOINT).
     pub entrypoint: Option<String>,
+
+    /// Environment variables as key-value pairs or list.
     pub environment: Option<Environment>,
+
+    /// Path to env file(s) to load.
     pub env_file: Option<Vec<String>>,
+
+    /// Port mappings (e.g., "8080:80").
     pub ports: Option<Vec<String>>,
+
+    /// Volume mount specifications.
     pub volumes: Option<Vec<String>>,
+
+    /// Networks to attach the service to.
     pub networks: Option<Vec<String>>,
+
+    /// Network mode (e.g., "host", "service:web").
     #[serde(rename = "network_mode")]
     pub network_mode: Option<String>,
+
+    /// Service dependencies that must start first.
     pub depends_on: Option<DependsOn>,
+
+    /// Restart policy ("no", "always", "on-failure", "unless-stopped").
     pub restart: Option<String>,
+
+    /// Health check configuration.
     pub healthcheck: Option<HealthCheck>,
+
+    /// Deployment and resource configuration.
     pub deploy: Option<Deploy>,
+
+    /// Service labels for metadata.
     pub labels: Option<HashMap<String, String>>,
+
+    /// Profile names that enable this service.
     pub profiles: Option<Vec<String>>,
 }
 
+/// Build configuration for creating container images.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Build {
+    /// Build context path (relative to compose file).
     pub context: Option<String>,
+
+    /// Path to Dockerfile (default: "Dockerfile").
     pub dockerfile: Option<String>,
+
+    /// Build arguments as key-value pairs.
     pub args: Option<HashMap<String, String>>,
 }
 
+/// Container command - either a string or list of arguments.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Command {
+    /// Command as a shell string.
     String(String),
+
+    /// Command as an array of arguments.
     List(Vec<String>),
 }
 
+/// Environment variables - either key-value map or list of assignments.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Environment {
+    /// Environment as key-value pairs.
     Map(HashMap<String, String>),
+
+    /// Environment as list of "KEY=VALUE" strings.
     List(Vec<String>),
 }
 
+/// Service dependencies with optional conditions.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum DependsOn {
+    /// Simple list of service names.
     Simple(Vec<String>),
+
+    /// Dependencies with start conditions.
     Conditional(HashMap<String, DependsCondition>),
 }
 
 impl DependsOn {
+    /// Returns an iterator over dependency service names.
     pub fn iter(&self) -> Box<dyn Iterator<Item = &String> + '_> {
         match self {
             DependsOn::Simple(list) => Box::new(list.iter()),
@@ -77,45 +165,73 @@ impl DependsOn {
     }
 }
 
+/// Condition for a service dependency (e.g., "service_healthy").
 #[derive(Debug, Deserialize, Clone)]
 pub struct DependsCondition {
+    /// The condition type: "service_started", "service_healthy", or "service_completed_successfully".
     pub condition: String,
 }
 
+/// Health check configuration for determining container readiness.
 #[derive(Debug, Deserialize, Clone)]
 pub struct HealthCheck {
+    /// Command to run for health check (e.g., ["CMD", "curl", "-f", "http://localhost/"]).
     pub test: Option<Vec<String>>,
+
+    /// Time between health checks (e.g., "30s").
     pub interval: Option<String>,
+
+    /// Maximum time for check to complete (e.g., "10s").
     pub timeout: Option<String>,
+
+    /// Number of consecutive failures before unhealthy.
     pub retries: Option<u32>,
+
+    /// Initial delay before starting health checks (e.g., "40s").
     pub start_period: Option<String>,
 }
 
+/// Deployment configuration for service scaling and resources.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Deploy {
+    /// Number of container replicas to run.
     pub replicas: Option<u32>,
+
+    /// Resource limits and reservations.
     pub resources: Option<DeployResources>,
 }
 
+/// Resource configuration with limits and reservations.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeployResources {
+    /// Maximum resources the service can use.
     pub limits: Option<ResourceSpec>,
+
+    /// Resources reserved for the service.
     pub reservations: Option<ResourceSpec>,
 }
 
+/// CPU and memory resource specification.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ResourceSpec {
+    /// CPU limit (e.g., "0.5" for half a CPU).
     pub cpus: Option<String>,
+
+    /// Memory limit (e.g., "512M").
     pub memory: Option<String>,
 }
 
+/// Named network configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Network {
+    /// Network driver ("bridge", "overlay", "host", etc.).
     pub driver: Option<String>,
 }
 
+/// Named volume configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Volume {
+    /// Volume driver ("local", "nfs", etc.).
     pub driver: Option<String>,
 }
 
@@ -123,6 +239,17 @@ pub mod compose;
 pub mod service_graph;
 
 impl ComposeFile {
+    /// Parse a compose file from YAML content with variable interpolation.
+    ///
+    /// # Arguments
+    ///
+    /// * `content` - Raw YAML content of the compose file.
+    /// * `env` - Environment variables for ${VAR} interpolation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposeError::Parse`] for invalid YAML or unresolved variables.
+    /// Returns [`ComposeError::Validation`] if the compose file is semantically invalid.
     pub fn parse(content: &str, env: &HashMap<String, String>) -> ComposeResult<Self> {
         let interpolated = interpolate_variables(content, env)?;
         let compose: ComposeFile = serde_yaml::from_str(&interpolated)
@@ -131,6 +258,17 @@ impl ComposeFile {
         Ok(compose)
     }
 
+    /// Validates the compose file for semantic correctness.
+    ///
+    /// Checks performed:
+    /// - Services map is not empty
+    /// - Version is 3.x if specified
+    /// - Each service has `image` or `build` specified
+    /// - All `depends_on` references exist
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposeError::Validation`] with details if validation fails.
     pub fn validate(&self) -> ComposeResult<()> {
         if self.services.is_empty() {
             return Err(ComposeError::Validation(
@@ -168,6 +306,7 @@ impl ComposeFile {
     }
 }
 
+/// Interpolates ${VAR} and ${VAR:-default} syntax in compose content.
 fn interpolate_variables(content: &str, env: &HashMap<String, String>) -> ComposeResult<String> {
     let mut output = String::with_capacity(content.len());
     let mut chars = content.chars().peekable();
@@ -206,6 +345,7 @@ fn interpolate_variables(content: &str, env: &HashMap<String, String>) -> Compos
     Ok(output)
 }
 
+/// Resolves a variable name to its value, checking provided env and system environment.
 fn resolve_env(var: &str, env: &HashMap<String, String>) -> Option<String> {
     if let Some(value) = env.get(var) {
         if !value.is_empty() {

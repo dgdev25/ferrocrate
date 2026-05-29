@@ -5,12 +5,15 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { workspace = true }
 ferro-core = { path = "../ferro-core" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10"
-thiserror = "2.0"
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -20,7 +23,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3.13"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

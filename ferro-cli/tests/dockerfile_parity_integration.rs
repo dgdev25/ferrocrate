@@ -69,7 +69,7 @@ fn dockerfile_build_defaults_to_local_dockerfile() {
     let build_output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
         .current_dir(context_dir.path())
-        .args(["build", "--tag", tag])
+        .args(["build", "--dockerfile", "Dockerfile", "--tag", tag])
         .output()
         .expect("run build");
     assert!(

@@ -39,7 +39,7 @@
 ### Networking
 - ✅ **Bridge networking** — Default container networking with port mapping
 - ✅ **Host and none modes** — Full control over network isolation
-- ⚠️ **Container DNS** — Name resolution via generated /etc/hosts (resolved at container start; no live resolver yet)
+- ✅ **Container DNS** — Container name/ID resolution via generated /etc/hosts, refreshed on every container start/stop (no standalone DNS server)
 - ✅ **Custom networks** — Named networks with configurable subnets
 - ⚠️ **eBPF (optional)** — Requires an externally provided eBPF object; iptables/nftables is the default and fully supported path
 - ✅ **Port mapping** — TCP/UDP port forwarding to host

@@ -68,6 +68,38 @@ pub fn validate_interface_name(name: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Maximum length for a network namespace name (a filename under /var/run/netns).
+const NETNS_NAME_MAX: usize = 255;
+
+/// Validates a network namespace name.
+///
+/// Unlike interface names, netns names are filenames under `/var/run/netns/` and
+/// are NOT bound by IFNAMSIZ (15). The same injection-safety rules apply, but the
+/// length limit is the filesystem name limit rather than the interface limit.
+pub fn validate_netns_name(name: &str) -> Result<(), ValidationError> {
+    if name.len() > NETNS_NAME_MAX {
+        return Err(ValidationError::InterfaceNameTooLong {
+            name: name.to_string(),
+            max: NETNS_NAME_MAX,
+        });
+    }
+    if name.is_empty() || name.starts_with('.') {
+        return Err(ValidationError::InvalidInterfaceName {
+            name: name.to_string(),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(ValidationError::InvalidInterfaceName {
+            name: name.to_string(),
+        });
+    }
+    check_shell_safe(name)?;
+    Ok(())
+}
+
 /// Validates a CIDR notation (IPv4 or IPv6).
 pub fn validate_cidr(cidr: &str) -> Result<(), ValidationError> {
     check_shell_safe(cidr)?;

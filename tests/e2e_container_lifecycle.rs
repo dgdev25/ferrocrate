@@ -217,4 +217,72 @@ CMD ["cat", "/hello.txt"]
             .args(["rmi", "test/committed:v1"])
             .output();
     }
+
+    #[test]
+    #[ignore = "Requires root + container runtime + network + image (sudo -E cargo test --test e2e_container_lifecycle -- --ignored network_published_port_and_egress)"]
+    fn network_published_port_and_egress() {
+        if !should_run() {
+            eprintln!("Skipping: container runtime not available");
+            return;
+        }
+
+        let runtime_dir = tempfile::tempdir().expect("runtime dir");
+
+        // Start nginx publishing host port 8080 -> container port 80 on bridge network.
+        // This exercises the OUTPUT-chain DNAT rule inserted by ferro-net.
+        let run_output = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args([
+                "run", "-d",
+                "--name", "ferro-e2e-web",
+                "--network", "bridge",
+                "-p", "8080:80",
+                "docker.io/library/nginx:alpine",
+            ])
+            .output()
+            .expect("run nginx");
+
+        assert!(
+            run_output.status.success(),
+            "nginx container should start: {}",
+            String::from_utf8_lossy(&run_output.stderr)
+        );
+
+        // Give nginx a moment to bind.
+        std::thread::sleep(Duration::from_secs(2));
+
+        // --- Check 1: published port reachable from host (OUTPUT-chain DNAT) ---
+        let curl_host = Command::new("curl")
+            .args(["--silent", "--fail", "--max-time", "5", "http://127.0.0.1:8080/"])
+            .output()
+            .expect("curl must be present on host");
+
+        assert!(
+            curl_host.status.success(),
+            "Published port 8080 must be reachable from localhost (DNAT check failed): {}",
+            String::from_utf8_lossy(&curl_host.stderr)
+        );
+
+        // --- Check 2: container has outbound internet egress (MASQUERADE + ip_forward) ---
+        let exec_output = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args([
+                "exec", "ferro-e2e-web",
+                "wget", "-q", "-O", "-", "--timeout=5", "http://1.1.1.1/",
+            ])
+            .output()
+            .expect("exec wget");
+
+        assert!(
+            exec_output.status.success(),
+            "Container must have outbound egress to 1.1.1.1 (MASQUERADE/ip_forward check failed): {}",
+            String::from_utf8_lossy(&exec_output.stderr)
+        );
+
+        // Cleanup
+        let _ = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["rm", "-f", "ferro-e2e-web"])
+            .output();
+    }
 }

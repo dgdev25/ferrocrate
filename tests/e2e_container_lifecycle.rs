@@ -114,7 +114,7 @@ CMD ["cat", "/hello.txt"]
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
-                "run", "-d",
+                "run",
                 "--name", "restart-test",
                 "-v", &format!("{}:/data", temp_dir.path().display()),
                 "alpine:3.19",
@@ -177,7 +177,7 @@ CMD ["cat", "/hello.txt"]
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
-                "run", "-d",
+                "run",
                 "--name", "commit-test",
                 "alpine:3.19",
                 "sh", "-c", "echo 'modified' > /modified.txt && sleep 60"
@@ -233,7 +233,7 @@ CMD ["cat", "/hello.txt"]
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
-                "run", "-d",
+                "run",
                 "--name", "ferro-e2e-web",
                 "--network", "bridge",
                 "-p", "8080:80",

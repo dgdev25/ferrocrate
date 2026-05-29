@@ -15,6 +15,15 @@ pub fn render_resolv_conf(config: &DnsConfig) -> String {
     lines.join("\n") + "\n"
 }
 
+/// Render an `/etc/hosts` body: loopback first, then `(name, ip)` entries.
+pub fn render_hosts_file(entries: &[(String, String)]) -> String {
+    let mut out = String::from("127.0.0.1\tlocalhost\n");
+    for (name, ip) in entries {
+        out.push_str(&format!("{ip}\t{name}\n"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_resolv_conf, DnsConfig};
@@ -29,5 +38,17 @@ mod tests {
         assert!(output.contains("nameserver 1.1.1.1"));
         assert!(output.contains("nameserver 8.8.8.8"));
         assert!(output.contains("search example.local"));
+    }
+
+    #[test]
+    fn renders_hosts_file() {
+        let entries = vec![
+            ("web".to_string(), "10.0.0.2".to_string()),
+            ("db".to_string(), "10.0.0.3".to_string()),
+        ];
+        let out = super::render_hosts_file(&entries);
+        assert!(out.starts_with("127.0.0.1\tlocalhost\n"));
+        assert!(out.contains("10.0.0.2\tweb\n"));
+        assert!(out.contains("10.0.0.3\tdb\n"));
     }
 }

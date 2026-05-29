@@ -16,6 +16,8 @@ pub enum SeccompError {
     UnknownSyscall(String),
     #[error("unknown architecture: {0}")]
     UnknownArch(String),
+    #[error("seccomp build failed ({0})")]
+    Build(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,7 +162,8 @@ pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompErro
     let default_action = parse_action(&profile.default_action)?;
 
     // Create the filter with the default action
-    let mut filter = ScmpFilterContext::new_filter(default_action)?;
+    let mut filter = ScmpFilterContext::new_filter(default_action)
+        .map_err(|e| SeccompError::Build(format!("new_filter: {e}")))?;
 
     // Add architecture rules
     for arch in &profile.architectures {
@@ -178,12 +181,23 @@ pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompErro
             "SCMP_ARCH_S390X" => ScmpArch::S390X,
             _ => return Err(SeccompError::UnknownArch(arch.clone())),
         };
-        filter.add_arch(scmp_arch)?;
+        filter
+            .add_arch(scmp_arch)
+            .map_err(|e| SeccompError::Build(format!("add_arch {arch}: {e}")))?;
     }
 
     // Add syscall rules
     for rule in &profile.syscalls {
         let action = parse_action(&rule.action)?;
+
+        // libseccomp rejects an unconditional rule whose action equals the filter's
+        // default action ("The library doesn't permit the particular operation").
+        // Such rules are redundant — the default already covers these syscalls — so
+        // skip them, matching runc/Docker behavior. (Conditional rules are kept: they
+        // narrow behavior for specific argument values.)
+        if rule.args.is_none() && action == default_action {
+            continue;
+        }
 
         for syscall_name in &rule.names {
             // Get syscall number by name
@@ -203,36 +217,50 @@ pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompErro
                         "SCMP_CMP_MASKED_EQ" => {
                             // For masked equality, use the value as mask
                             let mask = arg.value;
-                            filter.add_rule_conditional(
-                                action,
-                                syscall,
-                                &[ScmpArgCompare::new(
-                                    arg.index,
-                                    ScmpCompareOp::MaskedEqual(mask),
-                                    arg.value_two.unwrap_or(0),
-                                )],
-                            )?;
+                            filter
+                                .add_rule_conditional(
+                                    action,
+                                    syscall,
+                                    &[ScmpArgCompare::new(
+                                        arg.index,
+                                        ScmpCompareOp::MaskedEqual(mask),
+                                        arg.value_two.unwrap_or(0),
+                                    )],
+                                )
+                                .map_err(|e| {
+                                    SeccompError::Build(format!(
+                                        "add_rule_conditional {syscall_name}: {e}"
+                                    ))
+                                })?;
                             continue;
                         }
                         _ => {
                             return Err(SeccompError::UnknownAction(format!("cmp_op: {}", arg.op)))
                         }
                     };
-                    filter.add_rule_conditional(
-                        action,
-                        syscall,
-                        &[ScmpArgCompare::new(arg.index, cmp_op, arg.value)],
-                    )?;
+                    filter
+                        .add_rule_conditional(
+                            action,
+                            syscall,
+                            &[ScmpArgCompare::new(arg.index, cmp_op, arg.value)],
+                        )
+                        .map_err(|e| {
+                            SeccompError::Build(format!("add_rule_conditional {syscall_name}: {e}"))
+                        })?;
                 }
             } else {
                 // No argument rules - add simple rule
-                filter.add_rule(action, syscall)?;
+                filter
+                    .add_rule(action, syscall)
+                    .map_err(|e| SeccompError::Build(format!("add_rule {syscall_name}: {e}")))?;
             }
         }
     }
 
     // Apply the filter
-    filter.load()?;
+    filter
+        .load()
+        .map_err(|e| SeccompError::Build(format!("load: {e}")))?;
 
     Ok(())
 }

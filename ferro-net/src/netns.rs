@@ -1,5 +1,5 @@
 use crate::executor::{exec_cmd, ExecError};
-use crate::validate::{validate_interface_name, ValidationError};
+use crate::validate::{validate_interface_name, validate_netns_name, ValidationError};
 #[cfg(target_os = "linux")]
 use nix::sched::{setns, CloneFlags};
 #[cfg(target_os = "linux")]
@@ -28,12 +28,12 @@ pub fn netns_path(name: &str) -> PathBuf {
 // ============================================================================
 
 pub fn build_ip_netns_add_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
-    validate_interface_name(name)?;
+    validate_netns_name(name)?;
     Ok(vec!["ip".into(), "netns".into(), "add".into(), name.into()])
 }
 
 pub fn build_ip_netns_del_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
-    validate_interface_name(name)?;
+    validate_netns_name(name)?;
     Ok(vec!["ip".into(), "netns".into(), "del".into(), name.into()])
 }
 
@@ -42,7 +42,7 @@ pub fn build_ip_link_set_netns_cmd(
     netns: &str,
 ) -> Result<Vec<String>, ValidationError> {
     validate_interface_name(link)?;
-    validate_interface_name(netns)?;
+    validate_netns_name(netns)?;
     Ok(vec![
         "ip".into(),
         "link".into(),
@@ -121,5 +121,18 @@ mod tests {
     fn rejects_invalid_netns_names() {
         assert!(build_ip_netns_add_cmd("ns;rm -rf").is_err());
         assert!(build_ip_netns_add_cmd("").is_err());
+    }
+
+    #[test]
+    fn accepts_long_container_netns_name() {
+        // Regression: netns names (ferro-<32-hex-id> = 38 chars) are NOT interfaces
+        // and must not be rejected by the 15-char IFNAMSIZ limit.
+        let name = "ferro-73e7ef48de8bfe6fd1d552a7abb00cd5";
+        assert_eq!(name.len(), 38);
+        assert!(build_ip_netns_add_cmd(name).is_ok());
+        assert!(build_ip_netns_del_cmd(name).is_ok());
+        // The veth link param still enforces the interface limit.
+        assert!(build_ip_link_set_netns_cmd("eth0", name).is_ok());
+        assert!(build_ip_link_set_netns_cmd("this-iface-name-is-way-too-long", name).is_err());
     }
 }

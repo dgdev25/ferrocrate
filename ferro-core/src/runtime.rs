@@ -1687,6 +1687,9 @@ fn setup_network(
                 let forward = build_nft_forward_cmd(&map, &container_ip)?;
                 run_cmd_allow_exists(&prerouting)?;
                 run_cmd_allow_exists(&forward)?;
+                // LIMITATION: no OUTPUT-chain DNAT equivalent on the nftables backend yet,
+                // so reaching a published port from the host's own localhost works on the
+                // iptables backend only. External-interface access works on both. (see README)
             } else {
                 let prerouting = build_iptables_prerouting_cmd(&map, &container_ip)?;
                 let forward = build_iptables_forward_cmd(&map, &container_ip)?;

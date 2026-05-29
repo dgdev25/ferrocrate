@@ -42,7 +42,7 @@
 - ✅ **Container DNS** — Container name/ID resolution via generated /etc/hosts, refreshed on every container start/stop (no standalone DNS server)
 - ✅ **Custom networks** — Named networks with configurable subnets
 - ⚠️ **eBPF (optional)** — Requires an externally provided eBPF object; iptables/nftables is the default and fully supported path
-- ✅ **Port mapping** — TCP/UDP port forwarding to host
+- ✅ **Port mapping** — TCP/UDP port forwarding to host (host-localhost access to published ports requires the iptables backend; the nftables backend reaches them via the external interface only)
 - ⚠️ **IPv6 support** — Dual-stack networking (in progress)
 - ⚠️ **WireGuard overlay** — Encrypted cross-host communication (planned)
 

@@ -1581,10 +1581,14 @@ fn setup_network(
     } else {
         host_veth
     };
+    // The container-side peer must NOT be named "eth0" while in the host namespace:
+    // it would collide with the host's own eth0 (common on VMs/cloud) → EEXIST.
+    // Create it with a unique name, move it into the netns, then rename to eth0 there.
+    let cont_veth = format!("vc{}", short_id(container_id, 8));
     let veth_config = veth::VethConfig {
         pair: veth::VethPair {
             host: host_veth.clone(),
-            container: "eth0".to_string(),
+            container: cont_veth.clone(),
         },
         mtu: None,
         host_addr: None,
@@ -1601,7 +1605,12 @@ fn setup_network(
     } else if ebpf_monitor_enabled() {
         setup_ebpf_monitor(&host_veth)?;
     }
-    run_cmd(&netns::build_ip_link_set_netns_cmd("eth0", &netns_name)?)?;
+    run_cmd(&netns::build_ip_link_set_netns_cmd(&cont_veth, &netns_name)?)?;
+    // Rename the moved interface to eth0 inside the netns (while still down).
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "link", "set", &cont_veth, "name", "eth0"],
+    ))?;
 
     let container_ip = allocate_container_ip(container_id, &bridge_config.gateway)?;
     let container_ipv6 = if let Some((gateway, prefix)) = bridge_config

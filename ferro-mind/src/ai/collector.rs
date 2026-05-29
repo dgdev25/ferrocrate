@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 use serde::{Deserialize, Serialize};
 
@@ -160,9 +161,10 @@ impl TelemetryCollector {
 
     fn run(&mut self, rx: Receiver<TelemetryEvent>) {
         if let Err(e) = std::fs::create_dir_all(&self.data_dir) {
-            eprintln!(
-                "[ai-collector] failed to create data dir {:?}: {e}",
-                self.data_dir
+            warn!(
+                path = ?self.data_dir,
+                error = %e,
+                "ai-collector: failed to create data dir"
             );
             return;
         }
@@ -207,9 +209,10 @@ impl TelemetryCollector {
             .join("\n");
 
         if let Err(e) = std::fs::write(&path, content) {
-            eprintln!(
-                "[ai-collector] failed to write telemetry to {:?}: {e}",
-                path
+            warn!(
+                path = ?path,
+                error = %e,
+                "ai-collector: failed to write telemetry"
             );
         } else {
             self.buffer.clear();

@@ -35,7 +35,11 @@ use ferro_net::ebpf::{
 use ferro_net::exec_cmd as net_exec_cmd;
 use ferro_net::netns;
 use ferro_net::nftables::{build_nft_add_rule_cmd, build_nft_delete_rule_cmd, NftRule};
-use ferro_net::portmap::{build_iptables_forward_cmd, build_iptables_prerouting_cmd};
+use ferro_net::portmap::{
+    build_iptables_forward_cmd, build_iptables_masquerade_cmd, build_iptables_output_dnat_cmd,
+    build_iptables_prerouting_cmd,
+};
+use ferro_net::subnet::network_cidr_v4;
 use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
 use ferro_net::veth;
 use rand::Rng;
@@ -153,6 +157,12 @@ impl CreationRollback {
                         if let Err(e) = run_cmd(&forward) {
                             log::warn!("[rollback] failed to delete iptables forward: {:?}", e);
                         }
+                    }
+                }
+                if let Ok(mut output_dnat) = build_iptables_output_dnat_cmd(&map, container_ip) {
+                    replace_iptables_action(&mut output_dnat, "-D");
+                    if let Err(e) = run_cmd(&output_dnat) {
+                        log::warn!("[rollback] failed to delete iptables output dnat: {:?}", e);
                     }
                 }
                 // Delete nftables rules
@@ -1557,6 +1567,11 @@ fn setup_network(
             }
         }
     }
+    enable_ip_forwarding();
+    let subnet = network_cidr_v4(&bridge_config.gateway, bridge_config.prefix)
+        .map_err(RuntimeError::Network)?;
+    let masq = build_iptables_masquerade_cmd(&subnet, &bridge_config.name)?;
+    run_cmd_allow_exists(&masq)?;
     let netns_name = format!("ferro-{container_id}");
     run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
 
@@ -1672,11 +1687,16 @@ fn setup_network(
                 let forward = build_nft_forward_cmd(&map, &container_ip)?;
                 run_cmd_allow_exists(&prerouting)?;
                 run_cmd_allow_exists(&forward)?;
+                // LIMITATION: no OUTPUT-chain DNAT equivalent on the nftables backend yet,
+                // so reaching a published port from the host's own localhost works on the
+                // iptables backend only. External-interface access works on both. (see README)
             } else {
                 let prerouting = build_iptables_prerouting_cmd(&map, &container_ip)?;
                 let forward = build_iptables_forward_cmd(&map, &container_ip)?;
                 run_cmd_allow_exists(&prerouting)?;
                 run_cmd_allow_exists(&forward)?;
+                let output_dnat = build_iptables_output_dnat_cmd(&map, &container_ip)?;
+                run_cmd_allow_exists(&output_dnat)?;
             }
         }
     }
@@ -1736,6 +1756,10 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
                     let _ = run_cmd(&prerouting);
                     let _ = run_cmd(&forward);
                 }
+            }
+            if let Ok(mut output_dnat) = build_iptables_output_dnat_cmd(&map, container_ip) {
+                replace_iptables_action(&mut output_dnat, "-D");
+                let _ = run_cmd(&output_dnat);
             }
             if let Ok(nft_prerouting) = build_nft_prerouting_delete_cmd(&map, container_ip) {
                 let _ = run_cmd(&nft_prerouting);
@@ -2291,6 +2315,14 @@ fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
     ];
     out.extend(args.iter().map(|val| (*val).to_string()));
     out
+}
+
+/// Enable IPv4 forwarding so bridged containers can route through the host.
+/// Best-effort: logs a warning on failure rather than aborting container start.
+fn enable_ip_forwarding() {
+    if let Err(e) = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1") {
+        log::warn!("[net] failed to enable ip_forward: {e}");
+    }
 }
 
 /// Execute a command with logging and timeout.

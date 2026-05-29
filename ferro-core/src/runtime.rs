@@ -159,6 +159,12 @@ impl CreationRollback {
                         }
                     }
                 }
+                if let Ok(mut output_dnat) = build_iptables_output_dnat_cmd(&map, container_ip) {
+                    replace_iptables_action(&mut output_dnat, "-D");
+                    if let Err(e) = run_cmd(&output_dnat) {
+                        log::warn!("[rollback] failed to delete iptables output dnat: {:?}", e);
+                    }
+                }
                 // Delete nftables rules
                 if let Ok(nft_prerouting) = build_nft_prerouting_delete_cmd(&map, container_ip) {
                     if let Err(e) = run_cmd(&nft_prerouting) {

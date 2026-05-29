@@ -1,24 +1,55 @@
+//! Compose project management and orchestration.
+//!
+//! Provides project loading, file discovery, and orchestration commands.
+
 use crate::service_graph::ServiceGraph;
 use crate::{ComposeError, ComposeFile, ComposeResult};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Supported compose orchestration commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeCommand {
+    /// Start services in dependency order.
     Up,
+
+    /// Stop services in reverse order.
     Down,
+
+    /// List service status.
     Ps,
+
+    /// Show service logs.
     Logs,
 }
 
+/// A loaded compose project with parsed configuration.
+///
+/// Represents a compose.yaml file that has been loaded from disk,
+/// parsed, validated, and is ready for orchestration.
 #[derive(Debug, Clone)]
 pub struct ComposeProject {
+    /// Path to the compose file.
     pub path: PathBuf,
+
+    /// Parsed compose configuration.
     pub compose: ComposeFile,
 }
 
 impl ComposeProject {
+    /// Load a compose project from a file path.
+    ///
+    /// Loads the compose file, parses .env file from the same directory,
+    /// and validates the configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the compose.yaml file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposeError::Parse`] if the file cannot be read or parsed.
     pub fn load(path: &Path) -> ComposeResult<Self> {
         let content =
             fs::read_to_string(path).map_err(|err| ComposeError::Parse(err.to_string()))?;
@@ -33,10 +64,16 @@ impl ComposeProject {
         })
     }
 
+    /// Validates service dependencies and builds a dependency graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposeError::Validation`] if there are cyclic dependencies.
     pub fn validate_dependencies(&self) -> ComposeResult<ServiceGraph> {
         ServiceGraph::from_compose(&self.compose)
     }
 
+    /// Returns sorted list of all service names in the project.
     pub fn services(&self) -> Vec<String> {
         let mut names: Vec<String> = self.compose.services.keys().cloned().collect();
         names.sort();
@@ -44,6 +81,17 @@ impl ComposeProject {
     }
 }
 
+/// Find a compose file, either explicitly specified or by searching common locations.
+///
+/// Searches in order: explicit path, compose.yaml, compose.yml, docker-compose.yml, docker-compose.yaml.
+///
+/// # Arguments
+///
+/// * `explicit` - Optional explicit path to use instead of searching.
+///
+/// # Errors
+///
+/// Returns [`ComposeError::Parse`] if no compose file is found.
 pub fn find_compose_file(explicit: Option<&str>) -> ComposeResult<PathBuf> {
     if let Some(path) = explicit {
         let candidate = PathBuf::from(path);
@@ -72,6 +120,14 @@ pub fn find_compose_file(explicit: Option<&str>) -> ComposeResult<PathBuf> {
     ))
 }
 
+/// Computes the startup order for services based on dependencies.
+///
+/// Returns services in topological order, respecting `depends_on` relationships.
+/// Services with no dependencies start first, followed by dependent services.
+///
+/// # Errors
+///
+/// Returns [`ComposeError::Validation`] if there are cyclic dependencies.
 pub fn compose_up(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     let graph = project.validate_dependencies()?;
     let batches = graph.start_batches();
@@ -84,20 +140,27 @@ pub fn compose_up(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     Ok(ordered)
 }
 
+/// Computes the shutdown order (reverse of startup order).
+///
+/// Services are stopped in reverse dependency order to ensure
+/// dependent services stop before their dependencies.
 pub fn compose_down(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     let mut services = project.services();
     services.reverse();
     Ok(services)
 }
 
+/// Lists all services in the project (sorted alphabetically).
 pub fn compose_ps(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     Ok(project.services())
 }
 
+/// Lists services for log viewing (same as `compose_ps`).
 pub fn compose_logs(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     Ok(project.services())
 }
 
+/// Loads environment variables from a .env file in the given directory.
 fn load_env_file(dir: &Path) -> ComposeResult<HashMap<String, String>> {
     let mut env = HashMap::new();
     let env_path = dir.join(".env");

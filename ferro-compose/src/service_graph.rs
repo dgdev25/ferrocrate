@@ -1,20 +1,47 @@
+//! Service dependency graph with topological ordering.
+//!
+//! Represents the dependency relationships between services in a compose file,
+//! providing batched startup order that respects `depends_on` relationships.
+//! Services in the same batch can start in parallel as they have no dependencies on each other.
+
 use crate::{ComposeError, ComposeFile, ComposeResult};
 use std::collections::{HashMap, VecDeque};
 
+/// Service dependency graph with topological ordering.
+///
+/// Represents the dependency relationships between services in a compose file,
+/// providing batched startup order that respects `depends_on` relationships.
+/// Services in the same batch can start in parallel as they have no dependencies on each other.
 #[derive(Debug, Clone)]
 pub struct ServiceGraph {
+    /// Ordered batches of services. Each batch contains services that can start together.
     order: Vec<Vec<String>>,
 }
 
 impl ServiceGraph {
+    /// Builds a dependency graph from a compose file.
+    ///
+    /// Performs topological sort using Kahn's algorithm to determine
+    /// the order in which services should start.
+    ///
+    /// # Arguments
+    ///
+    /// * `compose` - Parsed compose file to analyze.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposeError::Validation`] if there are cyclic dependencies
+    /// or references to undefined services.
     pub fn from_compose(compose: &ComposeFile) -> ComposeResult<Self> {
         let mut indegree: HashMap<String, usize> = HashMap::new();
         let mut edges: HashMap<String, Vec<String>> = HashMap::new();
 
+        // Initialize all services with zero in-degree
         for name in compose.services.keys() {
             indegree.insert(name.clone(), 0);
         }
 
+        // Build dependency graph edges
         for (name, service) in &compose.services {
             if let Some(depends_on) = &service.depends_on {
                 for dep in depends_on.iter() {
@@ -32,6 +59,7 @@ impl ServiceGraph {
             }
         }
 
+        // Start with services that have no dependencies (in-degree = 0)
         let mut queue: VecDeque<String> = indegree
             .iter()
             .filter_map(|(name, count)| {
@@ -46,6 +74,7 @@ impl ServiceGraph {
         let mut order = Vec::new();
         let mut processed = 0usize;
 
+        // Process nodes in topological order
         while !queue.is_empty() {
             let mut batch = Vec::new();
             let batch_len = queue.len();
@@ -68,6 +97,7 @@ impl ServiceGraph {
             order.push(batch);
         }
 
+        // Check for cycles
         if processed != indegree.len() {
             return Err(ComposeError::Validation(
                 "compose contains cyclic dependencies".to_string(),
@@ -77,6 +107,10 @@ impl ServiceGraph {
         Ok(Self { order })
     }
 
+    /// Returns the startup batches in dependency order.
+    ///
+    /// Each batch contains services that can be started in parallel.
+    /// Services in batch 0 should start first, followed by batch 1, etc.
     pub fn start_batches(&self) -> Vec<Vec<String>> {
         self.order.clone()
     }

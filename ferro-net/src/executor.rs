@@ -6,6 +6,7 @@
 
 use std::process::Command;
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Debug, Error)]
 pub enum ExecError {
@@ -138,7 +139,7 @@ impl Transaction {
         for (_forward, rollback) in self.executed.iter().rev() {
             if !rollback.is_empty() {
                 if let Err(e) = exec_cmd(rollback) {
-                    eprintln!("[transaction] rollback failed: {e}");
+                    warn!(error = %e, "transaction rollback failed");
                 }
             }
         }

@@ -49,7 +49,9 @@ use std::collections::HashSet;
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::Ipv4Addr;
+#[cfg(target_os = "macos")]
+use std::net::TcpStream;
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
 #[cfg(all(unix, target_os = "linux"))]
@@ -155,6 +157,7 @@ pub enum Commands {
     },
     #[cfg(target_os = "linux")]
     Build {
+        #[arg(long)]
         dockerfile: Option<String>,
         #[arg(long)]
         ferrofile: Option<String>,
@@ -574,18 +577,30 @@ pub enum EntitlementCommands {
 }
 
 fn main() {
+    // Initialize tracing subscriber for structured logging (CQ-03)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
     match maybe_host_desktop_forward(&raw_args) {
         Ok(true) => return,
         Ok(false) => {}
         Err(err) => {
+            tracing::error!("{err}");
             eprintln!("error: {err}");
             process::exit(1);
         }
     }
     let cli = Cli::parse();
     if let Err(err) = dispatch(cli.command) {
-        eprintln!("error: {}", normalize_cli_error(err));
+        let normalized = normalize_cli_error(err);
+        tracing::error!("{normalized}");
+        eprintln!("error: {normalized}");
         process::exit(1);
     }
 }
@@ -2887,15 +2902,23 @@ fn handle_build(
         let dockerfile = dockerfile.unwrap_or("Dockerfile");
         let tag = tag.unwrap_or("local/build:latest");
         parse_image_reference(tag).map_err(|err| err.to_string())?;
+        // Resolve relative dockerfile paths against current working directory
+        let dockerfile_path = if Path::new(dockerfile).is_absolute() {
+            PathBuf::from(dockerfile)
+        } else {
+            std::env::current_dir()
+                .map_err(|err| format!("failed to get current directory: {err}"))?
+                .join(dockerfile)
+        };
         let r = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
-            Path::new(dockerfile),
+            &dockerfile_path,
             Some(tag),
             &runtime_dir,
             compression,
             store,
         )
         .map_err(|err| err.to_string())?;
-        let desc = format!("dockerfile={}", dockerfile);
+        let desc = format!("dockerfile={}", dockerfile_path.display());
         (r, desc)
     };
 
@@ -2955,9 +2978,9 @@ fn handle_build(
     Ok(())
 }
 
-fn validate_image_format(value: &str) -> Result<(), String> {
+fn validate_image_format(value: &str) -> Result<String, String> {
     match value {
-        "oci" | "rvf" => Ok(()),
+        "oci" | "rvf" => Ok(value.to_string()),
         _ => Err("image-format must be one of: oci, rvf".to_string()),
     }
 }
@@ -5168,6 +5191,7 @@ mod tests {
         let cli = Cli::parse_from([
             "ferrocrate",
             "build",
+            "--dockerfile",
             "./Dockerfile",
             "--tag",
             "acme/app:dev",
@@ -5179,11 +5203,15 @@ mod tests {
                 ferrofile,
                 tag,
                 compress,
+                image_format,
+                embed_model,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
                 assert_eq!(tag.expect("tag"), "acme/app:dev");
                 assert_eq!(compress, "gzip");
+                assert_eq!(image_format, "oci");
+                assert!(embed_model.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5830,7 +5858,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
         let err =
-            handle_build(&store, None, None, None, "gzip").expect_err("dockerfile should be read");
+            handle_build(&store, None, None, None, "gzip", "oci", None).expect_err("dockerfile should be read");
         assert!(
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
@@ -5841,7 +5869,7 @@ mod tests {
     fn build_handler_rejects_invalid_tag() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_build(&store, Some("./Dockerfile"), None, Some(""), "gzip")
+        let err = handle_build(&store, Some("./Dockerfile"), None, Some(""), "gzip", "oci", None)
             .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
     }

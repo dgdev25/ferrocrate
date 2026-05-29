@@ -5,14 +5,14 @@ edition = "2021"
 
 [dependencies]
 flate2 = "1.0"
-nix = { version = "0.30", features = ["process", "signal", "user"] }
+nix = { workspace = true }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 sled = "0.34"
 tar = "0.4"
-thiserror = "2.0"
+thiserror = { workspace = true }
 rvf-crypto = "0.2"
 hex = "0.4"
 zstd = "0.13"
@@ -22,17 +22,18 @@ ferro-net = { path = "../ferro-net" }
 ferro-mind = { path = "../ferro-mind" }
 rand = "0.9"
 log = "0.4"
+tracing = { workspace = true }
+dashmap = "6.1"
 uuid = { version = "1.0", features = ["v4"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-caps = "0.5"
+caps = { workspace = true }
 libseccomp = "0.3"
-nix = { version = "0.30", features = ["mount", "sched"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # Placeholder for non-Linux builds
 
 [dev-dependencies]
 httptest = "0.16"
-tempfile = "3.13"
+tempfile = { workspace = true }

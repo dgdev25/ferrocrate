@@ -54,7 +54,7 @@ use dashmap::DashMap;
 use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
@@ -2623,8 +2623,22 @@ impl BackendProbe for RuntimeBackendProbe {
     fn artifact_available(&self) -> bool {
         let object_path = std::env::var("FERROCRATE_EBPF_OBJECT")
             .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-monitor.o".to_string());
-        Path::new(&object_path).is_file()
+        ebpf_artifact_available(Path::new(&object_path))
     }
+}
+
+fn ebpf_artifact_available(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).is_ok() && magic == *b"\x7fELF"
 }
 
 fn resolve_network_backend(
@@ -4083,6 +4097,29 @@ mod tests {
         )
         .expect_err("eBPF must not fall back");
         assert!(err.to_string().contains("eBPF backend unavailable"));
+    }
+
+    #[test]
+    fn ebpf_artifact_requires_regular_nonempty_elf_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("missing.o");
+        assert!(!super::ebpf_artifact_available(&missing));
+
+        let directory = temp.path().join("directory.o");
+        std::fs::create_dir(&directory).expect("directory");
+        assert!(!super::ebpf_artifact_available(&directory));
+
+        let empty = temp.path().join("empty.o");
+        std::fs::write(&empty, []).expect("empty artifact");
+        assert!(!super::ebpf_artifact_available(&empty));
+
+        let invalid = temp.path().join("invalid.o");
+        std::fs::write(&invalid, b"not an ELF file").expect("invalid artifact");
+        assert!(!super::ebpf_artifact_available(&invalid));
+
+        let elf = temp.path().join("valid.o");
+        std::fs::write(&elf, b"\x7fELF").expect("ELF artifact");
+        assert!(super::ebpf_artifact_available(&elf));
     }
 
     #[test]

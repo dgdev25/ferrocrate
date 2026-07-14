@@ -127,7 +127,87 @@ task.
 - The final workspace suite differs from the supplied baseline: the stated
   cosign failure passed, while the unrelated seccomp default-profile test
   failed. This task does not modify seccomp behavior or that test.
-- `RuntimeBackendProbe::artifact_available` verifies that the configured
-  FerroCrate eBPF object file exists. The task contract does not define a
-  cryptographic artifact-verification mechanism; stronger verification remains
-  outside this task's scope.
+- Resolved by the review fix below: runtime artifact validation now requires a
+  regular nonempty ELF file. Cryptographic artifact verification remains outside
+  this task's scope.
+
+## Review-Fix Evidence
+
+### Changes
+
+- Added `bpftool` to the mandatory eBPF `BackendProbe` contract check.
+- Updated the eBPF unavailable error to state the exact Task 1 prerequisites:
+  `tc`, `bpftool`, bpffs mounted at `/sys/fs/bpf`, and a regular nonempty ELF
+  eBPF program artifact. It makes no cryptographic-verification claim.
+- Replaced runtime `Path::is_file()` artifact acceptance with
+  `ebpf_artifact_available`, which requires successful metadata lookup, a
+  regular file, nonzero length, successful opening, and the four-byte ELF
+  magic (`0x7f 45 4c 46`).
+- Added independent contract tests for missing `tc`, missing `bpftool`, missing
+  bpffs, invalid/missing artifact, and the all-prerequisites success path.
+- Added a runtime artifact test covering missing path, directory, empty file,
+  non-ELF file, and valid nonempty ELF-magic file.
+
+### Review-Fix RED Evidence
+
+Tests were extended before implementation and then run with:
+
+```text
+cargo test -p ferro-net backend
+cargo test -p ferro-core ebpf_artifact_requires_regular_nonempty_elf_file
+```
+
+Results before the fix:
+
+- `backend::tests::ebpf_requires_bpftool` failed because a probe with every
+  other prerequisite present was accepted.
+- The runtime test failed to compile because `ebpf_artifact_available` did not
+  exist.
+
+### Review-Fix GREEN Evidence
+
+```text
+cargo test -p ferro-net backend && \
+  cargo test -p ferro-core ebpf_ && \
+  cargo test -p ferro-cli published_port_preserves_ebpf_backend && \
+  cargo test --workspace
+```
+
+Focused results:
+
+- `ferro-net backend`: 7 passed
+- `ferro-core ebpf_`: 3 passed
+- `ferro-cli published_port_preserves_ebpf_backend`: 1 passed
+
+The workspace suite again failed only at the unrelated existing test:
+
+```text
+ferro-core/tests/security_tests.rs::parses_default_seccomp_profile
+left: "SCMP_ACT_ALLOW"
+right: "SCMP_ACT_ERRNO"
+```
+
+The stated cosign baseline test passed in this environment.
+
+### Ordering Confirmation
+
+`setup_network` calls `resolve_network_backend(network_backend,
+&RuntimeBackendProbe)` before it builds bridge configuration or calls
+`bridge::create_bridge`, `enable_ip_forwarding`, iptables masquerading,
+`ip netns add`, or veth creation. `resolve_network_backend` immediately calls
+`NetworkBackend::ensure_available`, and the runtime probe performs the ELF
+artifact validation. Therefore an unavailable eBPF backend is rejected before
+any common bridge or veth mutation. Host, none, and wireguard modes return via
+their dedicated paths and do not enter the bridge/veth setup path.
+
+### Review-Fix Self-Review
+
+- The contract requires all four Task 1 eBPF prerequisites; no individual
+  prerequisite is optional.
+- Artifact validation is limited exactly to regular/nonempty/ELF checks as
+  required. Cryptographic hash, map setup, and attach transaction verification
+  are not claimed or implemented here.
+- The established explicit backend selection and no-fallback behavior remain
+  unchanged.
+- The existing direct `ferro-net` dependency in `ferro-cli` and the lockfile
+  are intentionally unchanged by this review fix.

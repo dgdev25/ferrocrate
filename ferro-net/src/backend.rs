@@ -28,11 +28,13 @@ impl NetworkBackend {
         match self {
             Self::Ebpf
                 if !(probe.command_exists("tc")
+                    && probe.command_exists("bpftool")
                     && probe.bpffs_mounted()
                     && probe.artifact_available()) =>
             {
                 Err(BackendError::Unavailable(
-                    "eBPF backend unavailable: require tc, bpffs, and verified FerroCrate program"
+                    "eBPF backend unavailable: require tc and bpftool commands, bpffs mounted at \
+                     /sys/fs/bpf, and a regular nonempty ELF eBPF program artifact"
                         .into(),
                 ))
             }
@@ -76,6 +78,7 @@ mod tests {
 
     struct FakeProbe {
         tc_available: bool,
+        bpftool_available: bool,
         bpffs_mounted: bool,
         artifact_available: bool,
     }
@@ -84,15 +87,29 @@ mod tests {
         fn unavailable() -> Self {
             Self {
                 tc_available: false,
+                bpftool_available: false,
                 bpffs_mounted: false,
                 artifact_available: false,
+            }
+        }
+
+        fn available() -> Self {
+            Self {
+                tc_available: true,
+                bpftool_available: true,
+                bpffs_mounted: true,
+                artifact_available: true,
             }
         }
     }
 
     impl BackendProbe for FakeProbe {
         fn command_exists(&self, command: &str) -> bool {
-            command == "tc" && self.tc_available
+            match command {
+                "tc" => self.tc_available,
+                "bpftool" => self.bpftool_available,
+                _ => false,
+            }
         }
 
         fn bpffs_mounted(&self) -> bool {
@@ -109,6 +126,41 @@ mod tests {
         let probe = FakeProbe::unavailable();
         let err = NetworkBackend::Ebpf.ensure_available(&probe).unwrap_err();
         assert!(err.to_string().contains("eBPF backend unavailable"));
+    }
+
+    #[test]
+    fn ebpf_requires_tc() {
+        let mut probe = FakeProbe::available();
+        probe.tc_available = false;
+        assert!(NetworkBackend::Ebpf.ensure_available(&probe).is_err());
+    }
+
+    #[test]
+    fn ebpf_requires_bpftool() {
+        let mut probe = FakeProbe::available();
+        probe.bpftool_available = false;
+        assert!(NetworkBackend::Ebpf.ensure_available(&probe).is_err());
+    }
+
+    #[test]
+    fn ebpf_requires_bpffs() {
+        let mut probe = FakeProbe::available();
+        probe.bpffs_mounted = false;
+        assert!(NetworkBackend::Ebpf.ensure_available(&probe).is_err());
+    }
+
+    #[test]
+    fn ebpf_requires_valid_artifact() {
+        let mut probe = FakeProbe::available();
+        probe.artifact_available = false;
+        assert!(NetworkBackend::Ebpf.ensure_available(&probe).is_err());
+    }
+
+    #[test]
+    fn ebpf_accepts_all_task_one_prerequisites() {
+        NetworkBackend::Ebpf
+            .ensure_available(&FakeProbe::available())
+            .expect("all eBPF prerequisites available");
     }
 
     #[test]

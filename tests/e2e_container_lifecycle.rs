@@ -40,6 +40,30 @@ fn wait_for_container(container_id: &str, state: &str, timeout: Duration) -> boo
 mod tests {
     use super::*;
 
+    fn netfilter_snapshot() -> (String, String) {
+        let iptables = Command::new("iptables-save")
+            .output()
+            .expect("iptables-save must be present for the eBPF lane");
+        assert!(iptables.status.success(), "iptables-save must succeed");
+        let nftables = Command::new("nft")
+            .args(["list", "ruleset"])
+            .output()
+            .expect("nft must be present for the eBPF lane");
+        assert!(nftables.status.success(), "nft list ruleset must succeed");
+        (
+            ferrocrate_rule_lines(&String::from_utf8_lossy(&iptables.stdout)),
+            ferrocrate_rule_lines(&String::from_utf8_lossy(&nftables.stdout)),
+        )
+    }
+
+    fn ferrocrate_rule_lines(snapshot: &str) -> String {
+        snapshot
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().contains("ferro"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     #[ignore = "Requires container runtime"]
     fn pull_build_run_stop_remove_full_cycle() {
@@ -297,5 +321,105 @@ CMD ["cat", "/hello.txt"]
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args(["rm", "-f", "ferro-e2e-web"])
             .output();
+    }
+
+    #[test]
+    #[ignore = "Requires root + eBPF prerequisites + reserved SNAT range + network + image (FERROCRATE_E2E_NETWORK_BACKEND=ebpf sudo -E cargo test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes)"]
+    fn ebpf_network_published_port_egress_without_netfilter_changes() {
+        if std::env::var("FERROCRATE_E2E_NETWORK_BACKEND").as_deref() != Ok("ebpf") {
+            eprintln!("Skipping: FERROCRATE_E2E_NETWORK_BACKEND is not ebpf");
+            return;
+        }
+        if !should_run() {
+            eprintln!("Skipping: container runtime not available");
+            return;
+        }
+
+        let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let before = netfilter_snapshot();
+        let run_output = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args([
+                "run",
+                "--name",
+                "ferro-e2e-ebpf-web",
+                "--network",
+                "bridge",
+                "--network-backend",
+                "ebpf",
+                "-p",
+                "18080:80",
+                "docker.io/library/nginx:alpine",
+            ])
+            .output()
+            .expect("run nginx with eBPF");
+        assert!(
+            run_output.status.success(),
+            "eBPF nginx container should start: {}",
+            String::from_utf8_lossy(&run_output.stderr)
+        );
+
+        std::thread::sleep(Duration::from_secs(2));
+        let start = std::time::Instant::now();
+        let mut last_curl = None;
+        while start.elapsed() < Duration::from_secs(12) {
+            let curl = Command::new("curl")
+                .args([
+                    "--silent",
+                    "--fail",
+                    "--max-time",
+                    "2",
+                    "http://127.0.0.1:18080/",
+                ])
+                .output()
+                .expect("curl must be present on host");
+            let success = curl.status.success();
+            last_curl = Some(curl);
+            if success {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let curl = last_curl.expect("at least one curl attempt");
+        assert!(
+            curl.status.success(),
+            "eBPF published TCP port must be reachable: {}",
+            String::from_utf8_lossy(&curl.stderr)
+        );
+
+        let egress = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args([
+                "exec",
+                "ferro-e2e-ebpf-web",
+                "wget",
+                "-q",
+                "-O",
+                "-",
+                "--timeout=5",
+                "http://1.1.1.1/",
+            ])
+            .output()
+            .expect("exec wget");
+        assert!(
+            egress.status.success(),
+            "eBPF container must have outbound traffic: {}",
+            String::from_utf8_lossy(&egress.stderr)
+        );
+
+        let after = netfilter_snapshot();
+        assert_eq!(before.0, after.0, "eBPF mode changed FerroCrate iptables rules");
+        assert_eq!(before.1, after.1, "eBPF mode changed FerroCrate nftables rules");
+
+        let cleanup = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["rm", "-f", "ferro-e2e-ebpf-web"])
+            .output()
+            .expect("remove eBPF test container");
+        assert!(
+            cleanup.status.success(),
+            "eBPF container cleanup must succeed: {}",
+            String::from_utf8_lossy(&cleanup.stderr)
+        );
     }
 }

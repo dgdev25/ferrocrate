@@ -54,7 +54,46 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub ports: Vec<PortMappingRecord>,
     #[serde(default)]
+    pub network_backend: Option<String>,
+    #[serde(default)]
+    pub network_ownership: Option<NetworkOwnershipRecord>,
+    #[serde(default)]
     pub ai_runtime: Option<AiRuntimeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkOwnershipRecord {
+    pub owner_id: String,
+    pub host_interface: String,
+    #[serde(default)]
+    pub managed_interface: Option<String>,
+    #[serde(default)]
+    pub source_cidr: Option<String>,
+    #[serde(default)]
+    pub bridge: Option<String>,
+    #[serde(default)]
+    pub firewall_id: Option<String>,
+    #[serde(default)]
+    pub ebpf_pin_path: Option<String>,
+    #[serde(default)]
+    pub ebpf_filters: Vec<EbpfFilterOwnershipRecord>,
+    #[serde(default)]
+    pub ebpf_pins: Vec<EbpfPinOwnershipRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EbpfFilterOwnershipRecord {
+    pub direction: String,
+    pub priority: u32,
+    pub handle: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EbpfPinOwnershipRecord {
+    pub relative_path: String,
+    pub device: u64,
+    pub inode: u64,
+    pub directory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,6 +296,8 @@ mod tests {
                 container_port: 80,
                 protocol: "tcp".to_string(),
             }],
+            network_backend: None,
+            network_ownership: None,
             ai_runtime: None,
         };
 
@@ -298,6 +339,8 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            network_backend: None,
+            network_ownership: None,
             ai_runtime: None,
         };
 

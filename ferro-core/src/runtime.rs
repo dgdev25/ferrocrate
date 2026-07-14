@@ -3,7 +3,8 @@ use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
-    now_unix, ContainerRecord, ContainerStoreError, HealthConfig, LocalContainerStore,
+    now_unix, ContainerRecord, ContainerStoreError, EbpfFilterOwnershipRecord,
+    EbpfPinOwnershipRecord, HealthConfig, LocalContainerStore, NetworkOwnershipRecord,
     PortMappingRecord, RestartPolicy,
 };
 use crate::image_config::{
@@ -33,18 +34,14 @@ pub use ferro_net::NetworkBackend;
 use ferro_net::bridge;
 use ferro_net::BackendProbe;
 use ferro_net::ebpf::{
-    build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
-    EbpfProgram, SecurityMonitorConfig,
+    embedded_object_abi, embedded_object_sha256, install_security_monitor, EbpfNetwork,
+    EbpfNetworkConfig, SecurityMonitorConfig, FERRO_NETWORK_ROOT,
 };
+use ferro_net::ebpf_abi::{EndpointKey, EndpointValue, PortKey, PortValue};
 use ferro_net::exec_cmd as net_exec_cmd;
 use ferro_net::netns;
-use ferro_net::nftables::{
-    build_nft_add_rule_cmd, build_nft_delete_rule_handle_cmd,
-    build_nft_list_chain_with_handles_cmd, nft_rule_handles_from_list, NftRule,
-};
 use ferro_net::portmap::{
-    build_iptables_forward_cmd, build_iptables_masquerade_cmd, build_iptables_output_dnat_cmd,
-    build_iptables_prerouting_cmd,
+    build_network_plan as build_portmap_plan, NetworkPlan,
 };
 use ferro_net::subnet::network_cidr_v4;
 use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
@@ -55,9 +52,12 @@ use dashmap::DashMap;
 use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+#[cfg(test)]
+use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -82,6 +82,8 @@ struct CreationRollback {
     netns_name: Option<String>,
     container_ip: Option<String>,
     port_mappings: Vec<PortMappingRecord>,
+    network_backend: Option<NetworkBackend>,
+    network_ownership: Option<NetworkOwnershipRecord>,
     cgroup_name: Option<String>,
     cgroup_root: PathBuf,
     committed: bool,
@@ -95,6 +97,8 @@ impl CreationRollback {
             netns_name: None,
             container_ip: None,
             port_mappings: Vec::new(),
+            network_backend: None,
+            network_ownership: None,
             cgroup_name: None,
             cgroup_root,
             committed: false,
@@ -107,13 +111,14 @@ impl CreationRollback {
 
     fn track_network(
         &mut self,
-        netns_name: Option<String>,
-        container_ip: Option<String>,
-        ports: Vec<PortMappingRecord>,
+        setup: &NetworkSetup,
+        ports: &[PortMappingRecord],
     ) {
-        self.netns_name = netns_name;
-        self.container_ip = container_ip;
-        self.port_mappings = ports;
+        self.netns_name = setup.netns_name.clone();
+        self.container_ip = setup.container_ip.clone();
+        self.port_mappings = ports.to_vec();
+        self.network_backend = setup.backend;
+        self.network_ownership = setup.ownership.clone();
     }
 
     fn track_cgroup(&mut self, name: String) {
@@ -137,50 +142,15 @@ impl CreationRollback {
             }
         }
 
-        // Rollback network (iptables, nftables rules, netns)
-        if let Some(ref netns_name) = self.netns_name {
-            // Delete network namespace
-            if let Ok(cmd) = netns::build_ip_netns_del_cmd(netns_name) {
-                if let Err(e) = run_cmd(&cmd) {
-                    log::warn!("[rollback] failed to delete netns {}: {:?}", netns_name, e);
-                }
-            }
-        }
-
-        // Rollback iptables/nftables rules
-        if let Some(ref container_ip) = self.container_ip {
-            for mapping in &self.port_mappings {
-                let map = ferro_net::portmap::PortMapping {
-                    host_port: mapping.host_port,
-                    container_port: mapping.container_port,
-                    protocol: mapping.protocol.clone(),
-                };
-                // Delete iptables rules
-                if let Ok(mut prerouting) = build_iptables_prerouting_cmd(&map, container_ip) {
-                    if let Ok(mut forward) = build_iptables_forward_cmd(&map, container_ip) {
-                        replace_iptables_action(&mut prerouting, "-D");
-                        replace_iptables_action(&mut forward, "-D");
-                        if let Err(e) = run_cmd(&prerouting) {
-                            log::warn!("[rollback] failed to delete iptables prerouting: {:?}", e);
-                        }
-                        if let Err(e) = run_cmd(&forward) {
-                            log::warn!("[rollback] failed to delete iptables forward: {:?}", e);
-                        }
-                    }
-                }
-                if let Ok(mut output_dnat) = build_iptables_output_dnat_cmd(&map, container_ip) {
-                    replace_iptables_action(&mut output_dnat, "-D");
-                    if let Err(e) = run_cmd(&output_dnat) {
-                        log::warn!("[rollback] failed to delete iptables output dnat: {:?}", e);
-                    }
-                }
-                if let Err(e) = delete_nft_prerouting_rule(&map, container_ip) {
-                    log::warn!("[rollback] failed to delete nft prerouting: {:?}", e);
-                }
-                if let Err(e) = delete_nft_forward_rule(&map, container_ip) {
-                    log::warn!("[rollback] failed to delete nft forward: {:?}", e);
-                }
-            }
+        if let Err(error) = cleanup_network_resources(
+            &self.container_id,
+            self.netns_name.as_deref(),
+            self.container_ip.as_deref(),
+            &self.port_mappings,
+            self.network_backend,
+            self.network_ownership.as_ref(),
+        ) {
+            log::warn!("[rollback] failed to clean network resources: {error}");
         }
 
         // Rollback container directory
@@ -486,14 +456,13 @@ impl ContainerRuntime {
         validate_port_mapping_conflicts(&self.store, port_mappings)?;
 
         let rootless = !nix::unistd::Uid::effective().is_root();
-        let (netns_name, container_ip, container_ipv6) =
+        let network_setup =
             setup_network(&container_id, port_mappings, network_mode, network_backend)?;
         // Track network resources for rollback
-        rollback.track_network(
-            netns_name.clone(),
-            container_ip.clone(),
-            port_mappings.to_vec(),
-        );
+        rollback.track_network(&network_setup, port_mappings);
+        let netns_name = network_setup.netns_name.clone();
+        let container_ip = network_setup.container_ip.clone();
+        let container_ipv6 = network_setup.container_ipv6.clone();
         let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
 
@@ -605,6 +574,8 @@ impl ContainerRuntime {
                     protocol: mapping.protocol.clone(),
                 })
                 .collect(),
+            network_backend: network_setup.backend.map(|backend| backend.to_string()),
+            network_ownership: network_setup.ownership.clone(),
             ai_runtime: ai_config.cloned(),
         };
 
@@ -977,10 +948,7 @@ impl ContainerRuntime {
                 "container {id} is still running"
             )));
         }
-        // Best-effort cleanup - log failures but don't fail the remove operation
-        if let Err(e) = cleanup_network(&record) {
-            log::warn!("[cleanup] network cleanup failed for {id}: {e}");
-        }
+        cleanup_network(&record)?;
         let container_dir = self.runtime_dir.join("containers").join(id);
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
@@ -1573,7 +1541,25 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
     Ok(())
 }
 
-type NetworkSetup = (Option<String>, Option<String>, Option<String>);
+struct NetworkSetup {
+    netns_name: Option<String>,
+    container_ip: Option<String>,
+    container_ipv6: Option<String>,
+    backend: Option<NetworkBackend>,
+    ownership: Option<NetworkOwnershipRecord>,
+}
+
+impl NetworkSetup {
+    fn isolated(netns_name: Option<String>, container_ip: Option<String>, container_ipv6: Option<String>) -> Self {
+        Self {
+            netns_name,
+            container_ip,
+            container_ipv6,
+            backend: None,
+            ownership: None,
+        }
+    }
+}
 
 fn setup_network(
     container_id: &str,
@@ -1588,7 +1574,7 @@ fn setup_network(
                     "port mapping requires network bridge".to_string(),
                 ));
             }
-            return Ok((None, None, None));
+            return Ok(NetworkSetup::isolated(None, None, None));
         }
         "none" => {
             if !port_mappings.is_empty() {
@@ -1597,7 +1583,7 @@ fn setup_network(
                 ));
             }
             if !nix::unistd::Uid::effective().is_root() {
-                return Ok((None, None, None));
+                return Ok(NetworkSetup::isolated(None, None, None));
             }
             let netns_name = format!("ferro-{container_id}");
             run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
@@ -1605,7 +1591,7 @@ fn setup_network(
                 &netns_name,
                 &["ip", "link", "set", "lo", "up"],
             ))?;
-            return Ok((Some(netns_name), None, None));
+            return Ok(NetworkSetup::isolated(Some(netns_name), None, None));
         }
         "bridge" => {}
         "wireguard" => {
@@ -1624,7 +1610,7 @@ fn setup_network(
                 &["ip", "link", "set", "lo", "up"],
             ))?;
             let (ipv4, ipv6) = setup_wireguard(&netns_name, container_id)?;
-            return Ok((Some(netns_name), ipv4, ipv6));
+            return Ok(NetworkSetup::isolated(Some(netns_name), ipv4, ipv6));
         }
         _ => {
             return Err(RuntimeError::Network(
@@ -1641,12 +1627,6 @@ fn setup_network(
         active_backend = %active_backend,
         "network backend selected"
     );
-    if !port_mappings.is_empty() && active_backend == NetworkBackend::Ebpf {
-        return Err(RuntimeError::Network(
-            "port mapping requires network-backend=iptables or nftables".to_string(),
-        ));
-    }
-
     let bridge_config = bridge_config()?;
     let bridge_exec_config = bridge::BridgeConfig {
         name: bridge_config.name.clone(),
@@ -1666,8 +1646,6 @@ fn setup_network(
     enable_ip_forwarding();
     let subnet = network_cidr_v4(&bridge_config.gateway, bridge_config.prefix)
         .map_err(RuntimeError::Network)?;
-    let masq = build_iptables_masquerade_cmd(&subnet, &bridge_config.name)?;
-    run_cmd_allow_exists(&masq)?;
     let netns_name = format!("ferro-{container_id}");
     run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
 
@@ -1696,11 +1674,6 @@ fn setup_network(
         &bridge_config.name,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    if active_backend == NetworkBackend::Ebpf {
-        setup_ebpf_monitor(&host_veth)?;
-    } else if ebpf_monitor_enabled() {
-        setup_ebpf_monitor(&host_veth)?;
-    }
     run_cmd(&netns::build_ip_link_set_netns_cmd(&cont_veth, &netns_name)?)?;
     // Rename the moved interface to eth0 inside the netns (while still down).
     run_cmd(&ip_netns_exec(
@@ -1777,40 +1750,398 @@ fn setup_network(
         ))?;
     }
 
-    if !port_mappings.is_empty() {
-        if active_backend == NetworkBackend::Nftables {
-            ensure_nftables_chains()?;
+    let plan = build_network_plan(
+        active_backend,
+        container_id,
+        port_mappings,
+        &container_ip,
+        &subnet,
+        &bridge_config.name,
+    )?;
+    let ownership = match active_backend {
+        NetworkBackend::Ebpf => setup_ebpf_backend(
+            container_id,
+            &host_veth,
+            &netns_name,
+            &container_ip,
+            port_mappings,
+            &subnet,
+            &bridge_config.name,
+        ),
+        NetworkBackend::Iptables | NetworkBackend::Nftables => {
+            apply_network_plan(&plan)?;
+            Ok(NetworkOwnershipRecord {
+                owner_id: container_id.to_string(),
+                host_interface: host_veth.clone(),
+                managed_interface: None,
+                source_cidr: Some(subnet.clone()),
+                bridge: Some(bridge_config.name.clone()),
+                firewall_id: plan.firewall_id().map(str::to_string),
+                ebpf_pin_path: None,
+                ebpf_filters: Vec::new(),
+                ebpf_pins: Vec::new(),
+            })
         }
-        for mapping in port_mappings {
-            let map = ferro_net::portmap::PortMapping {
-                host_port: mapping.host_port,
-                container_port: mapping.container_port,
-                protocol: mapping.protocol.clone(),
-            };
-            if active_backend == NetworkBackend::Nftables {
-                let prerouting = build_nft_prerouting_cmd(&map, &container_ip)?;
-                let forward = build_nft_forward_cmd(&map, &container_ip)?;
-                run_cmd_allow_exists(&prerouting)?;
-                run_cmd_allow_exists(&forward)?;
-                // LIMITATION: no OUTPUT-chain DNAT equivalent on the nftables backend yet,
-                // so reaching a published port from the host's own localhost works on the
-                // iptables backend only. External-interface access works on both. (see README)
-            } else {
-                let prerouting = build_iptables_prerouting_cmd(&map, &container_ip)?;
-                let forward = build_iptables_forward_cmd(&map, &container_ip)?;
-                run_cmd_allow_exists(&prerouting)?;
-                run_cmd_allow_exists(&forward)?;
-                let output_dnat = build_iptables_output_dnat_cmd(&map, &container_ip)?;
-                run_cmd_allow_exists(&output_dnat)?;
+    };
+    let ownership = match ownership {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            if let Ok(command) = netns::build_ip_netns_del_cmd(&netns_name) {
+                let _ = run_cmd_allow_missing(&command);
             }
+            return Err(error);
         }
-    }
+    };
 
     if let Some(limit) = bandwidth_limit().as_deref() {
         apply_bandwidth_limit(&host_veth, limit)?;
     }
 
-    Ok((Some(netns_name), Some(container_ip), container_ipv6))
+    Ok(NetworkSetup {
+        netns_name: Some(netns_name),
+        container_ip: Some(container_ip),
+        container_ipv6,
+        backend: Some(active_backend),
+        ownership: Some(ownership),
+    })
+}
+
+fn build_network_plan(
+    backend: NetworkBackend,
+    owner_id: &str,
+    port_mappings: &[PortMappingRecord],
+    container_ip: &str,
+    source_cidr: &str,
+    bridge: &str,
+) -> Result<NetworkPlan, RuntimeError> {
+    let mappings = port_mappings
+        .iter()
+        .map(|mapping| ferro_net::portmap::PortMapping {
+            host_port: mapping.host_port,
+            container_port: mapping.container_port,
+            protocol: mapping.protocol.clone(),
+        })
+        .collect::<Vec<_>>();
+    build_portmap_plan(backend, owner_id, &mappings, container_ip, source_cidr, bridge)
+        .map_err(|error| RuntimeError::Network(error.to_string()))
+}
+
+fn apply_network_plan(plan: &NetworkPlan) -> Result<(), RuntimeError> {
+    for command in plan.commands() {
+        if let Err(error) = run_cmd(command) {
+            for cleanup in plan.cleanup_commands() {
+                let _ = run_cmd_allow_missing(cleanup);
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn setup_ebpf_backend(
+    container_id: &str,
+    host_veth: &str,
+    netns_name: &str,
+    container_ip: &str,
+    port_mappings: &[PortMappingRecord],
+    source_cidr: &str,
+    bridge: &str,
+) -> Result<NetworkOwnershipRecord, RuntimeError> {
+    let route = ebpf_external_route()?;
+    let before_ingress = tc_filter_snapshot(&route.interface, "ingress")?;
+    let before_egress = tc_filter_snapshot(&route.interface, "egress")?;
+    let (snat_port_start, snat_port_end) = ebpf_snat_range()?;
+    let mut network = EbpfNetwork::load(EbpfNetworkConfig {
+        network_id: container_id.to_string(),
+        interface: route.interface.clone(),
+        external_ipv4: route.address,
+        external_ifindex: route.ifindex,
+        next_hop_mac: route.next_hop_mac,
+        snat_port_start,
+        snat_port_end,
+        expected_object_sha256: embedded_object_sha256(),
+    })
+    .map_err(|error| RuntimeError::Network(error.to_string()))?;
+
+    let endpoint_address = container_ip
+        .parse::<Ipv4Addr>()
+        .map_err(|_| RuntimeError::Network("invalid eBPF endpoint IPv4 address".to_string()))?
+        .octets();
+    network
+        .install_endpoint(
+            EndpointKey {
+                address: endpoint_address,
+            },
+            EndpointValue {
+                ifindex: interface_ifindex(host_veth)?,
+                mac: netns_interface_mac(netns_name, "eth0")?,
+                flags: 0,
+            },
+        )
+        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    for mapping in port_mappings {
+        network
+            .install_port(
+                PortKey {
+                    protocol: protocol_number(&mapping.protocol)?,
+                    host_port: mapping.host_port,
+                },
+                PortValue {
+                    endpoint_address,
+                    endpoint_port: mapping.container_port,
+                },
+            )
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    }
+
+    let mut filters = tc_filter_snapshot(&route.interface, "ingress")?;
+    filters.extend(tc_filter_snapshot(&route.interface, "egress")?);
+    filters.retain(|filter| {
+        !before_ingress.contains(filter) && !before_egress.contains(filter)
+    });
+    if filters.len() != 2 {
+        return Err(RuntimeError::Network(format!(
+            "eBPF ownership capture expected two classifiers, found {}",
+            filters.len()
+        )));
+    }
+    let pin_path = Path::new(FERRO_NETWORK_ROOT).join(container_id);
+    let pins = capture_ebpf_pins(&pin_path)?;
+    if pins.is_empty() {
+        return Err(RuntimeError::Network(
+            "eBPF ownership capture found no pinned state".to_string(),
+        ));
+    }
+
+    let ownership = NetworkOwnershipRecord {
+        owner_id: container_id.to_string(),
+        host_interface: host_veth.to_string(),
+        managed_interface: Some(route.interface),
+        source_cidr: Some(source_cidr.to_string()),
+        bridge: Some(bridge.to_string()),
+        firewall_id: None,
+        ebpf_pin_path: Some(pin_path.display().to_string()),
+        ebpf_filters: filters,
+        ebpf_pins: pins,
+    };
+    std::mem::forget(network);
+    Ok(ownership)
+}
+
+struct EbpfExternalRoute {
+    interface: String,
+    address: [u8; 4],
+    ifindex: u32,
+    next_hop_mac: [u8; 6],
+}
+
+fn ebpf_external_route() -> Result<EbpfExternalRoute, RuntimeError> {
+    let output = run_cmd_capture(&[
+        "ip".to_string(),
+        "-4".to_string(),
+        "route".to_string(),
+        "get".to_string(),
+        "1.1.1.1".to_string(),
+    ])?;
+    let fields = output.split_whitespace().collect::<Vec<_>>();
+    let field_after = |name: &str| {
+        fields
+            .iter()
+            .position(|field| *field == name)
+            .and_then(|index| fields.get(index + 1).copied())
+    };
+    let interface = std::env::var("FERROCRATE_EBPF_EXTERNAL_INTERFACE")
+        .ok()
+        .or_else(|| field_after("dev").map(str::to_string))
+        .ok_or_else(|| RuntimeError::Network("eBPF route has no external interface".to_string()))?;
+    let address = std::env::var("FERROCRATE_EBPF_EXTERNAL_IPV4")
+        .ok()
+        .or_else(|| field_after("src").map(str::to_string))
+        .ok_or_else(|| RuntimeError::Network("eBPF route has no external source IPv4".to_string()))?
+        .parse::<Ipv4Addr>()
+        .map_err(|_| RuntimeError::Network("invalid eBPF external IPv4".to_string()))?
+        .octets();
+    let next_hop_mac = if let Ok(mac) = std::env::var("FERROCRATE_EBPF_NEXT_HOP_MAC") {
+        parse_mac(&mac)?
+    } else {
+        let gateway = field_after("via").ok_or_else(|| {
+            RuntimeError::Network(
+                "eBPF default route has no next hop; set FERROCRATE_EBPF_NEXT_HOP_MAC"
+                    .to_string(),
+            )
+        })?;
+        let neighbor = run_cmd_capture(&[
+            "ip".to_string(),
+            "neigh".to_string(),
+            "show".to_string(),
+            "to".to_string(),
+            gateway.to_string(),
+            "dev".to_string(),
+            interface.clone(),
+        ])?;
+        let neighbor_fields = neighbor.split_whitespace().collect::<Vec<_>>();
+        let index = neighbor_fields
+            .iter()
+            .position(|field| *field == "lladdr")
+            .ok_or_else(|| {
+                RuntimeError::Network(format!(
+                    "eBPF next-hop MAC for {gateway} is unresolved; populate the neighbor entry or set FERROCRATE_EBPF_NEXT_HOP_MAC"
+                ))
+            })?;
+        parse_mac(neighbor_fields.get(index + 1).copied().unwrap_or_default())?
+    };
+    Ok(EbpfExternalRoute {
+        ifindex: interface_ifindex(&interface)?,
+        interface,
+        address,
+        next_hop_mac,
+    })
+}
+
+fn interface_ifindex(interface: &str) -> Result<u32, RuntimeError> {
+    ferro_net::validate::validate_interface_name(interface)
+        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| RuntimeError::Network(format!("invalid ifindex for {interface}")))
+}
+
+fn netns_interface_mac(netns_name: &str, interface: &str) -> Result<[u8; 6], RuntimeError> {
+    let output = run_cmd_capture(&ip_netns_exec(
+        netns_name,
+        &["cat", &format!("/sys/class/net/{interface}/address")],
+    ))?;
+    parse_mac(output.trim())
+}
+
+fn parse_mac(value: &str) -> Result<[u8; 6], RuntimeError> {
+    let octets = value
+        .split(':')
+        .map(|part| u8::from_str_radix(part, 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RuntimeError::Network(format!("invalid MAC address `{value}`")))?;
+    octets
+        .try_into()
+        .map_err(|_| RuntimeError::Network(format!("invalid MAC address `{value}`")))
+}
+
+fn protocol_number(protocol: &str) -> Result<u8, RuntimeError> {
+    match protocol.to_ascii_lowercase().as_str() {
+        "tcp" => Ok(6),
+        "udp" => Ok(17),
+        _ => Err(RuntimeError::Network(format!(
+            "unsupported eBPF port protocol `{protocol}`"
+        ))),
+    }
+}
+
+fn ebpf_snat_range() -> Result<(u16, u16), RuntimeError> {
+    let value = std::env::var("FERROCRATE_EBPF_SNAT_PORT_RANGE")
+        .unwrap_or_else(|_| "50000-50031".to_string());
+    let (start, end) = value.split_once('-').ok_or_else(|| {
+        RuntimeError::Network("FERROCRATE_EBPF_SNAT_PORT_RANGE must be START-END".to_string())
+    })?;
+    let start = start.parse::<u16>().map_err(|_| {
+        RuntimeError::Network("invalid eBPF SNAT range start".to_string())
+    })?;
+    let end = end
+        .parse::<u16>()
+        .map_err(|_| RuntimeError::Network("invalid eBPF SNAT range end".to_string()))?;
+    Ok((start, end))
+}
+
+fn tc_filter_snapshot(
+    interface: &str,
+    direction: &str,
+) -> Result<Vec<EbpfFilterOwnershipRecord>, RuntimeError> {
+    let command = [
+        "tc".to_string(),
+        "-j".to_string(),
+        "filter".to_string(),
+        "show".to_string(),
+        "dev".to_string(),
+        interface.to_string(),
+        direction.to_string(),
+    ];
+    let output = match run_cmd_capture(&command) {
+        Ok(output) => output,
+        Err(error) if error.to_string().contains("Parent Qdisc doesn't exist") => {
+            return Ok(Vec::new())
+        }
+        Err(error) => return Err(error),
+    };
+    let filters = serde_json::from_str::<Vec<serde_json::Value>>(&output)
+        .map_err(|error| RuntimeError::Network(format!("invalid tc filter JSON: {error}")))?;
+    let mut owned = Vec::new();
+    for filter in filters {
+        if filter.get("kind").and_then(serde_json::Value::as_str) != Some("bpf") {
+            continue;
+        }
+        let Some(priority) = filter.get("pref").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(options) = filter.get("options") else {
+            continue;
+        };
+        let name = options
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !matches!(name, "ferro_ingress" | "ferro_egress") {
+            continue;
+        }
+        let handle = options
+            .get("handle")
+            .map(|value| match value {
+                serde_json::Value::String(value) => value.clone(),
+                value => value.to_string(),
+            })
+            .ok_or_else(|| RuntimeError::Network("owned tc filter has no handle".to_string()))?;
+        owned.push(EbpfFilterOwnershipRecord {
+            direction: direction.to_string(),
+            priority: u32::try_from(priority).map_err(|_| {
+                RuntimeError::Network("owned tc filter priority is out of range".to_string())
+            })?,
+            handle,
+        });
+    }
+    Ok(owned)
+}
+
+fn capture_ebpf_pins(root: &Path) -> Result<Vec<EbpfPinOwnershipRecord>, RuntimeError> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        records: &mut Vec<EbpfPinOwnershipRecord>,
+    ) -> Result<(), RuntimeError> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(RuntimeError::Network(format!(
+                "foreign symlink in eBPF ownership tree: {}",
+                path.display()
+            )));
+        }
+        let relative = path.strip_prefix(root).map_err(|_| {
+            RuntimeError::Network("eBPF pin escaped ownership root".to_string())
+        })?;
+        records.push(EbpfPinOwnershipRecord {
+            relative_path: relative.display().to_string(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            directory: metadata.is_dir(),
+        });
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                visit(root, &entry?.path(), records)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut records = Vec::new();
+    visit(root, root, &mut records)?;
+    Ok(records)
 }
 
 fn ensure_bridge_backend_root(
@@ -1854,32 +2185,223 @@ fn validate_port_mapping_conflicts(
 }
 
 fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
-    if let Some(netns_name) = record.netns.as_ref() {
-        if let Ok(cmd) = netns::build_ip_netns_del_cmd(netns_name) {
-            let _ = run_cmd(&cmd);
-        }
-    }
-    if let Some(container_ip) = record.ip_address.as_ref() {
-        for mapping in &record.ports {
-            let map = ferro_net::portmap::PortMapping {
-                host_port: mapping.host_port,
-                container_port: mapping.container_port,
-                protocol: mapping.protocol.clone(),
-            };
-            if let Ok(mut prerouting) = build_iptables_prerouting_cmd(&map, container_ip) {
-                if let Ok(mut forward) = build_iptables_forward_cmd(&map, container_ip) {
-                    replace_iptables_action(&mut prerouting, "-D");
-                    replace_iptables_action(&mut forward, "-D");
-                    let _ = run_cmd(&prerouting);
-                    let _ = run_cmd(&forward);
+    let backend = record
+        .network_backend
+        .as_deref()
+        .map(str::parse::<NetworkBackend>)
+        .transpose()
+        .map_err(|error| RuntimeError::Network(format!("malformed persisted backend: {error}")))?;
+    cleanup_network_resources(
+        &record.id,
+        record.netns.as_deref(),
+        record.ip_address.as_deref(),
+        &record.ports,
+        backend,
+        record.network_ownership.as_ref(),
+    )
+}
+
+fn cleanup_network_resources(
+    container_id: &str,
+    netns_name: Option<&str>,
+    container_ip: Option<&str>,
+    port_mappings: &[PortMappingRecord],
+    backend: Option<NetworkBackend>,
+    ownership: Option<&NetworkOwnershipRecord>,
+) -> Result<(), RuntimeError> {
+    match (backend, ownership) {
+        (None, None) => {}
+        (Some(backend), Some(ownership)) => {
+            validate_network_ownership(container_id, backend, ownership)?;
+            match backend {
+                NetworkBackend::Ebpf => cleanup_owned_ebpf(ownership)?,
+                NetworkBackend::Iptables | NetworkBackend::Nftables => {
+                    let container_ip = container_ip.ok_or_else(|| {
+                        RuntimeError::Network("firewall ownership has no container IP".to_string())
+                    })?;
+                    let source_cidr = ownership.source_cidr.as_deref().ok_or_else(|| {
+                        RuntimeError::Network("firewall ownership has no source CIDR".to_string())
+                    })?;
+                    let bridge = ownership.bridge.as_deref().ok_or_else(|| {
+                        RuntimeError::Network("firewall ownership has no bridge".to_string())
+                    })?;
+                    let plan = build_network_plan(
+                        backend,
+                        container_id,
+                        port_mappings,
+                        container_ip,
+                        source_cidr,
+                        bridge,
+                    )?;
+                    if ownership.firewall_id.as_deref() != plan.firewall_id() {
+                        return Err(RuntimeError::Network(
+                            "foreign firewall ownership metadata".to_string(),
+                        ));
+                    }
+                    for command in plan.cleanup_commands() {
+                        run_cmd_allow_missing(command)?;
+                    }
                 }
             }
-            if let Ok(mut output_dnat) = build_iptables_output_dnat_cmd(&map, container_ip) {
-                replace_iptables_action(&mut output_dnat, "-D");
-                let _ = run_cmd(&output_dnat);
+        }
+        _ => {
+            return Err(RuntimeError::Network(
+                "malformed network ownership metadata".to_string(),
+            ))
+        }
+    }
+
+    if let Some(netns_name) = netns_name {
+        let command = netns::build_ip_netns_del_cmd(netns_name)?;
+        run_cmd_allow_missing(&command)?;
+    }
+    if let Some(ownership) = ownership {
+        run_cmd_allow_missing(&[
+            "ip".to_string(),
+            "link".to_string(),
+            "delete".to_string(),
+            ownership.host_interface.clone(),
+        ])?;
+    }
+    Ok(())
+}
+
+fn validate_network_ownership(
+    container_id: &str,
+    backend: NetworkBackend,
+    ownership: &NetworkOwnershipRecord,
+) -> Result<(), RuntimeError> {
+    let expected_host = format!("veth{}", short_id(container_id, 8));
+    let expected_host = &expected_host[..expected_host.len().min(15)];
+    if ownership.owner_id != container_id || ownership.host_interface != expected_host {
+        return Err(RuntimeError::Network(
+            "foreign network ownership metadata".to_string(),
+        ));
+    }
+    match backend {
+        NetworkBackend::Ebpf
+            if ownership.firewall_id.is_some()
+                || ownership.ebpf_pin_path.as_deref()
+                    != Some(
+                        Path::new(FERRO_NETWORK_ROOT)
+                            .join(container_id)
+                            .to_string_lossy()
+                            .as_ref(),
+                    ) =>
+        {
+            Err(RuntimeError::Network(
+                "foreign eBPF ownership metadata".to_string(),
+            ))
+        }
+        NetworkBackend::Iptables | NetworkBackend::Nftables
+            if ownership.ebpf_pin_path.is_some()
+                || !ownership.ebpf_filters.is_empty()
+                || !ownership.ebpf_pins.is_empty() =>
+        {
+            Err(RuntimeError::Network(
+                "foreign firewall ownership metadata".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn cleanup_owned_ebpf(ownership: &NetworkOwnershipRecord) -> Result<(), RuntimeError> {
+    let interface = ownership.managed_interface.as_deref().ok_or_else(|| {
+        RuntimeError::Network("eBPF ownership has no managed interface".to_string())
+    })?;
+    ferro_net::validate::validate_interface_name(interface)
+        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    if ownership.ebpf_filters.len() != 2 || ownership.ebpf_pins.is_empty() {
+        return Err(RuntimeError::Network(
+            "malformed eBPF ownership metadata".to_string(),
+        ));
+    }
+    for filter in &ownership.ebpf_filters {
+        if !matches!(filter.direction.as_str(), "ingress" | "egress")
+            || filter.priority == 0
+            || filter.handle.is_empty()
+            || !filter
+                .handle
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() || character == 'x')
+        {
+            return Err(RuntimeError::Network(
+                "malformed eBPF filter ownership".to_string(),
+            ));
+        }
+        run_cmd_allow_missing(&[
+            "tc".to_string(),
+            "filter".to_string(),
+            "delete".to_string(),
+            "dev".to_string(),
+            interface.to_string(),
+            filter.direction.clone(),
+            "pref".to_string(),
+            filter.priority.to_string(),
+            "handle".to_string(),
+            filter.handle.clone(),
+            "bpf".to_string(),
+        ])?;
+    }
+    cleanup_owned_ebpf_pins(ownership)
+}
+
+fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), RuntimeError> {
+    let root = PathBuf::from(ownership.ebpf_pin_path.as_deref().ok_or_else(|| {
+        RuntimeError::Network("eBPF ownership has no pin path".to_string())
+    })?);
+    let mut pins = ownership.ebpf_pins.clone();
+    pins.sort_by(|left, right| {
+        Path::new(&right.relative_path)
+            .components()
+            .count()
+            .cmp(&Path::new(&left.relative_path).components().count())
+            .then_with(|| left.directory.cmp(&right.directory))
+    });
+    for pin in pins {
+        let relative = Path::new(&pin.relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                && !pin.relative_path.is_empty()
+        {
+            return Err(RuntimeError::Network(
+                "malformed eBPF pin ownership path".to_string(),
+            ));
+        }
+        let path = root.join(relative);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink()
+            || metadata.dev() != pin.device
+            || metadata.ino() != pin.inode
+            || metadata.is_dir() != pin.directory
+        {
+            return Err(RuntimeError::Network(format!(
+                "owned eBPF pin was replaced: {}",
+                path.display()
+            )));
+        }
+        let result = if pin.directory {
+            fs::remove_dir(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                return Err(RuntimeError::Network(format!(
+                    "foreign entry in owned eBPF pin directory: {}",
+                    path.display()
+                )))
             }
-            let _ = delete_nft_prerouting_rule(&map, container_ip);
-            let _ = delete_nft_forward_rule(&map, container_ip);
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
@@ -2162,180 +2684,6 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
     Ok(wrapped)
 }
 
-fn ensure_nftables_chains() -> Result<(), RuntimeError> {
-    let commands = vec![
-        vec![
-            "nft".to_string(),
-            "add".to_string(),
-            "table".to_string(),
-            "ip".to_string(),
-            "nat".to_string(),
-        ],
-        vec![
-            "nft".to_string(),
-            "add".to_string(),
-            "chain".to_string(),
-            "ip".to_string(),
-            "nat".to_string(),
-            "prerouting".to_string(),
-            "{".to_string(),
-            "type".to_string(),
-            "nat".to_string(),
-            "hook".to_string(),
-            "prerouting".to_string(),
-            "priority".to_string(),
-            "0".to_string(),
-            ";".to_string(),
-            "}".to_string(),
-        ],
-        vec![
-            "nft".to_string(),
-            "add".to_string(),
-            "table".to_string(),
-            "ip".to_string(),
-            "filter".to_string(),
-        ],
-        vec![
-            "nft".to_string(),
-            "add".to_string(),
-            "chain".to_string(),
-            "ip".to_string(),
-            "filter".to_string(),
-            "forward".to_string(),
-            "{".to_string(),
-            "type".to_string(),
-            "filter".to_string(),
-            "hook".to_string(),
-            "forward".to_string(),
-            "priority".to_string(),
-            "0".to_string(),
-            ";".to_string(),
-            "policy".to_string(),
-            "accept".to_string(),
-            ";".to_string(),
-            "}".to_string(),
-        ],
-    ];
-    for cmd in commands {
-        run_cmd_allow_exists(&cmd)?;
-    }
-    Ok(())
-}
-
-fn build_nft_prerouting_cmd(
-    mapping: &ferro_net::portmap::PortMapping,
-    container_ip: &str,
-) -> Result<Vec<String>, RuntimeError> {
-    build_nft_add_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip)).map_err(|e| {
-        RuntimeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("nft prerouting: {}", e),
-        ))
-    })
-}
-
-fn build_nft_forward_cmd(
-    mapping: &ferro_net::portmap::PortMapping,
-    container_ip: &str,
-) -> Result<Vec<String>, RuntimeError> {
-    build_nft_add_rule_cmd(&build_nft_forward_rule(mapping, container_ip)).map_err(|e| {
-        RuntimeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("nft forward: {}", e),
-        ))
-    })
-}
-
-fn delete_nft_prerouting_rule(
-    mapping: &ferro_net::portmap::PortMapping,
-    container_ip: &str,
-) -> Result<(), RuntimeError> {
-    delete_nft_rule_by_match(&build_nft_prerouting_rule(mapping, container_ip))
-}
-
-fn delete_nft_forward_rule(
-    mapping: &ferro_net::portmap::PortMapping,
-    container_ip: &str,
-) -> Result<(), RuntimeError> {
-    delete_nft_rule_by_match(&build_nft_forward_rule(mapping, container_ip))
-}
-
-fn delete_nft_rule_by_match(rule: &NftRule) -> Result<(), RuntimeError> {
-    let list_cmd = build_nft_list_chain_with_handles_cmd(rule).map_err(|e| {
-        RuntimeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("nft list chain: {}", e),
-        ))
-    })?;
-    let output = match run_cmd_capture(&list_cmd) {
-        Ok(output) => output,
-        Err(err) if is_nft_missing_chain_error(&err) => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    let handles = nft_rule_handles_from_list(&output, rule).map_err(|e| {
-        RuntimeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("nft handle parse: {}", e),
-        ))
-    })?;
-    for handle in handles {
-        let delete_cmd = build_nft_delete_rule_handle_cmd(rule, handle).map_err(|e| {
-            RuntimeError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("nft delete handle: {}", e),
-            ))
-        })?;
-        run_cmd(&delete_cmd)?;
-    }
-    Ok(())
-}
-
-fn is_nft_missing_chain_error(err: &RuntimeError) -> bool {
-    let message = err.to_string();
-    message.contains("No such file or directory")
-        || message.contains("No such table")
-        || message.contains("No such file")
-}
-
-fn build_nft_prerouting_rule(
-    mapping: &ferro_net::portmap::PortMapping,
-    container_ip: &str,
-) -> NftRule {
-    NftRule {
-        family: "ip".to_string(),
-        table: "nat".to_string(),
-        chain: "prerouting".to_string(),
-        expr: vec![
-            mapping.protocol.clone(),
-            "dport".to_string(),
-            mapping.host_port.to_string(),
-            "dnat".to_string(),
-            "to".to_string(),
-            format!("{container_ip}:{}", mapping.container_port),
-        ],
-    }
-}
-
-fn build_nft_forward_rule(
-    mapping: &ferro_net::portmap::PortMapping,
-    container_ip: &str,
-) -> NftRule {
-    NftRule {
-        family: "ip".to_string(),
-        table: "filter".to_string(),
-        chain: "forward".to_string(),
-        expr: vec![
-            "ip".to_string(),
-            "daddr".to_string(),
-            container_ip.to_string(),
-            mapping.protocol.clone(),
-            "dport".to_string(),
-            mapping.container_port.to_string(),
-            "accept".to_string(),
-        ],
-    }
-}
-
 fn update_container_hosts(
     runtime_dir: &Path,
     containers: &[ContainerRecord],
@@ -2437,15 +2785,6 @@ fn render_hosts(entries: &BTreeMap<String, BTreeSet<String>>) -> String {
     lines.join("\n") + "\n"
 }
 
-fn replace_iptables_action(cmd: &mut [String], replacement: &str) {
-    for entry in cmd.iter_mut() {
-        if entry == "-A" {
-            *entry = replacement.to_string();
-            break;
-        }
-    }
-}
-
 fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
     let mut out = vec![
         "ip".to_string(),
@@ -2505,24 +2844,32 @@ fn run_cmd_capture(args: &[String]) -> Result<String, RuntimeError> {
 }
 
 /// Execute a command, allowing "already exists" errors (idempotent operations).
-fn run_cmd_allow_exists(args: &[String]) -> Result<(), RuntimeError> {
+fn run_cmd_allow_missing(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
     let (bin, rest) = parse_cmd_args(args)?;
-    let cmd_str = args.join(" ");
-
-    log::debug!("[exec] {}", cmd_str);
-
     let output = Command::new(bin).args(rest).output()?;
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if stderr.contains("File exists") || stderr.contains("exists") {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if [
+        "No such file or directory",
+        "No such table",
+        "No such file",
+        "Cannot find device",
+        "Cannot find qdisc",
+        "Cannot find filter",
+        "does a matching rule exist",
+        "No chain/target/match by that name",
+    ]
+    .iter()
+    .any(|message| stderr.contains(message))
+    {
         return Ok(());
     }
-    Err(RuntimeError::Network(format!("{}: {}", bin, stderr.trim())))
+    Err(RuntimeError::Network(format!("{bin}: {}", stderr.trim())))
 }
 
 struct BridgeConfig {
@@ -2627,12 +2974,11 @@ impl BackendProbe for RuntimeBackendProbe {
     }
 
     fn artifact_available(&self) -> bool {
-        let object_path = std::env::var("FERROCRATE_EBPF_OBJECT")
-            .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-monitor.o".to_string());
-        ebpf_artifact_available(Path::new(&object_path))
+        embedded_object_abi().is_ok()
     }
 }
 
+#[cfg(test)]
 fn ebpf_artifact_available(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -2999,42 +3345,6 @@ fn validate_bandwidth_limit(limit: &str) -> Result<String, RuntimeError> {
         ));
     }
     Ok(value)
-}
-
-fn ebpf_monitor_enabled() -> bool {
-    std::env::var("FERROCRATE_EBPF_MONITOR")
-        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn setup_ebpf_monitor(iface: &str) -> Result<(), RuntimeError> {
-    if !command_available("bpftool") {
-        return Err(RuntimeError::Network(
-            "ebpf monitor requires bpftool".to_string(),
-        ));
-    }
-    let object_path = std::env::var("FERROCRATE_EBPF_OBJECT")
-        .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-monitor.o".to_string());
-    let section = std::env::var("FERROCRATE_EBPF_SECTION").unwrap_or_else(|_| "xdp".to_string());
-    let attach = std::env::var("FERROCRATE_EBPF_ATTACH").unwrap_or_else(|_| "xdp".to_string());
-    let pin_path = format!("/sys/fs/bpf/ferrocrate-{}", iface);
-    let program = EbpfProgram {
-        name: "ferrocrate_monitor".to_string(),
-        object_path,
-        section,
-    };
-    run_cmd(&build_bpftool_load_cmd(&program, &pin_path))?;
-    match attach.as_str() {
-        "xdp" => run_cmd(&build_xdp_attach_cmd(iface, &pin_path))?,
-        "tc-ingress" => run_cmd(&build_tc_attach_cmd(iface, &pin_path, "ingress"))?,
-        "tc-egress" => run_cmd(&build_tc_attach_cmd(iface, &pin_path, "egress"))?,
-        other => {
-            return Err(RuntimeError::Network(format!(
-                "invalid ebpf attach mode: {other}"
-            )))
-        }
-    }
-    Ok(())
 }
 
 fn security_ebpf_monitor_enabled() -> bool {
@@ -3857,6 +4167,8 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            network_backend: None,
+            network_ownership: None,
             ai_runtime: None,
         };
         store.put(&record).expect("seed stale record");
@@ -3903,6 +4215,8 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            network_backend: None,
+            network_ownership: None,
             ai_runtime: None,
         };
         store.put(&record).expect("seed live record");
@@ -4079,6 +4393,67 @@ mod tests {
         }
     }
 
+    fn fixture_network_mapping() -> Vec<PortMappingRecord> {
+        vec![PortMappingRecord {
+            host_port: 8080,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        }]
+    }
+
+    #[test]
+    fn ebpf_plan_contains_no_netfilter_commands() {
+        let plan = super::build_network_plan(
+            NetworkBackend::Ebpf,
+            "fixture-container",
+            &fixture_network_mapping(),
+            "10.0.0.2",
+            "10.0.0.0/24",
+            "ferro0",
+        )
+        .expect("eBPF plan");
+
+        assert!(plan.commands().iter().all(|command| {
+            !matches!(command.first().map(String::as_str), Some("iptables" | "nft"))
+        }));
+    }
+
+    #[test]
+    fn iptables_plan_contains_only_iptables_firewall_commands() {
+        let plan = super::build_network_plan(
+            NetworkBackend::Iptables,
+            "fixture-container",
+            &fixture_network_mapping(),
+            "10.0.0.2",
+            "10.0.0.0/24",
+            "ferro0",
+        )
+        .expect("iptables plan");
+
+        assert!(plan
+            .commands()
+            .iter()
+            .all(|command| command.first().map(String::as_str) == Some("iptables")));
+    }
+
+    #[test]
+    fn nftables_plan_contains_only_nft_firewall_commands() {
+        let plan = super::build_network_plan(
+            NetworkBackend::Nftables,
+            "fixture-container",
+            &fixture_network_mapping(),
+            "10.0.0.2",
+            "10.0.0.0/24",
+            "ferro0",
+        )
+        .expect("nftables plan");
+
+        assert!(plan
+            .commands()
+            .iter()
+            .all(|command| command.first().map(String::as_str) == Some("nft")));
+    }
+
     #[test]
     fn ebpf_backend_unavailable_fails_without_fallback() {
         struct UnavailableProbe;
@@ -4212,6 +4587,8 @@ mod tests {
                 container_port: 80,
                 protocol: "tcp".to_string(),
             }],
+            network_backend: None,
+            network_ownership: None,
             ai_runtime: None,
         };
         store.put(&existing).expect("put existing");

@@ -654,6 +654,7 @@ dependencies = [
  "ferro-compose",
  "ferro-core",
  "ferro-mind",
+ "ferro-net",
  "owo-colors",
  "proptest",
  "serde",

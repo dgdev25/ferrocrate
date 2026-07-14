@@ -30,6 +30,7 @@ use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
 };
 use ferro_net::bridge;
+use ferro_net::{BackendProbe, NetworkBackend};
 use ferro_net::ebpf::{
     build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
     EbpfProgram, SecurityMonitorConfig,
@@ -346,7 +347,7 @@ impl ContainerRuntime {
         name: Option<&str>,
         port_mappings: &[crate::container_store::PortMappingRecord],
         network_mode: &str,
-        network_backend: &str,
+        network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
         let store = LocalImageStore::open(self.runtime_dir.join("images"))?;
@@ -397,7 +398,7 @@ impl ContainerRuntime {
         name: Option<&str>,
         port_mappings: &[crate::container_store::PortMappingRecord],
         network_mode: &str,
-        network_backend: &str,
+        network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
@@ -1577,7 +1578,7 @@ fn setup_network(
     container_id: &str,
     port_mappings: &[crate::container_store::PortMappingRecord],
     network_mode: &str,
-    network_backend: &str,
+    network_backend: NetworkBackend,
 ) -> Result<NetworkSetup, RuntimeError> {
     match network_mode {
         "host" => {
@@ -1639,18 +1640,14 @@ fn setup_network(
         }
         return Ok((None, None, None));
     }
-    let effective_backend = resolve_network_backend(network_backend, container_id)?;
-    let portmap_backend = if effective_backend == "ebpf" {
-        if command_available("nft") {
-            "nftables"
-        } else {
-            "iptables"
-        }
-    } else {
-        effective_backend.as_str()
-    };
-    if !port_mappings.is_empty() && portmap_backend != "iptables" && portmap_backend != "nftables"
-    {
+    let active_backend = resolve_network_backend(network_backend, &RuntimeBackendProbe)?;
+    debug_assert_eq!(active_backend, network_backend);
+    info!(
+        requested_backend = %network_backend,
+        active_backend = %active_backend,
+        "network backend selected"
+    );
+    if !port_mappings.is_empty() && active_backend == NetworkBackend::Ebpf {
         return Err(RuntimeError::Network(
             "port mapping requires network-backend=iptables or nftables".to_string(),
         ));
@@ -1705,7 +1702,7 @@ fn setup_network(
         &bridge_config.name,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    if effective_backend == "ebpf" {
+    if active_backend == NetworkBackend::Ebpf {
         setup_ebpf_monitor(&host_veth)?;
     } else if ebpf_monitor_enabled() {
         setup_ebpf_monitor(&host_veth)?;
@@ -1787,7 +1784,7 @@ fn setup_network(
     }
 
     if !port_mappings.is_empty() {
-        if portmap_backend == "nftables" {
+        if active_backend == NetworkBackend::Nftables {
             ensure_nftables_chains()?;
         }
         for mapping in port_mappings {
@@ -1796,7 +1793,7 @@ fn setup_network(
                 container_port: mapping.container_port,
                 protocol: mapping.protocol.clone(),
             };
-            if portmap_backend == "nftables" {
+            if active_backend == NetworkBackend::Nftables {
                 let prerouting = build_nft_prerouting_cmd(&map, &container_ip)?;
                 let forward = build_nft_forward_cmd(&map, &container_ip)?;
                 run_cmd_allow_exists(&prerouting)?;
@@ -2603,52 +2600,41 @@ fn selected_network_name(network_mode: &str) -> Option<String> {
     }
 }
 
-fn ebpf_strict_mode() -> bool {
-    std::env::var("FERROCRATE_EBPF_STRICT")
-        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+struct RuntimeBackendProbe;
+
+impl BackendProbe for RuntimeBackendProbe {
+    fn command_exists(&self, command: &str) -> bool {
+        command_available(command)
+    }
+
+    fn bpffs_mounted(&self) -> bool {
+        fs::read_to_string("/proc/mounts")
+            .ok()
+            .map(|mounts| {
+                mounts.lines().any(|line| {
+                    let mut fields = line.split_whitespace();
+                    let _source = fields.next();
+                    fields.next() == Some("/sys/fs/bpf") && fields.next() == Some("bpf")
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn artifact_available(&self) -> bool {
+        let object_path = std::env::var("FERROCRATE_EBPF_OBJECT")
+            .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-monitor.o".to_string());
+        Path::new(&object_path).is_file()
+    }
 }
 
-fn ebpf_backend_available() -> bool {
-    // Allow tests to force unavailability even when tools exist
-    if std::env::var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE")
-        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    if std::env::var("FERROCRATE_EBPF_ASSUME_AVAILABLE")
-        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    command_available("bpftool") && command_available("tc")
-}
-
-fn resolve_network_backend(requested: &str, container_id: &str) -> Result<String, RuntimeError> {
-    if requested != "ebpf" {
-        return Ok(requested.to_string());
-    }
-    if ebpf_backend_available() {
-        return Ok("ebpf".to_string());
-    }
-    let reason = "missing required host tools for eBPF datapath (need bpftool and tc)";
-    if ebpf_strict_mode() {
-        return Err(RuntimeError::Network(format!(
-            "ebpf backend requested for {container_id} but unavailable: {reason}"
-        )));
-    }
-    let fallback = if command_available("nft") {
-        "nftables"
-    } else {
-        "iptables"
-    };
-    let message = format!(
-        "eBPF backend requested for {container_id}; falling back to {fallback} ({reason}). Set FERROCRATE_EBPF_STRICT=1 to fail instead."
-    );
-    warn!("{message}");
-    Ok(fallback.to_string())
+fn resolve_network_backend(
+    requested: NetworkBackend,
+    probe: &dyn BackendProbe,
+) -> Result<NetworkBackend, RuntimeError> {
+    requested
+        .ensure_available(probe)
+        .map_err(|err| RuntimeError::Network(err.to_string()))?;
+    Ok(requested)
 }
 
 fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, prefix: u8) -> String {
@@ -3502,7 +3488,7 @@ fn run_resource_monitor(
 
 #[cfg(test)]
 mod tests {
-    use super::ContainerRuntime;
+    use super::{ContainerRuntime, NetworkBackend};
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{now_unix, ContainerRecord, PortMappingRecord, RestartPolicy};
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
@@ -3560,7 +3546,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -3600,7 +3586,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -3644,7 +3630,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -3697,7 +3683,7 @@ mod tests {
                 Some("named"),
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -3753,7 +3739,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -3799,7 +3785,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -3958,7 +3944,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -4027,7 +4013,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                "ebpf",
+                NetworkBackend::Ebpf,
                 None,
             )
             .expect("run");
@@ -4074,49 +4060,29 @@ mod tests {
     }
 
     #[test]
-    fn ebpf_backend_falls_back_when_tools_missing() {
-        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
-        unsafe {
-            std::env::remove_var("FERROCRATE_EBPF_STRICT");
-            std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
-            std::env::set_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE", "1");
-        }
-        let backend = super::resolve_network_backend("ebpf", "c1").expect("fallback backend");
-        assert!(backend == "iptables" || backend == "nftables", "expected iptables or nftables, got {backend}");
-        unsafe {
-            std::env::remove_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE");
-        }
-    }
+    fn ebpf_backend_unavailable_fails_without_fallback() {
+        struct UnavailableProbe;
 
-    #[test]
-    fn ebpf_backend_can_be_forced_available_for_ci() {
-        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
-        unsafe {
-            std::env::set_var("FERROCRATE_EBPF_ASSUME_AVAILABLE", "1");
-            std::env::remove_var("FERROCRATE_EBPF_STRICT");
-        }
-        let backend = super::resolve_network_backend("ebpf", "c1").expect("ebpf backend");
-        assert_eq!(backend, "ebpf");
-        unsafe {
-            std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
-        }
-    }
+        impl ferro_net::BackendProbe for UnavailableProbe {
+            fn command_exists(&self, _: &str) -> bool {
+                false
+            }
 
-    #[test]
-    fn ebpf_backend_strict_mode_fails() {
-        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
-        unsafe {
-            std::env::set_var("FERROCRATE_EBPF_STRICT", "1");
-            std::env::remove_var("FERROCRATE_EBPF_ASSUME_AVAILABLE");
-            std::env::set_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE", "1");
+            fn bpffs_mounted(&self) -> bool {
+                false
+            }
+
+            fn artifact_available(&self) -> bool {
+                false
+            }
         }
-        let err = super::resolve_network_backend("ebpf", "c1").expect_err("strict failure");
-        let message = err.to_string();
-        assert!(message.contains("ebpf backend requested"));
-        unsafe {
-            std::env::remove_var("FERROCRATE_EBPF_STRICT");
-            std::env::remove_var("FERROCRATE_EBPF_ASSUME_UNAVAILABLE");
-        }
+
+        let err = super::resolve_network_backend(
+            ferro_net::NetworkBackend::Ebpf,
+            &UnavailableProbe,
+        )
+        .expect_err("eBPF must not fall back");
+        assert!(err.to_string().contains("eBPF backend unavailable"));
     }
 
     #[test]

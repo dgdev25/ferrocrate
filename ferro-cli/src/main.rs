@@ -36,6 +36,8 @@ use ferro_mind::ai::training::{
     handle_stats_command, handle_train_command,
 };
 #[cfg(target_os = "linux")]
+use ferro_net::NetworkBackend;
+#[cfg(target_os = "linux")]
 use ferro_mind::ai::training::{
     handle_export_rvf_command, handle_rvf_branch_command, handle_rvf_lineage_command,
     handle_rvf_stats_command, handle_rvf_verify_command,
@@ -90,7 +92,7 @@ pub enum Commands {
         name: Option<String>,
         #[arg(long, default_value = "bridge")]
         network: String,
-        #[arg(long, default_value = "ebpf")]
+        #[arg(long, default_value = "ebpf", value_parser = validate_network_backend)]
         network_backend: String,
         #[arg(long = "bind")]
         bind_mounts: Vec<String>,
@@ -2302,14 +2304,12 @@ fn handle_run(
     let configured_backend = configured_ai_backend();
     let _backend_guard = ScopedEnv::set("FERROCRATE_AI_BACKEND", configured_backend.as_deref());
     let _model_guard = ScopedEnv::set("FERROCRATE_AI_MODEL", ai_model);
-    let mut effective_backend = network_backend.to_string();
+    let effective_backend = network_backend
+        .parse::<NetworkBackend>()
+        .map_err(|err| err.to_string())?;
     if !publish.is_empty() && effective_network != "bridge" {
         return Err("run: publish requires --network bridge".to_string());
     }
-    if !publish.is_empty() && effective_backend == "ebpf" {
-        effective_backend = "iptables".to_string();
-    }
-    validate_network_backend(&effective_backend)?;
     // Provide a clear error when a user accidentally passes a .rvf file to `run`.
     if ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
         return Err(format!(
@@ -2388,7 +2388,7 @@ fn handle_run(
             name,
             &port_mappings,
             &effective_network,
-            &effective_backend,
+            effective_backend,
             effective_ai_config,
         )
         .map_err(|err| err.to_string())?;
@@ -2994,9 +2994,9 @@ fn split_reference(reference: &str) -> (&str, &str) {
     }
 }
 
-fn validate_network_backend(value: &str) -> Result<(), String> {
+fn validate_network_backend(value: &str) -> Result<String, String> {
     match value {
-        "ebpf" | "iptables" | "nftables" => Ok(()),
+        "ebpf" | "iptables" | "nftables" => Ok(value.to_string()),
         _ => Err("network-backend must be one of: ebpf, iptables, nftables".to_string()),
     }
 }
@@ -5184,6 +5184,27 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn published_port_preserves_ebpf_backend() {
+        let args = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "alpine",
+            "-p",
+            "8080:80",
+            "--network-backend",
+            "ebpf",
+        ])
+        .unwrap();
+        let Commands::Run {
+            network_backend, ..
+        } = args.command
+        else {
+            panic!("run command")
+        };
+        assert_eq!(network_backend, "ebpf");
     }
 
     #[test]

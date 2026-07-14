@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod bridge;
 pub mod dns;
 pub mod ebpf;
@@ -16,6 +17,9 @@ pub mod veth;
 
 // Re-export executor types
 pub use executor::{exec_cmd, exec_cmd_capture, ExecError, Transaction};
+
+// Re-export backend selection types
+pub use backend::{BackendError, BackendProbe, NetworkBackend};
 
 // Re-export validation types
 pub use validate::ValidationError;

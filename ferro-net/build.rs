@@ -5,8 +5,33 @@ use aya_build::{build_ebpf, Package, Toolchain};
 const BPF_TOOLCHAIN: &str = "nightly-2026-02-11";
 const BPF_LINKER_VERSION: &str = "0.10.4";
 const BPF_PACKAGE: &str = "ferro-net-ebpf";
+const BPF_INPUTS: &[&str] = &[
+    "../ferro-net-ebpf/Cargo.toml",
+    "../ferro-net-ebpf/src",
+    "../ferro-net-ebpf/src/main.rs",
+    "../ferro-net-ebpf/src/abi.rs",
+];
+const BPF_ENVIRONMENT: &[&str] = &[
+    "AYA_BUILD_SKIP",
+    "AYA_BPF_TARGET_ARCH",
+    "BPF_LINKER",
+    "CARGO_CFG_TARGET_ARCH",
+    "CARGO_CFG_TARGET_ENDIAN",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_HOME",
+    "CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER",
+    "HOST",
+    "PATH",
+    "RUSTC",
+    "RUSTC_BOOTSTRAP",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTFLAGS",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+];
 
 fn main() {
+    emit_rebuild_contract();
     reject_skipped_build();
     require_bpf_toolchain();
     require_bpf_linker();
@@ -42,6 +67,15 @@ fn main() {
     );
 
     println!("cargo:rustc-env=FERRO_NET_EBPF_OBJECT={}", object.display());
+}
+
+fn emit_rebuild_contract() {
+    for input in BPF_INPUTS {
+        println!("cargo:rerun-if-changed={input}");
+    }
+    for variable in BPF_ENVIRONMENT {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
 }
 
 fn require_bpf_linker() {

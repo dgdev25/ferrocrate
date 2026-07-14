@@ -19,29 +19,55 @@ pub const POLICY_VALUE_LEN: usize = 4;
 pub const META_KEY_LEN: usize = 4;
 pub const META_VALUE_LEN: usize = 4;
 
-const ENDPOINT_ADDRESS_OFFSET: usize = 0;
-const ENDPOINT_IFINDEX_OFFSET: usize = 0;
-const ENDPOINT_MAC_OFFSET: usize = 4;
-const ENDPOINT_FLAGS_OFFSET: usize = 10;
-const PORT_PROTOCOL_OFFSET: usize = 0;
-const PORT_NUMBER_OFFSET: usize = 2;
-const PORT_VALUE_ADDRESS_OFFSET: usize = 0;
-const PORT_VALUE_NUMBER_OFFSET: usize = 4;
-const CONNTRACK_PROTOCOL_OFFSET: usize = 0;
-const CONNTRACK_SOURCE_ADDRESS_OFFSET: usize = 4;
-const CONNTRACK_DESTINATION_ADDRESS_OFFSET: usize = 8;
-const CONNTRACK_SOURCE_PORT_OFFSET: usize = 12;
-const CONNTRACK_DESTINATION_PORT_OFFSET: usize = 14;
-const CONNTRACK_TRANSLATED_ADDRESS_OFFSET: usize = 0;
-const CONNTRACK_TRANSLATED_PORT_OFFSET: usize = 4;
-const CONNTRACK_STATE_OFFSET: usize = 6;
-const CONNTRACK_LAST_SEEN_OFFSET: usize = 8;
-const POLICY_ADDRESS_OFFSET: usize = 0;
-const POLICY_PROTOCOL_OFFSET: usize = 4;
-const POLICY_DIRECTION_OFFSET: usize = 5;
-const POLICY_PORT_OFFSET: usize = 6;
-const POLICY_ACTION_OFFSET: usize = 0;
-const POLICY_LOG_OFFSET: usize = 1;
+pub const ENDPOINT_ADDRESS_OFFSET: usize = 0;
+pub const ENDPOINT_IFINDEX_OFFSET: usize = 0;
+pub const ENDPOINT_MAC_OFFSET: usize = 4;
+pub const ENDPOINT_FLAGS_OFFSET: usize = 10;
+pub const PORT_PROTOCOL_OFFSET: usize = 0;
+pub const PORT_NUMBER_OFFSET: usize = 2;
+pub const PORT_VALUE_ADDRESS_OFFSET: usize = 0;
+pub const PORT_VALUE_NUMBER_OFFSET: usize = 4;
+pub const CONNTRACK_PROTOCOL_OFFSET: usize = 0;
+pub const CONNTRACK_SOURCE_ADDRESS_OFFSET: usize = 4;
+pub const CONNTRACK_DESTINATION_ADDRESS_OFFSET: usize = 8;
+pub const CONNTRACK_SOURCE_PORT_OFFSET: usize = 12;
+pub const CONNTRACK_DESTINATION_PORT_OFFSET: usize = 14;
+pub const CONNTRACK_TRANSLATED_ADDRESS_OFFSET: usize = 0;
+pub const CONNTRACK_TRANSLATED_PORT_OFFSET: usize = 4;
+pub const CONNTRACK_STATE_OFFSET: usize = 6;
+pub const CONNTRACK_LAST_SEEN_OFFSET: usize = 8;
+pub const POLICY_ADDRESS_OFFSET: usize = 0;
+pub const POLICY_PROTOCOL_OFFSET: usize = 4;
+pub const POLICY_DIRECTION_OFFSET: usize = 5;
+pub const POLICY_PORT_OFFSET: usize = 6;
+pub const POLICY_ACTION_OFFSET: usize = 0;
+pub const POLICY_LOG_OFFSET: usize = 1;
+
+const _: () = {
+    assert!(ENDPOINT_ADDRESS_OFFSET + 4 == ENDPOINT_KEY_LEN);
+    assert!(ENDPOINT_IFINDEX_OFFSET + 4 == ENDPOINT_MAC_OFFSET);
+    assert!(ENDPOINT_MAC_OFFSET + 6 == ENDPOINT_FLAGS_OFFSET);
+    assert!(ENDPOINT_FLAGS_OFFSET + 2 == ENDPOINT_VALUE_LEN);
+    assert!(PORT_PROTOCOL_OFFSET == 0);
+    assert!(PORT_NUMBER_OFFSET + 2 == PORT_KEY_LEN);
+    assert!(PORT_VALUE_ADDRESS_OFFSET + 4 == PORT_VALUE_NUMBER_OFFSET);
+    assert!(PORT_VALUE_NUMBER_OFFSET + 4 == PORT_VALUE_LEN);
+    assert!(CONNTRACK_PROTOCOL_OFFSET == 0);
+    assert!(CONNTRACK_SOURCE_ADDRESS_OFFSET + 4 == CONNTRACK_DESTINATION_ADDRESS_OFFSET);
+    assert!(CONNTRACK_DESTINATION_ADDRESS_OFFSET + 4 == CONNTRACK_SOURCE_PORT_OFFSET);
+    assert!(CONNTRACK_SOURCE_PORT_OFFSET + 2 == CONNTRACK_DESTINATION_PORT_OFFSET);
+    assert!(CONNTRACK_DESTINATION_PORT_OFFSET + 2 == CONNTRACK_KEY_LEN);
+    assert!(CONNTRACK_TRANSLATED_ADDRESS_OFFSET + 4 == CONNTRACK_TRANSLATED_PORT_OFFSET);
+    assert!(CONNTRACK_TRANSLATED_PORT_OFFSET + 2 == CONNTRACK_STATE_OFFSET);
+    assert!(CONNTRACK_STATE_OFFSET + 2 == CONNTRACK_LAST_SEEN_OFFSET);
+    assert!(CONNTRACK_LAST_SEEN_OFFSET + 8 == CONNTRACK_VALUE_LEN);
+    assert!(POLICY_ADDRESS_OFFSET + 4 == POLICY_PROTOCOL_OFFSET);
+    assert!(POLICY_PROTOCOL_OFFSET + 1 == POLICY_DIRECTION_OFFSET);
+    assert!(POLICY_DIRECTION_OFFSET + 1 == POLICY_PORT_OFFSET);
+    assert!(POLICY_PORT_OFFSET + 2 == POLICY_KEY_LEN);
+    assert!(POLICY_ACTION_OFFSET + 1 == POLICY_LOG_OFFSET);
+    assert!(POLICY_LOG_OFFSET + 3 == POLICY_VALUE_LEN);
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointKey {
@@ -293,8 +319,12 @@ impl PolicyValue {
 }
 
 #[cfg(test)]
+#[path = "../../ferro-net-ebpf/src/abi.rs"]
+mod kernel_abi;
+
+#[cfg(test)]
 mod ebpf_abi_tests {
-    use super::{PortKey, PROGRAM_ABI_VERSION};
+    use super::{kernel_abi, PortKey, PROGRAM_ABI_VERSION};
 
     #[test]
     fn port_key_is_stable_network_byte_order() {
@@ -308,5 +338,76 @@ mod ebpf_abi_tests {
     #[test]
     fn abi_version_is_nonzero() {
         assert_eq!(PROGRAM_ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn build_script_tracks_ebpf_inputs_and_environment() {
+        let build_script = include_str!("../build.rs");
+        for input in [
+            "../ferro-net-ebpf/Cargo.toml",
+            "../ferro-net-ebpf/src",
+            "../ferro-net-ebpf/src/main.rs",
+            "../ferro-net-ebpf/src/abi.rs",
+        ] {
+            assert!(build_script.contains(input), "missing rerun input {input}");
+        }
+        for variable in [
+            "AYA_BUILD_SKIP",
+            "AYA_BPF_TARGET_ARCH",
+            "BPF_LINKER",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_HOME",
+            "PATH",
+            "RUSTC",
+            "RUSTC_BOOTSTRAP",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "RUSTFLAGS",
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+        ] {
+            assert!(
+                build_script.contains(variable),
+                "missing rerun environment variable {variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn userspace_inherits_workspace_lints() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("[lints]\nworkspace = true"));
+    }
+
+    #[test]
+    fn kernel_offsets_match_userspace_abi() {
+        macro_rules! assert_offset {
+            ($name:ident) => {
+                assert_eq!(super::$name, kernel_abi::$name, stringify!($name));
+            };
+        }
+
+        assert_offset!(ENDPOINT_ADDRESS_OFFSET);
+        assert_offset!(ENDPOINT_IFINDEX_OFFSET);
+        assert_offset!(ENDPOINT_MAC_OFFSET);
+        assert_offset!(ENDPOINT_FLAGS_OFFSET);
+        assert_offset!(PORT_PROTOCOL_OFFSET);
+        assert_offset!(PORT_NUMBER_OFFSET);
+        assert_offset!(PORT_VALUE_ADDRESS_OFFSET);
+        assert_offset!(PORT_VALUE_NUMBER_OFFSET);
+        assert_offset!(CONNTRACK_PROTOCOL_OFFSET);
+        assert_offset!(CONNTRACK_SOURCE_ADDRESS_OFFSET);
+        assert_offset!(CONNTRACK_DESTINATION_ADDRESS_OFFSET);
+        assert_offset!(CONNTRACK_SOURCE_PORT_OFFSET);
+        assert_offset!(CONNTRACK_DESTINATION_PORT_OFFSET);
+        assert_offset!(CONNTRACK_TRANSLATED_ADDRESS_OFFSET);
+        assert_offset!(CONNTRACK_TRANSLATED_PORT_OFFSET);
+        assert_offset!(CONNTRACK_STATE_OFFSET);
+        assert_offset!(CONNTRACK_LAST_SEEN_OFFSET);
+        assert_offset!(POLICY_ADDRESS_OFFSET);
+        assert_offset!(POLICY_PROTOCOL_OFFSET);
+        assert_offset!(POLICY_DIRECTION_OFFSET);
+        assert_offset!(POLICY_PORT_OFFSET);
+        assert_offset!(POLICY_ACTION_OFFSET);
+        assert_offset!(POLICY_LOG_OFFSET);
     }
 }

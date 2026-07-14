@@ -1632,14 +1632,7 @@ fn setup_network(
         }
     }
 
-    if !nix::unistd::Uid::effective().is_root() {
-        if !port_mappings.is_empty() {
-            return Err(RuntimeError::Network(
-                "port mapping requires root".to_string(),
-            ));
-        }
-        return Ok((None, None, None));
-    }
+    ensure_bridge_backend_root(nix::unistd::Uid::effective().is_root(), network_backend)?;
     let active_backend = resolve_network_backend(network_backend, &RuntimeBackendProbe)?;
     debug_assert_eq!(active_backend, network_backend);
     info!(
@@ -1817,6 +1810,18 @@ fn setup_network(
     }
 
     Ok((Some(netns_name), Some(container_ip), container_ipv6))
+}
+
+fn ensure_bridge_backend_root(
+    is_root: bool,
+    requested_backend: NetworkBackend,
+) -> Result<(), RuntimeError> {
+    if is_root {
+        return Ok(());
+    }
+    Err(RuntimeError::Network(format!(
+        "rootless bridge backend setup requires root; requested backend {requested_backend} cannot be established"
+    )))
 }
 
 fn validate_port_mapping_conflicts(
@@ -4097,6 +4102,15 @@ mod tests {
         )
         .expect_err("eBPF must not fall back");
         assert!(err.to_string().contains("eBPF backend unavailable"));
+    }
+
+    #[test]
+    fn non_root_bridge_backend_fails_closed() {
+        let err = super::ensure_bridge_backend_root(false, NetworkBackend::Ebpf)
+            .expect_err("rootless bridge backend setup must fail");
+        assert!(err
+            .to_string()
+            .contains("rootless bridge backend setup requires root"));
     }
 
     #[test]

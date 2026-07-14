@@ -211,3 +211,83 @@ their dedicated paths and do not enter the bridge/veth setup path.
   unchanged.
 - The existing direct `ferro-net` dependency in `ferro-cli` and the lockfile
   are intentionally unchanged by this review fix.
+
+## Final Task 1 Fix Evidence
+
+### Changes
+
+- Bridge mode now calls `ensure_bridge_backend_root` before backend resolution,
+  selection logging, bridge creation, or any bridge/veth mutation. A non-root
+  request returns an actionable error naming the requested backend instead of
+  returning successful empty network state.
+- Host and none modes still return through their existing dedicated branches
+  before the bridge backend check, because they do not establish a bridge
+  backend.
+- `validate_network_backend` now delegates to `NetworkBackend::from_str` and
+  returns the original validated `String`; the duplicated accepted-backend list
+  was removed.
+
+### RED Evidence
+
+```text
+cargo test -p ferro-core non_root_bridge_backend_fails_closed
+cargo test -p ferro-cli network_backend_validator_delegates_to_typed_parser
+```
+
+Before the rootless bridge implementation, the core test failed to compile:
+
+```text
+error[E0425]: cannot find function `ensure_bridge_backend_root` in module `super`
+```
+
+The CLI regression passed before the refactor because the removed literal list
+had the same observable values as `NetworkBackend::from_str`; the test records
+the required parser-equivalence behavior while the implementation removes that
+future drift point.
+
+### GREEN Evidence
+
+```text
+cargo test -p ferro-net backend && \
+  cargo test -p ferro-core non_root_bridge_backend_fails_closed && \
+  cargo test -p ferro-core ebpf_ && \
+  cargo test -p ferro-cli network_backend_validator_delegates_to_typed_parser && \
+  cargo test -p ferro-cli published_port_preserves_ebpf_backend && \
+  cargo test --workspace
+```
+
+Focused results:
+
+- `ferro-net backend`: 7 passed
+- `ferro-core non_root_bridge_backend_fails_closed`: 1 passed
+- `ferro-core ebpf_`: 3 passed
+- `ferro-cli network_backend_validator_delegates_to_typed_parser`: 1 passed
+- `ferro-cli published_port_preserves_ebpf_backend`: 1 passed
+
+The workspace suite again failed only at the unrelated existing test:
+
+```text
+ferro-core/tests/security_tests.rs::parses_default_seccomp_profile
+left: "SCMP_ACT_ALLOW"
+right: "SCMP_ACT_ERRNO"
+```
+
+The stated cosign baseline test passed in this environment.
+
+### Task Boundary
+
+Task 1 performs every available pre-mutation backend check: host command
+availability, bpffs mounting, regular/nonempty ELF artifact validity, and the
+root requirement for bridge backend establishment. eBPF map-schema validation,
+the Aya loader, TC attach, and rollback/transaction verification are explicitly
+deferred to Task 5, which owns the loader and its attach lifecycle.
+
+### Final Self-Review
+
+- Non-root bridge setup cannot return success before backend establishment or
+  claim an active eBPF backend.
+- Host and none modes retain their no-backend semantics.
+- CLI backend validation has one source of truth: `NetworkBackend::from_str`.
+- No Task 5 loader or attach-transaction behavior was added.
+- The accepted direct `ferro-net` manifest and lockfile changes were not
+  modified.

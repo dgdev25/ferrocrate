@@ -35,7 +35,6 @@ use ferro_mind::ai::training::{
     handle_community_publish_command, handle_export_command, handle_import_command,
     handle_stats_command, handle_train_command,
 };
-#[cfg(target_os = "linux")]
 use ferro_net::NetworkBackend;
 #[cfg(target_os = "linux")]
 use ferro_mind::ai::training::{
@@ -62,6 +61,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::str::FromStr;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "linux")]
@@ -2995,10 +2995,9 @@ fn split_reference(reference: &str) -> (&str, &str) {
 }
 
 fn validate_network_backend(value: &str) -> Result<String, String> {
-    match value {
-        "ebpf" | "iptables" | "nftables" => Ok(value.to_string()),
-        _ => Err("network-backend must be one of: ebpf, iptables, nftables".to_string()),
-    }
+    NetworkBackend::from_str(value)
+        .map(|_| value.to_string())
+        .map_err(|err| err.to_string())
 }
 
 fn validate_network_mode(value: &str) -> Result<(), String> {
@@ -5110,6 +5109,7 @@ mod tests {
     use ferro_core::image_store::LocalImageStore;
     use ferro_core::runtime::ContainerRuntime;
     use ferro_core::volume_store::LocalVolumeStore;
+    use ferro_net::NetworkBackend;
     use std::io::Write;
     use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -5205,6 +5205,27 @@ mod tests {
             panic!("run command")
         };
         assert_eq!(network_backend, "ebpf");
+    }
+
+    #[test]
+    fn network_backend_validator_delegates_to_typed_parser() {
+        for value in ["ebpf", "iptables", "nftables"] {
+            assert_eq!(
+                validate_network_backend(value),
+                value
+                    .parse::<NetworkBackend>()
+                    .map(|_| value.to_string())
+                    .map_err(|err| err.to_string())
+            );
+        }
+
+        assert_eq!(
+            validate_network_backend("unsupported"),
+            "unsupported"
+                .parse::<NetworkBackend>()
+                .map(|_| "unsupported".to_string())
+                .map_err(|err| err.to_string())
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ members = [
   "ferro-cri",
   "ferro-core",
   "ferro-net",
+  "ferro-net-ebpf",
   "ferro-mind",
   "ferro-compose",
   "ferro-cli", "ferro-desktop",
@@ -23,6 +24,10 @@ missing_crate_level_docs = "allow"
 [workspace.dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+aya = "=0.14.0"
+aya-build = "=0.2.0"
+aya-ebpf = "=0.2.1"
+network-types = { version = "=0.2.0", default-features = false }
 
 # Common dependencies (ARCH-02)
 thiserror = "2.0"

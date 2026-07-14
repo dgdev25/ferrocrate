@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aya = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[build-dependencies]
+aya-build = { workspace = true }
+
+[[test]]
+name = "ebpf_abi"
+path = "src/ebpf_abi.rs"

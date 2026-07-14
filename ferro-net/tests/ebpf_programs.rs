@@ -17,10 +17,10 @@ use std::{
 
 use datapath::{
     action_for_parse_failure, actual_disposition, apply_decision, decide_egress, decide_ingress,
-    snat_candidate, Action, ConntrackPair, ConntrackRecord, ConntrackReservation, Counter,
-    DatapathState, DecisionError, Direction, Endpoint, ExternalNetwork, FlowKey, NatTarget,
-    Packet, ParseFailure, PolicyAction, PolicyKey, PortTarget, Socket, Translation,
-    IP_PROTOCOL_TCP, IP_PROTOCOL_UDP, SNAT_PROBE_LIMIT,
+    decision_error_counter, snat_candidate, Action, ConntrackPair, ConntrackRecord,
+    ConntrackReservation, Counter, DatapathState, DecisionError, Direction, Endpoint,
+    ExternalNetwork, FlowKey, NatTarget, Packet, ParseFailure, PolicyAction, PolicyKey,
+    PortTarget, Socket, Translation, IP_PROTOCOL_TCP, IP_PROTOCOL_UDP, SNAT_PROBE_LIMIT,
 };
 use ferro_net::ebpf::{build_bpftool_load_cmd, EbpfProgram};
 
@@ -50,6 +50,9 @@ impl FixtureState {
                 address: [203, 0, 113, 8],
                 ifindex: 9,
                 next_hop_mac: [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+                snat_port_start: 55_000,
+                snat_port_end: 55_031,
+                snat_range_reserved: true,
             }),
             ..Self::default()
         }
@@ -311,33 +314,39 @@ fn ebpf_program_builder_is_deterministic() {
 }
 
 #[test]
-fn mirrored_metadata_abi_uses_keyed_network_order_entries() {
+fn mirrored_metadata_abi_uses_one_coherent_fixed_width_config() {
     assert_eq!(host_abi::ENDPOINT_MAX_ENTRIES, 16_384);
     assert_eq!(host_abi::PORT_MAX_ENTRIES, 16_384);
     assert_eq!(host_abi::CONNTRACK_MAX_ENTRIES, 65_536);
     assert_eq!(host_abi::POLICY_MAX_ENTRIES, 32_768);
-    assert_eq!(host_abi::META_MAX_ENTRIES, 4);
+    assert_eq!(host_abi::META_MAX_ENTRIES, 1);
     assert_eq!(host_abi::META_MAX_ENTRIES, abi::META_MAX_ENTRIES);
     assert_eq!(host_abi::META_VALUE_LEN, abi::META_VALUE_LEN);
-    assert_eq!(host_abi::META_KEY_ABI_VERSION, 0);
-    assert_eq!(host_abi::META_KEY_EXTERNAL_IPV4, 1);
-    assert_eq!(host_abi::META_KEY_EXTERNAL_IFINDEX, 2);
-    assert_eq!(host_abi::META_KEY_NEXT_HOP_MAC, 3);
+    assert_eq!(host_abi::META_VALUE_LEN, 24);
 
-    let key = host_abi::MetaKey {
-        entry: host_abi::META_KEY_EXTERNAL_IFINDEX,
+    let config = host_abi::MetaConfig {
+        abi_version: host_abi::PROGRAM_ABI_VERSION,
+        external_ipv4: [203, 0, 113, 8],
+        external_ifindex: 0x0102_0304,
+        next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+        snat_port_start: 55_000,
+        snat_port_end: 55_031,
+        flags: host_abi::META_FLAG_SNAT_RANGE_RESERVED,
     };
-    assert_eq!(key.encode(), [0, 0, 0, 2]);
-    assert_eq!(host_abi::MetaKey::decode(key.encode()), key);
+    let expected = [
+        0, 0, 0, 1, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xd6, 0xd8, 0xd6, 0xf7, 0, 1,
+    ];
+    assert_eq!(config.encode(), expected);
+    assert_eq!(host_abi::MetaConfig::decode(expected), config);
+    assert!(config.snat_range_reserved());
 
-    let address = host_abi::MetaValue::from_ipv4([203, 0, 113, 8]);
-    assert_eq!(address.as_ipv4(), [203, 0, 113, 8]);
-    assert_eq!(host_abi::MetaValue::decode(address.encode()), address);
-    let ifindex = host_abi::MetaValue::from_u32(0x0102_0304);
-    assert_eq!(&ifindex.encode()[..4], &[1, 2, 3, 4]);
-    assert_eq!(ifindex.as_u32(), 0x0102_0304);
-    let mac = host_abi::MetaValue::from_mac([2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
-    assert_eq!(mac.as_mac(), [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    let kernel = abi::MetaConfig::decode(expected);
+    assert_eq!(kernel.encode(), expected);
+    assert_eq!(kernel.abi_version, config.abi_version);
+    assert_eq!(kernel.snat_port_start, config.snat_port_start);
+    assert_eq!(kernel.snat_port_end, config.snat_port_end);
+    assert!(kernel.snat_range_reserved());
 }
 
 #[test]
@@ -394,7 +403,7 @@ fn generic_snat_and_reverse_restore_mutate_complete_tcp_packets() {
     assert_eq!(egress.ifindex, Some(9));
     assert_eq!(egress.destination_mac, Some([2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]));
     assert_eq!(egress.source.address, [203, 0, 113, 8]);
-    assert!((49_152..=65_535).contains(&egress.source.port));
+    assert!((55_000..=55_031).contains(&egress.source.port));
     assert_eq!(egress.translation, Translation::Source);
     let pair = egress
         .installed_conntrack
@@ -427,7 +436,8 @@ fn snat_collision_probing_uses_noexist_and_selects_the_next_port() {
     let outbound = tcp_packet(internal, 32_000, [192, 0, 2, 10], 443);
     let state = FixtureState::with_external_endpoint(internal);
     let external = state.external.unwrap();
-    let first = snat_candidate(&outbound, 0);
+    let first = snat_candidate(&outbound, 0, external.snat_port_start, external.snat_port_end)
+        .unwrap();
     state.insert_existing(
         FlowKey {
             protocol: outbound.protocol,
@@ -444,7 +454,16 @@ fn snat_collision_probing_uses_noexist_and_selects_the_next_port() {
 
     let decision = decide_egress(&outbound, &state).unwrap();
 
-    assert_eq!(decision.source.port, snat_candidate(&outbound, 1));
+    assert_eq!(
+        decision.source.port,
+        snat_candidate(
+            &outbound,
+            1,
+            external.snat_port_start,
+            external.snat_port_end,
+        )
+        .unwrap()
+    );
     let attempts = state.reserve_attempts.borrow();
     assert_eq!(attempts.len(), 2);
     assert_eq!(attempts[0].destination_port, first);
@@ -464,7 +483,13 @@ fn snat_probe_exhaustion_drops_without_overwriting_collisions() {
                 source: outbound.destination.address,
                 destination: external.address,
                 source_port: outbound.destination.port,
-                destination_port: snat_candidate(&outbound, probe),
+                destination_port: snat_candidate(
+                    &outbound,
+                    probe,
+                    external.snat_port_start,
+                    external.snat_port_end,
+                )
+                .unwrap(),
             },
             NatTarget {
                 address: [10, 44, 9, probe as u8],
@@ -494,6 +519,82 @@ fn failed_forward_insert_rolls_back_the_reserved_reverse_entry() {
         Err(DecisionError::ConntrackInsertFailed)
     );
     assert!(state.conntrack.borrow().is_empty());
+}
+
+#[test]
+fn absent_invalid_or_unreserved_snat_config_cannot_allocate() {
+    let internal = [10, 44, 1, 2];
+    let outbound = tcp_packet(internal, 32_000, [192, 0, 2, 10], 443);
+
+    let mut absent = FixtureState::with_external_endpoint(internal);
+    absent.external = None;
+    assert_eq!(
+        decide_egress(&outbound, &absent),
+        Err(DecisionError::SnatConfigInvalid)
+    );
+    assert!(absent.conntrack.borrow().is_empty());
+
+    let mut unreserved = FixtureState::with_external_endpoint(internal);
+    unreserved.external.as_mut().unwrap().snat_range_reserved = false;
+    assert_eq!(
+        decide_egress(&outbound, &unreserved),
+        Err(DecisionError::SnatConfigInvalid)
+    );
+    assert!(unreserved.conntrack.borrow().is_empty());
+
+    let mut inverted = FixtureState::with_external_endpoint(internal);
+    inverted.external.as_mut().unwrap().snat_port_start = 56_000;
+    inverted.external.as_mut().unwrap().snat_port_end = 55_000;
+    assert_eq!(
+        decide_egress(&outbound, &inverted),
+        Err(DecisionError::SnatConfigInvalid)
+    );
+    assert!(inverted.conntrack.borrow().is_empty());
+
+    let mut too_small = FixtureState::with_external_endpoint(internal);
+    too_small.external.as_mut().unwrap().snat_port_start = 55_000;
+    too_small.external.as_mut().unwrap().snat_port_end = 55_003;
+    assert_eq!(
+        decide_egress(&outbound, &too_small),
+        Err(DecisionError::SnatConfigInvalid)
+    );
+    assert!(too_small.conntrack.borrow().is_empty());
+    assert_eq!(
+        decision_error_counter(DecisionError::SnatConfigInvalid),
+        Some(Counter::SnatConfigErrors)
+    );
+}
+
+#[test]
+fn every_bounded_probe_candidate_stays_inside_the_configured_range() {
+    let flow = tcp_packet([10, 44, 1, 2], 32_000, [192, 0, 2, 10], 443);
+    for probe in 0..SNAT_PROBE_LIMIT {
+        let candidate = snat_candidate(&flow, probe, 60_000, 60_015).unwrap();
+        assert!((60_000..=60_015).contains(&candidate));
+    }
+    assert_eq!(snat_candidate(&flow, 0, 0, 60_000), None);
+    assert_eq!(snat_candidate(&flow, 0, 60_000, 59_999), None);
+    assert_eq!(snat_candidate(&flow, 0, 60_000, 60_003), None);
+}
+
+#[test]
+fn committed_pair_survives_concurrent_return_use_and_installer_failure() {
+    let internal = [10, 44, 1, 2];
+    let remote = [192, 0, 2, 10];
+    let outbound = tcp_packet(internal, 32_000, remote, 443);
+    let state = FixtureState::with_external_endpoint(internal);
+    let egress = decide_egress(&outbound, &state).unwrap();
+    let pair = egress.installed_conntrack.unwrap();
+
+    let reply = tcp_packet(remote, 443, egress.source.address, egress.source.port);
+    let concurrent = decide_ingress(&reply, &state).unwrap();
+    assert_eq!(concurrent.destination, outbound.source);
+
+    let mut malformed = vec![0u8; 13];
+    assert!(apply_decision(&mut malformed, &outbound, &egress).is_err());
+    assert!(state.contains_record(pair.forward));
+    assert!(state.contains_record(pair.reverse));
+    assert_eq!(decide_ingress(&reply, &state).unwrap().destination, outbound.source);
 }
 
 #[test]

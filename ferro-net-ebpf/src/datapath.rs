@@ -9,8 +9,6 @@ pub const IP_PROTOCOL_TCP: u8 = 6;
 pub const IP_PROTOCOL_UDP: u8 = 17;
 pub const CONNTRACK_STATE_ESTABLISHED: u8 = 1;
 pub const POLICY_ACTION_ALLOW: u8 = 1;
-pub const SNAT_PORT_BASE: u16 = 49_152;
-pub const SNAT_PORT_COUNT: u32 = 16_384;
 pub const SNAT_PROBE_LIMIT: u8 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +62,7 @@ pub enum Counter {
     PolicyDenials = 6,
     MapErrors = 7,
     SnatExhaustions = 8,
+    SnatConfigErrors = 9,
 }
 
 impl Counter {
@@ -180,6 +179,9 @@ pub struct ExternalNetwork {
     pub address: [u8; 4],
     pub ifindex: u32,
     pub next_hop_mac: [u8; 6],
+    pub snat_port_start: u16,
+    pub snat_port_end: u16,
+    pub snat_range_reserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -257,6 +259,7 @@ pub enum DecisionError {
     EndpointMissing,
     InvalidTranslation,
     MetadataMissing,
+    SnatConfigInvalid,
     SnatExhausted,
     ConntrackInsertFailed,
 }
@@ -324,7 +327,15 @@ fn valid_external(external: ExternalNetwork) -> bool {
 }
 
 #[inline(always)]
-pub fn snat_candidate(packet: &Packet, probe: u8) -> u16 {
+pub fn snat_candidate(
+    packet: &Packet,
+    probe: u8,
+    range_start: u16,
+    range_end: u16,
+) -> Option<u16> {
+    if !valid_snat_range(range_start, range_end) || probe >= SNAT_PROBE_LIMIT {
+        return None;
+    }
     let bytes = FlowKey::from_packet(packet).encode();
     let mut hash = 2_166_136_261u32;
     let mut index = 0usize;
@@ -333,7 +344,27 @@ pub fn snat_candidate(packet: &Packet, probe: u8) -> u16 {
         hash = hash.wrapping_mul(16_777_619);
         index += 1;
     }
-    SNAT_PORT_BASE + ((hash.wrapping_add(u32::from(probe))) % SNAT_PORT_COUNT) as u16
+    let width = u32::from(range_end) - u32::from(range_start) + 1;
+    Some(range_start + ((hash.wrapping_add(u32::from(probe))) % width) as u16)
+}
+
+pub const fn valid_snat_range(range_start: u16, range_end: u16) -> bool {
+    range_start != 0
+        && range_end >= range_start
+        && (range_end as u32 - range_start as u32 + 1) >= SNAT_PROBE_LIMIT as u32
+}
+
+pub const fn decision_error_counter(error: DecisionError) -> Option<Counter> {
+    match error {
+        DecisionError::PolicyDenied => Some(Counter::PolicyDenials),
+        DecisionError::SnatExhausted => Some(Counter::SnatExhaustions),
+        DecisionError::SnatConfigInvalid | DecisionError::MetadataMissing => {
+            Some(Counter::SnatConfigErrors)
+        }
+        DecisionError::EndpointMissing
+        | DecisionError::InvalidTranslation
+        | DecisionError::ConntrackInsertFailed => Some(Counter::MapErrors),
+    }
 }
 
 fn conntrack_pair(packet: &Packet, external: ExternalNetwork, port: u16) -> ConntrackPair {
@@ -368,7 +399,14 @@ fn install_generic_snat<S: DatapathState>(
 ) -> Result<ConntrackPair, DecisionError> {
     let mut probe = 0u8;
     while probe < SNAT_PROBE_LIMIT {
-        let pair = conntrack_pair(packet, external, snat_candidate(packet, probe));
+        let port = snat_candidate(
+            packet,
+            probe,
+            external.snat_port_start,
+            external.snat_port_end,
+        )
+        .ok_or(DecisionError::SnatConfigInvalid)?;
+        let pair = conntrack_pair(packet, external, port);
         match state.reserve_conntrack(pair.reverse) {
             ConntrackReservation::Occupied => {
                 probe += 1;
@@ -472,8 +510,13 @@ pub fn decide_egress<S: DatapathState>(
     }
     let external = state
         .external_network()
-        .filter(|metadata| valid_external(*metadata))
-        .ok_or(DecisionError::MetadataMissing)?;
+        .ok_or(DecisionError::SnatConfigInvalid)?;
+    if !valid_external(external)
+        || !external.snat_range_reserved
+        || !valid_snat_range(external.snat_port_start, external.snat_port_end)
+    {
+        return Err(DecisionError::SnatConfigInvalid);
+    }
     if decision.translation == Translation::None {
         let pair = install_generic_snat(packet, external, state)?;
         decision.source = Socket {

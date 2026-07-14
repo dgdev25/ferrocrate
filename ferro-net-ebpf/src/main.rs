@@ -18,8 +18,8 @@ use core::{panic::PanicInfo, slice};
 
 use datapath::{
     action_for_parse_failure, actual_disposition, apply_decision, decide_egress, decide_ingress,
-    Action, Counter, DatapathState, Decision, DecisionError, Direction, Packet, ParseFailure,
-    IP_PROTOCOL_TCP, IP_PROTOCOL_UDP,
+    decision_error_counter, Action, Counter, DatapathState, Decision, Direction, Packet,
+    ParseFailure, IP_PROTOCOL_TCP, IP_PROTOCOL_UDP,
 };
 use maps::KernelState;
 use packet::{PacketError, PacketView, TransportProtocol};
@@ -77,48 +77,31 @@ fn classify(ctx: TcContext, direction: Direction) -> i32 {
     };
     let decision = match decision {
         Ok(decision) => decision,
-        Err(DecisionError::PolicyDenied) => {
-            maps::increment(Counter::PolicyDenials);
-            return finish_without_decision(Action::Drop);
-        }
-        Err(DecisionError::SnatExhausted) => {
-            maps::increment(Counter::SnatExhaustions);
-            return finish_without_decision(Action::Drop);
-        }
-        Err(_) => {
-            maps::increment(Counter::MapErrors);
+        Err(error) => {
+            if let Some(counter) = decision_error_counter(error) {
+                maps::increment(counter);
+            }
             return finish_without_decision(Action::Drop);
         }
     };
 
     if let Some(record) = decision.reverse_conntrack {
         if maps::insert_reverse_conntrack(record).is_err() {
-            rollback_installed(&decision);
             maps::increment(Counter::MapErrors);
             return finish_without_decision(Action::Drop);
         }
     }
     if apply_decision(bytes, &packet, &decision).is_err() {
-        rollback_installed(&decision);
         return finish_without_decision(Action::Drop);
     }
 
     let (actual, tc_result) = disposition(&decision);
-    if actual == Action::Drop {
-        rollback_installed(&decision);
-    }
     let metrics = decision.metrics(direction, actual);
     maps::increment(metrics.outcome);
     if metrics.translated {
         maps::increment(Counter::NatTranslations);
     }
     tc_result
-}
-
-fn rollback_installed(decision: &Decision) {
-    if let Some(pair) = decision.installed_conntrack {
-        maps::rollback_pair(pair);
-    }
 }
 
 fn disposition(decision: &Decision) -> (Action, i32) {

@@ -1,7 +1,7 @@
 use aya_ebpf::{
     helpers::bpf_ktime_get_ns,
     macros::map,
-    maps::{HashMap, LruHashMap, PerCpuArray},
+    maps::{Array, HashMap, LruHashMap, PerCpuArray},
 };
 
 use crate::{
@@ -10,15 +10,14 @@ use crate::{
         CONNTRACK_STATE_OFFSET, CONNTRACK_TRANSLATED_ADDRESS_OFFSET,
         CONNTRACK_TRANSLATED_PORT_OFFSET, CONNTRACK_VALUE_LEN, COUNTER_MAX_ENTRIES,
         ENDPOINT_FLAGS_OFFSET, ENDPOINT_IFINDEX_OFFSET, ENDPOINT_KEY_LEN, ENDPOINT_MAC_OFFSET,
-        ENDPOINT_MAX_ENTRIES, ENDPOINT_VALUE_LEN, META_KEY_ABI_VERSION,
-        META_KEY_EXTERNAL_IFINDEX, META_KEY_EXTERNAL_IPV4, META_KEY_LEN,
-        META_KEY_NEXT_HOP_MAC, META_MAX_ENTRIES, META_VALUE_LEN, POLICY_ACTION_OFFSET,
-        POLICY_KEY_LEN, POLICY_MAX_ENTRIES, POLICY_VALUE_LEN, PORT_KEY_LEN, PORT_MAX_ENTRIES,
-        PORT_VALUE_ADDRESS_OFFSET, PORT_VALUE_LEN, PORT_VALUE_NUMBER_OFFSET, PROGRAM_ABI_VERSION,
+        ENDPOINT_MAX_ENTRIES, ENDPOINT_VALUE_LEN, META_MAX_ENTRIES, META_VALUE_LEN, MetaConfig,
+        POLICY_ACTION_OFFSET, POLICY_KEY_LEN, POLICY_MAX_ENTRIES, POLICY_VALUE_LEN, PORT_KEY_LEN,
+        PORT_MAX_ENTRIES, PORT_VALUE_ADDRESS_OFFSET, PORT_VALUE_LEN, PORT_VALUE_NUMBER_OFFSET,
+        PROGRAM_ABI_VERSION,
     },
     datapath::{
-        ConntrackPair, ConntrackRecord, ConntrackReservation, Counter, DatapathState, Endpoint,
-        ExternalNetwork, FlowKey, NatTarget, PolicyAction, PolicyKey, PortTarget,
+        ConntrackRecord, ConntrackReservation, Counter, DatapathState, Endpoint, ExternalNetwork,
+        FlowKey, NatTarget, PolicyAction, PolicyKey, PortTarget,
         CONNTRACK_STATE_ESTABLISHED, POLICY_ACTION_ALLOW,
     },
 };
@@ -48,8 +47,8 @@ pub static FERRO_COUNTERS: PerCpuArray<u64> =
     PerCpuArray::with_max_entries(COUNTER_MAX_ENTRIES, 0);
 
 #[map]
-pub static FERRO_META: HashMap<[u8; META_KEY_LEN], [u8; META_VALUE_LEN]> =
-    HashMap::with_max_entries(META_MAX_ENTRIES, 0);
+pub static FERRO_META: Array<[u8; META_VALUE_LEN]> =
+    Array::with_max_entries(META_MAX_ENTRIES, 0);
 
 pub struct KernelState;
 
@@ -58,10 +57,6 @@ fn copied_map_value<const N: usize>(pointer: Option<*const [u8; N]>) -> Option<[
     // SAFETY: Aya returned a pointer to a fixed-size map value of exactly N bytes.
     // It is copied before another operation on the same map, so no map reference escapes.
     Some(unsafe { pointer.read_unaligned() })
-}
-
-fn metadata_value(key: u32) -> Option<[u8; META_VALUE_LEN]> {
-    copied_map_value(FERRO_META.get_ptr(key.to_be_bytes()))
 }
 
 fn conntrack_value(record: ConntrackRecord, last_seen_ns: u64) -> [u8; CONNTRACK_VALUE_LEN] {
@@ -150,19 +145,17 @@ impl DatapathState for KernelState {
     }
 
     fn external_network(&self) -> Option<ExternalNetwork> {
-        let version = metadata_value(META_KEY_ABI_VERSION)?;
-        if u32::from_be_bytes([version[0], version[1], version[2], version[3]])
-            != PROGRAM_ABI_VERSION
-        {
+        let config = MetaConfig::decode(copied_map_value(FERRO_META.get_ptr(0))?);
+        if config.abi_version != PROGRAM_ABI_VERSION {
             return None;
         }
-        let address = metadata_value(META_KEY_EXTERNAL_IPV4)?;
-        let ifindex = metadata_value(META_KEY_EXTERNAL_IFINDEX)?;
-        let mac = metadata_value(META_KEY_NEXT_HOP_MAC)?;
         Some(ExternalNetwork {
-            address: [address[0], address[1], address[2], address[3]],
-            ifindex: u32::from_be_bytes([ifindex[0], ifindex[1], ifindex[2], ifindex[3]]),
-            next_hop_mac: [mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]],
+            address: config.external_ipv4,
+            ifindex: config.external_ifindex,
+            next_hop_mac: config.next_hop_mac,
+            snat_port_start: config.snat_port_start,
+            snat_port_end: config.snat_port_end,
+            snat_range_reserved: config.snat_range_reserved(),
         })
     }
 
@@ -185,11 +178,6 @@ impl DatapathState for KernelState {
 
 pub fn insert_reverse_conntrack(record: ConntrackRecord) -> Result<(), i32> {
     insert_record(record, BPF_ANY)
-}
-
-pub fn rollback_pair(pair: ConntrackPair) {
-    let _ = FERRO_CONNTRACK.remove(pair.forward.key.encode());
-    let _ = FERRO_CONNTRACK.remove(pair.reverse.key.encode());
 }
 
 pub fn increment(counter: Counter) {

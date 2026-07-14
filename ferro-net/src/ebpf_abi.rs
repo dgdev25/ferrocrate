@@ -17,20 +17,23 @@ pub const CONNTRACK_KEY_LEN: usize = 16;
 pub const CONNTRACK_VALUE_LEN: usize = 16;
 pub const POLICY_KEY_LEN: usize = 8;
 pub const POLICY_VALUE_LEN: usize = 4;
-pub const META_KEY_LEN: usize = 4;
-pub const META_VALUE_LEN: usize = 8;
+pub const META_VALUE_LEN: usize = 24;
 
-pub const META_KEY_ABI_VERSION: u32 = 0;
-pub const META_KEY_EXTERNAL_IPV4: u32 = 1;
-pub const META_KEY_EXTERNAL_IFINDEX: u32 = 2;
-pub const META_KEY_NEXT_HOP_MAC: u32 = 3;
+pub const META_ABI_VERSION_OFFSET: usize = 0;
+pub const META_EXTERNAL_IPV4_OFFSET: usize = 4;
+pub const META_EXTERNAL_IFINDEX_OFFSET: usize = 8;
+pub const META_NEXT_HOP_MAC_OFFSET: usize = 12;
+pub const META_SNAT_RANGE_START_OFFSET: usize = 18;
+pub const META_SNAT_RANGE_END_OFFSET: usize = 20;
+pub const META_FLAGS_OFFSET: usize = 22;
+pub const META_FLAG_SNAT_RANGE_RESERVED: u16 = 1;
 
 pub const ENDPOINT_MAX_ENTRIES: u32 = 16_384;
 pub const PORT_MAX_ENTRIES: u32 = 16_384;
 pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
 pub const POLICY_MAX_ENTRIES: u32 = 32_768;
-pub const META_MAX_ENTRIES: u32 = 4;
-pub const COUNTER_MAX_ENTRIES: u32 = 9;
+pub const META_MAX_ENTRIES: u32 = 1;
+pub const COUNTER_MAX_ENTRIES: u32 = 10;
 
 pub const ENDPOINT_ADDRESS_OFFSET: usize = 0;
 pub const ENDPOINT_IFINDEX_OFFSET: usize = 0;
@@ -80,71 +83,88 @@ const _: () = {
     assert!(POLICY_PORT_OFFSET + 2 == POLICY_KEY_LEN);
     assert!(POLICY_ACTION_OFFSET + 1 == POLICY_LOG_OFFSET);
     assert!(POLICY_LOG_OFFSET + 3 == POLICY_VALUE_LEN);
+    assert!(META_ABI_VERSION_OFFSET + 4 == META_EXTERNAL_IPV4_OFFSET);
+    assert!(META_EXTERNAL_IPV4_OFFSET + 4 == META_EXTERNAL_IFINDEX_OFFSET);
+    assert!(META_EXTERNAL_IFINDEX_OFFSET + 4 == META_NEXT_HOP_MAC_OFFSET);
+    assert!(META_NEXT_HOP_MAC_OFFSET + 6 == META_SNAT_RANGE_START_OFFSET);
+    assert!(META_SNAT_RANGE_START_OFFSET + 2 == META_SNAT_RANGE_END_OFFSET);
+    assert!(META_SNAT_RANGE_END_OFFSET + 2 == META_FLAGS_OFFSET);
+    assert!(META_FLAGS_OFFSET + 2 == META_VALUE_LEN);
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MetaKey {
-    pub entry: u32,
+pub struct MetaConfig {
+    pub abi_version: u32,
+    pub external_ipv4: [u8; 4],
+    pub external_ifindex: u32,
+    pub next_hop_mac: [u8; 6],
+    pub snat_port_start: u16,
+    pub snat_port_end: u16,
+    pub flags: u16,
 }
 
-impl MetaKey {
-    pub fn encode(&self) -> [u8; META_KEY_LEN] {
-        self.entry.to_be_bytes()
-    }
-
-    pub fn decode(bytes: [u8; META_KEY_LEN]) -> Self {
-        Self {
-            entry: u32::from_be_bytes(bytes),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MetaValue {
-    bytes: [u8; META_VALUE_LEN],
-}
-
-impl MetaValue {
-    pub fn from_u32(value: u32) -> Self {
-        let mut bytes = [0; META_VALUE_LEN];
-        bytes[..4].copy_from_slice(&value.to_be_bytes());
-        Self { bytes }
-    }
-
-    pub fn from_ipv4(address: [u8; 4]) -> Self {
-        let mut bytes = [0; META_VALUE_LEN];
-        bytes[..4].copy_from_slice(&address);
-        Self { bytes }
-    }
-
-    pub fn from_mac(mac: [u8; 6]) -> Self {
-        let mut bytes = [0; META_VALUE_LEN];
-        bytes[..6].copy_from_slice(&mac);
-        Self { bytes }
-    }
-
+impl MetaConfig {
+    /// Encodes the one coherent metadata value shared by userspace and eBPF.
+    ///
+    /// Userspace may set `META_FLAG_SNAT_RANGE_RESERVED` only after verifying
+    /// the entire inclusive range is present in Linux `ip_local_reserved_ports`.
+    /// Task 7 must exercise that binding in privileged integration tests.
     pub fn encode(&self) -> [u8; META_VALUE_LEN] {
-        self.bytes
+        let mut bytes = [0; META_VALUE_LEN];
+        bytes[META_ABI_VERSION_OFFSET..META_EXTERNAL_IPV4_OFFSET]
+            .copy_from_slice(&self.abi_version.to_be_bytes());
+        bytes[META_EXTERNAL_IPV4_OFFSET..META_EXTERNAL_IFINDEX_OFFSET]
+            .copy_from_slice(&self.external_ipv4);
+        bytes[META_EXTERNAL_IFINDEX_OFFSET..META_NEXT_HOP_MAC_OFFSET]
+            .copy_from_slice(&self.external_ifindex.to_be_bytes());
+        bytes[META_NEXT_HOP_MAC_OFFSET..META_SNAT_RANGE_START_OFFSET]
+            .copy_from_slice(&self.next_hop_mac);
+        bytes[META_SNAT_RANGE_START_OFFSET..META_SNAT_RANGE_END_OFFSET]
+            .copy_from_slice(&self.snat_port_start.to_be_bytes());
+        bytes[META_SNAT_RANGE_END_OFFSET..META_FLAGS_OFFSET]
+            .copy_from_slice(&self.snat_port_end.to_be_bytes());
+        bytes[META_FLAGS_OFFSET..META_VALUE_LEN].copy_from_slice(&self.flags.to_be_bytes());
+        bytes
     }
 
     pub fn decode(bytes: [u8; META_VALUE_LEN]) -> Self {
-        Self { bytes }
+        Self {
+            abi_version: u32::from_be_bytes(
+                bytes[META_ABI_VERSION_OFFSET..META_EXTERNAL_IPV4_OFFSET]
+                    .try_into()
+                    .expect("fixed metadata ABI version range"),
+            ),
+            external_ipv4: bytes[META_EXTERNAL_IPV4_OFFSET..META_EXTERNAL_IFINDEX_OFFSET]
+                .try_into()
+                .expect("fixed metadata IPv4 range"),
+            external_ifindex: u32::from_be_bytes(
+                bytes[META_EXTERNAL_IFINDEX_OFFSET..META_NEXT_HOP_MAC_OFFSET]
+                    .try_into()
+                    .expect("fixed metadata ifindex range"),
+            ),
+            next_hop_mac: bytes[META_NEXT_HOP_MAC_OFFSET..META_SNAT_RANGE_START_OFFSET]
+                .try_into()
+                .expect("fixed metadata next-hop MAC range"),
+            snat_port_start: u16::from_be_bytes(
+                bytes[META_SNAT_RANGE_START_OFFSET..META_SNAT_RANGE_END_OFFSET]
+                    .try_into()
+                    .expect("fixed metadata SNAT start range"),
+            ),
+            snat_port_end: u16::from_be_bytes(
+                bytes[META_SNAT_RANGE_END_OFFSET..META_FLAGS_OFFSET]
+                    .try_into()
+                    .expect("fixed metadata SNAT end range"),
+            ),
+            flags: u16::from_be_bytes(
+                bytes[META_FLAGS_OFFSET..META_VALUE_LEN]
+                    .try_into()
+                    .expect("fixed metadata flags range"),
+            ),
+        }
     }
 
-    pub fn as_u32(&self) -> u32 {
-        u32::from_be_bytes(self.bytes[..4].try_into().expect("fixed metadata u32 range"))
-    }
-
-    pub fn as_ipv4(&self) -> [u8; 4] {
-        self.bytes[..4]
-            .try_into()
-            .expect("fixed metadata IPv4 range")
-    }
-
-    pub fn as_mac(&self) -> [u8; 6] {
-        self.bytes[..6]
-            .try_into()
-            .expect("fixed metadata MAC range")
+    pub fn snat_range_reserved(&self) -> bool {
+        self.flags & META_FLAG_SNAT_RANGE_RESERVED != 0
     }
 }
 

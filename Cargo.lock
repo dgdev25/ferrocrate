@@ -892,6 +892,7 @@ dependencies = [
  "aya",
  "aya-build",
  "nix",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]

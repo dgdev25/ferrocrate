@@ -3,7 +3,7 @@ pub mod bridge;
 pub mod dns;
 pub mod ebpf;
 pub mod ebpf_abi;
-pub mod ebpf_loader;
+mod ebpf_loader;
 pub mod ebpf_maps;
 pub mod executor;
 pub mod iptables;

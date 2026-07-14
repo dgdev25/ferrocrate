@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -6,17 +5,15 @@ use thiserror::Error;
 
 use crate::ebpf_abi::{
     EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
-    COUNTER_MAX_ENTRIES, ENDPOINTS_MAP_NAME, META_FLAG_SNAT_RANGE_RESERVED, POLICY_MAP_NAME,
-    PORTS_MAP_NAME, PROGRAM_ABI_VERSION,
+    COUNTER_MAX_ENTRIES, META_FLAG_SNAT_RANGE_RESERVED, PROGRAM_ABI_VERSION,
 };
 use crate::ebpf_loader::{
-    sha256, AyaKernel, KernelAdapter, KernelLoadPlan, KernelPreflight, MapMetadata, ObjectMetadata,
+    sha256, validate_embedded_object, AyaKernel, KernelAdapter, KernelLoadPlan, KernelPreflight,
 };
-use crate::ebpf_maps::expected_map_metadata;
 use crate::executor::{exec_cmd, exec_cmd_capture, ExecError};
 
 pub const BPFFS_ROOT: &str = "/sys/fs/bpf";
-pub const FERRO_NETWORK_ROOT: &str = "/sys/fs/bpf/ferro/networks";
+pub const FERRO_NETWORK_ROOT: &str = "/sys/fs/bpf/ferrocrate";
 pub const INGRESS_CLASSIFIER: &str = "ferro_ingress";
 pub const EGRESS_CLASSIFIER: &str = "ferro_egress";
 
@@ -81,6 +78,8 @@ pub enum EbpfError {
         expected: [u8; 32],
         actual: [u8; 32],
     },
+    #[error("embedded eBPF object format is invalid: {reason}")]
+    ObjectFormat { reason: String },
     #[error("could not read /proc/sys/net/ipv4/ip_local_reserved_ports: {reason}")]
     ReservedPortsRead { reason: String },
     #[error("invalid ip_local_reserved_ports value `{token}`")]
@@ -96,8 +95,8 @@ pub enum EbpfError {
     #[error("eBPF map `{map}` has the wrong type or dimensions")]
     MapSchemaMismatch {
         map: String,
-        expected: MapMetadata,
-        actual: MapMetadata,
+        expected: String,
+        actual: String,
     },
     #[error("required classifier `{classifier}` is missing")]
     MissingClassifier { classifier: &'static str },
@@ -109,6 +108,12 @@ pub enum EbpfError {
     InvalidPinPath { path: PathBuf },
     #[error("pin path already exists and is not owned by this transaction: {path}")]
     PinPathExists { path: PathBuf },
+    #[error("bpffs directory policy failed for `{path}`: {reason}")]
+    DirectoryPolicy { path: String, reason: String },
+    #[error("owned bpffs directory is not empty: {path}")]
+    DirectoryNotEmpty { path: String },
+    #[error("owned bpffs entry was replaced; refusing to delete `{entry}`")]
+    OwnershipChanged { entry: String },
     #[error("interface `{interface}` has ifindex {actual}, expected {expected}")]
     InterfaceMismatch {
         interface: String,
@@ -137,6 +142,8 @@ pub enum EbpfError {
     Metrics { reason: String },
     #[error("eBPF network is detached")]
     Detached,
+    #[error("invalid eBPF adapter lifecycle state: {reason}")]
+    InvalidAdapterState { reason: String },
     #[error("failed to detach eBPF network: {reason}")]
     Detach { reason: String },
     #[error("{primary}; rollback also failed: {rollback}")]
@@ -162,13 +169,23 @@ impl EbpfNetwork {
         Self::load_with(AyaKernel::new(), config)
     }
 
-    pub fn load_with<K>(mut kernel: K, config: EbpfNetworkConfig) -> Result<Self, EbpfError>
+    fn load_with<K>(kernel: K, config: EbpfNetworkConfig) -> Result<Self, EbpfError>
+    where
+        K: KernelAdapter + 'static,
+    {
+        Self::load_with_object(kernel, config, crate::ebpf_loader::embedded_object())
+    }
+
+    fn load_with_object<K>(
+        mut kernel: K,
+        config: EbpfNetworkConfig,
+        object: &'static [u8],
+    ) -> Result<Self, EbpfError>
     where
         K: KernelAdapter + 'static,
     {
         validate_config(&config)?;
-        let pin_path = config.pin_path()?;
-        let object = crate::ebpf_loader::embedded_object();
+        config.pin_path()?;
         let actual_hash = sha256(object);
         if actual_hash != config.expected_object_sha256 {
             return Err(EbpfError::ObjectHashMismatch {
@@ -176,20 +193,19 @@ impl EbpfNetwork {
                 actual: actual_hash,
             });
         }
+        validate_embedded_object(object)?;
 
         let reserved = kernel.reserved_ports()?;
         prove_reserved_range(&reserved, config.snat_port_start, config.snat_port_end)?;
 
         let preflight = KernelPreflight {
             object,
+            expected_object_sha256: config.expected_object_sha256,
+            network_id: &config.network_id,
             interface: &config.interface,
             external_ifindex: config.external_ifindex,
-            pin_path: &pin_path,
         };
-        let metadata = kernel.preflight(&preflight)?;
-        if let Err(error) = validate_object_metadata(&metadata) {
-            return Err(rollback_error(&mut kernel, error));
-        }
+        kernel.preflight(&preflight)?;
 
         let metadata = MetaConfig {
             abi_version: PROGRAM_ABI_VERSION,
@@ -202,8 +218,8 @@ impl EbpfNetwork {
         }
         .encode();
         let plan = KernelLoadPlan {
+            network_id: &config.network_id,
             interface: &config.interface,
-            pin_path: &pin_path,
             metadata,
         };
         if let Err(error) = kernel.commit(&plan) {
@@ -221,31 +237,23 @@ impl EbpfNetwork {
         key: EndpointKey,
         value: EndpointValue,
     ) -> Result<(), EbpfError> {
-        self.active_kernel()?.map_insert(
-            ENDPOINTS_MAP_NAME,
-            &key.encode(),
-            &value.encode(),
-        )
+        self.active_kernel()?.install_endpoint(key, value)
     }
 
     pub fn remove_endpoint(&mut self, key: EndpointKey) -> Result<(), EbpfError> {
-        self.active_kernel()?
-            .map_remove(ENDPOINTS_MAP_NAME, &key.encode())
+        self.active_kernel()?.remove_endpoint(key)
     }
 
     pub fn install_port(&mut self, key: PortKey, value: PortValue) -> Result<(), EbpfError> {
-        self.active_kernel()?
-            .map_insert(PORTS_MAP_NAME, &key.encode(), &value.encode())
+        self.active_kernel()?.install_port(key, value)
     }
 
     pub fn remove_port(&mut self, key: PortKey) -> Result<(), EbpfError> {
-        self.active_kernel()?
-            .map_remove(PORTS_MAP_NAME, &key.encode())
+        self.active_kernel()?.remove_port(key)
     }
 
     pub fn set_policy(&mut self, key: PolicyKey, value: PolicyValue) -> Result<(), EbpfError> {
-        self.active_kernel()?
-            .map_insert(POLICY_MAP_NAME, &key.encode(), &value.encode())
+        self.active_kernel()?.set_policy(key, value)
     }
 
     pub fn metrics(&mut self) -> Result<EbpfMetrics, EbpfError> {
@@ -281,7 +289,7 @@ pub fn embedded_object_sha256() -> [u8; 32] {
 }
 
 pub fn embedded_object_abi() -> Result<u32, EbpfError> {
-    crate::ebpf_loader::object_abi(crate::ebpf_loader::embedded_object())
+    Ok(validate_embedded_object(crate::ebpf_loader::embedded_object())?.program_abi)
 }
 
 fn validate_config(config: &EbpfNetworkConfig) -> Result<(), EbpfError> {
@@ -290,7 +298,10 @@ fn validate_config(config: &EbpfNetworkConfig) -> Result<(), EbpfError> {
         || config.interface.len() > 15
         || config.interface == "."
         || config.interface == ".."
-        || config.interface.bytes().any(|byte| byte == 0 || byte == b'/')
+        || config
+            .interface
+            .bytes()
+            .any(|byte| byte == 0 || byte == b'/')
     {
         return Err(EbpfError::InvalidConfig {
             reason: format!("invalid interface name `{}`", config.interface),
@@ -380,78 +391,6 @@ fn parse_port(value: &str, token: &str) -> Result<u16, EbpfError> {
         .ok_or_else(|| EbpfError::ReservedPortsInvalid {
             token: token.to_string(),
         })
-}
-
-fn validate_object_metadata(metadata: &ObjectMetadata) -> Result<(), EbpfError> {
-    if metadata.program_abi != PROGRAM_ABI_VERSION {
-        return Err(EbpfError::AbiMismatch {
-            expected: PROGRAM_ABI_VERSION,
-            actual: metadata.program_abi,
-        });
-    }
-
-    let expected_maps = expected_map_metadata();
-    let mut actual_names = BTreeSet::new();
-    for actual in &metadata.maps {
-        if !actual_names.insert(actual.name.as_str()) {
-            return Err(EbpfError::UnexpectedMap {
-                map: actual.name.clone(),
-            });
-        }
-        let Some(expected) = expected_maps.iter().find(|map| map.name == actual.name) else {
-            return Err(EbpfError::UnexpectedMap {
-                map: actual.name.clone(),
-            });
-        };
-        if actual != expected {
-            return Err(EbpfError::MapSchemaMismatch {
-                map: actual.name.clone(),
-                expected: expected.clone(),
-                actual: actual.clone(),
-            });
-        }
-    }
-    for expected in &expected_maps {
-        if !actual_names.contains(expected.name.as_str()) {
-            let map = expected_maps
-                .iter()
-                .find_map(|candidate| {
-                    (candidate.name == expected.name).then_some(candidate.name.as_str())
-                })
-                .expect("expected map name is present in the static schema");
-            let map = match map {
-                name if name == ENDPOINTS_MAP_NAME => ENDPOINTS_MAP_NAME,
-                name if name == PORTS_MAP_NAME => PORTS_MAP_NAME,
-                name if name == crate::ebpf_abi::CONNTRACK_MAP_NAME => {
-                    crate::ebpf_abi::CONNTRACK_MAP_NAME
-                }
-                name if name == POLICY_MAP_NAME => POLICY_MAP_NAME,
-                name if name == crate::ebpf_abi::COUNTERS_MAP_NAME => {
-                    crate::ebpf_abi::COUNTERS_MAP_NAME
-                }
-                _ => crate::ebpf_abi::META_MAP_NAME,
-            };
-            return Err(EbpfError::MissingMap { map });
-        }
-    }
-
-    let expected_classifiers = [INGRESS_CLASSIFIER, EGRESS_CLASSIFIER];
-    let mut actual_classifiers = BTreeSet::new();
-    for classifier in &metadata.classifiers {
-        if !actual_classifiers.insert(classifier.as_str())
-            || !expected_classifiers.contains(&classifier.as_str())
-        {
-            return Err(EbpfError::UnexpectedClassifier {
-                classifier: classifier.clone(),
-            });
-        }
-    }
-    for classifier in expected_classifiers {
-        if !actual_classifiers.contains(classifier) {
-            return Err(EbpfError::MissingClassifier { classifier });
-        }
-    }
-    Ok(())
 }
 
 fn rollback_error(kernel: &mut dyn KernelAdapter, primary: EbpfError) -> EbpfError {
@@ -584,4 +523,219 @@ fn sanitize_event(event: &str) -> Result<String, ExecError> {
 
 fn default_security_events() -> &'static [&'static str] {
     &["execve", "connect", "open", "ptrace", "mount", "unshare"]
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        embedded_object_sha256, EbpfError, EbpfNetwork, EbpfNetworkConfig, EGRESS_CLASSIFIER,
+        INGRESS_CLASSIFIER,
+    };
+    use crate::ebpf_abi::{
+        EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
+        COUNTER_MAX_ENTRIES, META_FLAG_SNAT_RANGE_RESERVED, META_VALUE_LEN, PROGRAM_ABI_VERSION,
+    };
+    use crate::ebpf_loader::{KernelAdapter, KernelLoadPlan, KernelPreflight};
+
+    #[derive(Debug, Default)]
+    struct FakeState {
+        events: Vec<String>,
+        metadata: Option<[u8; META_VALUE_LEN]>,
+        endpoints: Vec<(EndpointKey, EndpointValue)>,
+        ports: Vec<(PortKey, PortValue)>,
+        policies: Vec<(PolicyKey, PolicyValue)>,
+        rollback_count: usize,
+        detach_count: usize,
+    }
+
+    struct FakeKernel {
+        state: Arc<Mutex<FakeState>>,
+        reserved_ports: String,
+        fail_egress_attach: bool,
+    }
+
+    impl FakeKernel {
+        fn valid() -> (Self, Arc<Mutex<FakeState>>) {
+            let state = Arc::new(Mutex::new(FakeState::default()));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                    reserved_ports: "1-1024,50000-50031".to_string(),
+                    fail_egress_attach: false,
+                },
+                state,
+            )
+        }
+    }
+
+    impl KernelAdapter for FakeKernel {
+        fn reserved_ports(&mut self) -> Result<String, EbpfError> {
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .push("reserved".to_string());
+            Ok(self.reserved_ports.clone())
+        }
+
+        fn preflight(&mut self, request: &KernelPreflight<'_>) -> Result<(), EbpfError> {
+            assert_eq!(request.network_id, "test-network");
+            assert_eq!(request.expected_object_sha256, embedded_object_sha256());
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .push("preflight".to_string());
+            Ok(())
+        }
+
+        fn commit(&mut self, plan: &KernelLoadPlan<'_>) -> Result<(), EbpfError> {
+            let mut state = self.state.lock().unwrap();
+            state.metadata = Some(plan.metadata);
+            state.events.push(format!("attach:{INGRESS_CLASSIFIER}"));
+            if self.fail_egress_attach {
+                return Err(EbpfError::Attach {
+                    classifier: EGRESS_CLASSIFIER.to_string(),
+                    reason: "injected".to_string(),
+                });
+            }
+            state.events.push(format!("attach:{EGRESS_CLASSIFIER}"));
+            Ok(())
+        }
+
+        fn install_endpoint(
+            &mut self,
+            key: EndpointKey,
+            value: EndpointValue,
+        ) -> Result<(), EbpfError> {
+            self.state.lock().unwrap().endpoints.push((key, value));
+            Ok(())
+        }
+
+        fn remove_endpoint(&mut self, _key: EndpointKey) -> Result<(), EbpfError> {
+            Ok(())
+        }
+
+        fn install_port(&mut self, key: PortKey, value: PortValue) -> Result<(), EbpfError> {
+            self.state.lock().unwrap().ports.push((key, value));
+            Ok(())
+        }
+
+        fn remove_port(&mut self, _key: PortKey) -> Result<(), EbpfError> {
+            Ok(())
+        }
+
+        fn set_policy(&mut self, key: PolicyKey, value: PolicyValue) -> Result<(), EbpfError> {
+            self.state.lock().unwrap().policies.push((key, value));
+            Ok(())
+        }
+
+        fn counters(&mut self) -> Result<[u64; COUNTER_MAX_ENTRIES as usize], EbpfError> {
+            Ok([0; COUNTER_MAX_ENTRIES as usize])
+        }
+
+        fn rollback(&mut self) -> Result<(), EbpfError> {
+            self.state.lock().unwrap().rollback_count += 1;
+            Ok(())
+        }
+
+        fn detach(&mut self) -> Result<(), EbpfError> {
+            self.state.lock().unwrap().detach_count += 1;
+            Ok(())
+        }
+    }
+
+    fn config() -> EbpfNetworkConfig {
+        EbpfNetworkConfig {
+            network_id: "test-network".to_string(),
+            interface: "eth-test0".to_string(),
+            external_ipv4: [203, 0, 113, 8],
+            external_ifindex: 17,
+            next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            snat_port_start: 50_000,
+            snat_port_end: 50_031,
+            expected_object_sha256: embedded_object_sha256(),
+        }
+    }
+
+    #[test]
+    fn successful_load_commits_coherent_metadata_and_typed_updates() {
+        let (kernel, state) = FakeKernel::valid();
+        let mut network = EbpfNetwork::load_with(kernel, config()).unwrap();
+        let endpoint = (
+            EndpointKey {
+                address: [10, 44, 1, 2],
+            },
+            EndpointValue {
+                ifindex: 23,
+                mac: [2, 0, 0, 0, 0, 23],
+                flags: 1,
+            },
+        );
+        let port = (
+            PortKey {
+                protocol: 6,
+                host_port: 8080,
+            },
+            PortValue {
+                endpoint_address: [10, 44, 1, 2],
+                endpoint_port: 80,
+            },
+        );
+        let policy = (
+            PolicyKey {
+                endpoint_address: [10, 44, 1, 2],
+                protocol: 6,
+                direction: 1,
+                port: 443,
+            },
+            PolicyValue {
+                action: 1,
+                log: true,
+            },
+        );
+
+        network.install_endpoint(endpoint.0, endpoint.1).unwrap();
+        network.install_port(port.0, port.1).unwrap();
+        network.set_policy(policy.0, policy.1).unwrap();
+
+        let locked = state.lock().unwrap();
+        let metadata = MetaConfig::decode(locked.metadata.unwrap());
+        assert_eq!(metadata.abi_version, PROGRAM_ABI_VERSION);
+        assert_eq!(metadata.flags, META_FLAG_SNAT_RANGE_RESERVED);
+        assert_eq!(locked.endpoints, vec![endpoint]);
+        assert_eq!(locked.ports, vec![port]);
+        assert_eq!(locked.policies, vec![policy]);
+    }
+
+    #[test]
+    fn incomplete_reservation_fails_before_kernel_preflight() {
+        let (mut kernel, state) = FakeKernel::valid();
+        kernel.reserved_ports = "50000-50015".to_string();
+
+        assert!(matches!(
+            EbpfNetwork::load_with(kernel, config()),
+            Err(EbpfError::SnatRangeNotReserved { .. })
+        ));
+        assert_eq!(state.lock().unwrap().events, vec!["reserved"]);
+    }
+
+    #[test]
+    fn failed_second_attach_rolls_back_and_detach_is_idempotent() {
+        let (mut failing, failed_state) = FakeKernel::valid();
+        failing.fail_egress_attach = true;
+        assert!(matches!(
+            EbpfNetwork::load_with(failing, config()),
+            Err(EbpfError::Attach { .. })
+        ));
+        assert_eq!(failed_state.lock().unwrap().rollback_count, 1);
+
+        let (kernel, detached_state) = FakeKernel::valid();
+        let mut network = EbpfNetwork::load_with(kernel, config()).unwrap();
+        network.detach().unwrap();
+        network.detach().unwrap();
+        assert_eq!(detached_state.lock().unwrap().detach_count, 1);
+    }
 }

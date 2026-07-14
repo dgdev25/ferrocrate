@@ -106,5 +106,8 @@ fn metadata(
         key_size: key_size as u32,
         value_size: value_size as u32,
         max_entries,
+        map_flags: 0,
+        pinning: 0,
+        map_id: 0,
     }
 }

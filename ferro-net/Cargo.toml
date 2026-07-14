@@ -8,12 +8,15 @@ workspace = true
 
 [dependencies]
 aya = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [build-dependencies]
 aya-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [[test]]
 name = "ebpf_abi"

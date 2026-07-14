@@ -1,24 +1,31 @@
 use aya_ebpf::{
+    helpers::bpf_ktime_get_ns,
     macros::map,
-    maps::{Array, HashMap, LruHashMap, PerCpuArray},
+    maps::{HashMap, LruHashMap, PerCpuArray},
 };
 
 use crate::{
     abi::{
-        CONNTRACK_KEY_LEN, CONNTRACK_LAST_SEEN_OFFSET, CONNTRACK_STATE_OFFSET,
-        CONNTRACK_TRANSLATED_ADDRESS_OFFSET, CONNTRACK_TRANSLATED_PORT_OFFSET,
-        CONNTRACK_VALUE_LEN, ENDPOINT_FLAGS_OFFSET, ENDPOINT_IFINDEX_OFFSET, ENDPOINT_KEY_LEN,
-        ENDPOINT_MAC_OFFSET, ENDPOINT_VALUE_LEN, META_VALUE_LEN, POLICY_ACTION_OFFSET,
-        POLICY_KEY_LEN, POLICY_VALUE_LEN, PORT_KEY_LEN, PORT_VALUE_ADDRESS_OFFSET,
-        PORT_VALUE_LEN, PORT_VALUE_NUMBER_OFFSET,
+        CONNTRACK_KEY_LEN, CONNTRACK_LAST_SEEN_OFFSET, CONNTRACK_MAX_ENTRIES,
+        CONNTRACK_STATE_OFFSET, CONNTRACK_TRANSLATED_ADDRESS_OFFSET,
+        CONNTRACK_TRANSLATED_PORT_OFFSET, CONNTRACK_VALUE_LEN, COUNTER_MAX_ENTRIES,
+        ENDPOINT_FLAGS_OFFSET, ENDPOINT_IFINDEX_OFFSET, ENDPOINT_KEY_LEN, ENDPOINT_MAC_OFFSET,
+        ENDPOINT_MAX_ENTRIES, ENDPOINT_VALUE_LEN, META_KEY_ABI_VERSION,
+        META_KEY_EXTERNAL_IFINDEX, META_KEY_EXTERNAL_IPV4, META_KEY_LEN,
+        META_KEY_NEXT_HOP_MAC, META_MAX_ENTRIES, META_VALUE_LEN, POLICY_ACTION_OFFSET,
+        POLICY_KEY_LEN, POLICY_MAX_ENTRIES, POLICY_VALUE_LEN, PORT_KEY_LEN, PORT_MAX_ENTRIES,
+        PORT_VALUE_ADDRESS_OFFSET, PORT_VALUE_LEN, PORT_VALUE_NUMBER_OFFSET, PROGRAM_ABI_VERSION,
     },
     datapath::{
-        ConntrackRecord, Counter, DatapathState, Endpoint, FlowKey, NatTarget, PolicyAction,
-        PolicyKey, PortTarget, CONNTRACK_MAX_ENTRIES, CONNTRACK_STATE_ESTABLISHED,
-        COUNTER_MAX_ENTRIES, ENDPOINT_MAX_ENTRIES, META_MAX_ENTRIES, POLICY_ACTION_ALLOW,
-        POLICY_MAX_ENTRIES, PORT_MAX_ENTRIES,
+        ConntrackPair, ConntrackRecord, ConntrackReservation, Counter, DatapathState, Endpoint,
+        ExternalNetwork, FlowKey, NatTarget, PolicyAction, PolicyKey, PortTarget,
+        CONNTRACK_STATE_ESTABLISHED, POLICY_ACTION_ALLOW,
     },
 };
+
+const BPF_ANY: u64 = 0;
+const BPF_NOEXIST: u64 = 1;
+const EEXIST: i32 = -17;
 
 #[map]
 pub static FERRO_ENDPOINTS: HashMap<[u8; ENDPOINT_KEY_LEN], [u8; ENDPOINT_VALUE_LEN]> =
@@ -41,17 +48,38 @@ pub static FERRO_COUNTERS: PerCpuArray<u64> =
     PerCpuArray::with_max_entries(COUNTER_MAX_ENTRIES, 0);
 
 #[map]
-pub static FERRO_META: Array<[u8; META_VALUE_LEN]> =
-    Array::with_max_entries(META_MAX_ENTRIES, 0);
+pub static FERRO_META: HashMap<[u8; META_KEY_LEN], [u8; META_VALUE_LEN]> =
+    HashMap::with_max_entries(META_MAX_ENTRIES, 0);
 
 pub struct KernelState;
 
 fn copied_map_value<const N: usize>(pointer: Option<*const [u8; N]>) -> Option<[u8; N]> {
     let pointer = pointer?;
     // SAFETY: Aya returned a pointer to a fixed-size map value of exactly N bytes.
-    // The value is copied immediately, before this program performs another
-    // operation on the same map, so no map-backed reference escapes the lookup.
+    // It is copied before another operation on the same map, so no map reference escapes.
     Some(unsafe { pointer.read_unaligned() })
+}
+
+fn metadata_value(key: u32) -> Option<[u8; META_VALUE_LEN]> {
+    copied_map_value(FERRO_META.get_ptr(key.to_be_bytes()))
+}
+
+fn conntrack_value(record: ConntrackRecord, last_seen_ns: u64) -> [u8; CONNTRACK_VALUE_LEN] {
+    let mut value = [0; CONNTRACK_VALUE_LEN];
+    value[CONNTRACK_TRANSLATED_ADDRESS_OFFSET..CONNTRACK_TRANSLATED_ADDRESS_OFFSET + 4]
+        .copy_from_slice(&record.target.address);
+    value[CONNTRACK_TRANSLATED_PORT_OFFSET..CONNTRACK_TRANSLATED_PORT_OFFSET + 2]
+        .copy_from_slice(&record.target.port.to_be_bytes());
+    value[CONNTRACK_STATE_OFFSET] = CONNTRACK_STATE_ESTABLISHED;
+    value[CONNTRACK_LAST_SEEN_OFFSET..CONNTRACK_LAST_SEEN_OFFSET + 8]
+        .copy_from_slice(&last_seen_ns.to_be_bytes());
+    value
+}
+
+fn insert_record(record: ConntrackRecord, flags: u64) -> Result<(), i32> {
+    // SAFETY: bpf_ktime_get_ns takes no pointers and returns a scalar monotonic timestamp.
+    let now = unsafe { bpf_ktime_get_ns() };
+    FERRO_CONNTRACK.insert(record.key.encode(), conntrack_value(record, now), flags)
 }
 
 impl DatapathState for KernelState {
@@ -85,8 +113,7 @@ impl DatapathState for KernelState {
 
     fn published_port(&self, protocol: u8, host_port: u16) -> Option<PortTarget> {
         let port = host_port.to_be_bytes();
-        let key = [protocol, 0, port[0], port[1]];
-        let value = copied_map_value(FERRO_PORTS.get_ptr(key))?;
+        let value = copied_map_value(FERRO_PORTS.get_ptr([protocol, 0, port[0], port[1]]))?;
         Some(PortTarget {
             address: [
                 value[PORT_VALUE_ADDRESS_OFFSET],
@@ -121,18 +148,48 @@ impl DatapathState for KernelState {
             flags: value[ENDPOINT_FLAGS_OFFSET],
         })
     }
+
+    fn external_network(&self) -> Option<ExternalNetwork> {
+        let version = metadata_value(META_KEY_ABI_VERSION)?;
+        if u32::from_be_bytes([version[0], version[1], version[2], version[3]])
+            != PROGRAM_ABI_VERSION
+        {
+            return None;
+        }
+        let address = metadata_value(META_KEY_EXTERNAL_IPV4)?;
+        let ifindex = metadata_value(META_KEY_EXTERNAL_IFINDEX)?;
+        let mac = metadata_value(META_KEY_NEXT_HOP_MAC)?;
+        Some(ExternalNetwork {
+            address: [address[0], address[1], address[2], address[3]],
+            ifindex: u32::from_be_bytes([ifindex[0], ifindex[1], ifindex[2], ifindex[3]]),
+            next_hop_mac: [mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]],
+        })
+    }
+
+    fn reserve_conntrack(&self, record: ConntrackRecord) -> ConntrackReservation {
+        match insert_record(record, BPF_NOEXIST) {
+            Ok(()) => ConntrackReservation::Reserved,
+            Err(EEXIST) => ConntrackReservation::Occupied,
+            Err(_) => ConntrackReservation::Failed,
+        }
+    }
+
+    fn insert_conntrack(&self, record: ConntrackRecord) -> Result<(), ()> {
+        insert_record(record, BPF_NOEXIST).map_err(|_| ())
+    }
+
+    fn remove_conntrack(&self, key: FlowKey) {
+        let _ = FERRO_CONNTRACK.remove(key.encode());
+    }
 }
 
-pub fn insert_reverse_conntrack(record: ConntrackRecord, last_seen_ns: u64) -> Result<(), i32> {
-    let mut value = [0; CONNTRACK_VALUE_LEN];
-    value[CONNTRACK_TRANSLATED_ADDRESS_OFFSET..CONNTRACK_TRANSLATED_ADDRESS_OFFSET + 4]
-        .copy_from_slice(&record.target.address);
-    value[CONNTRACK_TRANSLATED_PORT_OFFSET..CONNTRACK_TRANSLATED_PORT_OFFSET + 2]
-        .copy_from_slice(&record.target.port.to_be_bytes());
-    value[CONNTRACK_STATE_OFFSET] = CONNTRACK_STATE_ESTABLISHED;
-    value[CONNTRACK_LAST_SEEN_OFFSET..CONNTRACK_LAST_SEEN_OFFSET + 8]
-        .copy_from_slice(&last_seen_ns.to_be_bytes());
-    FERRO_CONNTRACK.insert(record.key.encode(), value, 0)
+pub fn insert_reverse_conntrack(record: ConntrackRecord) -> Result<(), i32> {
+    insert_record(record, BPF_ANY)
+}
+
+pub fn rollback_pair(pair: ConntrackPair) {
+    let _ = FERRO_CONNTRACK.remove(pair.forward.key.encode());
+    let _ = FERRO_CONNTRACK.remove(pair.reverse.key.encode());
 }
 
 pub fn increment(counter: Counter) {
@@ -141,10 +198,8 @@ pub fn increment(counter: Counter) {
         return;
     }
     if let Some(pointer) = FERRO_COUNTERS.get_ptr_mut(index) {
-        // SAFETY: the checked index is inside the PerCpuArray's explicit maximum,
-        // and Aya returned the current CPU's unique, aligned u64 value pointer.
-        // Per-CPU storage requires no cross-CPU atomic operation; wrapping avoids
-        // debug/release divergence when a long-lived counter reaches u64::MAX.
+        // SAFETY: index is bounded by the PerCpuArray maximum and Aya returned
+        // the current CPU's aligned u64 slot. Wrapping keeps behavior uniform.
         unsafe {
             pointer.write(pointer.read().wrapping_add(1));
         }

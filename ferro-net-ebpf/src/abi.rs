@@ -9,7 +9,12 @@ pub const CONNTRACK_VALUE_LEN: usize = 16;
 pub const POLICY_KEY_LEN: usize = 8;
 pub const POLICY_VALUE_LEN: usize = 4;
 pub const META_KEY_LEN: usize = 4;
-pub const META_VALUE_LEN: usize = 4;
+pub const META_VALUE_LEN: usize = 8;
+
+pub const META_KEY_ABI_VERSION: u32 = 0;
+pub const META_KEY_EXTERNAL_IPV4: u32 = 1;
+pub const META_KEY_EXTERNAL_IFINDEX: u32 = 2;
+pub const META_KEY_NEXT_HOP_MAC: u32 = 3;
 
 pub const ENDPOINT_ADDRESS_OFFSET: usize = 0;
 pub const ENDPOINT_IFINDEX_OFFSET: usize = 0;
@@ -61,8 +66,9 @@ const _: () = {
     assert!(POLICY_LOG_OFFSET + 3 == POLICY_VALUE_LEN);
 };
 
-pub const ENDPOINT_MAX_ENTRIES: u32 = 4_096;
-pub const PORT_MAX_ENTRIES: u32 = 65_536;
+pub const ENDPOINT_MAX_ENTRIES: u32 = 16_384;
+pub const PORT_MAX_ENTRIES: u32 = 16_384;
 pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
-pub const POLICY_MAX_ENTRIES: u32 = 16_384;
-pub const META_MAX_ENTRIES: u32 = 1;
+pub const POLICY_MAX_ENTRIES: u32 = 32_768;
+pub const META_MAX_ENTRIES: u32 = 4;
+pub const COUNTER_MAX_ENTRIES: u32 = 9;

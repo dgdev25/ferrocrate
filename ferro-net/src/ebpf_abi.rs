@@ -7,6 +7,7 @@ pub const PORTS_MAP_NAME: &str = "FERRO_PORTS";
 pub const CONNTRACK_MAP_NAME: &str = "FERRO_CONNTRACK";
 pub const POLICY_MAP_NAME: &str = "FERRO_POLICY";
 pub const META_MAP_NAME: &str = "FERRO_META";
+pub const COUNTERS_MAP_NAME: &str = "FERRO_COUNTERS";
 
 pub const ENDPOINT_KEY_LEN: usize = 4;
 pub const ENDPOINT_VALUE_LEN: usize = 12;
@@ -17,7 +18,19 @@ pub const CONNTRACK_VALUE_LEN: usize = 16;
 pub const POLICY_KEY_LEN: usize = 8;
 pub const POLICY_VALUE_LEN: usize = 4;
 pub const META_KEY_LEN: usize = 4;
-pub const META_VALUE_LEN: usize = 4;
+pub const META_VALUE_LEN: usize = 8;
+
+pub const META_KEY_ABI_VERSION: u32 = 0;
+pub const META_KEY_EXTERNAL_IPV4: u32 = 1;
+pub const META_KEY_EXTERNAL_IFINDEX: u32 = 2;
+pub const META_KEY_NEXT_HOP_MAC: u32 = 3;
+
+pub const ENDPOINT_MAX_ENTRIES: u32 = 16_384;
+pub const PORT_MAX_ENTRIES: u32 = 16_384;
+pub const CONNTRACK_MAX_ENTRIES: u32 = 65_536;
+pub const POLICY_MAX_ENTRIES: u32 = 32_768;
+pub const META_MAX_ENTRIES: u32 = 4;
+pub const COUNTER_MAX_ENTRIES: u32 = 9;
 
 pub const ENDPOINT_ADDRESS_OFFSET: usize = 0;
 pub const ENDPOINT_IFINDEX_OFFSET: usize = 0;
@@ -68,6 +81,72 @@ const _: () = {
     assert!(POLICY_ACTION_OFFSET + 1 == POLICY_LOG_OFFSET);
     assert!(POLICY_LOG_OFFSET + 3 == POLICY_VALUE_LEN);
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaKey {
+    pub entry: u32,
+}
+
+impl MetaKey {
+    pub fn encode(&self) -> [u8; META_KEY_LEN] {
+        self.entry.to_be_bytes()
+    }
+
+    pub fn decode(bytes: [u8; META_KEY_LEN]) -> Self {
+        Self {
+            entry: u32::from_be_bytes(bytes),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaValue {
+    bytes: [u8; META_VALUE_LEN],
+}
+
+impl MetaValue {
+    pub fn from_u32(value: u32) -> Self {
+        let mut bytes = [0; META_VALUE_LEN];
+        bytes[..4].copy_from_slice(&value.to_be_bytes());
+        Self { bytes }
+    }
+
+    pub fn from_ipv4(address: [u8; 4]) -> Self {
+        let mut bytes = [0; META_VALUE_LEN];
+        bytes[..4].copy_from_slice(&address);
+        Self { bytes }
+    }
+
+    pub fn from_mac(mac: [u8; 6]) -> Self {
+        let mut bytes = [0; META_VALUE_LEN];
+        bytes[..6].copy_from_slice(&mac);
+        Self { bytes }
+    }
+
+    pub fn encode(&self) -> [u8; META_VALUE_LEN] {
+        self.bytes
+    }
+
+    pub fn decode(bytes: [u8; META_VALUE_LEN]) -> Self {
+        Self { bytes }
+    }
+
+    pub fn as_u32(&self) -> u32 {
+        u32::from_be_bytes(self.bytes[..4].try_into().expect("fixed metadata u32 range"))
+    }
+
+    pub fn as_ipv4(&self) -> [u8; 4] {
+        self.bytes[..4]
+            .try_into()
+            .expect("fixed metadata IPv4 range")
+    }
+
+    pub fn as_mac(&self) -> [u8; 6] {
+        self.bytes[..6]
+            .try_into()
+            .expect("fixed metadata MAC range")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointKey {

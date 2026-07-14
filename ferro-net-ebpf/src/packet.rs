@@ -131,6 +131,17 @@ pub fn parse_packet_bytes(packet: &[u8]) -> Result<PacketView, PacketError> {
     })
 }
 
+#[allow(dead_code)]
+pub fn rewrite_ethernet_destination(
+    packet: &mut [u8],
+    destination_mac: [u8; 6],
+) -> Result<(), PacketError> {
+    parse_packet_bytes(packet)?;
+    let destination = packet.get_mut(..6).ok_or(PacketError::Truncated)?;
+    destination.copy_from_slice(&destination_mac);
+    Ok(())
+}
+
 fn update_checksum_word(checksum: u16, old: u16, new: u16) -> u16 {
     let sum = u32::from(!checksum) + u32::from(!old) + u32::from(new);
     let sum = (sum & 0xffff) + (sum >> 16);

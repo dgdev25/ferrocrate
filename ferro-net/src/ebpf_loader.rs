@@ -142,8 +142,8 @@ pub(crate) struct AyaKernel {
     bpf: Option<Ebpf>,
     request: Option<ValidatedRequest>,
     layout: Option<PinLayout>,
-    ingress_link: Option<tc::SchedClassifierLinkId>,
-    egress_link: Option<tc::SchedClassifierLinkId>,
+    ingress_link: Option<OwnedClassifierLink>,
+    egress_link: Option<OwnedClassifierLink>,
     state: AdapterState,
 }
 
@@ -193,15 +193,16 @@ impl AyaKernel {
         }
 
         let mut failures = Vec::new();
-        if let Some(link_id) = self.egress_link.take() {
-            if let Err(error) = detach_classifier(self.bpf.as_mut(), EGRESS_PROGRAM, link_id) {
-                failures.push(error.to_string());
-            }
+        if let Err(error) = detach_retaining(&mut self.egress_link, OwnedClassifierLink::detach) {
+            failures.push(error.to_string());
         }
-        if let Some(link_id) = self.ingress_link.take() {
-            if let Err(error) = detach_classifier(self.bpf.as_mut(), INGRESS_PROGRAM, link_id) {
-                failures.push(error.to_string());
-            }
+        if let Err(error) = detach_retaining(&mut self.ingress_link, OwnedClassifierLink::detach) {
+            failures.push(error.to_string());
+        }
+        if !failures.is_empty() {
+            return Err(EbpfError::Detach {
+                reason: failures.join("; "),
+            });
         }
 
         self.bpf.take();
@@ -330,8 +331,12 @@ impl KernelAdapter for AyaKernel {
             });
         }
 
-        let mut layout = PinLayout::create(plan.network_id)?;
+        self.layout = Some(PinLayout::new()?);
         let result = (|| {
+            self.layout
+                .as_mut()
+                .ok_or_else(|| lifecycle_error("pin layout ownership is missing"))?
+                .prepare(plan.network_id)?;
             let meta = self
                 .bpf_mut()?
                 .map_mut(META_MAP_NAME)
@@ -341,8 +346,22 @@ impl KernelAdapter for AyaKernel {
             meta.set(0, plan.metadata, 0)
                 .map_err(|error| map_operation(META_MAP_NAME, "initialize", error))?;
 
-            layout.pin_maps(self.bpf_mut()?)?;
-            layout.pin_programs(self.bpf_mut()?)?;
+            self.layout
+                .as_mut()
+                .ok_or_else(|| lifecycle_error("pin layout ownership is missing"))?
+                .pin_maps(
+                    self.bpf
+                        .as_mut()
+                        .ok_or_else(|| lifecycle_error("Aya object is missing"))?,
+                )?;
+            self.layout
+                .as_mut()
+                .ok_or_else(|| lifecycle_error("pin layout ownership is missing"))?
+                .pin_programs(
+                    self.bpf
+                        .as_mut()
+                        .ok_or_else(|| lifecycle_error("Aya object is missing"))?,
+                )?;
 
             match tc::qdisc_add_clsact(plan.interface) {
                 Ok(()) => {}
@@ -369,7 +388,6 @@ impl KernelAdapter for AyaKernel {
             Ok(())
         })();
 
-        self.layout = Some(layout);
         if let Err(error) = result {
             let rollback = self.cleanup();
             return match rollback {
@@ -429,7 +447,7 @@ impl KernelAdapter for AyaKernel {
         for index in 0..COUNTER_MAX_ENTRIES {
             counters[index as usize] = map
                 .get(&index, 0)
-                .map(|values| values.iter().copied().sum())
+                .map(|values| aggregate_per_cpu(values.iter().copied()))
                 .map_err(|error| map_operation(COUNTERS_MAP_NAME, "read", error))?;
         }
         Ok(counters)
@@ -441,7 +459,7 @@ fn attach_classifier(
     name: &'static str,
     interface: &str,
     attach_type: TcAttachType,
-) -> Result<tc::SchedClassifierLinkId, EbpfError> {
+) -> Result<OwnedClassifierLink, EbpfError> {
     let program: &mut SchedClassifier = bpf
         .program_mut(name)
         .ok_or_else(|| missing_program(name))?
@@ -450,39 +468,109 @@ fn attach_classifier(
             classifier: name.to_string(),
             reason: error.to_string(),
         })?;
-    program
-        .attach(interface, attach_type)
+    let link_id = program
+        .attach_with_options(
+            interface,
+            attach_type,
+            tc::TcAttachOptions::Netlink(tc::NlOptions::default()),
+        )
         .map_err(|error: ProgramError| EbpfError::Attach {
             classifier: name.to_string(),
             reason: error.to_string(),
-        })
+        })?;
+    let link = program
+        .take_link(link_id)
+        .map_err(|error| EbpfError::Attach {
+            classifier: name.to_string(),
+            reason: format!("take ownership of attached link: {error}"),
+        })?;
+    let owned =
+        OwnedClassifierLink::from_aya(interface, &link).map_err(|error| EbpfError::Attach {
+            classifier: name.to_string(),
+            reason: error.to_string(),
+        })?;
+    // Netlink attachment ownership is represented by reproducible identity below.
+    // Forget Aya's wrapper so its best-effort Drop cannot race transactional cleanup.
+    std::mem::forget(link);
+    Ok(owned)
 }
 
-fn detach_classifier(
-    bpf: Option<&mut Ebpf>,
-    name: &'static str,
-    link_id: tc::SchedClassifierLinkId,
-) -> Result<(), EbpfError> {
-    let Some(bpf) = bpf else {
-        return Ok(());
-    };
-    let Some(program) = bpf.program_mut(name) else {
-        return Ok(());
-    };
-    let program: &mut SchedClassifier = program.try_into().map_err(|error| EbpfError::Detach {
-        reason: format!("open classifier {name} for detach: {error}"),
-    })?;
-    match program.detach(link_id) {
-        Ok(()) => Ok(()),
-        Err(error) if program_absent(&error) => Ok(()),
-        Err(error) => Err(EbpfError::Detach {
-            reason: format!("detach classifier {name}: {error}"),
-        }),
+#[derive(Debug)]
+struct OwnedClassifierLink {
+    interface: String,
+    attach_type: TcAttachType,
+    priority: u16,
+    handle: tc::TcHandle,
+    classid: Option<tc::TcHandle>,
+}
+
+impl OwnedClassifierLink {
+    fn from_aya(interface: &str, link: &tc::SchedClassifierLink) -> Result<Self, ProgramError> {
+        Ok(Self {
+            interface: interface.to_string(),
+            attach_type: link.attach_type()?,
+            priority: link.priority()?,
+            handle: link.handle()?,
+            classid: link.classid()?,
+        })
+    }
+
+    fn detach(&self) -> Result<(), EbpfError> {
+        let link = tc::SchedClassifierLink::attached(
+            &self.interface,
+            self.attach_type,
+            self.priority,
+            self.handle,
+            self.classid,
+        )
+        .map_err(|error| EbpfError::Detach {
+            reason: format!("reopen owned classifier link: {error}"),
+        })?;
+        match aya::programs::Link::detach(link) {
+            Ok(()) => Ok(()),
+            Err(error) if program_absent(&error) => Ok(()),
+            Err(error) => Err(EbpfError::Detach {
+                reason: format!("detach owned classifier link: {error}"),
+            }),
+        }
     }
 }
 
+fn detach_retaining<T, E>(
+    owned: &mut Option<T>,
+    detach: impl FnOnce(&T) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(value) = owned.as_ref() else {
+        return Ok(());
+    };
+    detach(value)?;
+    *owned = None;
+    Ok(())
+}
+
+fn remove_last_retaining<T, E>(
+    owned: &mut Vec<T>,
+    remove: impl FnOnce(&T) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(value) = owned.last() else {
+        return Ok(());
+    };
+    remove(value)?;
+    owned.pop();
+    Ok(())
+}
+
+fn aggregate_per_cpu(values: impl IntoIterator<Item = u64>) -> u64 {
+    values
+        .into_iter()
+        .fold(0_u64, |total, value| total.wrapping_add(value))
+}
+
 fn program_absent(error: &ProgramError) -> bool {
-    matches!(error, ProgramError::NotAttached) || has_errno(error, 2)
+    matches!(error, ProgramError::NotAttached)
+        || has_errno(error, 2)
+        || error.to_string().contains("No such file")
+        || error.to_string().contains("not found")
 }
 
 fn qdisc_already_exists(error: &tc::TcError) -> bool {
@@ -936,24 +1024,130 @@ pub(crate) struct OwnedEntry {
 }
 
 #[derive(Debug)]
+struct CreatedDirectoryGuard {
+    parent: Arc<OwnedFd>,
+    name: String,
+    identity: Option<FileIdentity>,
+    armed: bool,
+    released: bool,
+}
+
+impl CreatedDirectoryGuard {
+    fn new(parent: Arc<OwnedFd>, name: &str) -> Self {
+        Self {
+            parent,
+            name: name.to_string(),
+            identity: None,
+            armed: false,
+            released: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn capture_identity(&mut self) -> Result<(), EbpfError> {
+        let stat = fstatat(
+            self.parent.as_ref(),
+            self.name.as_str(),
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(|error| directory_policy(&self.name, error))?;
+        self.identity = Some(FileIdentity {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        });
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), EbpfError> {
+        if !self.armed || self.released {
+            return Ok(());
+        }
+        if self.identity.is_none() {
+            match self.capture_identity() {
+                Ok(()) => {}
+                Err(EbpfError::DirectoryPolicy { reason, .. }) if reason.contains("ENOENT") => {
+                    self.released = true;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let entry = OwnedEntry {
+            parent: self.parent.clone(),
+            name: self.name.clone(),
+            identity: self.identity.expect("captured identity"),
+        };
+        remove_owned_directory(&entry)?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for CreatedDirectoryGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::error!(entry = %self.name, %error, "created bpffs directory cleanup failed");
+        }
+    }
+}
+
+#[derive(Debug)]
 struct OwnedDirectory {
-    fd: Arc<OwnedFd>,
-    created: Option<OwnedEntry>,
+    fd: Option<Arc<OwnedFd>>,
+    created: Option<CreatedDirectoryGuard>,
+}
+
+impl OwnedDirectory {
+    fn existing(fd: OwnedFd) -> Self {
+        Self {
+            fd: Some(Arc::new(fd)),
+            created: None,
+        }
+    }
+
+    fn created(parent: Arc<OwnedFd>, name: &str) -> Self {
+        Self {
+            fd: None,
+            created: Some(CreatedDirectoryGuard::new(parent, name)),
+        }
+    }
+
+    fn fd(&self) -> Result<&Arc<OwnedFd>, EbpfError> {
+        self.fd
+            .as_ref()
+            .ok_or_else(|| lifecycle_error("created directory is not fully initialized"))
+    }
+
+    #[cfg(test)]
+    fn has_retryable_ownership(&self) -> bool {
+        self.created.is_some()
+    }
+
+    fn cleanup(&mut self) -> Result<(), EbpfError> {
+        if let Some(created) = self.created.as_mut() {
+            created.cleanup()?;
+            self.created = None;
+        }
+        self.fd = None;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 struct PinLayout {
     _root: Arc<OwnedFd>,
-    ferrocrate: OwnedDirectory,
-    network: OwnedDirectory,
-    maps: OwnedDirectory,
-    programs: OwnedDirectory,
+    ferrocrate: Option<OwnedDirectory>,
+    network: Option<OwnedDirectory>,
+    maps: Option<OwnedDirectory>,
+    programs: Option<OwnedDirectory>,
     pins: Vec<OwnedEntry>,
 }
 
 impl PinLayout {
-    fn create(network_id: &str) -> Result<Self, EbpfError> {
-        validate_component(network_id)?;
+    fn new() -> Result<Self, EbpfError> {
         let root = Arc::new(open_secure_directory(
             Path::new(BPFFS_ROOT),
             DirectoryPolicy {
@@ -962,57 +1156,102 @@ impl PinLayout {
                 mode: 0,
             },
         )?);
+        Ok(Self {
+            _root: root,
+            ferrocrate: None,
+            network: None,
+            maps: None,
+            programs: None,
+            pins: Vec::new(),
+        })
+    }
+
+    fn prepare(&mut self, network_id: &str) -> Result<(), EbpfError> {
+        validate_component(network_id)?;
         let policy = DirectoryPolicy {
             uid: 0,
             gid: 0,
             mode: OWNED_DIRECTORY_MODE,
         };
-        let ferrocrate = open_or_create_directory(root.clone(), FERROCRATE_DIR, policy)?;
-        if child_exists(&ferrocrate.fd, network_id)? {
+        match open_secure_child(self._root.as_ref(), FERROCRATE_DIR, policy) {
+            Ok(fd) => self.ferrocrate = Some(OwnedDirectory::existing(fd)),
+            Err(EbpfError::DirectoryPolicy { reason, .. }) if reason.contains("ENOENT") => {
+                create_directory_in(
+                    &mut self.ferrocrate,
+                    self._root.clone(),
+                    FERROCRATE_DIR,
+                    policy,
+                    CreationFailurePoint::Never,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+        let ferrocrate = self
+            .ferrocrate
+            .as_ref()
+            .expect("prepared ferrocrate")
+            .fd()?;
+        if child_exists(ferrocrate, network_id)? {
             return Err(EbpfError::PinPathExists {
                 path: format!("{BPFFS_ROOT}/{FERROCRATE_DIR}/{network_id}").into(),
             });
         }
-        let network = create_directory(ferrocrate.fd.clone(), network_id, policy)?;
-        let maps = match create_directory(network.fd.clone(), MAPS_DIR, policy) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = remove_owned_directory(network.created.as_ref().expect("created network"));
-                return Err(error);
-            }
-        };
-        let programs = match create_directory(network.fd.clone(), PROGRAMS_DIR, policy) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = remove_owned_directory(maps.created.as_ref().expect("created maps"));
-                let _ = remove_owned_directory(network.created.as_ref().expect("created network"));
-                return Err(error);
-            }
-        };
-        Ok(Self {
-            _root: root,
+        let ferrocrate = ferrocrate.clone();
+        create_directory_in(
+            &mut self.network,
             ferrocrate,
+            network_id,
+            policy,
+            CreationFailurePoint::Never,
+        )?;
+        let network = self
+            .network
+            .as_ref()
+            .expect("prepared network")
+            .fd()?
+            .clone();
+        create_directory_in(
+            &mut self.maps,
+            network.clone(),
+            MAPS_DIR,
+            policy,
+            CreationFailurePoint::Never,
+        )?;
+        create_directory_in(
+            &mut self.programs,
             network,
-            maps,
-            programs,
-            pins: Vec::new(),
-        })
+            PROGRAMS_DIR,
+            policy,
+            CreationFailurePoint::Never,
+        )?;
+        Ok(())
     }
 
     fn pin_maps(&mut self, bpf: &mut Ebpf) -> Result<(), EbpfError> {
+        let maps = self
+            .maps
+            .as_ref()
+            .ok_or_else(|| lifecycle_error("map pin directory is not prepared"))?
+            .fd()?
+            .clone();
         for expected in expected_map_metadata() {
             let name = static_map_name(&expected.name)?;
             let map = bpf.map_mut(name).ok_or_else(|| missing_map(name))?;
-            let target = descriptor_path(&self.maps.fd, name);
+            let target = descriptor_path(&maps, name);
             map.pin(&target)
                 .map_err(|error| loader_error(&format!("pin map {name}"), error))?;
-            self.pins
-                .push(capture_owned_entry(self.maps.fd.clone(), name)?);
+            self.pins.push(capture_owned_entry(maps.clone(), name)?);
         }
         Ok(())
     }
 
     fn pin_programs(&mut self, bpf: &mut Ebpf) -> Result<(), EbpfError> {
+        let programs = self
+            .programs
+            .as_ref()
+            .ok_or_else(|| lifecycle_error("program pin directory is not prepared"))?
+            .fd()?
+            .clone();
         for name in [INGRESS_PROGRAM, EGRESS_PROGRAM] {
             let program: &mut SchedClassifier = bpf
                 .program_mut(name)
@@ -1028,45 +1267,31 @@ impl PinLayout {
                     classifier: name.to_string(),
                     reason: error.to_string(),
                 })?;
-            let target = descriptor_path(&self.programs.fd, name);
+            let target = descriptor_path(&programs, name);
             program
                 .pin(&target)
                 .map_err(|error| loader_error(&format!("pin program {name}"), error))?;
-            self.pins
-                .push(capture_owned_entry(self.programs.fd.clone(), name)?);
+            self.pins.push(capture_owned_entry(programs.clone(), name)?);
         }
         Ok(())
     }
 
     fn cleanup(&mut self) -> Result<(), EbpfError> {
-        let mut failures = Vec::new();
-        while let Some(pin) = self.pins.pop() {
-            if let Err(error) = remove_owned_file(&pin) {
-                failures.push(error.to_string());
-            }
+        while !self.pins.is_empty() {
+            remove_last_retaining(&mut self.pins, remove_owned_file)?;
         }
-        for directory in [&self.programs, &self.maps, &self.network] {
-            if let Some(entry) = &directory.created {
-                if let Err(error) = remove_owned_directory(entry) {
-                    failures.push(error.to_string());
-                }
-            }
-        }
-        if failures.is_empty() {
-            if let Some(entry) = &self.ferrocrate.created {
-                match remove_owned_directory(entry) {
-                    Ok(()) => {}
-                    Err(EbpfError::DirectoryNotEmpty { .. }) => {}
-                    Err(error) => failures.push(error.to_string()),
-                }
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(EbpfError::Detach {
-                reason: failures.join("; "),
-            })
+        cleanup_directory_slot(&mut self.programs)?;
+        cleanup_directory_slot(&mut self.maps)?;
+        cleanup_directory_slot(&mut self.network)?;
+        cleanup_directory_slot(&mut self.ferrocrate)?;
+        Ok(())
+    }
+}
+
+impl Drop for PinLayout {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::error!(%error, "bpffs ownership cleanup remained incomplete at drop");
         }
     }
 }
@@ -1102,32 +1327,62 @@ pub(crate) fn open_secure_child(
     Ok(fd)
 }
 
-fn open_or_create_directory(
-    parent: Arc<OwnedFd>,
-    name: &str,
-    policy: DirectoryPolicy,
-) -> Result<OwnedDirectory, EbpfError> {
-    match open_secure_child(parent.as_ref(), name, policy) {
-        Ok(fd) => Ok(OwnedDirectory {
-            fd: Arc::new(fd),
-            created: None,
-        }),
-        Err(EbpfError::DirectoryPolicy { reason, .. }) if reason.contains("ENOENT") => {
-            create_directory(parent, name, policy)
-        }
-        Err(error) => Err(error),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum CreationFailurePoint {
+    Never,
+    AfterMkdir,
+    AfterCapture,
+    AfterOpen,
+    AfterFstat,
+    AfterIdentity,
+}
+
+fn inject_creation_failure(
+    configured: CreationFailurePoint,
+    current: CreationFailurePoint,
+) -> Result<(), EbpfError> {
+    if configured == current {
+        Err(lifecycle_error(&format!(
+            "injected directory creation failure at {current:?}"
+        )))
+    } else {
+        Ok(())
     }
 }
 
-fn create_directory(
+fn create_directory_in(
+    slot: &mut Option<OwnedDirectory>,
     parent: Arc<OwnedFd>,
     name: &str,
     policy: DirectoryPolicy,
-) -> Result<OwnedDirectory, EbpfError> {
+    failure: CreationFailurePoint,
+) -> Result<(), EbpfError> {
+    if slot.is_some() {
+        return Err(lifecycle_error(
+            "directory ownership slot is already occupied",
+        ));
+    }
     validate_component(name)?;
-    mkdirat(parent.as_ref(), name, Mode::from_bits_truncate(policy.mode))
-        .map_err(|error| directory_policy(name, error))?;
-    let created = capture_owned_entry(parent.clone(), name)?;
+    *slot = Some(OwnedDirectory::created(parent.clone(), name));
+    if let Err(error) = mkdirat(parent.as_ref(), name, Mode::from_bits_truncate(policy.mode)) {
+        *slot = None;
+        return Err(directory_policy(name, error));
+    }
+    slot.as_mut()
+        .expect("creation guard installed")
+        .created
+        .as_mut()
+        .expect("created directory guard")
+        .arm();
+    inject_creation_failure(failure, CreationFailurePoint::AfterMkdir)?;
+    slot.as_mut()
+        .expect("creation guard installed")
+        .created
+        .as_mut()
+        .expect("created directory guard")
+        .capture_identity()?;
+    inject_creation_failure(failure, CreationFailurePoint::AfterCapture)?;
     let fd = match open_secure_child(
         parent.as_ref(),
         name,
@@ -1138,42 +1393,43 @@ fn create_directory(
         },
     ) {
         Ok(fd) => fd,
-        Err(error) => {
-            let _ = remove_owned_directory(&created);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
+    slot.as_mut().expect("creation guard installed").fd = Some(Arc::new(fd));
+    inject_creation_failure(failure, CreationFailurePoint::AfterOpen)?;
+    let directory = slot.as_mut().expect("creation guard installed");
+    let fd = directory.fd()?;
     let opened = fstat(&fd).map_err(|error| directory_policy(name, error))?;
+    inject_creation_failure(failure, CreationFailurePoint::AfterFstat)?;
+    let created = directory.created.as_ref().expect("created directory guard");
     if (FileIdentity {
         device: opened.st_dev,
         inode: opened.st_ino,
-    }) != created.identity
+    }) != created.identity.expect("captured identity")
     {
         return Err(EbpfError::OwnershipChanged {
             entry: name.to_string(),
         });
     }
+    inject_creation_failure(failure, CreationFailurePoint::AfterIdentity)?;
     if let Err(error) = fchown(
-        &fd,
+        fd.as_ref(),
         Some(Uid::from_raw(policy.uid)),
         Some(Gid::from_raw(policy.gid)),
     )
-    .and_then(|_| fchmod(&fd, Mode::from_bits_truncate(policy.mode)))
+    .and_then(|_| fchmod(fd.as_ref(), Mode::from_bits_truncate(policy.mode)))
     {
-        drop(fd);
-        let _ = remove_owned_directory(&created);
         return Err(directory_policy(name, error));
     }
-    if let Err(error) = verify_directory(&fd, name.to_string(), policy, false) {
-        drop(fd);
-        let _ = remove_owned_directory(&created);
-        return Err(error);
+    verify_directory(fd.as_ref(), name.to_string(), policy, false)
+}
+
+fn cleanup_directory_slot(slot: &mut Option<OwnedDirectory>) -> Result<(), EbpfError> {
+    if let Some(directory) = slot.as_mut() {
+        directory.cleanup()?;
     }
-    let fd = Arc::new(fd);
-    Ok(OwnedDirectory {
-        fd,
-        created: Some(created),
-    })
+    *slot = None;
+    Ok(())
 }
 
 fn verify_directory(
@@ -1425,6 +1681,12 @@ fn loader_error(operation: &str, error: impl std::fmt::Display) -> EbpfError {
     }
 }
 
+fn lifecycle_error(reason: &str) -> EbpfError {
+    EbpfError::InvalidAdapterState {
+        reason: reason.to_string(),
+    }
+}
+
 fn static_map_name(name: &str) -> Result<&'static str, EbpfError> {
     match name {
         crate::ebpf_abi::ENDPOINTS_MAP_NAME => Ok(crate::ebpf_abi::ENDPOINTS_MAP_NAME),
@@ -1641,5 +1903,88 @@ mod review_tests {
             Err(EbpfError::OwnershipChanged { .. })
         ));
         assert_eq!(fs::read(&pin).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn failed_link_detach_retains_ownership_until_retry_succeeds() {
+        let mut owned = Some(41_u64);
+        let mut attempts = 0;
+
+        let first = detach_retaining(&mut owned, |_| {
+            attempts += 1;
+            Err("injected detach failure")
+        });
+        assert_eq!(first, Err("injected detach failure"));
+        assert_eq!(owned, Some(41));
+
+        detach_retaining(&mut owned, |_| {
+            attempts += 1;
+            Ok::<(), &str>(())
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(owned, None);
+    }
+
+    #[test]
+    fn failed_pin_unlink_retains_identity_record_until_retry_succeeds() {
+        let mut pins = vec![7_u64];
+        let mut attempts = 0;
+
+        let first = remove_last_retaining(&mut pins, |_| {
+            attempts += 1;
+            Err("injected unlink failure")
+        });
+        assert_eq!(first, Err("injected unlink failure"));
+        assert_eq!(pins, vec![7]);
+
+        remove_last_retaining(&mut pins, |_| {
+            attempts += 1;
+            Ok::<(), &str>(())
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(pins.is_empty());
+    }
+
+    #[test]
+    fn creation_failures_leave_a_retryable_guard_and_no_directory_after_cleanup() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = fs::metadata(temporary.path()).unwrap();
+        let policy = DirectoryPolicy {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: 0o700,
+        };
+        let parent = Arc::new(open_secure_directory(temporary.path(), policy).unwrap());
+
+        for (index, failure) in [
+            CreationFailurePoint::AfterMkdir,
+            CreationFailurePoint::AfterCapture,
+            CreationFailurePoint::AfterOpen,
+            CreationFailurePoint::AfterFstat,
+            CreationFailurePoint::AfterIdentity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = format!("guard-{index}");
+            let mut directory = None;
+            assert!(
+                create_directory_in(&mut directory, parent.clone(), &name, policy, failure,)
+                    .is_err()
+            );
+            assert!(directory
+                .as_ref()
+                .is_some_and(OwnedDirectory::has_retryable_ownership));
+            directory.as_mut().unwrap().cleanup().unwrap();
+            assert!(!temporary.path().join(name).exists());
+        }
+    }
+
+    #[test]
+    fn per_cpu_metric_overflow_wraps_deterministically() {
+        assert_eq!(aggregate_per_cpu([u64::MAX, 2]), 1);
     }
 }

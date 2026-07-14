@@ -23,6 +23,7 @@ use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{parse_image_reference, RegistryClient};
 #[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
+use ferro_core::runtime::NetworkBackend;
 #[cfg(target_os = "linux")]
 use ferro_core::runtime::ContainerRuntime;
 #[cfg(target_os = "linux")]
@@ -35,7 +36,6 @@ use ferro_mind::ai::training::{
     handle_community_publish_command, handle_export_command, handle_import_command,
     handle_stats_command, handle_train_command,
 };
-use ferro_net::NetworkBackend;
 #[cfg(target_os = "linux")]
 use ferro_mind::ai::training::{
     handle_export_rvf_command, handle_rvf_branch_command, handle_rvf_lineage_command,
@@ -5107,9 +5107,8 @@ mod tests {
     };
     use clap::Parser;
     use ferro_core::image_store::LocalImageStore;
-    use ferro_core::runtime::ContainerRuntime;
+    use ferro_core::runtime::{ContainerRuntime, NetworkBackend};
     use ferro_core::volume_store::LocalVolumeStore;
-    use ferro_net::NetworkBackend;
     use std::io::Write;
     use std::os::unix::net::UnixStream as StdUnixStream;
 

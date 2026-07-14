@@ -7,7 +7,6 @@ edition = "2021"
 clap = { workspace = true }
 clap_complete = "4.5"
 ferro-core = { path = "../ferro-core" }
-ferro-net = { path = "../ferro-net" }
 ferro-compose = { path = "../ferro-compose" }
 ferro-mind = { path = "../ferro-mind", default-features = false }
 serde_json = { workspace = true }

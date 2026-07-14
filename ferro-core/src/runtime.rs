@@ -29,8 +29,9 @@ use crate::ai_runtime::AiRuntimeConfig;
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
 };
+pub use ferro_net::NetworkBackend;
 use ferro_net::bridge;
-use ferro_net::{BackendProbe, NetworkBackend};
+use ferro_net::BackendProbe;
 use ferro_net::ebpf::{
     build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
     EbpfProgram, SecurityMonitorConfig,

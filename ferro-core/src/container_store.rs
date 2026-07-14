@@ -63,10 +63,22 @@ pub struct ContainerRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NetworkOwnershipRecord {
+    #[serde(default)]
+    pub schema_version: u32,
     pub owner_id: String,
+    #[serde(default)]
+    pub network_id: Option<String>,
     pub host_interface: String,
     #[serde(default)]
+    pub host_ifindex: Option<u32>,
+    #[serde(default)]
+    pub namespace_identity: Option<KernelObjectIdentityRecord>,
+    #[serde(default)]
     pub managed_interface: Option<String>,
+    #[serde(default)]
+    pub managed_ifindex: Option<u32>,
+    #[serde(default)]
+    pub bridge_ifindex: Option<u32>,
     #[serde(default)]
     pub source_cidr: Option<String>,
     #[serde(default)]
@@ -74,18 +86,48 @@ pub struct NetworkOwnershipRecord {
     #[serde(default)]
     pub firewall_id: Option<String>,
     #[serde(default)]
+    pub firewall_marker: Option<String>,
+    #[serde(default)]
+    pub firewall_expected_state: Option<String>,
+    #[serde(default)]
     pub ebpf_pin_path: Option<String>,
+    #[serde(default)]
+    pub external_ipv4: Option<String>,
+    #[serde(default)]
+    pub next_hop_mac: Option<String>,
+    #[serde(default)]
+    pub snat_port_start: Option<u16>,
+    #[serde(default)]
+    pub snat_port_end: Option<u16>,
+    #[serde(default)]
+    pub object_sha256: Option<String>,
+    #[serde(default)]
+    pub object_abi: Option<u32>,
     #[serde(default)]
     pub ebpf_filters: Vec<EbpfFilterOwnershipRecord>,
     #[serde(default)]
     pub ebpf_pins: Vec<EbpfPinOwnershipRecord>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KernelObjectIdentityRecord {
+    pub device: u64,
+    pub inode: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EbpfFilterOwnershipRecord {
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub interface_ifindex: Option<u32>,
     pub direction: String,
     pub priority: u32,
     pub handle: String,
+    #[serde(default)]
+    pub program_id: Option<u32>,
+    #[serde(default)]
+    pub program_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -111,9 +111,18 @@ pub(crate) struct KernelLoadPlan<'a> {
 pub(crate) trait KernelAdapter {
     fn reserved_ports(&mut self) -> Result<String, EbpfError>;
     fn preflight(&mut self, request: &KernelPreflight<'_>) -> Result<(), EbpfError>;
+    fn preflight_interface(&mut self, _interface: &str) -> Result<(), EbpfError> {
+        Ok(())
+    }
     fn commit(&mut self, plan: &KernelLoadPlan<'_>) -> Result<(), EbpfError>;
+    fn attach_interface(&mut self, _interface: &str) -> Result<(), EbpfError> {
+        Ok(())
+    }
     fn rollback(&mut self) -> Result<(), EbpfError>;
     fn detach(&mut self) -> Result<(), EbpfError>;
+    fn persist(&mut self) -> Result<(), EbpfError> {
+        Ok(())
+    }
     fn install_endpoint(&mut self, key: EndpointKey, value: EndpointValue)
         -> Result<(), EbpfError>;
     fn remove_endpoint(&mut self, key: EndpointKey) -> Result<(), EbpfError>;
@@ -144,6 +153,7 @@ pub(crate) struct AyaKernel {
     layout: Option<PinLayout>,
     ingress_link: Option<OwnedClassifierLink>,
     egress_link: Option<OwnedClassifierLink>,
+    additional_links: Vec<OwnedClassifierLink>,
     state: AdapterState,
 }
 
@@ -155,6 +165,7 @@ impl Default for AyaKernel {
             layout: None,
             ingress_link: None,
             egress_link: None,
+            additional_links: Vec::new(),
             state: AdapterState::New,
         }
     }
@@ -193,6 +204,14 @@ impl AyaKernel {
         }
 
         let mut failures = Vec::new();
+        for link in self.additional_links.iter().rev() {
+            if let Err(error) = link.detach() {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            self.additional_links.clear();
+        }
         if let Err(error) = detach_retaining(&mut self.egress_link, OwnedClassifierLink::detach) {
             failures.push(error.to_string());
         }
@@ -222,6 +241,23 @@ impl AyaKernel {
                 reason: failures.join("; "),
             })
         }
+    }
+
+    fn persist_committed(&mut self) -> Result<(), EbpfError> {
+        self.require_state(AdapterState::Committed, "persistent transfer")?;
+        let layout = self
+            .layout
+            .as_mut()
+            .ok_or_else(|| lifecycle_error("pin layout ownership is missing"))?;
+        layout.persist()?;
+        self.additional_links.clear();
+        self.ingress_link = None;
+        self.egress_link = None;
+        self.bpf.take();
+        self.layout = None;
+        self.request = None;
+        self.state = AdapterState::Detached;
+        Ok(())
     }
 
     fn insert_hash<const K: usize, const V: usize>(
@@ -306,6 +342,11 @@ impl KernelAdapter for AyaKernel {
         });
         self.state = AdapterState::Preflighted;
         Ok(())
+    }
+
+    fn preflight_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+        self.require_state(AdapterState::Preflighted, "additional interface preflight")?;
+        validate_attach_interface(interface)
     }
 
     fn commit(&mut self, plan: &KernelLoadPlan<'_>) -> Result<(), EbpfError> {
@@ -403,12 +444,52 @@ impl KernelAdapter for AyaKernel {
         Ok(())
     }
 
+    fn attach_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+        self.require_state(AdapterState::Committed, "additional interface attach")?;
+        match tc::qdisc_add_clsact(interface) {
+            Ok(()) => {}
+            Err(error) if qdisc_already_exists(&error) => {}
+            Err(error) => return Err(loader_error("add additional clsact qdisc", error)),
+        }
+        let ingress = attach_classifier(
+            self.bpf_mut()?,
+            INGRESS_PROGRAM,
+            interface,
+            TcAttachType::Ingress,
+        )?;
+        let egress = match attach_classifier(
+            self.bpf_mut()?,
+            EGRESS_PROGRAM,
+            interface,
+            TcAttachType::Egress,
+        ) {
+            Ok(link) => link,
+            Err(error) => {
+                let rollback = ingress.detach();
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(EbpfError::Rollback {
+                        primary: error.to_string(),
+                        rollback: rollback.to_string(),
+                    }),
+                };
+            }
+        };
+        self.additional_links.push(ingress);
+        self.additional_links.push(egress);
+        Ok(())
+    }
+
     fn rollback(&mut self) -> Result<(), EbpfError> {
         self.cleanup()
     }
 
     fn detach(&mut self) -> Result<(), EbpfError> {
         self.cleanup()
+    }
+
+    fn persist(&mut self) -> Result<(), EbpfError> {
+        self.persist_committed()
     }
 
     fn install_endpoint(
@@ -1093,6 +1174,14 @@ impl CreatedPinGuard {
         Ok(())
     }
 
+    fn persist(&mut self) -> Result<(), EbpfError> {
+        if self.armed && !self.released && self.identity.is_none() {
+            self.capture_identity()?;
+        }
+        self.released = true;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn has_retryable_ownership(&self) -> bool {
         self.armed && !self.released
@@ -1205,6 +1294,14 @@ impl CreatedDirectoryGuard {
         self.released = true;
         Ok(())
     }
+
+    fn persist(&mut self) -> Result<(), EbpfError> {
+        if self.armed && !self.released && self.identity.is_none() {
+            self.capture_identity()?;
+        }
+        self.released = true;
+        Ok(())
+    }
 }
 
 impl Drop for CreatedDirectoryGuard {
@@ -1252,6 +1349,15 @@ impl OwnedDirectory {
             created.cleanup()?;
             self.created = None;
         }
+        self.fd = None;
+        Ok(())
+    }
+
+    fn persist(&mut self) -> Result<(), EbpfError> {
+        if let Some(created) = self.created.as_mut() {
+            created.persist()?;
+        }
+        self.created = None;
         self.fd = None;
         Ok(())
     }
@@ -1422,6 +1528,25 @@ impl PinLayout {
         cleanup_directory_slot(&mut self.maps)?;
         cleanup_directory_slot(&mut self.network)?;
         cleanup_directory_slot(&mut self.ferrocrate)?;
+        Ok(())
+    }
+
+    fn persist(&mut self) -> Result<(), EbpfError> {
+        for pin in &mut self.pins {
+            pin.persist()?;
+        }
+        self.pins.clear();
+        for directory in [
+            &mut self.programs,
+            &mut self.maps,
+            &mut self.network,
+            &mut self.ferrocrate,
+        ] {
+            if let Some(directory) = directory.as_mut() {
+                directory.persist()?;
+            }
+            *directory = None;
+        }
         Ok(())
     }
 }
@@ -1682,6 +1807,29 @@ fn directory_policy(path: impl ToString, reason: impl ToString) -> EbpfError {
         path: path.to_string(),
         reason: reason.to_string(),
     }
+}
+
+fn validate_attach_interface(interface: &str) -> Result<(), EbpfError> {
+    validate_component(interface)?;
+    fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))
+        .map_err(|error| loader_error("read additional interface ifindex", error))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| loader_error("parse additional interface ifindex", error))?;
+    let qdisc = Command::new("tc")
+        .args(["qdisc", "show", "dev", interface])
+        .output()
+        .map_err(|error| EbpfError::TcUnavailable {
+            interface: interface.to_string(),
+            reason: error.to_string(),
+        })?;
+    if !qdisc.status.success() {
+        return Err(EbpfError::TcUnavailable {
+            interface: interface.to_string(),
+            reason: String::from_utf8_lossy(&qdisc.stderr).trim().to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_environment(

@@ -27,6 +27,20 @@ impl NetworkPlan {
     pub fn firewall_id(&self) -> Option<&str> {
         self.firewall_id.as_deref()
     }
+
+    pub fn ownership_marker(&self) -> Option<String> {
+        self.firewall_id
+            .as_ref()
+            .map(|firewall_id| format!("ferrocrate:{}", firewall_id.to_ascii_lowercase()))
+    }
+
+    pub fn expected_owned_state(&self) -> String {
+        self.commands
+            .iter()
+            .map(|command| command.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 pub fn build_network_plan(
@@ -69,18 +83,13 @@ pub fn build_network_plan(
     }
 }
 
-fn owner_token(owner_id: &str) -> String {
-    let token: String = owner_id
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(12)
-        .flat_map(char::to_lowercase)
-        .collect();
-    if token.is_empty() {
-        "invalidowner".to_string()
-    } else {
-        token
+pub fn firewall_owner_token(owner_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in owner_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
     }
+    format!("{hash:016x}")
 }
 
 fn iptables_cmd(table: &str, action: &str, chain: &str, args: &[&str]) -> Vec<String> {
@@ -102,7 +111,7 @@ fn build_owned_iptables_plan(
     source_cidr: &str,
     bridge: &str,
 ) -> NetworkPlan {
-    let token = owner_token(owner_id).to_ascii_uppercase();
+    let token = firewall_owner_token(owner_id).to_ascii_uppercase();
     let firewall_id = format!("FC_{token}");
     let prerouting = format!("{firewall_id}_PRE");
     let output = format!("{firewall_id}_OUT");
@@ -211,7 +220,8 @@ fn build_owned_nftables_plan(
     source_cidr: &str,
     bridge: &str,
 ) -> NetworkPlan {
-    let firewall_id = format!("fc_{}", owner_token(owner_id));
+    let firewall_id = format!("fc_{}", firewall_owner_token(owner_id));
+    let marker = format!("ferrocrate:{firewall_id}");
     let mut commands = vec![
         nft_cmd(&["add", "table", "ip", &firewall_id]),
         nft_cmd(&[
@@ -229,6 +239,9 @@ fn build_owned_nftables_plan(
         nft_cmd(&[
             "add", "chain", "ip", &firewall_id, "forward", "{", "type", "filter", "hook",
             "forward", "priority", "filter", ";", "policy", "accept", ";", "}",
+        ]),
+        nft_cmd(&[
+            "add", "rule", "ip", &firewall_id, "forward", "counter", "comment", &marker,
         ]),
         nft_cmd(&[
             "add", "rule", "ip", &firewall_id, "postrouting", "ip", "saddr", source_cidr,
@@ -457,5 +470,42 @@ mod tests {
     #[test]
     fn masquerade_rejects_bad_cidr() {
         assert!(super::build_iptables_masquerade_cmd("not-a-cidr", "ferro0").is_err());
+    }
+
+    #[test]
+    fn network_backend_plans_are_command_isolated_and_owned() {
+        let mapping = super::PortMapping {
+            host_port: 18080,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        };
+        for (backend, binary) in [
+            (crate::NetworkBackend::Iptables, "iptables"),
+            (crate::NetworkBackend::Nftables, "nft"),
+        ] {
+            let plan = super::build_network_plan(
+                backend,
+                "container-a",
+                std::slice::from_ref(&mapping),
+                "10.0.0.2",
+                "10.0.0.0/24",
+                "ferro0",
+            )
+            .unwrap();
+            assert!(plan
+                .commands()
+                .iter()
+                .chain(plan.cleanup_commands())
+                .all(|command| command.first().map(String::as_str) == Some(binary)));
+            assert!(plan.ownership_marker().unwrap().contains("ferrocrate:"));
+            assert!(!plan.expected_owned_state().is_empty());
+        }
+    }
+
+    #[test]
+    fn network_backend_firewall_ids_do_not_collide_on_shared_prefixes() {
+        let first = super::firewall_owner_token("aaaaaaaaaaaa-container-one");
+        let second = super::firewall_owner_token("aaaaaaaaaaaa-container-two");
+        assert_ne!(first, second);
     }
 }

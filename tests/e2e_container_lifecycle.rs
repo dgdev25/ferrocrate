@@ -3,6 +3,7 @@
 //! Tests full workflows from pull to cleanup.
 
 use std::process::Command;
+use std::net::TcpListener;
 use std::time::Duration;
 
 /// Helper to run ferro-cli
@@ -13,6 +14,53 @@ fn ferro_cli() -> Command {
 /// Check if test should run (requires rootless container support)
 fn should_run() -> bool {
     std::env::var("FERROCRATE_RUNTIME_DIR").is_ok() || cfg!(target_os = "linux")
+}
+
+fn reserve_dynamic_host_port() -> std::io::Result<(TcpListener, u16)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
+}
+
+fn response_provenance_token() -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("ferrocrate-ebpf-{}-{nonce}", std::process::id())
+}
+
+fn normalize_netfilter_snapshot(snapshot: &str) -> String {
+    snapshot
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            let line = if line.starts_with('[') {
+                line.split_once("] ").map(|(_, rest)| rest).unwrap_or(line)
+            } else {
+                line
+            };
+            let line = line.split(" # handle ").next().unwrap_or(line);
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            let mut normalized = Vec::new();
+            let mut index = 0;
+            while index < tokens.len() {
+                if tokens[index] == "counter"
+                    && tokens.get(index + 1) == Some(&"packets")
+                    && tokens.get(index + 3) == Some(&"bytes")
+                {
+                    normalized.push("counter");
+                    index += 5;
+                } else {
+                    normalized.push(tokens[index]);
+                    index += 1;
+                }
+            }
+            normalized.join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Helper to wait for container state
@@ -51,17 +99,36 @@ mod tests {
             .expect("nft must be present for the eBPF lane");
         assert!(nftables.status.success(), "nft list ruleset must succeed");
         (
-            ferrocrate_rule_lines(&String::from_utf8_lossy(&iptables.stdout)),
-            ferrocrate_rule_lines(&String::from_utf8_lossy(&nftables.stdout)),
+            normalize_netfilter_snapshot(&String::from_utf8_lossy(&iptables.stdout)),
+            normalize_netfilter_snapshot(&String::from_utf8_lossy(&nftables.stdout)),
         )
     }
 
-    fn ferrocrate_rule_lines(snapshot: &str) -> String {
-        snapshot
-            .lines()
-            .filter(|line| line.to_ascii_lowercase().contains("ferro"))
-            .collect::<Vec<_>>()
-            .join("\n")
+    #[test]
+    fn network_backend_snapshot_normalization_keeps_all_rule_changes() {
+        let before = "[1:2] -A POSTROUTING -j MASQUERADE\n-A OUTPUT -p tcp --dport 45001 -j DNAT\nfc_one # handle 7\n";
+        let counters_only = "[9:8] -A POSTROUTING -j MASQUERADE\n-A OUTPUT -p tcp --dport 45001 -j DNAT\nfc_one # handle 99\n";
+        let added = "[9:8] -A POSTROUTING -j MASQUERADE\n-A OUTPUT -p tcp --dport 45001 -j DNAT\nfc_one # handle 99\nfc_two\n";
+        let deleted = "[9:8] -A POSTROUTING -j MASQUERADE\nfc_one # handle 99\n";
+        assert_eq!(
+            normalize_netfilter_snapshot(before),
+            "-A POSTROUTING -j MASQUERADE\n-A OUTPUT -p tcp --dport 45001 -j DNAT\nfc_one"
+        );
+        assert_eq!(
+            normalize_netfilter_snapshot(before),
+            normalize_netfilter_snapshot(counters_only)
+        );
+        assert_ne!(normalize_netfilter_snapshot(before), normalize_netfilter_snapshot(added));
+        assert_ne!(normalize_netfilter_snapshot(before), normalize_netfilter_snapshot(deleted));
+    }
+
+    #[test]
+    fn network_backend_dynamic_port_and_provenance_are_nonempty() {
+        let (_reservation, port) = reserve_dynamic_host_port().expect("dynamic host port");
+        assert_ne!(port, 0);
+        let token = response_provenance_token();
+        assert!(token.starts_with("ferrocrate-ebpf-"));
+        assert!(token.len() > "ferrocrate-ebpf-".len());
     }
 
     #[test]
@@ -336,20 +403,31 @@ CMD ["cat", "/hello.txt"]
         }
 
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let (port_reservation, host_port) =
+            reserve_dynamic_host_port().expect("reserve unoccupied localhost port");
+        let port_mapping = format!("{host_port}:80");
+        let provenance = response_provenance_token();
+        let nginx_command = format!(
+            "printf '%s\\n' '{provenance}' > /usr/share/nginx/html/index.html; exec nginx -g 'daemon off;'"
+        );
         let before = netfilter_snapshot();
+        drop(port_reservation);
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
-                "run",
-                "--name",
-                "ferro-e2e-ebpf-web",
-                "--network",
-                "bridge",
-                "--network-backend",
-                "ebpf",
-                "-p",
-                "18080:80",
-                "docker.io/library/nginx:alpine",
+                "run".to_string(),
+                "--name".to_string(),
+                "ferro-e2e-ebpf-web".to_string(),
+                "--network".to_string(),
+                "bridge".to_string(),
+                "--network-backend".to_string(),
+                "ebpf".to_string(),
+                "-p".to_string(),
+                port_mapping,
+                "docker.io/library/nginx:alpine".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                nginx_command,
             ])
             .output()
             .expect("run nginx with eBPF");
@@ -364,13 +442,8 @@ CMD ["cat", "/hello.txt"]
         let mut last_curl = None;
         while start.elapsed() < Duration::from_secs(12) {
             let curl = Command::new("curl")
-                .args([
-                    "--silent",
-                    "--fail",
-                    "--max-time",
-                    "2",
-                    "http://127.0.0.1:18080/",
-                ])
+                .args(["--silent", "--fail", "--max-time", "2"])
+                .arg(format!("http://127.0.0.1:{host_port}/"))
                 .output()
                 .expect("curl must be present on host");
             let success = curl.status.success();
@@ -386,6 +459,15 @@ CMD ["cat", "/hello.txt"]
             "eBPF published TCP port must be reachable: {}",
             String::from_utf8_lossy(&curl.stderr)
         );
+        assert_eq!(
+            String::from_utf8_lossy(&curl.stdout).trim(),
+            provenance,
+            "published-port response did not come from the test container"
+        );
+
+        let during = netfilter_snapshot();
+        assert_eq!(before.0, during.0, "eBPF setup changed the iptables ruleset");
+        assert_eq!(before.1, during.1, "eBPF setup changed the nftables ruleset");
 
         let egress = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
@@ -407,10 +489,6 @@ CMD ["cat", "/hello.txt"]
             String::from_utf8_lossy(&egress.stderr)
         );
 
-        let after = netfilter_snapshot();
-        assert_eq!(before.0, after.0, "eBPF mode changed FerroCrate iptables rules");
-        assert_eq!(before.1, after.1, "eBPF mode changed FerroCrate nftables rules");
-
         let cleanup = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args(["rm", "-f", "ferro-e2e-ebpf-web"])
@@ -421,5 +499,8 @@ CMD ["cat", "/hello.txt"]
             "eBPF container cleanup must succeed: {}",
             String::from_utf8_lossy(&cleanup.stderr)
         );
+        let after = netfilter_snapshot();
+        assert_eq!(before.0, after.0, "eBPF cleanup changed the iptables ruleset");
+        assert_eq!(before.1, after.1, "eBPF cleanup changed the nftables ruleset");
     }
 }

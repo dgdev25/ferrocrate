@@ -5,7 +5,8 @@ use thiserror::Error;
 
 use crate::ebpf_abi::{
     EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
-    COUNTER_MAX_ENTRIES, META_FLAG_SNAT_RANGE_RESERVED, PROGRAM_ABI_VERSION,
+    COUNTER_MAX_ENTRIES, ENDPOINTS_MAP_NAME, META_FLAG_SNAT_RANGE_RESERVED, PORTS_MAP_NAME,
+    PROGRAM_ABI_VERSION,
 };
 use crate::ebpf_loader::{
     sha256, validate_embedded_object, AyaKernel, KernelAdapter, KernelLoadPlan, KernelPreflight,
@@ -155,6 +156,21 @@ pub struct EbpfNetwork {
     detached: bool,
 }
 
+pub struct PreparedEbpfNetwork {
+    kernel: Box<dyn KernelAdapter>,
+    config: EbpfNetworkConfig,
+    additional_interfaces: Vec<String>,
+}
+
+impl fmt::Debug for PreparedEbpfNetwork {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedEbpfNetwork")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for EbpfNetwork {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -166,21 +182,33 @@ impl fmt::Debug for EbpfNetwork {
 
 impl EbpfNetwork {
     pub fn load(config: EbpfNetworkConfig) -> Result<Self, EbpfError> {
-        Self::load_with(AyaKernel::new(), config)
+        Self::prepare(config)?.attach()
     }
 
+    pub fn prepare(config: EbpfNetworkConfig) -> Result<PreparedEbpfNetwork, EbpfError> {
+        Self::prepare_with(AyaKernel::new(), config)
+    }
+
+    #[cfg(test)]
     fn load_with<K>(kernel: K, config: EbpfNetworkConfig) -> Result<Self, EbpfError>
     where
         K: KernelAdapter + 'static,
     {
-        Self::load_with_object(kernel, config, crate::ebpf_loader::embedded_object())
+        Self::prepare_with(kernel, config)?.attach()
     }
 
-    fn load_with_object<K>(
+    fn prepare_with<K>(kernel: K, config: EbpfNetworkConfig) -> Result<PreparedEbpfNetwork, EbpfError>
+    where
+        K: KernelAdapter + 'static,
+    {
+        Self::prepare_with_object(kernel, config, crate::ebpf_loader::embedded_object())
+    }
+
+    fn prepare_with_object<K>(
         mut kernel: K,
         config: EbpfNetworkConfig,
         object: &'static [u8],
-    ) -> Result<Self, EbpfError>
+    ) -> Result<PreparedEbpfNetwork, EbpfError>
     where
         K: KernelAdapter + 'static,
     {
@@ -207,6 +235,48 @@ impl EbpfNetwork {
         };
         kernel.preflight(&preflight)?;
 
+        Ok(PreparedEbpfNetwork {
+            kernel: Box::new(kernel),
+            config,
+            additional_interfaces: Vec::new(),
+        })
+    }
+
+    pub fn persist(mut self) -> Result<(), EbpfError> {
+        self.active_kernel()?.persist()?;
+        self.detached = true;
+        Ok(())
+    }
+
+    pub fn install_pinned_endpoint(
+        network_id: &str,
+        key: EndpointKey,
+        value: EndpointValue,
+    ) -> Result<(), EbpfError> {
+        update_pinned_map(network_id, ENDPOINTS_MAP_NAME, &key.encode(), &value.encode())
+    }
+
+    pub fn remove_pinned_endpoint(network_id: &str, key: EndpointKey) -> Result<(), EbpfError> {
+        delete_pinned_map_key(network_id, ENDPOINTS_MAP_NAME, &key.encode())
+    }
+
+    pub fn install_pinned_port(
+        network_id: &str,
+        key: PortKey,
+        value: PortValue,
+    ) -> Result<(), EbpfError> {
+        update_pinned_map(network_id, PORTS_MAP_NAME, &key.encode(), &value.encode())
+    }
+
+    pub fn remove_pinned_port(network_id: &str, key: PortKey) -> Result<(), EbpfError> {
+        delete_pinned_map_key(network_id, PORTS_MAP_NAME, &key.encode())
+    }
+
+    fn commit_prepared(
+        mut kernel: Box<dyn KernelAdapter>,
+        config: EbpfNetworkConfig,
+        additional_interfaces: Vec<String>,
+    ) -> Result<Self, EbpfError> {
         let metadata = MetaConfig {
             abi_version: PROGRAM_ABI_VERSION,
             external_ipv4: config.external_ipv4,
@@ -223,11 +293,16 @@ impl EbpfNetwork {
             metadata,
         };
         if let Err(error) = kernel.commit(&plan) {
-            return Err(rollback_error(&mut kernel, error));
+            return Err(rollback_error(kernel.as_mut(), error));
+        }
+        for interface in additional_interfaces {
+            if let Err(error) = kernel.attach_interface(&interface) {
+                return Err(rollback_error(kernel.as_mut(), error));
+            }
         }
 
         Ok(Self {
-            kernel: Box::new(kernel),
+            kernel,
             detached: false,
         })
     }
@@ -276,6 +351,119 @@ impl EbpfNetwork {
             Ok(self.kernel.as_mut())
         }
     }
+}
+
+impl PreparedEbpfNetwork {
+    pub fn config(&self) -> &EbpfNetworkConfig {
+        &self.config
+    }
+
+    pub fn prepare_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+        validate_network_id(interface)?;
+        if interface == self.config.interface
+            || self.additional_interfaces.iter().any(|value| value == interface)
+        {
+            return Err(EbpfError::InvalidAdapterState {
+                reason: format!("classifier interface {interface} is duplicated"),
+            });
+        }
+        self.kernel.preflight_interface(interface)?;
+        self.additional_interfaces.push(interface.to_string());
+        Ok(())
+    }
+
+    pub fn attach(self) -> Result<EbpfNetwork, EbpfError> {
+        EbpfNetwork::commit_prepared(
+            self.kernel,
+            self.config,
+            self.additional_interfaces,
+        )
+    }
+}
+
+fn pinned_map_path(network_id: &str, map_name: &str) -> Result<PathBuf, EbpfError> {
+    validate_network_id(network_id)?;
+    Ok(Path::new(FERRO_NETWORK_ROOT)
+        .join(network_id)
+        .join("maps")
+        .join(map_name))
+}
+
+fn hex_bytes(bytes: &[u8]) -> Vec<String> {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn update_pinned_map(
+    network_id: &str,
+    map_name: &'static str,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), EbpfError> {
+    let command = build_pinned_map_update_command(network_id, map_name, key, value)?;
+    exec_cmd(&command).map_err(|error| EbpfError::MapOperation {
+        operation: "update pinned",
+        map: map_name,
+        reason: error.to_string(),
+    })
+}
+
+fn build_pinned_map_update_command(
+    network_id: &str,
+    map_name: &'static str,
+    key: &[u8],
+    value: &[u8],
+) -> Result<Vec<String>, EbpfError> {
+    let path = pinned_map_path(network_id, map_name)?;
+    let mut command = vec![
+        "bpftool".to_string(),
+        "map".to_string(),
+        "update".to_string(),
+        "pinned".to_string(),
+        path.display().to_string(),
+        "key".to_string(),
+        "hex".to_string(),
+    ];
+    command.extend(hex_bytes(key));
+    command.extend(["value".to_string(), "hex".to_string()]);
+    command.extend(hex_bytes(value));
+    command.push("any".to_string());
+    Ok(command)
+}
+
+fn delete_pinned_map_key(
+    network_id: &str,
+    map_name: &'static str,
+    key: &[u8],
+) -> Result<(), EbpfError> {
+    let command = build_pinned_map_delete_command(network_id, map_name, key)?;
+    match exec_cmd(&command) {
+        Ok(()) => Ok(()),
+        Err(error) if error.to_string().contains("No such file or directory") => Ok(()),
+        Err(error) => Err(EbpfError::MapOperation {
+            operation: "delete pinned",
+            map: map_name,
+            reason: error.to_string(),
+        }),
+    }
+}
+
+fn build_pinned_map_delete_command(
+    network_id: &str,
+    map_name: &'static str,
+    key: &[u8],
+) -> Result<Vec<String>, EbpfError> {
+    let path = pinned_map_path(network_id, map_name)?;
+    let mut command = vec![
+        "bpftool".to_string(),
+        "map".to_string(),
+        "delete".to_string(),
+        "pinned".to_string(),
+        path.display().to_string(),
+        "key".to_string(),
+        "hex".to_string(),
+    ];
+    command.extend(hex_bytes(key));
+    Ok(command)
 }
 
 impl Drop for EbpfNetwork {
@@ -530,12 +718,14 @@ mod lifecycle_tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        embedded_object_sha256, EbpfError, EbpfNetwork, EbpfNetworkConfig, EGRESS_CLASSIFIER,
-        INGRESS_CLASSIFIER,
+        build_pinned_map_delete_command, build_pinned_map_update_command,
+        embedded_object_sha256, hex_bytes, EbpfError, EbpfNetwork, EbpfNetworkConfig,
+        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
-        COUNTER_MAX_ENTRIES, META_FLAG_SNAT_RANGE_RESERVED, META_VALUE_LEN, PROGRAM_ABI_VERSION,
+        COUNTER_MAX_ENTRIES, ENDPOINTS_MAP_NAME, META_FLAG_SNAT_RANGE_RESERVED, META_VALUE_LEN,
+        PORTS_MAP_NAME, PROGRAM_ABI_VERSION,
     };
     use crate::ebpf_loader::{KernelAdapter, KernelLoadPlan, KernelPreflight};
 
@@ -591,6 +781,15 @@ mod lifecycle_tests {
             Ok(())
         }
 
+        fn preflight_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("preflight-interface:{interface}"));
+            Ok(())
+        }
+
         fn commit(&mut self, plan: &KernelLoadPlan<'_>) -> Result<(), EbpfError> {
             let mut state = self.state.lock().unwrap();
             state.metadata = Some(plan.metadata);
@@ -602,6 +801,15 @@ mod lifecycle_tests {
                 });
             }
             state.events.push(format!("attach:{EGRESS_CLASSIFIER}"));
+            Ok(())
+        }
+
+        fn attach_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("attach-interface:{interface}"));
             Ok(())
         }
 
@@ -658,6 +866,74 @@ mod lifecycle_tests {
             snat_port_end: 50_031,
             expected_object_sha256: embedded_object_sha256(),
         }
+    }
+
+    #[test]
+    fn network_backend_typed_pinned_record_commands_preserve_schema_bytes() {
+        let endpoint_key = EndpointKey {
+            address: [10, 44, 1, 2],
+        };
+        let endpoint_value = EndpointValue {
+            ifindex: 23,
+            mac: [2, 0, 0, 0, 0, 23],
+            flags: 1,
+        };
+        let update = build_pinned_map_update_command(
+            "shared-bridge",
+            ENDPOINTS_MAP_NAME,
+            &endpoint_key.encode(),
+            &endpoint_value.encode(),
+        )
+        .unwrap();
+        assert_eq!(
+            &update[..7],
+            [
+                "bpftool",
+                "map",
+                "update",
+                "pinned",
+                "/sys/fs/bpf/ferrocrate/shared-bridge/maps/FERRO_ENDPOINTS",
+                "key",
+                "hex",
+            ]
+        );
+        let key_hex = hex_bytes(&endpoint_key.encode());
+        assert_eq!(&update[7..7 + key_hex.len()], key_hex);
+        assert!(update.ends_with(&["any".to_string()]));
+
+        let port_key = PortKey {
+            protocol: 6,
+            host_port: 45_123,
+        };
+        let delete = build_pinned_map_delete_command(
+            "shared-bridge",
+            PORTS_MAP_NAME,
+            &port_key.encode(),
+        )
+        .unwrap();
+        assert_eq!(delete[2], "delete");
+        assert_eq!(delete[4], "/sys/fs/bpf/ferrocrate/shared-bridge/maps/FERRO_PORTS");
+        assert_eq!(&delete[7..], hex_bytes(&port_key.encode()));
+        assert!(build_pinned_map_delete_command("../foreign", PORTS_MAP_NAME, &[0]).is_err());
+    }
+
+    #[test]
+    fn network_backend_additional_classifier_is_preflighted_and_unique() {
+        let (kernel, state) = FakeKernel::valid();
+        let mut prepared = EbpfNetwork::prepare_with(kernel, config()).unwrap();
+        prepared.prepare_interface("lo").unwrap();
+        assert!(prepared.prepare_interface("lo").is_err());
+        prepared.attach().unwrap();
+        let events = &state.lock().unwrap().events;
+        let preflight = events
+            .iter()
+            .position(|event| event == "preflight-interface:lo")
+            .unwrap();
+        let attach = events
+            .iter()
+            .position(|event| event == "attach-interface:lo")
+            .unwrap();
+        assert!(preflight < attach);
     }
 
     #[test]
@@ -737,5 +1013,40 @@ mod lifecycle_tests {
         network.detach().unwrap();
         network.detach().unwrap();
         assert_eq!(detached_state.lock().unwrap().detach_count, 1);
+    }
+
+    #[test]
+    fn prepare_is_mutation_free_until_attach() {
+        let (kernel, state) = FakeKernel::valid();
+        let prepared = EbpfNetwork::prepare_with(kernel, config()).unwrap();
+        assert!(state
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !event.starts_with("attach:")));
+
+        let _network = prepared.attach().unwrap();
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| event.starts_with("attach:"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn persistent_transfer_disarms_drop_cleanup() {
+        let (kernel, state) = FakeKernel::valid();
+        let network = EbpfNetwork::prepare_with(kernel, config())
+            .unwrap()
+            .attach()
+            .unwrap();
+        network.persist().unwrap();
+        assert_eq!(state.lock().unwrap().detach_count, 0);
     }
 }

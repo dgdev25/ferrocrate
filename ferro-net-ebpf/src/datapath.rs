@@ -258,7 +258,6 @@ pub enum DecisionError {
     PolicyDenied,
     EndpointMissing,
     InvalidTranslation,
-    MetadataMissing,
     SnatConfigInvalid,
     SnatExhausted,
     ConntrackInsertFailed,
@@ -358,9 +357,7 @@ pub const fn decision_error_counter(error: DecisionError) -> Option<Counter> {
     match error {
         DecisionError::PolicyDenied => Some(Counter::PolicyDenials),
         DecisionError::SnatExhausted => Some(Counter::SnatExhaustions),
-        DecisionError::SnatConfigInvalid | DecisionError::MetadataMissing => {
-            Some(Counter::SnatConfigErrors)
-        }
+        DecisionError::SnatConfigInvalid => Some(Counter::SnatConfigErrors),
         DecisionError::EndpointMissing
         | DecisionError::InvalidTranslation
         | DecisionError::ConntrackInsertFailed => Some(Counter::MapErrors),

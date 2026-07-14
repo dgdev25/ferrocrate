@@ -262,6 +262,40 @@ fn udp_source_rewrites_use_rfc1071_checksums() {
 }
 
 #[test]
+fn network_backend_localhost_publish_vector_dnat_and_reverse_dnat_preserve_loopback_tuple() {
+    let localhost = [127, 0, 0, 1];
+    let endpoint = [10, 44, 1, 2];
+
+    let mut request = tcp_packet();
+    rewrite_ipv4_source(&mut request, localhost).unwrap();
+    rewrite_ipv4_destination(&mut request, localhost).unwrap();
+    rewrite_transport_port(&mut request, PortField::Source, 51_000).unwrap();
+    rewrite_transport_port(&mut request, PortField::Destination, 8_080).unwrap();
+    rewrite_ipv4_destination(&mut request, endpoint).unwrap();
+    rewrite_transport_port(&mut request, PortField::Destination, 80).unwrap();
+    assert_eq!(&request[26..30], &localhost);
+    assert_eq!(&request[30..34], &endpoint);
+    assert_eq!(u16::from_be_bytes([request[34], request[35]]), 51_000);
+    assert_eq!(u16::from_be_bytes([request[36], request[37]]), 80);
+    assert_eq!(u16::from_be_bytes([request[24], request[25]]), reference_ipv4_checksum(&request));
+    assert_eq!(u16::from_be_bytes([request[50], request[51]]), reference_transport_checksum(&request));
+
+    let mut response = tcp_packet();
+    rewrite_ipv4_source(&mut response, endpoint).unwrap();
+    rewrite_ipv4_destination(&mut response, localhost).unwrap();
+    rewrite_transport_port(&mut response, PortField::Source, 80).unwrap();
+    rewrite_transport_port(&mut response, PortField::Destination, 51_000).unwrap();
+    rewrite_ipv4_source(&mut response, localhost).unwrap();
+    rewrite_transport_port(&mut response, PortField::Source, 8_080).unwrap();
+    assert_eq!(&response[26..30], &localhost);
+    assert_eq!(&response[30..34], &localhost);
+    assert_eq!(u16::from_be_bytes([response[34], response[35]]), 8_080);
+    assert_eq!(u16::from_be_bytes([response[36], response[37]]), 51_000);
+    assert_eq!(u16::from_be_bytes([response[24], response[25]]), reference_ipv4_checksum(&response));
+    assert_eq!(u16::from_be_bytes([response[50], response[51]]), reference_transport_checksum(&response));
+}
+
+#[test]
 fn ipv4_udp_zero_checksum_remains_disabled() {
     let mut packet = udp_packet();
     packet[40..42].copy_from_slice(&[0, 0]);

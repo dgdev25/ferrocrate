@@ -178,6 +178,7 @@ pub struct Endpoint {
 pub struct ExternalNetwork {
     pub address: [u8; 4],
     pub ifindex: u32,
+    pub loopback_ifindex: u32,
     pub next_hop_mac: [u8; 6],
     pub snat_port_start: u16,
     pub snat_port_end: u16,
@@ -481,6 +482,7 @@ pub fn decide_egress<S: DatapathState>(
     enforce_policy(packet, Direction::Egress, state)?;
     let mut decision = Decision::pass(packet);
 
+    let mut conntrack_target = None;
     if let Some(target) = state.conntrack(FlowKey::from_packet(packet)) {
         if !valid_target(target.address, target.port) {
             return Err(DecisionError::InvalidTranslation);
@@ -490,6 +492,7 @@ pub fn decide_egress<S: DatapathState>(
             port: target.port,
         };
         decision.translation = Translation::Source;
+        conntrack_target = Some(target);
     }
 
     if let Some(endpoint) = state.endpoint(decision.destination.address) {
@@ -513,6 +516,17 @@ pub fn decide_egress<S: DatapathState>(
         || !valid_snat_range(external.snat_port_start, external.snat_port_end)
     {
         return Err(DecisionError::SnatConfigInvalid);
+    }
+    if let Some(target) = conntrack_target {
+        if target.address[0] == 127 {
+            if external.loopback_ifindex == 0 {
+                return Err(DecisionError::SnatConfigInvalid);
+            }
+            decision.action = Action::Redirect;
+            decision.ifindex = Some(external.loopback_ifindex);
+            decision.destination_mac = None;
+            return Ok(decision);
+        }
     }
     if decision.translation == Translation::None {
         let pair = install_generic_snat(packet, external, state)?;

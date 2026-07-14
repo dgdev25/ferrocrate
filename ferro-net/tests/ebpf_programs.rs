@@ -49,6 +49,7 @@ impl FixtureState {
             external: Some(ExternalNetwork {
                 address: [203, 0, 113, 8],
                 ifindex: 9,
+                loopback_ifindex: 1,
                 next_hop_mac: [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
                 snat_port_start: 55_000,
                 snat_port_end: 55_031,
@@ -322,12 +323,13 @@ fn mirrored_metadata_abi_uses_one_coherent_fixed_width_config() {
     assert_eq!(host_abi::META_MAX_ENTRIES, 1);
     assert_eq!(host_abi::META_MAX_ENTRIES, abi::META_MAX_ENTRIES);
     assert_eq!(host_abi::META_VALUE_LEN, abi::META_VALUE_LEN);
-    assert_eq!(host_abi::META_VALUE_LEN, 24);
+    assert_eq!(host_abi::META_VALUE_LEN, 28);
 
     let config = host_abi::MetaConfig {
         abi_version: host_abi::PROGRAM_ABI_VERSION,
         external_ipv4: [203, 0, 113, 8],
         external_ifindex: 0x0102_0304,
+        loopback_ifindex: 1,
         next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         snat_port_start: 55_000,
         snat_port_end: 55_031,
@@ -335,7 +337,7 @@ fn mirrored_metadata_abi_uses_one_coherent_fixed_width_config() {
     };
     let expected = [
         0, 0, 0, 1, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
-        0xd6, 0xd8, 0xd6, 0xf7, 0, 1,
+        0xd6, 0xd8, 0xd6, 0xf7, 0, 1, 0, 0, 0, 1,
     ];
     assert_eq!(config.encode(), expected);
     assert_eq!(host_abi::MetaConfig::decode(expected), config);
@@ -697,6 +699,48 @@ fn published_port_dnat_carries_endpoint_mac_and_reverse_tuple() {
             },
         })
     );
+}
+
+#[test]
+fn localhost_published_port_response_returns_through_loopback() {
+    let localhost = [127, 0, 0, 1];
+    let endpoint_address = [10, 44, 1, 2];
+    let request = tcp_packet(localhost, 51_000, localhost, 8080);
+    let mut state = FixtureState::default();
+    state.external = Some(ExternalNetwork {
+        address: [203, 0, 113, 8],
+        ifindex: 9,
+        loopback_ifindex: 1,
+        next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+        snat_port_start: 55_000,
+        snat_port_end: 55_031,
+        snat_range_reserved: true,
+    });
+    state.ports.push((
+        (request.protocol, 8080),
+        PortTarget {
+            address: endpoint_address,
+            port: 80,
+        },
+    ));
+    state.endpoints.push((
+        endpoint_address,
+        Endpoint {
+            ifindex: 17,
+            mac: [2, 0, 0, 0, 0, 17],
+            flags: 0,
+        },
+    ));
+
+    let ingress = decide_ingress(&request, &state).unwrap();
+    let reverse = ingress.reverse_conntrack.expect("reverse DNAT record");
+    state.conntrack.borrow_mut().push((reverse.key, reverse.target));
+    let response = tcp_packet(endpoint_address, 80, localhost, 51_000);
+    let egress = decide_egress(&response, &state).unwrap();
+
+    assert_eq!(egress.source, Socket { address: localhost, port: 8080 });
+    assert_eq!(egress.ifindex, Some(1), "localhost response must use loopback");
+    assert_eq!(egress.destination_mac, None);
 }
 
 #[test]

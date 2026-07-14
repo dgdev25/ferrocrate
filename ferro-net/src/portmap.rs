@@ -41,6 +41,36 @@ impl NetworkPlan {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    pub fn rollback_commands_for(&self, setup_index: usize) -> Vec<Vec<String>> {
+        let Some(command) = self.commands.get(setup_index) else {
+            return Vec::new();
+        };
+        match command.first().map(String::as_str) {
+            Some("iptables") => {
+                let mut rollback = command.clone();
+                match rollback.get(3).map(String::as_str) {
+                    Some("-N") => rollback[3] = "-X".to_string(),
+                    Some("-A") => rollback[3] = "-D".to_string(),
+                    _ => return Vec::new(),
+                }
+                vec![rollback]
+            }
+            Some("nft")
+                if command.get(1).map(String::as_str) == Some("add")
+                    && command.get(2).map(String::as_str) == Some("table") =>
+            {
+                vec![vec![
+                    "nft".to_string(),
+                    "delete".to_string(),
+                    "table".to_string(),
+                    command.get(3).cloned().unwrap_or_default(),
+                    command.get(4).cloned().unwrap_or_default(),
+                ]]
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 pub fn build_network_plan(
@@ -111,13 +141,13 @@ fn build_owned_iptables_plan(
     source_cidr: &str,
     bridge: &str,
 ) -> NetworkPlan {
-    let token = firewall_owner_token(owner_id).to_ascii_uppercase();
-    let firewall_id = format!("FC_{token}");
+    let token = firewall_owner_token(owner_id);
+    let firewall_id = format!("fc_{token}");
     let prerouting = format!("{firewall_id}_PRE");
     let output = format!("{firewall_id}_OUT");
     let postrouting = format!("{firewall_id}_POST");
     let forward = format!("{firewall_id}_FWD");
-    let comment = format!("ferrocrate:{token}");
+    let comment = format!("ferrocrate:{firewall_id}");
     let chains = [
         ("nat", prerouting.as_str()),
         ("nat", output.as_str()),
@@ -507,5 +537,58 @@ mod tests {
         let first = super::firewall_owner_token("aaaaaaaaaaaa-container-one");
         let second = super::firewall_owner_token("aaaaaaaaaaaa-container-two");
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn network_backend_iptables_uses_one_canonical_owner_token_end_to_end() {
+        let plan = super::build_network_plan(
+            crate::backend::NetworkBackend::Iptables,
+            "canonical-owner",
+            &[PortMapping {
+                host_port: 45_123,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
+            "10.0.0.2",
+            "10.0.0.0/24",
+            "ferro0",
+        )
+        .unwrap();
+        let firewall_id = plan.firewall_id().unwrap();
+        let marker = plan.ownership_marker().unwrap();
+
+        assert_eq!(marker, format!("ferrocrate:{firewall_id}"));
+        assert!(plan.commands().iter().filter(|command| {
+            command.iter().any(|argument| argument == "--comment")
+        }).all(|command| command.iter().any(|argument| argument == &marker)));
+        assert!(plan.commands().iter().all(|command| {
+            command
+                .iter()
+                .filter(|argument| argument.starts_with("FC_") || argument.starts_with("fc_"))
+                .all(|argument| argument.to_ascii_lowercase().contains(firewall_id))
+        }));
+    }
+
+    #[test]
+    fn network_backend_setup_rollback_is_scoped_to_successful_mutations() {
+        let plan = super::build_network_plan(
+            crate::backend::NetworkBackend::Iptables,
+            "rollback-owner",
+            &[],
+            "10.0.0.2",
+            "10.0.0.0/24",
+            "ferro0",
+        )
+        .unwrap();
+        assert!(plan.rollback_commands_for(plan.commands().len()).is_empty());
+        for (index, command) in plan.commands().iter().enumerate() {
+            let rollback = plan.rollback_commands_for(index);
+            assert_eq!(rollback.len(), 1);
+            assert_eq!(rollback[0][..3], command[..3]);
+            assert_eq!(
+                rollback[0][3],
+                if command[3] == "-N" { "-X" } else { "-D" }
+            );
+        }
     }
 }

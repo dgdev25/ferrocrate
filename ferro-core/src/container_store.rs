@@ -78,6 +78,8 @@ pub struct NetworkOwnershipRecord {
     #[serde(default)]
     pub managed_ifindex: Option<u32>,
     #[serde(default)]
+    pub loopback_ifindex: Option<u32>,
+    #[serde(default)]
     pub bridge_ifindex: Option<u32>,
     #[serde(default)]
     pub source_cidr: Option<String>,
@@ -136,6 +138,8 @@ pub struct EbpfPinOwnershipRecord {
     pub device: u64,
     pub inode: u64,
     pub directory: bool,
+    #[serde(default)]
+    pub map_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

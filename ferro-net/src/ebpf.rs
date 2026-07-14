@@ -24,6 +24,7 @@ pub struct EbpfNetworkConfig {
     pub interface: String,
     pub external_ipv4: [u8; 4],
     pub external_ifindex: u32,
+    pub loopback_ifindex: u32,
     pub next_hop_mac: [u8; 6],
     pub snat_port_start: u16,
     pub snat_port_end: u16,
@@ -159,7 +160,28 @@ pub struct EbpfNetwork {
 pub struct PreparedEbpfNetwork {
     kernel: Box<dyn KernelAdapter>,
     config: EbpfNetworkConfig,
-    additional_interfaces: Vec<String>,
+    additional_interfaces: Vec<(String, u32)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedObjectIdentity {
+    pub relative_path: String,
+    pub device: u64,
+    pub inode: u64,
+    pub directory: bool,
+    pub map_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedNetworkIdentity {
+    pub root: PathBuf,
+    pub objects: Vec<PinnedObjectIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedPinnedNetwork {
+    network_id: String,
+    identity: PinnedNetworkIdentity,
 }
 
 impl fmt::Debug for PreparedEbpfNetwork {
@@ -248,39 +270,50 @@ impl EbpfNetwork {
         Ok(())
     }
 
-    pub fn install_pinned_endpoint(
+    pub fn pinned_map_id(path: &Path) -> Result<u32, EbpfError> {
+        let map = aya::maps::MapData::from_pin(path).map_err(|error| EbpfError::MapOperation {
+            operation: "open pinned identity",
+            map: "pinned map",
+            reason: error.to_string(),
+        })?;
+        map.info()
+            .map(|info| info.id())
+            .map_err(|error| EbpfError::MapOperation {
+                operation: "read pinned identity",
+                map: "pinned map",
+                reason: error.to_string(),
+            })
+    }
+
+    pub fn verify_pinned_network(
         network_id: &str,
-        key: EndpointKey,
-        value: EndpointValue,
-    ) -> Result<(), EbpfError> {
-        update_pinned_map(network_id, ENDPOINTS_MAP_NAME, &key.encode(), &value.encode())
-    }
-
-    pub fn remove_pinned_endpoint(network_id: &str, key: EndpointKey) -> Result<(), EbpfError> {
-        delete_pinned_map_key(network_id, ENDPOINTS_MAP_NAME, &key.encode())
-    }
-
-    pub fn install_pinned_port(
-        network_id: &str,
-        key: PortKey,
-        value: PortValue,
-    ) -> Result<(), EbpfError> {
-        update_pinned_map(network_id, PORTS_MAP_NAME, &key.encode(), &value.encode())
-    }
-
-    pub fn remove_pinned_port(network_id: &str, key: PortKey) -> Result<(), EbpfError> {
-        delete_pinned_map_key(network_id, PORTS_MAP_NAME, &key.encode())
+        identity: PinnedNetworkIdentity,
+    ) -> Result<VerifiedPinnedNetwork, EbpfError> {
+        let expected_root = Path::new(FERRO_NETWORK_ROOT).join(network_id);
+        if identity.root != expected_root {
+            return Err(EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: "pin root does not match the network identity".to_string(),
+            });
+        }
+        verify_pinned_tree(&identity)?;
+        Ok(VerifiedPinnedNetwork {
+            network_id: network_id.to_string(),
+            identity,
+        })
     }
 
     fn commit_prepared(
         mut kernel: Box<dyn KernelAdapter>,
         config: EbpfNetworkConfig,
-        additional_interfaces: Vec<String>,
+        additional_interfaces: Vec<(String, u32)>,
     ) -> Result<Self, EbpfError> {
         let metadata = MetaConfig {
             abi_version: PROGRAM_ABI_VERSION,
             external_ipv4: config.external_ipv4,
             external_ifindex: config.external_ifindex,
+            loopback_ifindex: config.loopback_ifindex,
             next_hop_mac: config.next_hop_mac,
             snat_port_start: config.snat_port_start,
             snat_port_end: config.snat_port_end,
@@ -295,8 +328,8 @@ impl EbpfNetwork {
         if let Err(error) = kernel.commit(&plan) {
             return Err(rollback_error(kernel.as_mut(), error));
         }
-        for interface in additional_interfaces {
-            if let Err(error) = kernel.attach_interface(&interface) {
+        for (interface, expected_ifindex) in additional_interfaces {
+            if let Err(error) = kernel.attach_interface(&interface, expected_ifindex) {
                 return Err(rollback_error(kernel.as_mut(), error));
             }
         }
@@ -353,22 +386,247 @@ impl EbpfNetwork {
     }
 }
 
+impl VerifiedPinnedNetwork {
+    pub fn install_endpoint(
+        &self,
+        key: EndpointKey,
+        value: EndpointValue,
+    ) -> Result<(), EbpfError> {
+        verify_pinned_tree(&self.identity)?;
+        update_verified_hash::<4, 12>(
+            &self.network_id,
+            &self.identity,
+            ENDPOINTS_MAP_NAME,
+            key.encode(),
+            value.encode(),
+        )
+    }
+
+    pub fn install_port(&self, key: PortKey, value: PortValue) -> Result<(), EbpfError> {
+        verify_pinned_tree(&self.identity)?;
+        update_verified_hash::<4, 8>(
+            &self.network_id,
+            &self.identity,
+            PORTS_MAP_NAME,
+            key.encode(),
+            value.encode(),
+        )
+    }
+
+    pub fn remove_endpoint(&self, key: EndpointKey) -> Result<(), EbpfError> {
+        verify_pinned_tree(&self.identity)?;
+        delete_verified_hash::<4, 12>(
+            &self.network_id,
+            &self.identity,
+            ENDPOINTS_MAP_NAME,
+            key.encode(),
+        )
+    }
+
+    pub fn remove_port(&self, key: PortKey) -> Result<(), EbpfError> {
+        verify_pinned_tree(&self.identity)?;
+        delete_verified_hash::<4, 8>(
+            &self.network_id,
+            &self.identity,
+            PORTS_MAP_NAME,
+            key.encode(),
+        )
+    }
+}
+
+fn verified_map_data(
+    network_id: &str,
+    identity: &PinnedNetworkIdentity,
+    map_name: &'static str,
+) -> Result<aya::maps::MapData, EbpfError> {
+    let relative = format!("maps/{map_name}");
+    let expected = identity
+        .objects
+        .iter()
+        .find(|item| item.relative_path == relative && !item.directory)
+        .ok_or_else(|| EbpfError::MapOperation {
+            operation: "verify pinned ownership",
+            map: map_name,
+            reason: "persisted map identity is missing".to_string(),
+        })?;
+    let expected_map_id = expected.map_id.ok_or_else(|| EbpfError::MapOperation {
+        operation: "verify pinned ownership",
+        map: map_name,
+        reason: "persisted map id is missing".to_string(),
+    })?;
+    let path = pinned_map_path(network_id, map_name)?;
+    let data = aya::maps::MapData::from_pin(&path).map_err(|error| EbpfError::MapOperation {
+        operation: "open verified pinned map",
+        map: map_name,
+        reason: error.to_string(),
+    })?;
+    let actual_map_id = data.info().map(|info| info.id()).map_err(|error| {
+        EbpfError::MapOperation {
+            operation: "read verified pinned map identity",
+            map: map_name,
+            reason: error.to_string(),
+        }
+    })?;
+    if actual_map_id != expected_map_id {
+        return Err(EbpfError::MapOperation {
+            operation: "verify pinned ownership",
+            map: map_name,
+            reason: format!("map id changed from {expected_map_id} to {actual_map_id}"),
+        });
+    }
+    Ok(data)
+}
+
+fn update_verified_hash<const K: usize, const V: usize>(
+    network_id: &str,
+    identity: &PinnedNetworkIdentity,
+    map_name: &'static str,
+    key: [u8; K],
+    value: [u8; V],
+) -> Result<(), EbpfError> {
+    let map_data = aya::maps::Map::HashMap(verified_map_data(network_id, identity, map_name)?);
+    let mut map = aya::maps::HashMap::<_, [u8; K], [u8; V]>::try_from(map_data).map_err(
+        |error| EbpfError::MapOperation {
+            operation: "reopen verified pinned map",
+            map: map_name,
+            reason: error.to_string(),
+        },
+    )?;
+    map.insert(key, value, 0)
+        .map_err(|error| EbpfError::MapOperation {
+            operation: "update verified pinned key",
+            map: map_name,
+            reason: error.to_string(),
+        })
+}
+
+fn verify_pinned_tree(identity: &PinnedNetworkIdentity) -> Result<(), EbpfError> {
+    fn visit(root: &Path, path: &Path, observed: &mut Vec<PinnedObjectIdentity>) -> Result<(), EbpfError> {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| EbpfError::MapOperation {
+            operation: "verify pinned ownership",
+            map: "pin tree",
+            reason: error.to_string(),
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: format!("symlink in pin tree: {}", path.display()),
+            });
+        }
+        let relative = path.strip_prefix(root).map_err(|error| EbpfError::MapOperation {
+            operation: "verify pinned ownership",
+            map: "pin tree",
+            reason: error.to_string(),
+        })?;
+        let persisted = PinnedObjectIdentity {
+            relative_path: relative.display().to_string(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            directory: metadata.is_dir(),
+            map_id: None,
+        };
+        observed.push(persisted);
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).map_err(|error| EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: error.to_string(),
+            })? {
+                let entry = entry.map_err(|error| EbpfError::MapOperation {
+                    operation: "verify pinned ownership",
+                    map: "pin tree",
+                    reason: error.to_string(),
+                })?;
+                visit(root, &entry.path(), observed)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut observed = Vec::new();
+    visit(&identity.root, &identity.root, &mut observed)?;
+    if observed.len() != identity.objects.len() {
+        return Err(EbpfError::MapOperation {
+            operation: "verify pinned ownership",
+            map: "pin tree",
+            reason: "pin tree entry count changed".to_string(),
+        });
+    }
+    for current in observed {
+        let expected = identity
+            .objects
+            .iter()
+            .find(|item| item.relative_path == current.relative_path)
+            .ok_or_else(|| EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: format!("foreign pin entry: {}", current.relative_path),
+            })?;
+        if expected.device != current.device
+            || expected.inode != current.inode
+            || expected.directory != current.directory
+        {
+            return Err(EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: format!("pin identity changed: {}", current.relative_path),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn delete_verified_hash<const K: usize, const V: usize>(
+    network_id: &str,
+    identity: &PinnedNetworkIdentity,
+    map_name: &'static str,
+    key: [u8; K],
+) -> Result<(), EbpfError> {
+    let map_data = aya::maps::Map::HashMap(verified_map_data(network_id, identity, map_name)?);
+    let mut map = aya::maps::HashMap::<_, [u8; K], [u8; V]>::try_from(map_data).map_err(|error| {
+        EbpfError::MapOperation {
+            operation: "reopen verified pinned map",
+            map: map_name,
+            reason: error.to_string(),
+        }
+    })?;
+    match map.remove(&key) {
+        Ok(()) | Err(aya::maps::MapError::KeyNotFound) => Ok(()),
+        Err(error) => Err(EbpfError::MapOperation {
+            operation: "delete verified pinned key",
+            map: map_name,
+            reason: error.to_string(),
+        }),
+    }
+}
+
 impl PreparedEbpfNetwork {
     pub fn config(&self) -> &EbpfNetworkConfig {
         &self.config
     }
 
-    pub fn prepare_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+    pub fn prepare_interface(
+        &mut self,
+        interface: &str,
+        expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
         validate_network_id(interface)?;
         if interface == self.config.interface
-            || self.additional_interfaces.iter().any(|value| value == interface)
+            || self
+                .additional_interfaces
+                .iter()
+                .any(|(value, _)| value == interface)
         {
             return Err(EbpfError::InvalidAdapterState {
                 reason: format!("classifier interface {interface} is duplicated"),
             });
         }
-        self.kernel.preflight_interface(interface)?;
-        self.additional_interfaces.push(interface.to_string());
+        self.kernel
+            .preflight_interface(interface, expected_ifindex)?;
+        self.additional_interfaces
+            .push((interface.to_string(), expected_ifindex));
         Ok(())
     }
 
@@ -393,20 +651,6 @@ fn hex_bytes(bytes: &[u8]) -> Vec<String> {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn update_pinned_map(
-    network_id: &str,
-    map_name: &'static str,
-    key: &[u8],
-    value: &[u8],
-) -> Result<(), EbpfError> {
-    let command = build_pinned_map_update_command(network_id, map_name, key, value)?;
-    exec_cmd(&command).map_err(|error| EbpfError::MapOperation {
-        operation: "update pinned",
-        map: map_name,
-        reason: error.to_string(),
-    })
-}
-
 fn build_pinned_map_update_command(
     network_id: &str,
     map_name: &'static str,
@@ -428,23 +672,6 @@ fn build_pinned_map_update_command(
     command.extend(hex_bytes(value));
     command.push("any".to_string());
     Ok(command)
-}
-
-fn delete_pinned_map_key(
-    network_id: &str,
-    map_name: &'static str,
-    key: &[u8],
-) -> Result<(), EbpfError> {
-    let command = build_pinned_map_delete_command(network_id, map_name, key)?;
-    match exec_cmd(&command) {
-        Ok(()) => Ok(()),
-        Err(error) if error.to_string().contains("No such file or directory") => Ok(()),
-        Err(error) => Err(EbpfError::MapOperation {
-            operation: "delete pinned",
-            map: map_name,
-            reason: error.to_string(),
-        }),
-    }
 }
 
 fn build_pinned_map_delete_command(
@@ -732,6 +959,9 @@ mod lifecycle_tests {
     #[derive(Debug, Default)]
     struct FakeState {
         events: Vec<String>,
+        network_preflights: Vec<String>,
+        interface_preflights: Vec<(String, u32)>,
+        interface_attaches: Vec<(String, u32)>,
         metadata: Option<[u8; META_VALUE_LEN]>,
         endpoints: Vec<(EndpointKey, EndpointValue)>,
         ports: Vec<(PortKey, PortValue)>,
@@ -744,6 +974,7 @@ mod lifecycle_tests {
         state: Arc<Mutex<FakeState>>,
         reserved_ports: String,
         fail_egress_attach: bool,
+        replacement_ifindex_at_attach: Option<u32>,
     }
 
     impl FakeKernel {
@@ -754,6 +985,7 @@ mod lifecycle_tests {
                     state: Arc::clone(&state),
                     reserved_ports: "1-1024,50000-50031".to_string(),
                     fail_egress_attach: false,
+                    replacement_ifindex_at_attach: None,
                 },
                 state,
             )
@@ -771,22 +1003,23 @@ mod lifecycle_tests {
         }
 
         fn preflight(&mut self, request: &KernelPreflight<'_>) -> Result<(), EbpfError> {
-            assert_eq!(request.network_id, "test-network");
             assert_eq!(request.expected_object_sha256, embedded_object_sha256());
-            self.state
-                .lock()
-                .unwrap()
-                .events
-                .push("preflight".to_string());
+            let mut state = self.state.lock().unwrap();
+            state.network_preflights.push(request.network_id.to_string());
+            state.events.push("preflight".to_string());
             Ok(())
         }
 
-        fn preflight_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
-            self.state
-                .lock()
-                .unwrap()
-                .events
-                .push(format!("preflight-interface:{interface}"));
+        fn preflight_interface(
+            &mut self,
+            interface: &str,
+            expected_ifindex: u32,
+        ) -> Result<(), EbpfError> {
+            let mut state = self.state.lock().unwrap();
+            state
+                .interface_preflights
+                .push((interface.to_string(), expected_ifindex));
+            state.events.push(format!("preflight-interface:{interface}"));
             Ok(())
         }
 
@@ -804,12 +1037,23 @@ mod lifecycle_tests {
             Ok(())
         }
 
-        fn attach_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
-            self.state
-                .lock()
-                .unwrap()
-                .events
-                .push(format!("attach-interface:{interface}"));
+        fn attach_interface(
+            &mut self,
+            interface: &str,
+            expected_ifindex: u32,
+        ) -> Result<(), EbpfError> {
+            if let Some(actual) = self.replacement_ifindex_at_attach {
+                return Err(EbpfError::InterfaceMismatch {
+                    interface: interface.to_string(),
+                    expected: expected_ifindex,
+                    actual,
+                });
+            }
+            let mut state = self.state.lock().unwrap();
+            state
+                .interface_attaches
+                .push((interface.to_string(), expected_ifindex));
+            state.events.push(format!("attach-interface:{interface}"));
             Ok(())
         }
 
@@ -861,6 +1105,7 @@ mod lifecycle_tests {
             interface: "eth-test0".to_string(),
             external_ipv4: [203, 0, 113, 8],
             external_ifindex: 17,
+            loopback_ifindex: 1,
             next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
             snat_port_start: 50_000,
             snat_port_end: 50_031,
@@ -921,10 +1166,11 @@ mod lifecycle_tests {
     fn network_backend_additional_classifier_is_preflighted_and_unique() {
         let (kernel, state) = FakeKernel::valid();
         let mut prepared = EbpfNetwork::prepare_with(kernel, config()).unwrap();
-        prepared.prepare_interface("lo").unwrap();
-        assert!(prepared.prepare_interface("lo").is_err());
+        prepared.prepare_interface("lo", 1).unwrap();
+        assert!(prepared.prepare_interface("lo", 1).is_err());
         prepared.attach().unwrap();
-        let events = &state.lock().unwrap().events;
+        let state = state.lock().unwrap();
+        let events = &state.events;
         let preflight = events
             .iter()
             .position(|event| event == "preflight-interface:lo")
@@ -934,6 +1180,101 @@ mod lifecycle_tests {
             .position(|event| event == "attach-interface:lo")
             .unwrap();
         assert!(preflight < attach);
+        assert_eq!(state.interface_preflights, vec![("lo".to_string(), 1)]);
+        assert_eq!(state.interface_attaches, vec![("lo".to_string(), 1)]);
+    }
+
+    #[test]
+    fn network_backend_additional_ifindex_replacement_fails_before_attach_mutation() {
+        let (mut kernel, state) = FakeKernel::valid();
+        kernel.replacement_ifindex_at_attach = Some(99);
+        let mut prepared = EbpfNetwork::prepare_with(kernel, config()).unwrap();
+        prepared.prepare_interface("lo", 1).unwrap();
+
+        assert!(matches!(
+            prepared.attach(),
+            Err(EbpfError::InterfaceMismatch {
+                expected: 1,
+                actual: 99,
+                ..
+            })
+        ));
+        let state = state.lock().unwrap();
+        assert_eq!(state.interface_preflights, vec![("lo".to_string(), 1)]);
+        assert!(state.interface_attaches.is_empty());
+        assert_eq!(state.rollback_count, 1);
+    }
+
+    #[test]
+    fn network_backend_one_load_shares_classifiers_and_maps_for_multiple_endpoints() {
+        let (kernel, state) = FakeKernel::valid();
+        let mut network = EbpfNetwork::load_with(kernel, config()).unwrap();
+        for suffix in [2u8, 3] {
+            let address = [10, 44, 1, suffix];
+            network
+                .install_endpoint(
+                    EndpointKey { address },
+                    EndpointValue {
+                        ifindex: u32::from(suffix) + 20,
+                        mac: [2, 0, 0, 0, 0, suffix],
+                        flags: 0,
+                    },
+                )
+                .unwrap();
+            network
+                .install_port(
+                    PortKey {
+                        protocol: 6,
+                        host_port: 8_000 + u16::from(suffix),
+                    },
+                    PortValue {
+                        endpoint_address: address,
+                        endpoint_port: 80,
+                    },
+                )
+                .unwrap();
+        }
+        let state = state.lock().unwrap();
+        assert_eq!(state.network_preflights, vec!["test-network"]);
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| event.starts_with("attach:"))
+                .count(),
+            2
+        );
+        assert_eq!(state.endpoints.len(), 2);
+        assert_eq!(state.ports.len(), 2);
+    }
+
+    #[test]
+    fn network_backend_distinct_bridge_networks_share_host_attach_points_without_rejection() {
+        let shared = Arc::new(Mutex::new(FakeState::default()));
+        for network_id in ["bridge-a", "bridge-b"] {
+            let kernel = FakeKernel {
+                state: Arc::clone(&shared),
+                reserved_ports: "1-1024,50000-50031".to_string(),
+                fail_egress_attach: false,
+                replacement_ifindex_at_attach: None,
+            };
+            let mut network_config = config();
+            network_config.network_id = network_id.to_string();
+            let mut prepared = EbpfNetwork::prepare_with(kernel, network_config).unwrap();
+            prepared.prepare_interface("lo", 1).unwrap();
+            prepared.attach().unwrap().persist().unwrap();
+        }
+        let state = shared.lock().unwrap();
+        assert_eq!(state.network_preflights, vec!["bridge-a", "bridge-b"]);
+        assert_eq!(state.interface_attaches.len(), 2);
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| event.starts_with("attach:"))
+                .count(),
+            4
+        );
     }
 
     #[test]

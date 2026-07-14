@@ -111,11 +111,19 @@ pub(crate) struct KernelLoadPlan<'a> {
 pub(crate) trait KernelAdapter {
     fn reserved_ports(&mut self) -> Result<String, EbpfError>;
     fn preflight(&mut self, request: &KernelPreflight<'_>) -> Result<(), EbpfError>;
-    fn preflight_interface(&mut self, _interface: &str) -> Result<(), EbpfError> {
+    fn preflight_interface(
+        &mut self,
+        _interface: &str,
+        _expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
         Ok(())
     }
     fn commit(&mut self, plan: &KernelLoadPlan<'_>) -> Result<(), EbpfError>;
-    fn attach_interface(&mut self, _interface: &str) -> Result<(), EbpfError> {
+    fn attach_interface(
+        &mut self,
+        _interface: &str,
+        _expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
         Ok(())
     }
     fn rollback(&mut self) -> Result<(), EbpfError>;
@@ -344,9 +352,13 @@ impl KernelAdapter for AyaKernel {
         Ok(())
     }
 
-    fn preflight_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+    fn preflight_interface(
+        &mut self,
+        interface: &str,
+        expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
         self.require_state(AdapterState::Preflighted, "additional interface preflight")?;
-        validate_attach_interface(interface)
+        validate_attach_interface(interface, expected_ifindex)
     }
 
     fn commit(&mut self, plan: &KernelLoadPlan<'_>) -> Result<(), EbpfError> {
@@ -444,8 +456,13 @@ impl KernelAdapter for AyaKernel {
         Ok(())
     }
 
-    fn attach_interface(&mut self, interface: &str) -> Result<(), EbpfError> {
+    fn attach_interface(
+        &mut self,
+        interface: &str,
+        expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
         self.require_state(AdapterState::Committed, "additional interface attach")?;
+        validate_attach_interface(interface, expected_ifindex)?;
         match tc::qdisc_add_clsact(interface) {
             Ok(()) => {}
             Err(error) if qdisc_already_exists(&error) => {}
@@ -1809,13 +1826,20 @@ fn directory_policy(path: impl ToString, reason: impl ToString) -> EbpfError {
     }
 }
 
-fn validate_attach_interface(interface: &str) -> Result<(), EbpfError> {
+fn validate_attach_interface(interface: &str, expected_ifindex: u32) -> Result<(), EbpfError> {
     validate_component(interface)?;
-    fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))
+    let actual_ifindex = fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))
         .map_err(|error| loader_error("read additional interface ifindex", error))?
         .trim()
         .parse::<u32>()
         .map_err(|error| loader_error("parse additional interface ifindex", error))?;
+    if actual_ifindex != expected_ifindex {
+        return Err(EbpfError::InterfaceMismatch {
+            interface: interface.to_string(),
+            expected: expected_ifindex,
+            actual: actual_ifindex,
+        });
+    }
     let qdisc = Command::new("tc")
         .args(["qdisc", "show", "dev", interface])
         .output()

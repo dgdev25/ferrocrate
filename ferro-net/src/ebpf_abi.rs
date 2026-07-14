@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub const PROGRAM_ABI_VERSION: u32 = 1;
+pub const PROGRAM_ABI_VERSION: u32 = 2;
 
 pub const ENDPOINTS_MAP_NAME: &str = "FERRO_ENDPOINTS";
 pub const PORTS_MAP_NAME: &str = "FERRO_PORTS";
@@ -17,7 +17,7 @@ pub const CONNTRACK_KEY_LEN: usize = 16;
 pub const CONNTRACK_VALUE_LEN: usize = 16;
 pub const POLICY_KEY_LEN: usize = 8;
 pub const POLICY_VALUE_LEN: usize = 4;
-pub const META_VALUE_LEN: usize = 24;
+pub const META_VALUE_LEN: usize = 28;
 
 pub const META_ABI_VERSION_OFFSET: usize = 0;
 pub const META_EXTERNAL_IPV4_OFFSET: usize = 4;
@@ -26,6 +26,7 @@ pub const META_NEXT_HOP_MAC_OFFSET: usize = 12;
 pub const META_SNAT_RANGE_START_OFFSET: usize = 18;
 pub const META_SNAT_RANGE_END_OFFSET: usize = 20;
 pub const META_FLAGS_OFFSET: usize = 22;
+pub const META_LOOPBACK_IFINDEX_OFFSET: usize = 24;
 pub const META_FLAG_SNAT_RANGE_RESERVED: u16 = 1;
 
 pub const ENDPOINT_MAX_ENTRIES: u32 = 16_384;
@@ -89,7 +90,8 @@ const _: () = {
     assert!(META_NEXT_HOP_MAC_OFFSET + 6 == META_SNAT_RANGE_START_OFFSET);
     assert!(META_SNAT_RANGE_START_OFFSET + 2 == META_SNAT_RANGE_END_OFFSET);
     assert!(META_SNAT_RANGE_END_OFFSET + 2 == META_FLAGS_OFFSET);
-    assert!(META_FLAGS_OFFSET + 2 == META_VALUE_LEN);
+    assert!(META_FLAGS_OFFSET + 2 == META_LOOPBACK_IFINDEX_OFFSET);
+    assert!(META_LOOPBACK_IFINDEX_OFFSET + 4 == META_VALUE_LEN);
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +99,7 @@ pub struct MetaConfig {
     pub abi_version: u32,
     pub external_ipv4: [u8; 4],
     pub external_ifindex: u32,
+    pub loopback_ifindex: u32,
     pub next_hop_mac: [u8; 6],
     pub snat_port_start: u16,
     pub snat_port_end: u16,
@@ -117,6 +120,8 @@ impl MetaConfig {
             .copy_from_slice(&self.external_ipv4);
         bytes[META_EXTERNAL_IFINDEX_OFFSET..META_NEXT_HOP_MAC_OFFSET]
             .copy_from_slice(&self.external_ifindex.to_be_bytes());
+        bytes[META_LOOPBACK_IFINDEX_OFFSET..META_VALUE_LEN]
+            .copy_from_slice(&self.loopback_ifindex.to_be_bytes());
         bytes[META_NEXT_HOP_MAC_OFFSET..META_SNAT_RANGE_START_OFFSET]
             .copy_from_slice(&self.next_hop_mac);
         bytes[META_SNAT_RANGE_START_OFFSET..META_SNAT_RANGE_END_OFFSET]
@@ -141,6 +146,11 @@ impl MetaConfig {
                 bytes[META_EXTERNAL_IFINDEX_OFFSET..META_NEXT_HOP_MAC_OFFSET]
                     .try_into()
                     .expect("fixed metadata ifindex range"),
+            ),
+            loopback_ifindex: u32::from_be_bytes(
+                bytes[META_LOOPBACK_IFINDEX_OFFSET..META_VALUE_LEN]
+                    .try_into()
+                    .expect("fixed metadata loopback ifindex range"),
             ),
             next_hop_mac: bytes[META_NEXT_HOP_MAC_OFFSET..META_SNAT_RANGE_START_OFFSET]
                 .try_into()

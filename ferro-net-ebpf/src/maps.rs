@@ -152,6 +152,7 @@ impl DatapathState for KernelState {
         Some(ExternalNetwork {
             address: config.external_ipv4,
             ifindex: config.external_ifindex,
+            loopback_ifindex: config.loopback_ifindex,
             next_hop_mac: config.next_hop_mac,
             snat_port_start: config.snat_port_start,
             snat_port_end: config.snat_port_end,

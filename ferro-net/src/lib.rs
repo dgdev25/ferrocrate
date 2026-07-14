@@ -2,6 +2,8 @@ pub mod backend;
 pub mod bridge;
 pub mod dns;
 pub mod ebpf;
+pub mod ebpf_abi;
+pub mod ebpf_loader;
 pub mod ebpf_maps;
 pub mod executor;
 pub mod iptables;
@@ -28,7 +30,10 @@ pub use validate::ValidationError;
 pub use bridge::{create_bridge, destroy_bridge, BridgeConfig};
 
 // Re-export eBPF execution functions
-pub use ebpf::{install_security_monitor, SecurityMonitorConfig};
+pub use ebpf::{
+    embedded_object_abi, embedded_object_sha256, install_security_monitor, EbpfError, EbpfMetrics,
+    EbpfNetwork, EbpfNetworkConfig, SecurityMonitorConfig,
+};
 
 // Re-export veth execution functions
 pub use veth::{assign_ip, create_veth_pair, destroy_veth_pair, VethConfig, VethPair};

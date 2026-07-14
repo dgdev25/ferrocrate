@@ -326,9 +326,9 @@ scripts/build-targets.sh  # x86_64, aarch64, riscv64
 ### Project Status
 
 **Current Phase:** Phase 1 (Core Parity) — 95% complete
-**Total Lines of Code:** ~20,000 LOC across 111 source files
-**Test Coverage:** 202 tests, all passing
-**Security Audit:** Comprehensive audit completed (49 findings, 9 critical fixed)
+**Total Lines of Code:** ~22,000 LOC across 111+ source files
+**In Flight:** Networking (veth/netns isolation), seccomp profile hardening, rootfs extraction
+**Security Audit:** Comprehensive audit completed (49 findings, 37% remediation complete as of 2026-03-14)
 
 See [ROADMAP.md](docs/ROADMAP.md) for detailed feature status and roadmap.
 

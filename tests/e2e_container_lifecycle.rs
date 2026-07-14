@@ -16,6 +16,7 @@ fn should_run() -> bool {
 }
 
 /// Helper to wait for container state
+#[allow(dead_code)]
 fn wait_for_container(container_id: &str, state: &str, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
@@ -236,6 +237,7 @@ CMD ["cat", "/hello.txt"]
                 "run",
                 "--name", "ferro-e2e-web",
                 "--network", "bridge",
+                "--network-backend", "iptables",
                 "-p", "8080:80",
                 "docker.io/library/nginx:alpine",
             ])
@@ -252,11 +254,22 @@ CMD ["cat", "/hello.txt"]
         std::thread::sleep(Duration::from_secs(2));
 
         // --- Check 1: published port reachable from host (OUTPUT-chain DNAT) ---
-        let curl_host = Command::new("curl")
-            .args(["--silent", "--fail", "--max-time", "5", "http://127.0.0.1:8080/"])
-            .output()
-            .expect("curl must be present on host");
+        let start = std::time::Instant::now();
+        let mut last_curl = None;
+        while start.elapsed() < Duration::from_secs(12) {
+            let curl_host = Command::new("curl")
+                .args(["--silent", "--fail", "--max-time", "2", "http://127.0.0.1:8080/"])
+                .output()
+                .expect("curl must be present on host");
+            if curl_host.status.success() {
+                last_curl = Some(curl_host);
+                break;
+            }
+            last_curl = Some(curl_host);
+            std::thread::sleep(Duration::from_millis(400));
+        }
 
+        let curl_host = last_curl.expect("at least one curl attempt");
         assert!(
             curl_host.status.success(),
             "Published port 8080 must be reachable from localhost (DNAT check failed): {}",

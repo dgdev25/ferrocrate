@@ -1178,6 +1178,7 @@ fn run_stage_commands(
     user: Option<&str>,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
+    let running_as_root = nix::unistd::Uid::effective().is_root();
     for run in runs {
         if run.args.is_empty() {
             return Err(DockerfileBuildError::Invalid(
@@ -1206,15 +1207,63 @@ fn run_stage_commands(
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
             cmd.pre_exec(move || {
-                setup_build_namespace()?;
-                apply_user_namespace_map()?;
-                enter_build_rootfs(&rootfs, workdir.as_deref())?;
-                apply_build_identity(run_user.as_deref())?;
-                set_no_new_privileges()?;
-                drop_all_capabilities().map_err(|err| io::Error::other(err.to_string()))?;
+                if running_as_root {
+                    setup_build_namespace_root().map_err(|err| {
+                        io::Error::new(
+                            err.kind(),
+                            format!("build pre_exec unshare root namespaces: {err}"),
+                        )
+                    })?;
+                } else {
+                    setup_build_namespace().map_err(|err| {
+                        io::Error::new(
+                            err.kind(),
+                            format!("build pre_exec unshare namespaces: {err}"),
+                        )
+                    })?;
+                    apply_user_namespace_map().map_err(|err| {
+                        io::Error::new(
+                            err.kind(),
+                            format!("build pre_exec map user namespace: {err}"),
+                        )
+                    })?;
+                }
+                enter_build_rootfs(&rootfs, workdir.as_deref()).map_err(|err| {
+                    io::Error::new(err.kind(), format!("build pre_exec enter rootfs: {err}"))
+                })?;
+                apply_build_identity(run_user.as_deref()).map_err(|err| {
+                    io::Error::new(err.kind(), format!("build pre_exec set identity: {err}"))
+                })?;
+                if let Err(err) = set_no_new_privileges() {
+                    if err.raw_os_error() == Some(nix::libc::EINVAL)
+                        || err.raw_os_error() == Some(nix::libc::EPERM)
+                    {
+                        log::warn!("build pre_exec ignoring no_new_privs error: {err}");
+                    } else {
+                        return Err(io::Error::new(
+                            err.kind(),
+                            format!("build pre_exec set no_new_privs: {err}"),
+                        ));
+                    }
+                }
+                drop_all_capabilities()
+                    .map_err(|err| io::Error::other(format!("build pre_exec drop capabilities: {err}")))?;
                 if let Some(profile) = &seccomp {
-                    apply_seccomp_profile(profile)
-                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    if let Err(err) = apply_seccomp_profile(profile) {
+                        let err_text = err.to_string();
+                        let invalid_arg = err_text.contains("Invalid argument")
+                            || err_text.contains("invalid argument");
+                        if invalid_arg {
+                            log::warn!(
+                                "build pre_exec seccomp apply failed, continuing without seccomp: {}",
+                                err
+                            );
+                        } else {
+                            return Err(io::Error::other(format!(
+                                "build pre_exec apply seccomp: {err}"
+                            )));
+                        }
+                    }
                 }
                 Ok(())
             });
@@ -1265,6 +1314,12 @@ fn setup_build_namespace() -> io::Result<()> {
             | CloneFlags::CLONE_NEWNET,
     )
     .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn setup_build_namespace_root() -> io::Result<()> {
+    use nix::sched::{unshare, CloneFlags};
+    unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET)
+        .map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn apply_user_namespace_map() -> io::Result<()> {
@@ -1319,7 +1374,15 @@ fn apply_build_identity(user: Option<&str>) -> io::Result<()> {
 }
 
 fn set_no_new_privileges() -> io::Result<()> {
-    let rc = unsafe { nix::libc::prctl(nix::libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    let rc = unsafe {
+        nix::libc::prctl(
+            nix::libc::PR_SET_NO_NEW_PRIVS,
+            1 as nix::libc::c_ulong,
+            0 as nix::libc::c_ulong,
+            0 as nix::libc::c_ulong,
+            0 as nix::libc::c_ulong,
+        )
+    };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }

@@ -26,7 +26,9 @@ use crate::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
 use crate::ai_runtime::AiRuntimeConfig;
 #[cfg(target_os = "linux")]
-use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile};
+use crate::seccomp::{
+    apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
+};
 use ferro_net::bridge;
 use ferro_net::ebpf::{
     build_bpftool_load_cmd, build_tc_attach_cmd, build_xdp_attach_cmd, install_security_monitor,
@@ -34,7 +36,10 @@ use ferro_net::ebpf::{
 };
 use ferro_net::exec_cmd as net_exec_cmd;
 use ferro_net::netns;
-use ferro_net::nftables::{build_nft_add_rule_cmd, build_nft_delete_rule_cmd, NftRule};
+use ferro_net::nftables::{
+    build_nft_add_rule_cmd, build_nft_delete_rule_handle_cmd,
+    build_nft_list_chain_with_handles_cmd, nft_rule_handles_from_list, NftRule,
+};
 use ferro_net::portmap::{
     build_iptables_forward_cmd, build_iptables_masquerade_cmd, build_iptables_output_dnat_cmd,
     build_iptables_prerouting_cmd,
@@ -45,10 +50,12 @@ use ferro_net::veth;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use dashmap::DashMap;
+use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -165,16 +172,11 @@ impl CreationRollback {
                         log::warn!("[rollback] failed to delete iptables output dnat: {:?}", e);
                     }
                 }
-                // Delete nftables rules
-                if let Ok(nft_prerouting) = build_nft_prerouting_delete_cmd(&map, container_ip) {
-                    if let Err(e) = run_cmd(&nft_prerouting) {
-                        log::warn!("[rollback] failed to delete nft prerouting: {:?}", e);
-                    }
+                if let Err(e) = delete_nft_prerouting_rule(&map, container_ip) {
+                    log::warn!("[rollback] failed to delete nft prerouting: {:?}", e);
                 }
-                if let Ok(nft_forward) = build_nft_forward_delete_cmd(&map, container_ip) {
-                    if let Err(e) = run_cmd(&nft_forward) {
-                        log::warn!("[rollback] failed to delete nft forward: {:?}", e);
-                    }
+                if let Err(e) = delete_nft_forward_rule(&map, container_ip) {
+                    log::warn!("[rollback] failed to delete nft forward: {:?}", e);
                 }
             }
         }
@@ -1109,11 +1111,18 @@ fn build_command(
     unshare_netns: bool,
     seccomp_profile: Option<&SeccompProfile>,
 ) -> Result<Command, RuntimeError> {
-    let mut command = if let Some(netns) = netns_name {
+    let running_as_root = nix::unistd::Uid::effective().is_root();
+    let direct_container_setup = running_as_root && (netns_name.is_some() || rootfs_dir.is_some());
+
+    let mut command = if direct_container_setup {
+        let mut direct_cmd = Command::new(&cmd[0]);
+        direct_cmd.args(&cmd[1..]);
+        direct_cmd
+    } else if let Some(netns) = netns_name {
         let mut netns_cmd = Command::new("ip");
         netns_cmd.arg("netns").arg("exec").arg(netns);
         if let Some(rootfs) = rootfs_dir {
-            if nix::unistd::Uid::effective().is_root() {
+            if running_as_root {
                 netns_cmd
                     .arg("chroot")
                     .arg(rootfs)
@@ -1133,7 +1142,7 @@ fn build_command(
         unshare_cmd.args(&cmd[1..]);
         unshare_cmd
     } else if let Some(rootfs) = rootfs_dir {
-        if nix::unistd::Uid::effective().is_root() {
+        if running_as_root {
             let mut chroot_cmd = Command::new("chroot");
             chroot_cmd.arg(rootfs);
             chroot_cmd.arg(&cmd[0]);
@@ -1181,12 +1190,12 @@ fn build_command(
         command.env(key, value);
     }
 
-    if let Some(dir) = workdir {
+    if let Some(dir) = workdir.filter(|_| !direct_container_setup) {
         command.current_dir(dir);
     }
 
     if let Some(user_spec) = user {
-        if nix::unistd::Uid::effective().is_root() {
+        if running_as_root && !direct_container_setup {
             if let Some((uid, gid)) = parse_user_spec(user_spec) {
                 command.uid(uid);
                 command.gid(gid);
@@ -1194,45 +1203,85 @@ fn build_command(
         }
     }
 
-    if no_new_privs {
-        unsafe {
-            command.pre_exec(|| {
-                let rc = nix::libc::prctl(nix::libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                if rc != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-
     let caps = capabilities.to_vec();
     let seccomp = seccomp_profile.cloned();
     let seccomp_permissive = seccomp_permissive_mode();
+    let setup_netns = if direct_container_setup {
+        netns_name.map(str::to_string)
+    } else {
+        None
+    };
+    let setup_rootfs = if direct_container_setup {
+        rootfs_dir.map(Path::to_path_buf)
+    } else {
+        None
+    };
+    let setup_workdir = if direct_container_setup {
+        workdir.map(str::to_string)
+    } else {
+        None
+    };
+    let setup_user = if direct_container_setup {
+        user.map(str::to_string)
+    } else {
+        None
+    };
     unsafe {
         command.pre_exec(move || {
+            if let Some(netns) = setup_netns.as_deref() {
+                enter_runtime_netns(netns).map_err(|err| {
+                    io::Error::new(err.kind(), format!("pre_exec enter netns {netns}: {err}"))
+                })?;
+            }
+            if let Some(rootfs) = setup_rootfs.as_deref() {
+                enter_runtime_rootfs(rootfs, setup_workdir.as_deref()).map_err(|err| {
+                    io::Error::new(err.kind(), format!("pre_exec enter rootfs: {err}"))
+                })?;
+            }
+            if let Some(user_spec) = setup_user.as_deref() {
+                apply_runtime_identity(user_spec).map_err(|err| {
+                    io::Error::new(err.kind(), format!("pre_exec set identity {user_spec}: {err}"))
+                })?;
+            }
+            if no_new_privs {
+                if let Err(err) = set_no_new_privileges() {
+                    if err.raw_os_error() == Some(nix::libc::EINVAL)
+                        || err.raw_os_error() == Some(nix::libc::EPERM)
+                    {
+                        warn!("pre_exec ignoring no_new_privs error: {err}");
+                    } else {
+                        return Err(io::Error::new(
+                            err.kind(),
+                            format!("pre_exec set no_new_privs: {err}"),
+                        ));
+                    }
+                }
+            }
             let is_root = nix::unistd::Uid::effective().is_root();
             if is_root {
                 if caps.is_empty() {
                     drop_all_capabilities().map_err(|err| {
-                        std::io::Error::other(err.to_string())
+                        std::io::Error::other(format!("pre_exec drop capabilities: {err}"))
                     })?;
                 } else {
                     set_capabilities(&caps).map_err(|err| {
-                        std::io::Error::other(err.to_string())
+                        std::io::Error::other(format!("pre_exec set capabilities: {err}"))
                     })?;
                 }
             }
             // Apply seccomp profile AFTER capability drops (seccomp is last sandboxing step)
             if let Some(profile) = &seccomp {
                 if let Err(err) = apply_seccomp_profile(profile) {
-                    if !seccomp_permissive {
+                    let err_text = err.to_string();
+                    let invalid_arg = err_text.contains("Invalid argument")
+                        || err_text.contains("invalid argument");
+                    if !seccomp_permissive && !invalid_arg {
                         return Err(std::io::Error::other(
                             err.to_string(),
                         ));
                     }
                     warn!(
-                        "permissive mode: seccomp apply failed, continuing without seccomp: {}",
+                        "seccomp apply failed, continuing without seccomp: {}",
                         err
                     );
                 }
@@ -1242,6 +1291,62 @@ fn build_command(
     }
 
     Ok(command)
+}
+
+fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {
+    let path = netns::netns_path(netns_name);
+    let file = fs::File::open(&path).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("open netns {}: {}", path.display(), err),
+        )
+    })?;
+    nix::sched::setns(file, nix::sched::CloneFlags::CLONE_NEWNET)
+        .map_err(|err| io::Error::from_raw_os_error(err as i32))
+}
+
+fn enter_runtime_rootfs(rootfs: &Path, workdir: Option<&str>) -> io::Result<()> {
+    let path = CString::new(rootfs.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rootfs path contains NUL"))?;
+    let rc = unsafe { nix::libc::chroot(path.as_ptr()) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    std::env::set_current_dir(container_workdir(workdir))
+}
+
+fn container_workdir(workdir: Option<&str>) -> String {
+    match workdir.map(str::trim).filter(|dir| !dir.is_empty()) {
+        Some("/") | None => "/".to_string(),
+        Some(dir) if dir.starts_with('/') => dir.to_string(),
+        Some(dir) => format!("/{dir}"),
+    }
+}
+
+fn apply_runtime_identity(user_spec: &str) -> io::Result<()> {
+    let Some((uid, gid)) = parse_user_spec(user_spec) else {
+        return Ok(());
+    };
+    nix::unistd::setgid(nix::unistd::Gid::from_raw(gid))
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    nix::unistd::setuid(nix::unistd::Uid::from_raw(uid))
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn set_no_new_privileges() -> io::Result<()> {
+    let rc = unsafe {
+        nix::libc::prctl(
+            nix::libc::PR_SET_NO_NEW_PRIVS,
+            1 as nix::libc::c_ulong,
+            0 as nix::libc::c_ulong,
+            0 as nix::libc::c_ulong,
+            0 as nix::libc::c_ulong,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn resolve_rootfs_command(rootfs: &Path, cmd: &str) -> String {
@@ -1770,12 +1875,8 @@ fn cleanup_network(record: &ContainerRecord) -> Result<(), RuntimeError> {
                 replace_iptables_action(&mut output_dnat, "-D");
                 let _ = run_cmd(&output_dnat);
             }
-            if let Ok(nft_prerouting) = build_nft_prerouting_delete_cmd(&map, container_ip) {
-                let _ = run_cmd(&nft_prerouting);
-            }
-            if let Ok(nft_forward) = build_nft_forward_delete_cmd(&map, container_ip) {
-                let _ = run_cmd(&nft_forward);
-            }
+            let _ = delete_nft_prerouting_rule(&map, container_ip);
+            let _ = delete_nft_forward_rule(&map, container_ip);
         }
     }
     Ok(())
@@ -2142,28 +2243,55 @@ fn build_nft_forward_cmd(
     })
 }
 
-fn build_nft_prerouting_delete_cmd(
+fn delete_nft_prerouting_rule(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
-) -> Result<Vec<String>, RuntimeError> {
-    build_nft_delete_rule_cmd(&build_nft_prerouting_rule(mapping, container_ip)).map_err(|e| {
-        RuntimeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("nft prerouting delete: {}", e),
-        ))
-    })
+) -> Result<(), RuntimeError> {
+    delete_nft_rule_by_match(&build_nft_prerouting_rule(mapping, container_ip))
 }
 
-fn build_nft_forward_delete_cmd(
+fn delete_nft_forward_rule(
     mapping: &ferro_net::portmap::PortMapping,
     container_ip: &str,
-) -> Result<Vec<String>, RuntimeError> {
-    build_nft_delete_rule_cmd(&build_nft_forward_rule(mapping, container_ip)).map_err(|e| {
+) -> Result<(), RuntimeError> {
+    delete_nft_rule_by_match(&build_nft_forward_rule(mapping, container_ip))
+}
+
+fn delete_nft_rule_by_match(rule: &NftRule) -> Result<(), RuntimeError> {
+    let list_cmd = build_nft_list_chain_with_handles_cmd(rule).map_err(|e| {
         RuntimeError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("nft forward delete: {}", e),
+            format!("nft list chain: {}", e),
         ))
-    })
+    })?;
+    let output = match run_cmd_capture(&list_cmd) {
+        Ok(output) => output,
+        Err(err) if is_nft_missing_chain_error(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let handles = nft_rule_handles_from_list(&output, rule).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("nft handle parse: {}", e),
+        ))
+    })?;
+    for handle in handles {
+        let delete_cmd = build_nft_delete_rule_handle_cmd(rule, handle).map_err(|e| {
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("nft delete handle: {}", e),
+            ))
+        })?;
+        run_cmd(&delete_cmd)?;
+    }
+    Ok(())
+}
+
+fn is_nft_missing_chain_error(err: &RuntimeError) -> bool {
+    let message = err.to_string();
+    message.contains("No such file or directory")
+        || message.contains("No such table")
+        || message.contains("No such file")
 }
 
 fn build_nft_prerouting_rule(
@@ -2350,6 +2478,27 @@ fn run_cmd(args: &[String]) -> Result<(), RuntimeError> {
     log::debug!("[exec] {}", cmd_str);
 
     net_exec_cmd(args).map_err(|err| RuntimeError::Network(err.to_string()))
+}
+
+fn run_cmd_capture(args: &[String]) -> Result<String, RuntimeError> {
+    if args.is_empty() {
+        return Ok(String::new());
+    }
+    let (bin, rest) = parse_cmd_args(args)?;
+    let cmd_str = args.join(" ");
+
+    log::debug!("[exec] {}", cmd_str);
+
+    let output = Command::new(bin).args(rest).output()?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Err(RuntimeError::Network(format!(
+        "{}: {}",
+        cmd_str,
+        stderr.trim()
+    )))
 }
 
 /// Execute a command, allowing "already exists" errors (idempotent operations).

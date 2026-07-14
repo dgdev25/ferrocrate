@@ -9,11 +9,26 @@ pub enum CapabilityError {
 
 /// Drop all capabilities for the current process (bounding, effective, permitted, inheritable).
 pub fn drop_all_capabilities() -> Result<(), CapabilityError> {
-    let empty = caps::CapsHashSet::new();
-    caps::set(None, CapSet::Bounding, &empty)?;
-    caps::set(None, CapSet::Effective, &empty)?;
-    caps::set(None, CapSet::Permitted, &empty)?;
-    caps::set(None, CapSet::Inheritable, &empty)?;
+    if let Err(err) = caps::clear(None, CapSet::Bounding) {
+        if !is_unprivileged_bounding_drop(&err) {
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = caps::clear(None, CapSet::Effective) {
+        if !is_nonfatal_cap_error(&err) {
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = caps::clear(None, CapSet::Permitted) {
+        if !is_nonfatal_cap_error(&err) {
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = caps::clear(None, CapSet::Inheritable) {
+        if !is_nonfatal_cap_error(&err) {
+            return Err(err.into());
+        }
+    }
     Ok(())
 }
 
@@ -24,11 +39,51 @@ pub fn get_capabilities(set: CapSet) -> Result<caps::CapsHashSet, CapabilityErro
 
 pub fn set_capabilities(caps_to_set: &[Capability]) -> Result<(), CapabilityError> {
     let set: CapsHashSet = caps_to_set.iter().copied().collect();
-    caps::set(None, CapSet::Bounding, &set)?;
-    caps::set(None, CapSet::Effective, &set)?;
-    caps::set(None, CapSet::Permitted, &set)?;
-    caps::set(None, CapSet::Inheritable, &set)?;
+    for cap in caps::all() {
+        if !set.contains(&cap) {
+            if let Err(err) = caps::drop(None, CapSet::Bounding, cap) {
+                if !is_kernel_without_bounding_caps(&err) {
+                    return Err(err.into());
+                }
+            }
+        }
+    }
+    if let Err(err) = caps::set(None, CapSet::Permitted, &set) {
+        if !is_nonfatal_cap_error(&err) {
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = caps::set(None, CapSet::Inheritable, &set) {
+        if !is_nonfatal_cap_error(&err) {
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = caps::set(None, CapSet::Effective, &set) {
+        if !is_nonfatal_cap_error(&err) {
+            return Err(err.into());
+        }
+    }
     Ok(())
+}
+
+fn is_unprivileged_bounding_drop(err: &caps::errors::CapsError) -> bool {
+    let message = err.to_string();
+    message.contains("Operation not permitted")
+        || message.contains("operation not permitted")
+        || is_kernel_without_bounding_caps(err)
+}
+
+fn is_kernel_without_bounding_caps(err: &caps::errors::CapsError) -> bool {
+    let message = err.to_string();
+    message.contains("Invalid argument") || message.contains("invalid argument")
+}
+
+fn is_nonfatal_cap_error(err: &caps::errors::CapsError) -> bool {
+    let message = err.to_string();
+    message.contains("Invalid argument")
+        || message.contains("invalid argument")
+        || message.contains("Operation not permitted")
+        || message.contains("operation not permitted")
 }
 
 #[cfg(test)]
@@ -44,8 +99,20 @@ mod tests {
 
     #[test]
     fn drop_all_caps_is_idempotent() {
-        let _ = drop_all_capabilities();
-        let after = get_capabilities(CapSet::Effective).expect("read caps");
-        assert!(after.is_empty());
+        if std::env::var_os("FERRO_CAP_DROP_CHILD").is_some() {
+            drop_all_capabilities().expect("drop capabilities");
+            let after = get_capabilities(CapSet::Effective).expect("read caps");
+            assert!(after.is_empty());
+            return;
+        }
+
+        let current_exe = std::env::current_exe().expect("current test executable");
+        let status = std::process::Command::new(current_exe)
+            .env("FERRO_CAP_DROP_CHILD", "1")
+            .arg("capabilities::tests::drop_all_caps_is_idempotent")
+            .arg("--exact")
+            .status()
+            .expect("spawn capability drop child");
+        assert!(status.success());
     }
 }

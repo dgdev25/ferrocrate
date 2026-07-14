@@ -1,4 +1,5 @@
 /target
+.worktrees/
 .claude-flow/*
 
 # ONNX model files (download separately)

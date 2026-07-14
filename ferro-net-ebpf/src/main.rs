@@ -3,6 +3,9 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod abi;
+// Task 3 defines packet APIs before the TC entrypoints consume them.
+#[allow(dead_code)]
+mod packet;
 
 use aya_ebpf::{macros::map, maps::HashMap};
 use core::panic::PanicInfo;

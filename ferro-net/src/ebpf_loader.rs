@@ -550,9 +550,9 @@ fn detach_retaining<T, E>(
 
 fn remove_last_retaining<T, E>(
     owned: &mut Vec<T>,
-    remove: impl FnOnce(&T) -> Result<(), E>,
+    remove: impl FnOnce(&mut T) -> Result<(), E>,
 ) -> Result<(), E> {
-    let Some(value) = owned.last() else {
+    let Some(value) = owned.last_mut() else {
         return Ok(());
     };
     remove(value)?;
@@ -1023,6 +1023,127 @@ pub(crate) struct OwnedEntry {
     identity: FileIdentity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinKind {
+    Map,
+    Program,
+}
+
+#[derive(Debug)]
+struct CreatedPinGuard {
+    parent: Arc<OwnedFd>,
+    name: String,
+    kind: PinKind,
+    identity: Option<FileIdentity>,
+    armed: bool,
+    released: bool,
+}
+
+impl CreatedPinGuard {
+    fn new(parent: Arc<OwnedFd>, name: &str, kind: PinKind) -> Self {
+        Self {
+            parent,
+            name: name.to_string(),
+            kind,
+            identity: None,
+            armed: false,
+            released: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn capture_identity(&mut self) -> Result<(), EbpfError> {
+        let stat = fstatat(
+            self.parent.as_ref(),
+            self.name.as_str(),
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(|error| directory_policy(&self.name, error))?;
+        self.identity = Some(FileIdentity {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        });
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), EbpfError> {
+        if !self.armed || self.released {
+            return Ok(());
+        }
+        if self.identity.is_none() {
+            match self.capture_identity() {
+                Ok(()) => {}
+                Err(EbpfError::DirectoryPolicy { reason, .. }) if reason.contains("ENOENT") => {
+                    self.released = true;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let entry = OwnedEntry {
+            parent: self.parent.clone(),
+            name: self.name.clone(),
+            identity: self.identity.expect("captured pin identity"),
+        };
+        remove_owned_file(&entry)?;
+        self.released = true;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn has_retryable_ownership(&self) -> bool {
+        self.armed && !self.released
+    }
+}
+
+impl Drop for CreatedPinGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::error!(
+                pin = %self.name,
+                kind = ?self.kind,
+                %error,
+                "created bpffs pin cleanup failed"
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum PinFailurePoint {
+    Never,
+    BeforeCapture,
+}
+
+fn create_pin_with_guard(
+    pins: &mut Vec<CreatedPinGuard>,
+    parent: Arc<OwnedFd>,
+    name: &str,
+    kind: PinKind,
+    failure: PinFailurePoint,
+    create: impl FnOnce(&Path) -> Result<(), EbpfError>,
+) -> Result<(), EbpfError> {
+    validate_component(name)?;
+    pins.push(CreatedPinGuard::new(parent.clone(), name, kind));
+    let target = descriptor_path(&parent, name);
+    if let Err(error) = create(&target) {
+        pins.pop();
+        return Err(error);
+    }
+    let guard = pins.last_mut().expect("pin guard installed");
+    guard.arm();
+    if failure == PinFailurePoint::BeforeCapture {
+        return Err(lifecycle_error(&format!(
+            "injected {kind:?} pin identity capture failure"
+        )));
+    }
+    guard.capture_identity()
+}
+
 #[derive(Debug)]
 struct CreatedDirectoryGuard {
     parent: Arc<OwnedFd>,
@@ -1143,7 +1264,7 @@ struct PinLayout {
     network: Option<OwnedDirectory>,
     maps: Option<OwnedDirectory>,
     programs: Option<OwnedDirectory>,
-    pins: Vec<OwnedEntry>,
+    pins: Vec<CreatedPinGuard>,
 }
 
 impl PinLayout {
@@ -1237,10 +1358,19 @@ impl PinLayout {
         for expected in expected_map_metadata() {
             let name = static_map_name(&expected.name)?;
             let map = bpf.map_mut(name).ok_or_else(|| missing_map(name))?;
-            let target = descriptor_path(&maps, name);
-            map.pin(&target)
-                .map_err(|error| loader_error(&format!("pin map {name}"), error))?;
-            self.pins.push(capture_owned_entry(maps.clone(), name)?);
+            create_pin_with_guard(
+                &mut self.pins,
+                maps.clone(),
+                name,
+                PinKind::Map,
+                PinFailurePoint::Never,
+                |target| {
+                    map.pin(target).map_err(|error| EbpfError::Pin {
+                        item: name.to_string(),
+                        reason: error.to_string(),
+                    })
+                },
+            )?;
         }
         Ok(())
     }
@@ -1267,18 +1397,26 @@ impl PinLayout {
                     classifier: name.to_string(),
                     reason: error.to_string(),
                 })?;
-            let target = descriptor_path(&programs, name);
-            program
-                .pin(&target)
-                .map_err(|error| loader_error(&format!("pin program {name}"), error))?;
-            self.pins.push(capture_owned_entry(programs.clone(), name)?);
+            create_pin_with_guard(
+                &mut self.pins,
+                programs.clone(),
+                name,
+                PinKind::Program,
+                PinFailurePoint::Never,
+                |target| {
+                    program.pin(target).map_err(|error| EbpfError::Pin {
+                        item: name.to_string(),
+                        reason: error.to_string(),
+                    })
+                },
+            )?;
         }
         Ok(())
     }
 
     fn cleanup(&mut self) -> Result<(), EbpfError> {
         while !self.pins.is_empty() {
-            remove_last_retaining(&mut self.pins, remove_owned_file)?;
+            remove_last_retaining(&mut self.pins, CreatedPinGuard::cleanup)?;
         }
         cleanup_directory_slot(&mut self.programs)?;
         cleanup_directory_slot(&mut self.maps)?;
@@ -1469,6 +1607,7 @@ fn child_exists(parent: &Arc<OwnedFd>, name: &str) -> Result<bool, EbpfError> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn capture_owned_entry(
     parent: Arc<OwnedFd>,
     name: &str,
@@ -1986,5 +2125,51 @@ mod review_tests {
     #[test]
     fn per_cpu_metric_overflow_wraps_deterministically() {
         assert_eq!(aggregate_per_cpu([u64::MAX, 2]), 1);
+    }
+
+    fn exercise_pin_capture_failure(kind: PinKind, name: &str) {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = fs::metadata(temporary.path()).unwrap();
+        let parent = Arc::new(
+            open_secure_directory(
+                temporary.path(),
+                DirectoryPolicy {
+                    uid: metadata.uid(),
+                    gid: metadata.gid(),
+                    mode: 0o700,
+                },
+            )
+            .unwrap(),
+        );
+        let mut pins = Vec::new();
+
+        assert!(create_pin_with_guard(
+            &mut pins,
+            parent,
+            name,
+            kind,
+            PinFailurePoint::BeforeCapture,
+            |target| {
+                fs::write(target, b"pinned").map_err(|error| lifecycle_error(&error.to_string()))
+            },
+        )
+        .is_err());
+        assert_eq!(pins.len(), 1);
+        assert!(pins[0].has_retryable_ownership());
+
+        remove_last_retaining(&mut pins, CreatedPinGuard::cleanup).unwrap();
+        assert!(pins.is_empty());
+        assert!(!temporary.path().join(name).exists());
+    }
+
+    #[test]
+    fn map_pin_capture_failure_retains_guard_until_retryable_cleanup() {
+        exercise_pin_capture_failure(PinKind::Map, "map-pin");
+    }
+
+    #[test]
+    fn program_pin_capture_failure_retains_guard_until_retryable_cleanup() {
+        exercise_pin_capture_failure(PinKind::Program, "program-pin");
     }
 }

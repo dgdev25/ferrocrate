@@ -31,6 +31,115 @@ fn udp_packet() -> Vec<u8> {
     ]
 }
 
+fn rfc1071_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut words = bytes.chunks_exact(2);
+    for word in &mut words {
+        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    }
+    if let Some(byte) = words.remainder().first() {
+        sum += u32::from(*byte) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn reference_ipv4_checksum(packet: &[u8]) -> u16 {
+    let ipv4_offset = 14;
+    let ipv4_header_len = usize::from(packet[ipv4_offset] & 0x0f) * 4;
+    let mut header = packet[ipv4_offset..ipv4_offset + ipv4_header_len].to_vec();
+    header[10..12].copy_from_slice(&[0, 0]);
+    rfc1071_checksum(&header)
+}
+
+fn reference_transport_checksum(packet: &[u8]) -> u16 {
+    let ipv4_offset = 14;
+    let ipv4_header_len = usize::from(packet[ipv4_offset] & 0x0f) * 4;
+    let ipv4_total_len = usize::from(u16::from_be_bytes([
+        packet[ipv4_offset + 2],
+        packet[ipv4_offset + 3],
+    ]));
+    let transport_offset = ipv4_offset + ipv4_header_len;
+    let transport_len = ipv4_total_len - ipv4_header_len;
+    let protocol = packet[ipv4_offset + 9];
+    let checksum_offset = match protocol {
+        6 => 16,
+        17 => 6,
+        _ => panic!("reference checksum requires TCP or UDP"),
+    };
+
+    let mut covered = Vec::with_capacity(12 + transport_len);
+    covered.extend_from_slice(&packet[ipv4_offset + 12..ipv4_offset + 20]);
+    covered.extend_from_slice(&[0, protocol]);
+    covered.extend_from_slice(&(transport_len as u16).to_be_bytes());
+    covered.extend_from_slice(&packet[transport_offset..transport_offset + transport_len]);
+    covered[12 + checksum_offset..14 + checksum_offset].copy_from_slice(&[0, 0]);
+    rfc1071_checksum(&covered)
+}
+
+fn tcp_packet_with_odd_payload() -> Vec<u8> {
+    let mut packet = tcp_packet();
+    packet.extend_from_slice(&[0xde, 0xad, 0xbe]);
+    packet[16..18].copy_from_slice(&43u16.to_be_bytes());
+    packet[24..26].copy_from_slice(&[0, 0]);
+    let ipv4_checksum = reference_ipv4_checksum(&packet);
+    packet[24..26].copy_from_slice(&ipv4_checksum.to_be_bytes());
+    packet[50..52].copy_from_slice(&[0, 0]);
+    let transport_checksum = reference_transport_checksum(&packet);
+    packet[50..52].copy_from_slice(&transport_checksum.to_be_bytes());
+    packet
+}
+
+fn udp_packet_with_odd_payload() -> Vec<u8> {
+    let mut packet = udp_packet();
+    packet.extend_from_slice(&[0xa1, 0xb2, 0xc3]);
+    packet[16..18].copy_from_slice(&31u16.to_be_bytes());
+    packet[38..40].copy_from_slice(&11u16.to_be_bytes());
+    packet[24..26].copy_from_slice(&[0, 0]);
+    let ipv4_checksum = reference_ipv4_checksum(&packet);
+    packet[24..26].copy_from_slice(&ipv4_checksum.to_be_bytes());
+    packet[40..42].copy_from_slice(&[0, 0]);
+    let transport_checksum = reference_transport_checksum(&packet);
+    packet[40..42].copy_from_slice(&transport_checksum.to_be_bytes());
+    packet
+}
+
+fn short_tcp_header_packet() -> Vec<u8> {
+    let mut packet = tcp_packet();
+    packet[16..18].copy_from_slice(&39u16.to_be_bytes());
+    packet.truncate(14 + 39);
+    packet
+}
+
+fn short_udp_header_packet() -> Vec<u8> {
+    let mut packet = udp_packet();
+    packet[16..18].copy_from_slice(&27u16.to_be_bytes());
+    packet.truncate(14 + 27);
+    packet
+}
+
+fn assert_all_rewrites_leave_packet_unchanged(input: &[u8]) {
+    let original = input.to_vec();
+
+    let mut packet = original.clone();
+    assert!(rewrite_ipv4_destination(&mut packet, [203, 0, 113, 10]).is_err());
+    assert_eq!(packet, original);
+
+    let mut packet = original.clone();
+    assert!(rewrite_ipv4_source(&mut packet, [192, 0, 2, 45]).is_err());
+    assert_eq!(packet, original);
+
+    let mut packet = original.clone();
+    assert!(rewrite_transport_port(&mut packet, PortField::Source, 1234).is_err());
+    assert_eq!(packet, original);
+
+    let mut packet = original.clone();
+    assert!(rewrite_transport_port(&mut packet, PortField::Destination, 4321).is_err());
+    assert_eq!(packet, original);
+}
+
 #[test]
 fn truncated_ethernet_is_rejected() {
     assert_eq!(
@@ -89,8 +198,9 @@ fn ipv4_fragment_offset_is_rejected() {
 
 #[test]
 fn truncated_tcp_header_is_rejected() {
-    let mut packet = tcp_packet();
-    packet.truncate(packet.len() - 1);
+    let packet = short_tcp_header_packet();
+    assert_eq!(packet.len() - 14, 39);
+    assert_eq!(u16::from_be_bytes([packet[16], packet[17]]), 39);
     assert_eq!(
         parse_packet_bytes(&packet),
         Err(PacketError::Truncated)
@@ -99,8 +209,9 @@ fn truncated_tcp_header_is_rejected() {
 
 #[test]
 fn truncated_udp_header_is_rejected() {
-    let mut packet = udp_packet();
-    packet.truncate(packet.len() - 1);
+    let packet = short_udp_header_packet();
+    assert_eq!(packet.len() - 14, 27);
+    assert_eq!(u16::from_be_bytes([packet[16], packet[17]]), 27);
     assert_eq!(
         parse_packet_bytes(&packet),
         Err(PacketError::Truncated)
@@ -108,11 +219,10 @@ fn truncated_udp_header_is_rejected() {
 }
 
 #[test]
-fn ipv6_extension_chain_is_rejected_in_abi_v1() {
-    let mut packet = vec![0u8; 14 + 40 + 8];
+fn ipv6_is_rejected_at_ethertype_in_abi_v1() {
+    let mut packet = vec![0u8; 14 + 40];
     packet[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
     packet[14] = 0x60;
-    packet[20] = 0;
     assert_eq!(
         parse_packet_bytes(&packet),
         Err(PacketError::UnsupportedNetwork)
@@ -160,4 +270,76 @@ fn ipv4_udp_zero_checksum_remains_disabled() {
     rewrite_transport_port(&mut packet, PortField::Destination, 5353).expect("rewrite port");
 
     assert_eq!(&packet[40..42], &[0, 0]);
+}
+
+#[test]
+fn odd_length_tcp_rewrites_match_independent_rfc1071_checksums() {
+    let mut packet = tcp_packet_with_odd_payload();
+
+    rewrite_ipv4_destination(&mut packet, [203, 0, 113, 9]).expect("rewrite destination");
+    rewrite_transport_port(&mut packet, PortField::Destination, 8443).expect("rewrite port");
+
+    assert_eq!(
+        u16::from_be_bytes([packet[24], packet[25]]),
+        reference_ipv4_checksum(&packet)
+    );
+    assert_eq!(
+        u16::from_be_bytes([packet[50], packet[51]]),
+        reference_transport_checksum(&packet)
+    );
+    assert_eq!(&packet[54..], &[0xde, 0xad, 0xbe]);
+}
+
+#[test]
+fn odd_length_udp_rewrites_match_independent_rfc1071_checksums() {
+    let mut packet = udp_packet_with_odd_payload();
+
+    rewrite_ipv4_source(&mut packet, [192, 0, 2, 44]).expect("rewrite source");
+    rewrite_transport_port(&mut packet, PortField::Source, 1053).expect("rewrite port");
+
+    assert_eq!(
+        u16::from_be_bytes([packet[24], packet[25]]),
+        reference_ipv4_checksum(&packet)
+    );
+    assert_eq!(
+        u16::from_be_bytes([packet[40], packet[41]]),
+        reference_transport_checksum(&packet)
+    );
+    assert_eq!(&packet[42..], &[0xa1, 0xb2, 0xc3]);
+}
+
+#[test]
+fn malformed_packets_are_unchanged_by_every_rewrite() {
+    let mut packet = tcp_packet();
+    packet[14] = 0x44;
+    assert_all_rewrites_leave_packet_unchanged(&packet);
+}
+
+#[test]
+fn truncated_packets_are_unchanged_by_every_rewrite() {
+    assert_all_rewrites_leave_packet_unchanged(&short_tcp_header_packet());
+    assert_all_rewrites_leave_packet_unchanged(&short_udp_header_packet());
+}
+
+#[test]
+fn fragmented_packets_are_unchanged_by_every_rewrite() {
+    let mut more_fragments = tcp_packet();
+    more_fragments[20..22].copy_from_slice(&0x2000u16.to_be_bytes());
+    assert_all_rewrites_leave_packet_unchanged(&more_fragments);
+
+    let mut fragment_offset = udp_packet();
+    fragment_offset[20..22].copy_from_slice(&1u16.to_be_bytes());
+    assert_all_rewrites_leave_packet_unchanged(&fragment_offset);
+}
+
+#[test]
+fn unsupported_packets_are_unchanged_by_every_rewrite() {
+    let mut ipv6 = vec![0u8; 14 + 40];
+    ipv6[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    ipv6[14] = 0x60;
+    assert_all_rewrites_leave_packet_unchanged(&ipv6);
+
+    let mut unsupported_transport = tcp_packet();
+    unsupported_transport[23] = 1;
+    assert_all_rewrites_leave_packet_unchanged(&unsupported_transport);
 }

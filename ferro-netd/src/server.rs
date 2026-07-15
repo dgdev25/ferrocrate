@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, BTreeSet}, fs, io::Write, os::unix::fs::PermissionsExt};
+use std::{collections::{BTreeMap, BTreeSet}, fs::{self, OpenOptions}, io::Write, os::unix::fs::PermissionsExt};
 use serde::{Deserialize, Serialize};
 use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, netns::move_to_netns, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use std::path::PathBuf;
@@ -24,7 +24,7 @@ impl NetdServer {
     fn persist(&self) -> Result<(), String> {
         let Some(path) = &self.journal else { return Ok(()); };
         let temporary = path.with_extension("tmp");
-        let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;
         file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
         file.write_all(&serde_json::to_vec(&PersistedState { overlays: self.overlays.clone(), endpoints: self.endpoints.clone() }).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
@@ -53,8 +53,8 @@ impl NetdServer {
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
-                self.overlays.insert(overlay_id);
-                if self.persist().is_err() { return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
+                self.overlays.insert(overlay_id.clone());
+                if self.persist().is_err() { self.overlays.remove(&overlay_id); let _ = destroy_bridge(&overlay_id); return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
@@ -72,7 +72,7 @@ impl NetdServer {
                 if exec_cmd(&master).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to attach endpoint veth"); }
                 if let Some(netns) = netns { if move_to_netns(&format!("fc-{endpoint_id}"), &netns).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to move endpoint into namespace"); } }
                 self.endpoints.insert(endpoint_id.clone(), overlay_id);
-                if self.persist().is_err() { let _ = self.endpoints.remove(&endpoint_id); return reject(RejectionCode::Busy, "failed to persist endpoint ownership"); }
+                if self.persist().is_err() { let _ = self.endpoints.remove(&endpoint_id); let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to persist endpoint ownership"); }
                 NetdResponse::Attached
             }
             NetdRequest::DetachEndpoint { endpoint_id, .. } => { if self.endpoints.remove(&endpoint_id).is_some() { let _ = destroy_veth_pair(&endpoint_id); } let _ = self.persist(); NetdResponse::Detached }

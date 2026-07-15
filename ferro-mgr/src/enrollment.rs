@@ -3,7 +3,7 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use thiserror::Error;
 
-use crate::{pki::unix_now, store::{Enrollment, ManagerStore, ScopedToken, StoreError}};
+use crate::{pki::{unix_now, CertificateAuthority, PkiError}, store::{Enrollment, ManagerStore, ScopedToken, StoreError}};
 
 #[derive(Debug, Error)]
 pub enum EnrollmentError {
@@ -13,6 +13,8 @@ pub enum EnrollmentError {
     Entropy,
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    Pki(#[from] PkiError),
 }
 
 pub struct EnrollmentService {
@@ -37,6 +39,12 @@ impl EnrollmentService {
         let secret: [u8; 32] = bytes.try_into().map_err(|_| EnrollmentError::MalformedToken)?;
         self.store.register_node_with_token(&secret, enrollment, unix_now())?;
         Ok(())
+    }
+
+    pub fn enroll_csr(&self, token: &str, enrollment: Enrollment, csr_pem: &str, authority: &CertificateAuthority) -> Result<String, EnrollmentError> {
+        let certificate = authority.sign_node_csr(csr_pem, &self.cluster_id, &enrollment.node_id)?;
+        self.enroll(token, enrollment)?;
+        Ok(certificate)
     }
 
     pub fn cluster_id(&self) -> &str { &self.cluster_id }

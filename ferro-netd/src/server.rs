@@ -69,8 +69,9 @@ impl NetdServer {
             let stale: Vec<String> = self.overlays.difference(&desired_overlays).cloned().collect();
             for overlay_id in stale {
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard { let _ = manager.remove(&WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses: Vec::new() }); }
+                if let Some(routes) = self.routes.get(&overlay_id) { if remove_overlay_routes(&overlay_id, routes).is_err() { return reject(RejectionCode::Busy, "failed to remove overlay routes"); } }
+                self.routes.remove(&overlay_id);
                 self.overlays.remove(&overlay_id);
-                if let Some(routes) = self.routes.remove(&overlay_id) { remove_overlay_routes(&overlay_id, &routes); }
                 let endpoints: Vec<String> = self.endpoints.iter().filter(|(_, overlay)| *overlay == &overlay_id).map(|(endpoint, _)| endpoint.clone()).collect();
                 for endpoint in endpoints { self.endpoints.remove(&endpoint); let _ = destroy_veth_pair(&endpoint); }
                 let _ = destroy_bridge(&overlay_id);
@@ -103,7 +104,12 @@ impl NetdServer {
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard { let _ = manager.remove(&WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses: Vec::new() }); }
-                if self.overlays.remove(&overlay_id) { if let Some(routes) = self.routes.remove(&overlay_id) { remove_overlay_routes(&overlay_id, &routes); } let _ = destroy_bridge(&overlay_id); }
+                if self.overlays.contains(&overlay_id) {
+                    if let Some(routes) = self.routes.get(&overlay_id) { if remove_overlay_routes(&overlay_id, routes).is_err() { return reject(RejectionCode::Busy, "failed to remove overlay routes"); } }
+                    self.routes.remove(&overlay_id);
+                    self.overlays.remove(&overlay_id);
+                    let _ = destroy_bridge(&overlay_id);
+                }
                 let _ = self.persist();
                 NetdResponse::Removed
             }
@@ -130,7 +136,8 @@ fn apply_overlay_routes(interface: &str, routes: &[String]) -> Result<(), ()> {
     }
     Ok(())
 }
-fn remove_overlay_routes(interface: &str, routes: &[String]) {
-    for route in routes { let _ = exec_cmd(&vec!["ip".into(), "route".into(), "del".into(), route.clone(), "dev".into(), interface.to_string()]); }
+fn remove_overlay_routes(interface: &str, routes: &[String]) -> Result<(), ()> {
+    for route in routes { exec_cmd(&vec!["ip".into(), "route".into(), "del".into(), route.clone(), "dev".into(), interface.to_string()]).map_err(|_| ())?; }
+    Ok(())
 }
 fn reject(code: RejectionCode, reason: &str) -> NetdResponse { NetdResponse::Rejected { code, reason: reason.to_string() } }

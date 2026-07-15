@@ -348,6 +348,8 @@ mod tests {
             }],
             network_backend: None,
             network_ownership: None,
+            managed_overlay: None,
+            managed_host_veth: None,
             ai_runtime: None,
         };
 
@@ -391,6 +393,8 @@ mod tests {
             ports: Vec::new(),
             network_backend: None,
             network_ownership: None,
+            managed_overlay: None,
+            managed_host_veth: None,
             ai_runtime: None,
         };
 

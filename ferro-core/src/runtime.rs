@@ -6210,6 +6210,8 @@ mod tests {
             ports: Vec::new(),
             network_backend: None,
             network_ownership: None,
+            managed_overlay: None,
+            managed_host_veth: None,
             ai_runtime: None,
         };
         store.put(&record).expect("seed stale record");
@@ -6259,6 +6261,8 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
+            managed_overlay: None,
+            managed_host_veth: None,
         };
         store.put(&record).expect("seed live record");
         drop(store);
@@ -6558,6 +6562,8 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
+            managed_overlay: None,
+            managed_host_veth: None,
         }
     }
 
@@ -7244,6 +7250,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
+            managed_overlay: None,
+            managed_host_veth: None,
         };
         store.put(&existing).expect("put existing");
 

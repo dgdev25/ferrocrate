@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +13,8 @@ pub enum CertificateRole {
 pub enum PkiError {
     #[error("certificate generation failed: {0}")]
     Rcgen(#[from] rcgen::Error),
+    #[error("certificate signing request does not request client authentication")]
+    MissingClientAuth,
 }
 
 #[derive(Debug)]
@@ -48,6 +50,19 @@ impl CertificateAuthority {
 
     pub fn issue_admin_certificate(&self, cluster_id: &str) -> Result<IssuedCertificate, PkiError> {
         self.issue(cluster_id, "administrator", CertificateRole::Administrator)
+    }
+
+    pub fn sign_node_csr(&self, csr_pem: &str, cluster_id: &str, node_id: &str) -> Result<String, PkiError> {
+        let request = CertificateSigningRequestParams::from_pem(csr_pem)?;
+        if !request.params.extended_key_usages.contains(&ExtendedKeyUsagePurpose::ClientAuth) {
+            return Err(PkiError::MissingClientAuth);
+        }
+        let mut params = request.params;
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, format!("ferrocrate/{cluster_id}/{node_id}"));
+        params.is_ca = IsCa::NoCa;
+        let issuer = rcgen::Issuer::from_params(&self.params, &self.key);
+        Ok(CertificateSigningRequestParams { params, public_key: request.public_key }.signed_by(&issuer)?.pem())
     }
 
     fn issue(&self, cluster_id: &str, subject: &str, role: CertificateRole) -> Result<IssuedCertificate, PkiError> {

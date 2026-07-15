@@ -24,7 +24,7 @@ tempfile = { workspace = true }
 base64 = "0.22"
 getrandom = "0.3"
 ed25519-dalek = "2"
-rcgen = "0.14"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

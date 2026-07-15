@@ -22,6 +22,7 @@ fn main() {
     if let Some(parent) = std::path::Path::new(&path).parent() { std::fs::create_dir_all(parent).expect("socket directory"); }
     if std::path::Path::new(&path).exists() { std::fs::remove_file(&path).expect("stale socket"); }
     let listener = UnixListener::bind(path).expect("bind Unix socket");
+    restrict_privileges().expect("failed to restrict netd privileges");
     for stream in listener.incoming() {
         let mut stream = match stream { Ok(stream) => stream, Err(_) => continue };
         let peer_uid = getsockopt(&stream, PeerCredentials).map(|credentials| credentials.uid()).unwrap_or(u32::MAX);
@@ -38,4 +39,18 @@ fn main() {
         let response = server.handle_peer(peer_uid, &frame, now);
         if let Ok(bytes) = response_frame(&response) { let _ = stream.write_all(&bytes); }
     }
+}
+
+fn restrict_privileges() -> Result<(), Box<dyn std::error::Error>> {
+    nix::sys::prctl::set_no_new_privs()?;
+    let allowed: caps::CapsHashSet = [
+        caps::Capability::CAP_NET_ADMIN,
+        caps::Capability::CAP_BPF,
+        caps::Capability::CAP_PERFMON,
+    ].into_iter().collect();
+    caps::set(None, caps::CapSet::Effective, &allowed)?;
+    caps::set(None, caps::CapSet::Permitted, &allowed)?;
+    caps::set(None, caps::CapSet::Inheritable, &allowed)?;
+    caps::clear(None, caps::CapSet::Ambient)?;
+    Ok(())
 }

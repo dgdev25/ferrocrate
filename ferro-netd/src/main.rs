@@ -14,7 +14,10 @@ fn main() {
     let cluster = std::env::var("FERROCRATE_CLUSTER_ID").expect("FERROCRATE_CLUSTER_ID is required");
     let node = std::env::var("FERROCRATE_NODE_ID").expect("FERROCRATE_NODE_ID is required");
     let policy = Policy::new(cluster, node, &key).expect("invalid manager signing key");
-    let mut server = NetdServer::new(_uid, policy);
+    let mut server = match std::env::var("FERROCRATE_NETD_WG_PRIVATE_KEY_PATH") {
+        Ok(path) => NetdServer::with_wireguard(_uid, policy, path.into(), std::env::var("FERROCRATE_NETD_WG_LISTEN_PORT").unwrap_or_else(|_| "51820".into()).parse().expect("FERROCRATE_NETD_WG_LISTEN_PORT must be numeric")),
+        Err(_) => NetdServer::new(_uid, policy),
+    };
     let path = std::env::var("FERROCRATE_NETD_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/netd.sock".to_string());
     if let Some(parent) = std::path::Path::new(&path).parent() { std::fs::create_dir_all(parent).expect("socket directory"); }
     if std::path::Path::new(&path).exists() { std::fs::remove_file(&path).expect("stale socket"); }

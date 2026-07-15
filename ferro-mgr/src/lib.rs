@@ -7,6 +7,8 @@ pub mod agent;
 pub mod enrollment;
 pub mod pki;
 pub mod recovery;
+pub mod revocation;
+pub mod rotation;
 pub mod store;
 
 pub mod proto {

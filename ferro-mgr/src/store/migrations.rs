@@ -2,7 +2,19 @@ use rusqlite::{Connection, Result};
 
 pub(super) fn apply(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS enrollment_tokens (
+        "CREATE TABLE IF NOT EXISTS cluster_metadata (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             cluster_epoch INTEGER NOT NULL
+         ) STRICT;
+         INSERT OR IGNORE INTO cluster_metadata (singleton, cluster_epoch) VALUES (1, 1);
+         CREATE TABLE IF NOT EXISTS recovery_audit (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             previous_epoch INTEGER NOT NULL,
+             next_epoch INTEGER NOT NULL,
+             reason TEXT NOT NULL,
+             created_at INTEGER NOT NULL
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS enrollment_tokens (
              secret_hash BLOB PRIMARY KEY NOT NULL,
              expected_node TEXT NOT NULL,
              approved_endpoint TEXT NOT NULL,

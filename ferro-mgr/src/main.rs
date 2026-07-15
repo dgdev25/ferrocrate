@@ -20,11 +20,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = Identity::from_pem(cert, key);
     let database = std::env::var("FERROCRATE_MANAGER_DB").unwrap_or_else(|_| "ferro-mgr.sqlite".into());
     let store = Arc::new(ManagerStore::open(database)?);
+    let cluster_epoch = store.cluster_epoch()?;
     let enrollment = Arc::new(EnrollmentService::new(cluster_id.clone(), store.clone()));
     let authority = Arc::new(CertificateAuthority::new(&format!("{cluster_id}-node-root"))?);
     let enrollment_service = EnrollmentServiceServer::new(EnrollmentServiceImpl::new(enrollment.clone(), authority.clone()));
-    let control_service = ControlServiceServer::new(ControlServiceImpl::new(cluster_id, 1, signing_key, store.clone()));
-    let admin_service = AdminServiceServer::new(AdminServiceImpl::new(store, 1));
+    let control_service = ControlServiceServer::new(ControlServiceImpl::new(cluster_id, cluster_epoch, signing_key, store.clone()));
+    let admin_service = AdminServiceServer::new(AdminServiceImpl::new(store, cluster_epoch));
     let public = Server::builder().tls_config(ServerTlsConfig::new().identity(identity.clone()))?
         .add_service(enrollment_service)
         .serve(bind);

@@ -40,3 +40,14 @@ fn node_count_excludes_revoked_nodes() {
     store.revoke_node("node-a", "test").unwrap();
     assert_eq!(store.node_count().unwrap(), 0);
 }
+
+#[test]
+fn recovery_advances_epoch_and_invalidates_nodes() {
+    let store = store();
+    store.register_node(enrollment()).unwrap();
+    assert_eq!(store.cluster_epoch().unwrap(), 1);
+    assert_eq!(store.recover_after_restore("database restore", 200).unwrap(), 2);
+    assert_eq!(store.cluster_epoch().unwrap(), 2);
+    assert_eq!(store.node_count().unwrap(), 0);
+    assert!(!store.node_is_active("node-a").unwrap());
+}

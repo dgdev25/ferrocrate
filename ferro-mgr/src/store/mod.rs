@@ -195,6 +195,23 @@ impl ManagerStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL)", [node_id], |row| row.get(0))?)
     }
+
+    pub fn cluster_epoch(&self) -> Result<u64, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row("SELECT cluster_epoch FROM cluster_metadata WHERE singleton = 1", [], |row| row.get(0))?)
+    }
+
+    pub fn recover_after_restore(&self, reason: &str, now_unix_secs: i64) -> Result<u64, StoreError> {
+        self.transact(|tx| {
+            let previous: u64 = tx.query_row("SELECT cluster_epoch FROM cluster_metadata WHERE singleton = 1", [], |row| row.get(0))?;
+            let next = previous.saturating_add(1);
+            tx.execute("UPDATE cluster_metadata SET cluster_epoch = ?1 WHERE singleton = 1", params![next])?;
+            tx.execute("UPDATE enrollment_tokens SET expires_at = ?1, consumed_at = COALESCE(consumed_at, ?1)", params![now_unix_secs])?;
+            tx.execute("UPDATE nodes SET revoked_at = ?1, revocation_reason = 'recovery epoch rotation' WHERE revoked_at IS NULL", params![now_unix_secs])?;
+            tx.execute("INSERT INTO recovery_audit (previous_epoch, next_epoch, reason, created_at) VALUES (?1, ?2, ?3, ?4)", params![previous, next, reason, now_unix_secs])?;
+            Ok(next)
+        })
+    }
 }
 
 fn consume_token_tx(tx: &Transaction<'_>, hash: &[u8; 32], now_unix_secs: i64) -> Result<(String, String), StoreError> {

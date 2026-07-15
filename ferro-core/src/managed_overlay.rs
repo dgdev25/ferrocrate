@@ -35,6 +35,7 @@ pub struct ManagedOverlayAttachment {
     pub ipv4: String,
     pub ipv6: Option<String>,
     pub gateway: String,
+    pub prefix: u8,
     pub mtu: u16,
 }
 
@@ -49,7 +50,7 @@ pub enum ManagedOverlayRequest {
 pub enum ManagedOverlayResponse {
     Attached(ManagedOverlayAttachment),
     Detached { released: bool },
-    Overlay { overlay_id: String, bridge: String, gateway: String, mtu: u16 },
+    Overlay { overlay_id: String, bridge: String, gateway: String, prefix: u8, mtu: u16 },
     Rejected { reason: String },
 }
 

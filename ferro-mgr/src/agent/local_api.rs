@@ -18,6 +18,7 @@ pub struct Attachment {
     pub ipv4: std::net::Ipv4Addr,
     pub ipv6: Option<std::net::Ipv6Addr>,
     pub gateway: std::net::Ipv4Addr,
+    pub prefix: u8,
     pub mtu: u16,
 }
 
@@ -45,6 +46,7 @@ pub struct LocalApi {
 pub struct OverlayConfig {
     pub bridge: String,
     pub gateway: std::net::Ipv4Addr,
+    pub prefix: u8,
     pub mtu: u16,
 }
 
@@ -59,7 +61,7 @@ pub enum LocalApiRequest {
 pub enum LocalApiResponse {
     Attached(Attachment),
     Detached { released: bool },
-    Overlay { overlay_id: String, bridge: String, gateway: std::net::Ipv4Addr, mtu: u16 },
+    Overlay { overlay_id: String, bridge: String, gateway: std::net::Ipv4Addr, prefix: u8, mtu: u16 },
     Rejected { reason: String },
 }
 
@@ -79,10 +81,10 @@ impl LocalApi {
         let overlay_id = overlay_id.into();
         let config = self.overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)?.get(&overlay_id).cloned();
         if *self.enforce_overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)? && config.is_none() { return Err(LocalApiError::UnknownOverlay); }
-        let config = config.unwrap_or_else(|| OverlayConfig { bridge: overlay_id.clone(), gateway: "10.0.0.1".parse().expect("static gateway"), mtu: 1500 });
+        let config = config.unwrap_or_else(|| OverlayConfig { bridge: overlay_id.clone(), gateway: "10.0.0.1".parse().expect("static gateway"), prefix: 24, mtu: 1500 });
         let allocation = self.ipam.allocate(container_id)?;
         let netns = format!("ferro-{}", allocation.container_id);
-        Ok(Attachment { overlay_id, container_id: allocation.container_id, bridge: config.bridge, netns, ipv4: allocation.address, ipv6: None, gateway: config.gateway, mtu: config.mtu })
+        Ok(Attachment { overlay_id, container_id: allocation.container_id, bridge: config.bridge, netns, ipv4: allocation.address, ipv6: None, gateway: config.gateway, prefix: config.prefix, mtu: config.mtu })
     }
 
     pub fn detach(&self, caller_uid: u32, container_id: &str, now_unix: i64) -> Result<Option<Allocation>, LocalApiError> {
@@ -94,7 +96,7 @@ impl LocalApi {
         let result = match request {
             LocalApiRequest::AttachContainer { overlay_id, container_id, now_unix } => self.attach(caller_uid, overlay_id, container_id, now_unix).map(LocalApiResponse::Attached),
             LocalApiRequest::DetachContainer { container_id, now_unix } => self.detach(caller_uid, &container_id, now_unix).map(|allocation| LocalApiResponse::Detached { released: allocation.is_some() }),
-            LocalApiRequest::InspectOverlay { overlay_id, now_unix } => self.inspect(caller_uid, &overlay_id, now_unix).map(|config| LocalApiResponse::Overlay { overlay_id, bridge: config.bridge, gateway: config.gateway, mtu: config.mtu }),
+            LocalApiRequest::InspectOverlay { overlay_id, now_unix } => self.inspect(caller_uid, &overlay_id, now_unix).map(|config| LocalApiResponse::Overlay { overlay_id, bridge: config.bridge, gateway: config.gateway, prefix: config.prefix, mtu: config.mtu }),
         };
         result.unwrap_or_else(|error| LocalApiResponse::Rejected { reason: error.to_string() })
     }

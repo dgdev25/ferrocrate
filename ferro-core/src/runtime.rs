@@ -2557,7 +2557,7 @@ fn setup_managed_network(
     run_cmd(&netns::build_ip_link_set_netns_cmd(&cont_veth, &netns_name)?)?;
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", &cont_veth, "name", "eth0"]))?;
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "addr", "add", &format!("{}/24", attachment.ipv4), "dev", "eth0"]))?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "addr", "add", &format!("{}/{}", attachment.ipv4, attachment.prefix), "dev", "eth0"]))?;
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "route", "add", "default", "via", &attachment.gateway]))?;
     rollback.track_network_context(attachment.ipv4.clone(), &[])?;

@@ -3017,7 +3017,7 @@ fn setup_ebpf_backend(
         ownership.host_ifindex = Some(host_ifindex);
         ownership.namespace_identity = Some(namespace_identity);
         ownership.bridge_ifindex = Some(bridge_ifindex);
-        let verified = verify_ebpf_record_mutation_ownership(&ownership)?;
+        let verified = verify_ebpf_record_mutation_ownership(&ownership, false)?;
         rollback.adopt_backend(NetworkBackend::Ebpf, ownership.clone(), None)?;
         verify_ebpf_classifier_ownership(&ownership)?;
         verified
@@ -3963,7 +3963,10 @@ fn cleanup_network_resources(
             match backend {
                 NetworkBackend::Ebpf => {
                     if Path::new(ownership.ebpf_pin_path.as_deref().unwrap_or_default()).exists() {
-                        let verified = verify_ebpf_record_mutation_ownership(ownership)?;
+                        let verified = verify_ebpf_record_mutation_ownership(
+                            ownership,
+                            remove_shared_ebpf,
+                        )?;
                         cleanup_ebpf_container_records(
                             container_ip,
                             port_mappings,
@@ -4059,6 +4062,7 @@ fn cleanup_ebpf_container_records(
 
 fn verify_ebpf_record_mutation_ownership(
     ownership: &NetworkOwnershipRecord,
+    allow_missing_owned_filters: bool,
 ) -> Result<VerifiedPinnedNetwork, RuntimeError> {
     let network_id = ownership.network_id.as_deref().ok_or_else(|| {
         RuntimeError::Network("eBPF ownership has no bridge network identity".to_string())
@@ -4076,7 +4080,7 @@ fn verify_ebpf_record_mutation_ownership(
             "eBPF pin tree is incomplete, replaced, or foreign".to_string(),
         ));
     }
-    verify_ebpf_classifier_ownership(ownership)?;
+    verify_ebpf_classifier_ownership_with(ownership, !allow_missing_owned_filters)?;
     let identity = PinnedNetworkIdentity {
         root,
         objects: ownership
@@ -4098,6 +4102,13 @@ fn verify_ebpf_record_mutation_ownership(
 fn verify_ebpf_classifier_ownership(
     ownership: &NetworkOwnershipRecord,
 ) -> Result<(), RuntimeError> {
+    verify_ebpf_classifier_ownership_with(ownership, true)
+}
+
+fn verify_ebpf_classifier_ownership_with(
+    ownership: &NetworkOwnershipRecord,
+    require_all: bool,
+) -> Result<(), RuntimeError> {
     let interface = ownership.managed_interface.as_deref().ok_or_else(|| {
         RuntimeError::Network("eBPF ownership has no managed interface".to_string())
     })?;
@@ -4106,15 +4117,19 @@ fn verify_ebpf_classifier_ownership(
         if observed_filters.contains(expected) {
             continue;
         }
-        let reason = if observed_filters
+        if observed_filters
             .iter()
             .any(|candidate| same_filter_slot(expected, candidate))
         {
-            "eBPF classifier ownership was replaced"
-        } else {
-            "eBPF classifier ownership is incomplete"
-        };
-        return Err(RuntimeError::Network(reason.to_string()));
+            return Err(RuntimeError::Network(
+                "eBPF classifier ownership was replaced".to_string(),
+            ));
+        }
+        if require_all {
+            return Err(RuntimeError::Network(
+                "eBPF classifier ownership is incomplete".to_string(),
+            ));
+        }
     }
     Ok(())
 }

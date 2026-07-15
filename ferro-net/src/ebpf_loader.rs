@@ -383,6 +383,8 @@ impl KernelAdapter for AyaKernel {
                         .to_string(),
             });
         }
+        let primary_interface = request.interface.clone();
+        let primary_ifindex = request.external_ifindex;
 
         self.layout = Some(PinLayout::new()?);
         let result = (|| {
@@ -416,6 +418,10 @@ impl KernelAdapter for AyaKernel {
                         .ok_or_else(|| lifecycle_error("Aya object is missing"))?,
                 )?;
 
+            // Revalidate the primary interface after all pre-attach preparation
+            // and immediately before the first TC mutation. The interface name
+            // can otherwise be rebound between preflight and attach.
+            validate_attach_interface(&primary_interface, primary_ifindex)?;
             match tc::qdisc_add_clsact(plan.interface) {
                 Ok(()) => {}
                 Err(error) if qdisc_already_exists(&error) => {}

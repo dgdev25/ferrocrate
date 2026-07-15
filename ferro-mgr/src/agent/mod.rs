@@ -6,4 +6,5 @@ pub mod credentials;
 pub mod netd_client;
 
 pub use reconcile::{Agent, AgentError, NetdClient};
+pub use local_api::{LocalApiRequest, LocalApiResponse};
 pub use state::{AgentState, StateStore};

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+#[cfg(unix)]
+use std::{io::{Read, Write}, os::unix::net::UnixStream, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedOverlayRef(String);
@@ -34,6 +36,43 @@ pub struct ManagedOverlayAttachment {
     pub ipv6: Option<String>,
     pub gateway: String,
     pub mtu: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ManagedOverlayRequest {
+    AttachContainer { overlay_id: String, container_id: String, now_unix: i64 },
+    DetachContainer { container_id: String, now_unix: i64 },
+    InspectOverlay { overlay_id: String, now_unix: i64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ManagedOverlayResponse {
+    Attached(ManagedOverlayAttachment),
+    Detached { released: bool },
+    Overlay { overlay_id: String, bridge: String, gateway: String, mtu: u16 },
+    Rejected { reason: String },
+}
+
+#[cfg(unix)]
+pub struct ManagedOverlayClient { socket: std::path::PathBuf, timeout: Duration }
+
+#[cfg(unix)]
+impl ManagedOverlayClient {
+    pub fn new(socket: impl Into<std::path::PathBuf>) -> Self { Self { socket: socket.into(), timeout: Duration::from_secs(5) } }
+    pub fn with_timeout(mut self, timeout: Duration) -> Self { self.timeout = timeout; self }
+    pub fn request(&self, request: &ManagedOverlayRequest) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
+        let mut stream = UnixStream::connect(&self.socket).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        stream.set_read_timeout(Some(self.timeout)).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        stream.set_write_timeout(Some(self.timeout)).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        let body = serde_json::to_vec(request).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        stream.write_all(&(body.len() as u32).to_be_bytes()).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        stream.write_all(&body).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        let mut prefix = [0_u8; 4]; stream.read_exact(&mut prefix).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        let length = u32::from_be_bytes(prefix) as usize;
+        if length > 256 * 1024 { return Err(ManagedOverlayError::InvalidReference); }
+        let mut response = vec![0_u8; length]; stream.read_exact(&mut response).map_err(|_| ManagedOverlayError::InvalidReference)?;
+        serde_json::from_slice(&response).map_err(|_| ManagedOverlayError::InvalidReference)
+    }
 }
 
 #[cfg(test)]

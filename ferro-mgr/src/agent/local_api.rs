@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, sync::Mutex};
+use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
 
 use super::ipam::{Allocation, Ipam, IpamError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Attachment {
     pub overlay_id: String,
     pub container_id: String,
@@ -43,6 +44,21 @@ pub struct OverlayConfig {
     pub mtu: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LocalApiRequest {
+    AttachContainer { overlay_id: String, container_id: String, now_unix: i64 },
+    DetachContainer { container_id: String, now_unix: i64 },
+    InspectOverlay { overlay_id: String, now_unix: i64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LocalApiResponse {
+    Attached(Attachment),
+    Detached { released: bool },
+    Overlay { overlay_id: String, bridge: String, gateway: std::net::Ipv4Addr, mtu: u16 },
+    Rejected { reason: String },
+}
+
 impl LocalApi {
     pub fn new(runtime_uid: u32, lease_expiry: i64, ipam: Ipam) -> Self { Self { runtime_uid, lease_expiry: Mutex::new(lease_expiry), ipam, overlays: Mutex::new(BTreeMap::new()), enforce_overlays: Mutex::new(false) } }
 
@@ -66,6 +82,20 @@ impl LocalApi {
     pub fn detach(&self, caller_uid: u32, container_id: &str, now_unix: i64) -> Result<Option<Allocation>, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
         Ok(self.ipam.release(container_id)?)
+    }
+
+    pub fn handle(&self, caller_uid: u32, request: LocalApiRequest) -> LocalApiResponse {
+        let result = match request {
+            LocalApiRequest::AttachContainer { overlay_id, container_id, now_unix } => self.attach(caller_uid, overlay_id, container_id, now_unix).map(LocalApiResponse::Attached),
+            LocalApiRequest::DetachContainer { container_id, now_unix } => self.detach(caller_uid, &container_id, now_unix).map(|allocation| LocalApiResponse::Detached { released: allocation.is_some() }),
+            LocalApiRequest::InspectOverlay { overlay_id, now_unix } => self.inspect(caller_uid, &overlay_id, now_unix).map(|config| LocalApiResponse::Overlay { overlay_id, bridge: config.bridge, gateway: config.gateway, mtu: config.mtu }),
+        };
+        result.unwrap_or_else(|error| LocalApiResponse::Rejected { reason: error.to_string() })
+    }
+
+    pub fn inspect(&self, caller_uid: u32, overlay_id: &str, now_unix: i64) -> Result<OverlayConfig, LocalApiError> {
+        self.authorize(caller_uid, now_unix)?;
+        self.overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)?.get(overlay_id).cloned().ok_or(LocalApiError::UnknownOverlay)
     }
 
     pub fn renew_lease(&self, caller_uid: u32, expiry: i64) -> Result<(), LocalApiError> {

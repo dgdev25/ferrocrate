@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}};
+use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, netns::move_to_netns, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}};
 use crate::policy::Policy;
 use crate::protocol::{NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
 
@@ -26,13 +26,14 @@ impl NetdServer {
                 if self.overlays.remove(&overlay_id) { let _ = destroy_bridge(&overlay_id); }
                 NetdResponse::Removed
             }
-            NetdRequest::AttachEndpoint { overlay_id, endpoint_id } => {
+            NetdRequest::AttachEndpoint { overlay_id, endpoint_id, netns } => {
                 if self.endpoints.contains_key(&endpoint_id) { return NetdResponse::Attached; }
                 let container = format!("fc-{endpoint_id}");
                 let config = VethConfig { pair: VethPair { host: endpoint_id.clone(), container }, mtu: None, host_addr: None, container_addr: None };
                 if create_veth_pair(&config).is_err() { return reject(RejectionCode::Busy, "failed to create endpoint veth"); }
                 let master = match build_ip_link_set_master_cmd(&endpoint_id, &overlay_id) { Ok(command) => command, Err(_) => { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::PolicyViolation, "invalid endpoint interface"); } };
                 if exec_cmd(&master).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to attach endpoint veth"); }
+                if let Some(netns) = netns { if move_to_netns(&format!("fc-{endpoint_id}"), &netns).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to move endpoint into namespace"); } }
                 self.endpoints.insert(endpoint_id, overlay_id);
                 NetdResponse::Attached
             }

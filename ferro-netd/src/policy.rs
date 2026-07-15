@@ -43,10 +43,19 @@ fn validate_request(request: &NetdRequest) -> Result<(), RejectionCode> {
             for route in &peer.allowed_ips { route.parse::<IpNet>().map_err(|_| RejectionCode::PolicyViolation)?; }
         }
     }
-    if let NetdRequest::AttachEndpoint { overlay_id, endpoint_id } | NetdRequest::DetachEndpoint { overlay_id, endpoint_id } = request {
-        validate_interface_name(overlay_id).map_err(|_| RejectionCode::PolicyViolation)?;
-        validate_interface_name(endpoint_id).map_err(|_| RejectionCode::PolicyViolation)?;
-        validate_interface_name(&format!("fc-{endpoint_id}")).map_err(|_| RejectionCode::PolicyViolation)?;
+    match request {
+        NetdRequest::AttachEndpoint { overlay_id, endpoint_id, netns } => {
+            validate_interface_name(overlay_id).map_err(|_| RejectionCode::PolicyViolation)?;
+            validate_interface_name(endpoint_id).map_err(|_| RejectionCode::PolicyViolation)?;
+            validate_interface_name(&format!("fc-{endpoint_id}")).map_err(|_| RejectionCode::PolicyViolation)?;
+            if let Some(netns) = netns { ferro_net::validate::validate_netns_name(netns).map_err(|_| RejectionCode::PolicyViolation)?; }
+        }
+        NetdRequest::DetachEndpoint { overlay_id, endpoint_id } => {
+            validate_interface_name(overlay_id).map_err(|_| RejectionCode::PolicyViolation)?;
+            validate_interface_name(endpoint_id).map_err(|_| RejectionCode::PolicyViolation)?;
+            validate_interface_name(&format!("fc-{endpoint_id}")).map_err(|_| RejectionCode::PolicyViolation)?;
+        }
+        _ => {}
     }
     Ok(())
 }

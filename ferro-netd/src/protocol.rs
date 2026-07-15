@@ -19,7 +19,7 @@ pub struct SignedEnvelope {
 pub enum NetdRequest {
     ApplyOverlay { overlay_id: String, peers: Vec<PeerSpec>, routes: Vec<String> },
     RemoveOverlay { overlay_id: String },
-    AttachEndpoint { overlay_id: String, endpoint_id: String },
+    AttachEndpoint { overlay_id: String, endpoint_id: String, #[serde(default)] netns: Option<String> },
     DetachEndpoint { overlay_id: String, endpoint_id: String },
     Inspect { overlay_id: String },
 }

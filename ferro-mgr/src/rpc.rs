@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::{Arc, Mutex}};
 
 use prost::Message;
 use tokio_stream::wrappers::ReceiverStream;
@@ -25,10 +25,10 @@ impl EnrollmentRpc for EnrollmentServiceImpl {
     }
 }
 
-pub struct ControlServiceImpl { builder: Arc<DesiredStateBuilder>, revision: u64, store: Arc<ManagerStore> }
+pub struct ControlServiceImpl { builder: Arc<DesiredStateBuilder>, revision: u64, store: Arc<ManagerStore>, active_nodes: Arc<Mutex<HashSet<String>>> }
 impl ControlServiceImpl {
     pub fn new(cluster_id: impl Into<String>, epoch: u64, signing_key: Vec<u8>, store: Arc<ManagerStore>) -> Self {
-        Self { builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)), revision: 1, store }
+        Self { builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)), revision: 1, store, active_nodes: Arc::new(Mutex::new(HashSet::new())) }
     }
 }
 
@@ -41,9 +41,17 @@ impl ControlService for ControlServiceImpl {
         let builder = self.builder.clone();
         let revision = self.revision;
         let store = self.store.clone();
+        let active_nodes = self.active_nodes.clone();
         tokio::spawn(async move {
+            let mut bound_node = None;
             while let Ok(Some(message)) = inbound.message().await {
                 if message.node_id.is_empty() { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node_id is required".into() })).await; continue; }
+                if bound_node.as_deref() != Some(message.node_id.as_str()) {
+                    if bound_node.is_some() { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node identity changed within stream".into() })).await; break; }
+                    let duplicate = match active_nodes.lock() { Ok(mut active) => !active.insert(message.node_id.clone()), Err(_) => true };
+                    if duplicate { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node already has an active control stream".into() })).await; break; }
+                    bound_node = Some(message.node_id.clone());
+                }
                 match store.node_is_active(&message.node_id) {
                     Ok(true) => {}
                     Ok(false) | Err(_) => { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node is not enrolled or has been revoked".into() })).await; continue; }
@@ -59,6 +67,7 @@ impl ControlService for ControlServiceImpl {
                 };
                 let _ = sender.send(Ok(ManagerMessage { desired_state: Some(desired_state), error: String::new() })).await;
             }
+            if let Some(node_id) = bound_node { if let Ok(mut active) = active_nodes.lock() { active.remove(&node_id); } }
         });
         Ok(Response::new(ReceiverStream::new(receiver)))
     }

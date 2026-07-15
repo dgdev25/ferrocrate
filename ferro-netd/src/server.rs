@@ -1,13 +1,35 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{collections::{BTreeMap, BTreeSet}, fs, io::Write, os::unix::fs::PermissionsExt};
+use serde::{Deserialize, Serialize};
 use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, netns::move_to_netns, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use std::path::PathBuf;
 use crate::policy::Policy;
 use crate::protocol::{NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
 
-pub struct NetdServer { uid: u32, policy: Policy, overlays: BTreeSet<String>, endpoints: BTreeMap<String, String>, wireguard: Option<(WireGuardManager, PathBuf, u16)> }
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedState { overlays: BTreeSet<String>, endpoints: BTreeMap<String, String> }
+
+pub struct NetdServer { uid: u32, policy: Policy, overlays: BTreeSet<String>, endpoints: BTreeMap<String, String>, wireguard: Option<(WireGuardManager, PathBuf, u16)>, journal: Option<PathBuf> }
 impl NetdServer {
-    pub fn new(uid: u32, policy: Policy) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), wireguard: None } }
-    pub fn with_wireguard(uid: u32, policy: Policy, private_key_path: PathBuf, listen_port: u16) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), wireguard: Some((WireGuardManager::new(None), private_key_path, listen_port)) } }
+    pub fn new(uid: u32, policy: Policy) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), wireguard: None, journal: None } }
+    pub fn with_wireguard(uid: u32, policy: Policy, private_key_path: PathBuf, listen_port: u16) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), wireguard: Some((WireGuardManager::new(None), private_key_path, listen_port)), journal: None } }
+    pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
+        if path.exists() {
+            let state: PersistedState = serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+            self.overlays = state.overlays;
+            self.endpoints = state.endpoints;
+        }
+        self.journal = Some(path);
+        Ok(self)
+    }
+    fn persist(&self) -> Result<(), String> {
+        let Some(path) = &self.journal else { return Ok(()); };
+        let temporary = path.with_extension("tmp");
+        let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
+        file.write_all(&serde_json::to_vec(&PersistedState { overlays: self.overlays.clone(), endpoints: self.endpoints.clone() }).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        fs::rename(temporary, path).map_err(|error| error.to_string())
+    }
     pub fn handle_peer(&mut self, uid: u32, frame: &[u8], now: u64) -> NetdResponse {
         if uid != self.uid { return reject(RejectionCode::UnauthorizedPeer, "unexpected Unix peer UID"); }
         if frame.len() > MAX_FRAME_BYTES + 4 { return reject(RejectionCode::OversizedFrame, "frame exceeds 1 MiB"); }
@@ -32,11 +54,13 @@ impl NetdServer {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
                 self.overlays.insert(overlay_id);
+                if self.persist().is_err() { return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard { let _ = manager.remove(&WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses: Vec::new() }); }
                 if self.overlays.remove(&overlay_id) { let _ = destroy_bridge(&overlay_id); }
+                let _ = self.persist();
                 NetdResponse::Removed
             }
             NetdRequest::AttachEndpoint { overlay_id, endpoint_id, netns } => {
@@ -47,10 +71,11 @@ impl NetdServer {
                 let master = match build_ip_link_set_master_cmd(&endpoint_id, &overlay_id) { Ok(command) => command, Err(_) => { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::PolicyViolation, "invalid endpoint interface"); } };
                 if exec_cmd(&master).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to attach endpoint veth"); }
                 if let Some(netns) = netns { if move_to_netns(&format!("fc-{endpoint_id}"), &netns).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to move endpoint into namespace"); } }
-                self.endpoints.insert(endpoint_id, overlay_id);
+                self.endpoints.insert(endpoint_id.clone(), overlay_id);
+                if self.persist().is_err() { let _ = self.endpoints.remove(&endpoint_id); return reject(RejectionCode::Busy, "failed to persist endpoint ownership"); }
                 NetdResponse::Attached
             }
-            NetdRequest::DetachEndpoint { endpoint_id, .. } => { if self.endpoints.remove(&endpoint_id).is_some() { let _ = destroy_veth_pair(&endpoint_id); } NetdResponse::Detached }
+            NetdRequest::DetachEndpoint { endpoint_id, .. } => { if self.endpoints.remove(&endpoint_id).is_some() { let _ = destroy_veth_pair(&endpoint_id); } let _ = self.persist(); NetdResponse::Detached }
             NetdRequest::Inspect { overlay_id } => NetdResponse::Snapshot { overlay_id, revision: envelope.revision },
         }
     }

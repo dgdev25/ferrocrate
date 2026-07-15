@@ -18,6 +18,9 @@ fn main() {
         Ok(path) => NetdServer::with_wireguard(_uid, policy, path.into(), std::env::var("FERROCRATE_NETD_WG_LISTEN_PORT").unwrap_or_else(|_| "51820".into()).parse().expect("FERROCRATE_NETD_WG_LISTEN_PORT must be numeric")),
         Err(_) => NetdServer::new(_uid, policy),
     };
+    if let Ok(path) = std::env::var("FERROCRATE_NETD_STATE") {
+        server = server.load_journal(path.into()).expect("invalid netd ownership journal");
+    }
     let path = std::env::var("FERROCRATE_NETD_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/netd.sock".to_string());
     if let Some(parent) = std::path::Path::new(&path).parent() { std::fs::create_dir_all(parent).expect("socket directory"); }
     if std::path::Path::new(&path).exists() { std::fs::remove_file(&path).expect("stale socket"); }

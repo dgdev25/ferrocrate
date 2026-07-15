@@ -20,6 +20,8 @@ ipnet = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 tempfile = { workspace = true }
+base64 = "0.22"
+getrandom = "0.3"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

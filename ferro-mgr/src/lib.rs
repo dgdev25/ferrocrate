@@ -1,4 +1,7 @@
 pub mod config;
+pub mod admin;
+pub mod enrollment;
+pub mod pki;
 pub mod recovery;
 pub mod store;
 

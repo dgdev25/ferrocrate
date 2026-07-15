@@ -3003,7 +3003,8 @@ fn validate_network_backend(value: &str) -> Result<String, String> {
 fn validate_network_mode(value: &str) -> Result<(), String> {
     match value {
         "bridge" | "host" | "none" | "wireguard" | "encrypted" => Ok(()),
-        _ => Err("network must be one of: bridge, host, none, wireguard, encrypted".to_string()),
+        value if value.starts_with("managed:") => ferro_core::managed_overlay::ManagedOverlayRef::parse(value).map(|_| ()).map_err(|error| error.to_string()),
+        _ => Err("network must be one of: bridge, host, none, wireguard, encrypted, managed:<overlay-id>".to_string()),
     }
 }
 

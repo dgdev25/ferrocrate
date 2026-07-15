@@ -1,4 +1,7 @@
 pub mod config;
+pub mod control;
+pub mod desired_state;
+pub mod limits;
 pub mod admin;
 pub mod enrollment;
 pub mod pki;

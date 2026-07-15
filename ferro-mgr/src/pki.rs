@@ -1,9 +1,66 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use thiserror::Error;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertificateRole {
     Node { node_id: String },
     Administrator,
+}
+
+#[derive(Debug, Error)]
+pub enum PkiError {
+    #[error("certificate generation failed: {0}")]
+    Rcgen(#[from] rcgen::Error),
+}
+
+#[derive(Debug)]
+pub struct IssuedCertificate {
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+    pub role: CertificateRole,
+}
+
+pub struct CertificateAuthority {
+    params: CertificateParams,
+    key: KeyPair,
+    certificate_pem: String,
+}
+
+impl CertificateAuthority {
+    pub fn new(common_name: &str) -> Result<Self, PkiError> {
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, common_name);
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let key = KeyPair::generate()?;
+        let certificate = params.self_signed(&key)?;
+        Ok(Self { params, key, certificate_pem: certificate.pem() })
+    }
+
+    pub fn certificate_pem(&self) -> &str { &self.certificate_pem }
+
+    pub fn issue_node_certificate(&self, cluster_id: &str, node_id: &str) -> Result<IssuedCertificate, PkiError> {
+        self.issue(cluster_id, node_id, CertificateRole::Node { node_id: node_id.into() })
+    }
+
+    pub fn issue_admin_certificate(&self, cluster_id: &str) -> Result<IssuedCertificate, PkiError> {
+        self.issue(cluster_id, "administrator", CertificateRole::Administrator)
+    }
+
+    fn issue(&self, cluster_id: &str, subject: &str, role: CertificateRole) -> Result<IssuedCertificate, PkiError> {
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, format!("ferrocrate/{cluster_id}/{subject}"));
+        params.is_ca = IsCa::NoCa;
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let key = KeyPair::generate()?;
+        let issuer = rcgen::Issuer::from_params(&self.params, &self.key);
+        let certificate = params.signed_by(&key, &issuer)?;
+        Ok(IssuedCertificate { certificate_pem: certificate.pem(), private_key_pem: key.serialize_pem(), role })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,4 +1,15 @@
-use ferro_mgr::{admin::{AdminAuthorizer, AuthError}, pki::{CertificateIdentity, CertificateRole}};
+use ferro_mgr::{admin::{AdminAuthorizer, AuthError}, pki::{CertificateAuthority, CertificateIdentity, CertificateRole}};
+
+#[test]
+fn authority_issues_distinct_client_certificates() {
+    let authority = CertificateAuthority::new("ferro-node-root").unwrap();
+    let node = authority.issue_node_certificate("cluster-a", "node-a").unwrap();
+    let admin = authority.issue_admin_certificate("cluster-a").unwrap();
+    assert!(authority.certificate_pem().starts_with("-----BEGIN CERTIFICATE-----"));
+    assert!(node.certificate_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    assert!(admin.certificate_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    assert_ne!(node.private_key_pem, admin.private_key_pem);
+}
 
 #[test]
 fn node_identity_cannot_use_admin_authorizer() {

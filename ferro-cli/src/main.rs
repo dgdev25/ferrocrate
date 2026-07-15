@@ -2276,7 +2276,11 @@ fn handle_run(
     }
     let mut resolved_bridge_cidr = bridge_cidr.map(|val| val.to_string());
     let mut resolved_bridge_name = bridge_name.map(|val| val.to_string());
-    let selected_network_name = if is_builtin_network_mode(&effective_network) {
+    let selected_network_name = if let Some(managed) = effective_network.strip_prefix("managed:") {
+        ferro_core::managed_overlay::ManagedOverlayRef::parse(&effective_network)
+            .map_err(|error| format!("run: invalid managed overlay: {error}"))?;
+        Some(managed.to_string())
+    } else if is_builtin_network_mode(&effective_network) {
         validate_network_mode(&effective_network)?;
         if effective_network == "bridge" {
             Some("bridge".to_string())

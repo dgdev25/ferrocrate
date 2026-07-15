@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, exec_cmd_capture, netns::move_to_netns, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use std::path::PathBuf;
 use crate::policy::Policy;
-use crate::protocol::{NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
+use crate::protocol::{DesiredStateEnvelope, NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedState { overlays: BTreeSet<String>, endpoints: BTreeMap<String, String> }
@@ -39,6 +39,32 @@ impl NetdServer {
         if frame.len() < 4 { return reject(RejectionCode::InvalidFrame, "missing frame prefix"); }
         let length = u32::from_be_bytes(frame[..4].try_into().expect("prefix")) as usize;
         if length > MAX_FRAME_BYTES || length != frame.len() - 4 { return reject(RejectionCode::OversizedFrame, "invalid frame length"); }
+        if let Ok(desired) = serde_json::from_slice::<DesiredStateEnvelope>(&frame[4..]) {
+            let state = match self.policy.validate_desired_state(&desired.desired_state, &desired.node_id, now) { Ok(state) => state, Err(code) => return reject(code, "desired state rejected") };
+            let desired_overlays: BTreeSet<String> = state.overlays.iter().map(|overlay| overlay.overlay_id.clone()).collect();
+            for overlay in state.overlays {
+                let request = NetdRequest::ApplyOverlay {
+                    overlay_id: overlay.overlay_id,
+                    peers: overlay.peers.into_iter().map(|peer| crate::protocol::PeerSpec { node_id: peer.node_id, public_key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, peer.public_key), endpoint: peer.endpoint, allowed_ips: peer.allowed_ips }).collect(),
+                    routes: overlay.routes,
+                    addresses: Vec::new(),
+                };
+                let NetdRequest::ApplyOverlay { overlay_id, peers, routes: _, addresses } = request else { unreachable!() };
+                if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() { return reject(RejectionCode::Busy, "failed to create overlay bridge"); }
+                self.overlays.insert(overlay_id);
+                let _ = (peers, addresses);
+            }
+            let stale: Vec<String> = self.overlays.difference(&desired_overlays).cloned().collect();
+            for overlay_id in stale {
+                if let Some((manager, private_key_path, listen_port)) = &self.wireguard { let _ = manager.remove(&WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses: Vec::new() }); }
+                self.overlays.remove(&overlay_id);
+                let endpoints: Vec<String> = self.endpoints.iter().filter(|(_, overlay)| *overlay == &overlay_id).map(|(endpoint, _)| endpoint.clone()).collect();
+                for endpoint in endpoints { self.endpoints.remove(&endpoint); let _ = destroy_veth_pair(&endpoint); }
+                let _ = destroy_bridge(&overlay_id);
+            }
+            if self.persist().is_err() { return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
+            return NetdResponse::Applied;
+        }
         let envelope: SignedEnvelope = match serde_json::from_slice(&frame[4..]) { Ok(value) => value, Err(_) => return reject(RejectionCode::InvalidFrame, "invalid JSON") };
         if let Err(code) = self.policy.validate(&envelope, now) { return reject(code, "policy rejected request"); }
         match envelope.request {

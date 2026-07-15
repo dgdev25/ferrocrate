@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+prost = "0.14"
 ferro-net = { path = "../ferro-net" }
 serde = { workspace = true }
 serde_json = { workspace = true }

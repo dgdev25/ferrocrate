@@ -1,9 +1,26 @@
 use std::{io::{Read, Write}, os::unix::net::UnixStream, path::PathBuf, time::Duration};
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
+use prost::Message;
+
+use crate::proto::DesiredState;
+use super::reconcile::NetdClient;
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+#[derive(Serialize)]
+struct DesiredStateEnvelope<'a> {
+    cluster_id: &'a str,
+    node_id: &'a str,
+    epoch: u64,
+    revision: u64,
+    lease_expires_unix_secs: u64,
+    desired_state: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+enum NetdResponse { Applied, Rejected { code: serde_json::Value, reason: String }, #[serde(other)] Other }
 
 #[derive(Debug, Error)]
 pub enum NetdClientError {
@@ -15,6 +32,25 @@ pub enum NetdClientError {
     InvalidFrame,
     #[error("netd response exceeds the configured limit")]
     Oversized,
+}
+
+impl NetdClient for UnixNetdClient {
+    fn apply(&self, desired_state: &DesiredState) -> Result<(), String> {
+        let request = DesiredStateEnvelope {
+            cluster_id: &desired_state.cluster_id,
+            node_id: "",
+            epoch: desired_state.cluster_epoch,
+            revision: desired_state.revision,
+            lease_expires_unix_secs: desired_state.lease_expires_unix as u64,
+            desired_state: desired_state.encode_to_vec(),
+        };
+        let response: NetdResponse = self.request(&request).map_err(|error| error.to_string())?;
+        match response {
+            NetdResponse::Applied => Ok(()),
+            NetdResponse::Rejected { reason, .. } => Err(reason),
+            NetdResponse::Other => Err("netd returned an unexpected response".into()),
+        }
+    }
 }
 
 pub struct UnixNetdClient {

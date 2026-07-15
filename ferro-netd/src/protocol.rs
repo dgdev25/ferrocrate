@@ -16,6 +16,16 @@ pub struct SignedEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesiredStateEnvelope {
+    pub cluster_id: String,
+    pub node_id: String,
+    pub epoch: u64,
+    pub revision: u64,
+    pub lease_expires_unix_secs: u64,
+    pub desired_state: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NetdRequest {
     ApplyOverlay { overlay_id: String, peers: Vec<PeerSpec>, routes: Vec<String>, #[serde(default)] addresses: Vec<String> },
     RemoveOverlay { overlay_id: String },
@@ -36,6 +46,13 @@ pub enum NetdResponse { Applied, Removed, Attached, Detached, Snapshot { overlay
 impl NetdResponse { pub fn code(&self) -> Option<RejectionCode> { match self { Self::Rejected { code, .. } => Some(code.clone()), _ => None } } }
 
 pub fn frame(envelope: &SignedEnvelope) -> Result<Vec<u8>, serde_json::Error> {
+    let body = serde_json::to_vec(envelope)?;
+    let mut output = (body.len() as u32).to_be_bytes().to_vec();
+    output.extend(body);
+    Ok(output)
+}
+
+pub fn desired_state_frame(envelope: &DesiredStateEnvelope) -> Result<Vec<u8>, serde_json::Error> {
     let body = serde_json::to_vec(envelope)?;
     let mut output = (body.len() as u32).to_be_bytes().to_vec();
     output.extend(body);

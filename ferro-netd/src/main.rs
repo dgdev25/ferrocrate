@@ -2,18 +2,37 @@ mod policy;
 mod protocol;
 mod server;
 
-use std::os::unix::net::UnixListener;
+use std::{io::{Read, Write}, os::unix::net::UnixListener, time::{SystemTime, UNIX_EPOCH}};
+use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use policy::Policy;
+use protocol::{response_frame, MAX_FRAME_BYTES};
+use server::NetdServer;
 
 fn main() {
     let _uid = std::env::var("FERROCRATE_AGENT_UID").expect("FERROCRATE_AGENT_UID is required").parse::<u32>().expect("FERROCRATE_AGENT_UID must be numeric");
     let key = std::env::var("FERROCRATE_NETD_SIGNING_KEY").expect("FERROCRATE_NETD_SIGNING_KEY is required");
     let cluster = std::env::var("FERROCRATE_CLUSTER_ID").expect("FERROCRATE_CLUSTER_ID is required");
     let node = std::env::var("FERROCRATE_NODE_ID").expect("FERROCRATE_NODE_ID is required");
-    let _policy = Policy::new(cluster, node, &key).expect("invalid manager signing key");
+    let policy = Policy::new(cluster, node, &key).expect("invalid manager signing key");
+    let mut server = NetdServer::new(_uid, policy);
     let path = std::env::var("FERROCRATE_NETD_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/netd.sock".to_string());
     if let Some(parent) = std::path::Path::new(&path).parent() { std::fs::create_dir_all(parent).expect("socket directory"); }
     if std::path::Path::new(&path).exists() { std::fs::remove_file(&path).expect("stale socket"); }
-    let _listener = UnixListener::bind(path).expect("bind Unix socket");
-    loop { std::thread::park(); }
+    let listener = UnixListener::bind(path).expect("bind Unix socket");
+    for stream in listener.incoming() {
+        let mut stream = match stream { Ok(stream) => stream, Err(_) => continue };
+        let peer_uid = getsockopt(&stream, PeerCredentials).map(|credentials| credentials.uid()).unwrap_or(u32::MAX);
+        let mut prefix = [0_u8; 4];
+        if stream.read_exact(&mut prefix).is_err() { continue; }
+        let length = u32::from_be_bytes(prefix) as usize;
+        let mut frame = prefix.to_vec();
+        if length <= MAX_FRAME_BYTES {
+            let mut body = vec![0_u8; length];
+            if stream.read_exact(&mut body).is_err() { continue; }
+            frame.extend(body);
+        }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
+        let response = server.handle_peer(peer_uid, &frame, now);
+        if let Ok(bytes) = response_frame(&response) { let _ = stream.write_all(&bytes); }
+    }
 }

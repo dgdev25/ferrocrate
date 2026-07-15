@@ -41,3 +41,10 @@ pub fn frame(envelope: &SignedEnvelope) -> Result<Vec<u8>, serde_json::Error> {
     output.extend(body);
     Ok(output)
 }
+
+pub fn response_frame(response: &NetdResponse) -> Result<Vec<u8>, serde_json::Error> {
+    let body = serde_json::to_vec(response)?;
+    let mut output = (body.len() as u32).to_be_bytes().to_vec();
+    output.extend(body);
+    Ok(output)
+}

@@ -58,6 +58,10 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub network_ownership: Option<NetworkOwnershipRecord>,
     #[serde(default)]
+    pub managed_overlay: Option<String>,
+    #[serde(default)]
+    pub managed_host_veth: Option<String>,
+    #[serde(default)]
     pub ai_runtime: Option<AiRuntimeConfig>,
 }
 

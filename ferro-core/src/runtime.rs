@@ -1100,6 +1100,8 @@ impl ContainerRuntime {
                 .collect(),
             network_backend: network_setup.backend.map(|backend| backend.to_string()),
             network_ownership: network_setup.ownership.clone(),
+            managed_overlay: network_setup.managed_overlay.clone(),
+            managed_host_veth: network_setup.managed_host_veth.clone(),
             ai_runtime: ai_config.cloned(),
         };
 
@@ -2077,6 +2079,8 @@ struct NetworkSetup {
     backend: Option<NetworkBackend>,
     ownership: Option<NetworkOwnershipRecord>,
     ebpf_network: Option<EbpfNetwork>,
+    managed_overlay: Option<String>,
+    managed_host_veth: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2212,6 +2216,8 @@ impl NetworkSetup {
             backend: None,
             ownership: None,
             ebpf_network: None,
+            managed_overlay: None,
+            managed_host_veth: None,
         }
     }
 }
@@ -2511,6 +2517,8 @@ fn setup_network(
         backend: Some(active_backend),
         ownership: Some(ownership),
         ebpf_network: None,
+        managed_overlay: None,
+        managed_host_veth: None,
     })
 }
 
@@ -2553,7 +2561,10 @@ fn setup_managed_network(
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
     run_cmd(&ip_netns_exec(&netns_name, &["ip", "route", "add", "default", "via", &attachment.gateway]))?;
     rollback.track_network_context(attachment.ipv4.clone(), &[])?;
-    Ok(NetworkSetup::isolated(Some(netns_name), Some(attachment.ipv4), attachment.ipv6))
+    let mut setup = NetworkSetup::isolated(Some(netns_name), Some(attachment.ipv4), attachment.ipv6);
+    setup.managed_overlay = Some(overlay_id.to_string());
+    setup.managed_host_veth = Some(host_veth);
+    Ok(setup)
 }
 
 fn build_network_plan(
@@ -3936,6 +3947,15 @@ fn cleanup_network(
     record: &ContainerRecord,
     all_records: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
+    if let Some(overlay_id) = record.managed_overlay.as_deref() {
+        let socket = std::env::var("FERROCRATE_AGENT_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
+        let request = ManagedOverlayRequest::DetachContainer { container_id: record.id.clone(), now_unix: crate::container_store::now_unix() as i64 };
+        let response = ManagedOverlayClient::new(socket).request(&request).map_err(|error| RuntimeError::Network(format!("managed overlay detach unavailable for {overlay_id}: {error}")))?;
+        if !matches!(response, ManagedOverlayResponse::Detached { .. }) { return Err(RuntimeError::Network("managed overlay agent rejected detach".to_string())); }
+        if let Some(host_veth) = record.managed_host_veth.as_deref() { run_cmd_allow_missing(&["ip".into(), "link".into(), "delete".into(), host_veth.into()])?; }
+        if let Some(netns_name) = record.netns.as_deref() { run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?; }
+        return Ok(());
+    }
     if record.network_backend.is_none() && record.network_ownership.is_none() {
         let proven = legacy_firewall_rules_proven(record)?;
         match classify_legacy_network_record(record.network_name.as_deref(), proven)? {

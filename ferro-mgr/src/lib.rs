@@ -7,6 +7,7 @@ pub mod admin;
 pub mod agent;
 pub mod enrollment;
 pub mod pki;
+pub mod rpc;
 pub mod recovery;
 pub mod revocation;
 pub mod rotation;

@@ -1013,6 +1013,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tonic 0.14.6",
  "tonic-prost",
  "tonic-prost-build",

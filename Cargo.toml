@@ -3,6 +3,7 @@ members = [
   "ferro-cri",
   "ferro-core",
   "ferro-net",
+  "ferro-netd",
   "ferro-net-ebpf",
   "ferro-mind",
   "ferro-compose",

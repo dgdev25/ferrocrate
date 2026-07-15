@@ -44,7 +44,7 @@
 - ⚠️ **eBPF (optional)** — Requires an externally provided eBPF object; iptables/nftables is the default and fully supported path
 - ✅ **Port mapping** — TCP/UDP port forwarding to host (host-localhost access to published ports requires the iptables backend; the nftables backend reaches them via the external interface only)
 - ⚠️ **IPv6 support** — Dual-stack networking (in progress)
-- ⚠️ **WireGuard overlay** — Encrypted cross-host communication (planned)
+- ⚠️ **Managed WireGuard overlay** — Authenticated manager/netd control plane and runtime attachment are implemented; two-host qualification remains pending
 
 ### Storage & Volumes
 - ✅ **Named volumes** — Persistent storage across container lifecycle

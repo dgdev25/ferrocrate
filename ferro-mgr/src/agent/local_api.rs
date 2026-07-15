@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 use thiserror::Error;
 
@@ -8,7 +8,12 @@ use super::ipam::{Allocation, Ipam, IpamError};
 pub struct Attachment {
     pub overlay_id: String,
     pub container_id: String,
+    pub bridge: String,
+    pub netns: String,
     pub ipv4: std::net::Ipv4Addr,
+    pub ipv6: Option<std::net::Ipv6Addr>,
+    pub gateway: std::net::Ipv4Addr,
+    pub mtu: u16,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -17,6 +22,8 @@ pub enum LocalApiError {
     Unauthorized,
     #[error("overlay lease is expired")]
     Expired,
+    #[error("overlay is not authorized for this node")]
+    UnknownOverlay,
     #[error(transparent)]
     Ipam(#[from] IpamError),
 }
@@ -25,16 +32,35 @@ pub struct LocalApi {
     runtime_uid: u32,
     lease_expiry: Mutex<i64>,
     ipam: Ipam,
+    overlays: Mutex<BTreeMap<String, OverlayConfig>>,
+    enforce_overlays: Mutex<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayConfig {
+    pub bridge: String,
+    pub gateway: std::net::Ipv4Addr,
+    pub mtu: u16,
 }
 
 impl LocalApi {
-    pub fn new(runtime_uid: u32, lease_expiry: i64, ipam: Ipam) -> Self { Self { runtime_uid, lease_expiry: Mutex::new(lease_expiry), ipam } }
+    pub fn new(runtime_uid: u32, lease_expiry: i64, ipam: Ipam) -> Self { Self { runtime_uid, lease_expiry: Mutex::new(lease_expiry), ipam, overlays: Mutex::new(BTreeMap::new()), enforce_overlays: Mutex::new(false) } }
+
+    pub fn register_overlay(&self, overlay_id: impl Into<String>, config: OverlayConfig) -> Result<(), LocalApiError> {
+        self.overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)?.insert(overlay_id.into(), config);
+        *self.enforce_overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)? = true;
+        Ok(())
+    }
 
     pub fn attach(&self, caller_uid: u32, overlay_id: impl Into<String>, container_id: impl Into<String>, now_unix: i64) -> Result<Attachment, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
         let overlay_id = overlay_id.into();
+        let config = self.overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)?.get(&overlay_id).cloned();
+        if *self.enforce_overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)? && config.is_none() { return Err(LocalApiError::UnknownOverlay); }
+        let config = config.unwrap_or_else(|| OverlayConfig { bridge: overlay_id.clone(), gateway: "10.0.0.1".parse().expect("static gateway"), mtu: 1500 });
         let allocation = self.ipam.allocate(container_id)?;
-        Ok(Attachment { overlay_id, container_id: allocation.container_id, ipv4: allocation.address })
+        let netns = format!("ferro-{}", allocation.container_id);
+        Ok(Attachment { overlay_id, container_id: allocation.container_id, bridge: config.bridge, netns, ipv4: allocation.address, ipv6: None, gateway: config.gateway, mtu: config.mtu })
     }
 
     pub fn detach(&self, caller_uid: u32, container_id: &str, now_unix: i64) -> Result<Option<Allocation>, LocalApiError> {

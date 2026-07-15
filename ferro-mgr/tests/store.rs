@@ -1,4 +1,5 @@
 use ferro_mgr::store::{Enrollment, ManagerStore, Overlay, ScopedToken, StoreError};
+use ferro_mgr::recovery::restore_backup;
 use ipnet::Ipv4Net;
 use tempfile::tempdir;
 
@@ -60,4 +61,17 @@ fn latest_revision_returns_highest_persisted_payload() {
     store.append_revision("overlay-r", b"first").unwrap();
     store.append_revision("overlay-r", b"second").unwrap();
     assert_eq!(store.latest_revision().unwrap(), Some((2, b"second".to_vec())));
+}
+
+#[test]
+fn backup_restore_writes_new_path_and_rotates_epoch() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("source.sqlite");
+    let destination = directory.path().join("restored.sqlite");
+    let store = ManagerStore::open(&source).unwrap();
+    assert_eq!(store.cluster_epoch().unwrap(), 1);
+    drop(store);
+    let plan = restore_backup(&source, &destination, "restore test", 500).unwrap();
+    assert_eq!(plan.next_epoch, 2);
+    assert_eq!(ManagerStore::open(destination).unwrap().cluster_epoch().unwrap(), 2);
 }

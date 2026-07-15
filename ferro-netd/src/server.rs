@@ -49,7 +49,7 @@ impl NetdServer {
                     routes: overlay.routes,
                     addresses: Vec::new(),
                 };
-                let NetdRequest::ApplyOverlay { overlay_id, peers, routes: _, addresses } = request else { unreachable!() };
+                let NetdRequest::ApplyOverlay { overlay_id, peers, routes, addresses } = request else { unreachable!() };
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
                     let peers = match peers.iter().map(|peer| {
                         let endpoint = peer.endpoint.parse().map_err(|_| ());
@@ -60,6 +60,7 @@ impl NetdServer {
                     let config = WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses };
                     if manager.apply(&config, &peers).is_err() { return reject(RejectionCode::Busy, "failed to apply WireGuard overlay"); }
                 }
+                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() { return reject(RejectionCode::Busy, "failed to create overlay bridge"); }
                 self.overlays.insert(overlay_id);
             }
@@ -77,7 +78,7 @@ impl NetdServer {
         let envelope: SignedEnvelope = match serde_json::from_slice(&frame[4..]) { Ok(value) => value, Err(_) => return reject(RejectionCode::InvalidFrame, "invalid JSON") };
         if let Err(code) = self.policy.validate(&envelope, now) { return reject(code, "policy rejected request"); }
         match envelope.request {
-            NetdRequest::ApplyOverlay { overlay_id, peers, routes: _, addresses } => {
+            NetdRequest::ApplyOverlay { overlay_id, peers, routes, addresses } => {
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
                     let addresses = match addresses.iter().map(|address| address.parse()).collect::<Result<Vec<_>, _>>() { Ok(addresses) => addresses, Err(_) => return reject(RejectionCode::PolicyViolation, "invalid WireGuard interface address") };
                     let peers = match peers.iter().map(|peer| {
@@ -88,6 +89,7 @@ impl NetdServer {
                     let config = WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses };
                     if manager.apply(&config, &peers).is_err() { return reject(RejectionCode::Busy, "failed to apply WireGuard overlay"); }
                 }
+                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
@@ -117,5 +119,11 @@ impl NetdServer {
             NetdRequest::Inspect { overlay_id } => NetdResponse::Snapshot { overlay_id, revision: envelope.revision },
         }
     }
+}
+fn apply_overlay_routes(interface: &str, routes: &[String]) -> Result<(), ()> {
+    for route in routes {
+        exec_cmd(&vec!["ip".into(), "route".into(), "replace".into(), route.clone(), "dev".into(), interface.to_string()]).map_err(|_| ())?;
+    }
+    Ok(())
 }
 fn reject(code: RejectionCode, reason: &str) -> NetdResponse { NetdResponse::Rejected { code, reason: reason.to_string() } }

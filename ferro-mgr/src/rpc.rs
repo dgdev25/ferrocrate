@@ -24,10 +24,10 @@ impl EnrollmentRpc for EnrollmentServiceImpl {
     }
 }
 
-pub struct ControlServiceImpl { builder: Arc<DesiredStateBuilder>, revision: u64 }
+pub struct ControlServiceImpl { builder: Arc<DesiredStateBuilder>, revision: u64, store: Arc<ManagerStore> }
 impl ControlServiceImpl {
-    pub fn new(cluster_id: impl Into<String>, epoch: u64, signing_key: Vec<u8>) -> Self {
-        Self { builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)), revision: 1 }
+    pub fn new(cluster_id: impl Into<String>, epoch: u64, signing_key: Vec<u8>, store: Arc<ManagerStore>) -> Self {
+        Self { builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)), revision: 1, store }
     }
 }
 
@@ -39,9 +39,15 @@ impl ControlService for ControlServiceImpl {
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         let builder = self.builder.clone();
         let revision = self.revision;
+        let store = self.store.clone();
         tokio::spawn(async move {
             while let Ok(Some(message)) = inbound.message().await {
                 if message.node_id.is_empty() { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node_id is required".into() })).await; continue; }
+                match store.node_is_active(&message.node_id) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node is not enrolled or has been revoked".into() })).await; continue; }
+                }
+                if message.acknowledged_revision > revision { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "acknowledged revision is ahead of manager".into() })).await; continue; }
                 let desired_state = builder.snapshot(revision, Vec::new(), chrono_like_now());
                 let _ = sender.send(Ok(ManagerMessage { desired_state: Some(desired_state), error: String::new() })).await;
             }

@@ -190,6 +190,11 @@ impl ManagerStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Ok(connection.query_row("SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL", [], |row| row.get(0))?)
     }
+
+    pub fn node_is_active(&self, node_id: &str) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL)", [node_id], |row| row.get(0))?)
+    }
 }
 
 fn consume_token_tx(tx: &Transaction<'_>, hash: &[u8; 32], now_unix_secs: i64) -> Result<(String, String), StoreError> {

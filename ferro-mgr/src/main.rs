@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(CertificateAuthority::new(&format!("{cluster_id}-node-root"))?);
     let public = Server::builder().tls_config(tls.clone())?
         .add_service(EnrollmentServiceServer::new(EnrollmentServiceImpl::new(enrollment, authority)))
-        .add_service(ControlServiceServer::new(ControlServiceImpl::new(cluster_id, 1, signing_key)))
+        .add_service(ControlServiceServer::new(ControlServiceImpl::new(cluster_id, 1, signing_key, store.clone())))
         .serve(bind);
     let admin = Server::builder().tls_config(tls)?
         .add_service(AdminServiceServer::new(AdminServiceImpl::new(store, 1)))

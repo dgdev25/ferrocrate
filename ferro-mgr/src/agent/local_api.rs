@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Mutex};
 #[cfg(unix)]
-use std::{fs, io::{Read, Write}, os::unix::net::UnixListener, path::Path};
+use std::{fs, io::{Read, Write}, os::unix::{fs::PermissionsExt, net::UnixListener}, path::Path};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
@@ -110,6 +110,7 @@ impl LocalApi {
         if path.exists() { fs::remove_file(path)?; }
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let listener = UnixListener::bind(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
         for stream in listener.incoming() {
             let mut stream = match stream { Ok(stream) => stream, Err(_) => continue };
             let caller_uid = getsockopt(&stream, PeerCredentials).map(|cred| cred.uid()).unwrap_or(u32::MAX);

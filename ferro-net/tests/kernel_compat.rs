@@ -100,3 +100,18 @@ fn nftables_kernel_compat_smoke() {
         .expect("failed to run nft list ruleset");
     assert!(status.success(), "nft list ruleset failed");
 }
+
+#[test]
+#[ignore = "Task 7 qualification: requires root, kernel 5.10+, tc, and mounted bpffs"]
+fn ebpf_kernel_compatibility() {
+    assert!(nix::unistd::Uid::effective().is_root(), "must run as root");
+    let actual = kernel_version().expect("kernel version");
+    assert!(version_at_least(actual, (5, 10, 0)), "kernel < 5.10");
+    assert!(command_exists("tc"), "tc is not installed");
+    assert!(std::path::Path::new("/sys/fs/bpf").is_dir(), "bpffs path is unavailable");
+    let mounts = std::fs::read_to_string("/proc/mounts").expect("read /proc/mounts");
+    assert!(
+        mounts.lines().any(|line| line.split_whitespace().nth(1) == Some("/sys/fs/bpf")),
+        "bpffs is not mounted at /sys/fs/bpf"
+    );
+}

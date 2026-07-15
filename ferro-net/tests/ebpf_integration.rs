@@ -59,7 +59,8 @@ fn privileged_aya_load_detach_smoke_deferred_to_task_7() {
         .parse()
         .expect("numeric test SNAT end");
     let mut network = EbpfNetwork::load(EbpfNetworkConfig {
-        network_id: format!("loader-smoke-{}", std::process::id()),
+        network_id: env::var("FERRO_EBPF_TEST_NETWORK_ID")
+            .unwrap_or_else(|_| format!("loader-smoke-{}", std::process::id())),
         interface,
         external_ipv4,
         external_ifindex,

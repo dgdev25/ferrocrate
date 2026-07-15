@@ -16,5 +16,5 @@ fn leases_are_capped_at_fifteen_minutes_and_identified() {
     let state = builder.snapshot(7, vec![OverlayState { overlay_id: "ov-a".into(), routes: vec![], peers: vec![] }], 100);
     assert_eq!(state.cluster_id, "cluster-a");
     assert_eq!(state.lease_expires_unix, 100 + MAX_LEASE_SECONDS);
-    assert_eq!(state.signature.len(), 32);
+    assert_eq!(state.signature.len(), 64);
 }

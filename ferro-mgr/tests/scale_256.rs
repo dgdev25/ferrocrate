@@ -1,4 +1,5 @@
 use ferro_mgr::{agent::{Agent, NetdClient, StateStore}, desired_state::DesiredStateBuilder, metrics::ManagerMetrics, proto::DesiredState};
+use ed25519_dalek::SigningKey;
 use tempfile::tempdir;
 
 struct NoopNetd;
@@ -11,7 +12,7 @@ fn agents_256_converge_to_one_revision_without_secret_metrics() {
     let desired = builder.snapshot(42, Vec::new(), 100);
     let mut agents = Vec::with_capacity(256);
     for index in 0..256 {
-        let agent = Agent::new("cluster-a", vec![5; 32], StateStore::new(directory.path().join(format!("agent-{index}.json"))), NoopNetd).unwrap();
+        let agent = Agent::new("cluster-a", SigningKey::from_bytes(&[5; 32]).verifying_key().to_bytes().to_vec(), StateStore::new(directory.path().join(format!("agent-{index}.json"))), NoopNetd).unwrap();
         agents.push(agent);
     }
     for agent in &agents { assert_eq!(agent.reconcile(desired.clone(), 101).unwrap(), 42); }

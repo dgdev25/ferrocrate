@@ -1,5 +1,5 @@
 use prost::Message;
-use sha2::{Digest, Sha256};
+use ed25519_dalek::{Signer, SigningKey};
 
 use crate::proto::{DesiredState, OverlayState};
 
@@ -9,11 +9,12 @@ pub const MAX_LEASE_SECONDS: i64 = 15 * 60;
 pub struct DesiredStateBuilder {
     cluster_id: String,
     cluster_epoch: u64,
-    signing_key: Vec<u8>,
+    signing_key: [u8; 32],
 }
 
 impl DesiredStateBuilder {
     pub fn new(cluster_id: impl Into<String>, cluster_epoch: u64, signing_key: Vec<u8>) -> Self {
+        let signing_key: [u8; 32] = signing_key.try_into().expect("desired-state signing keys must be 32 bytes");
         Self { cluster_id: cluster_id.into(), cluster_epoch, signing_key }
     }
 
@@ -32,11 +33,8 @@ impl DesiredStateBuilder {
     fn build(&self, revision: u64, overlays: Vec<OverlayState>, now_unix: i64) -> DesiredState {
         let lease_expires_unix = now_unix.saturating_add(MAX_LEASE_SECONDS);
         let mut state = DesiredState { cluster_id: self.cluster_id.clone(), cluster_epoch: self.cluster_epoch, revision, overlays, signature: Vec::new(), lease_expires_unix };
-        let mut digest = Sha256::new();
-        digest.update(&self.signing_key);
         let unsigned = state.encode_to_vec();
-        digest.update(unsigned);
-        state.signature = digest.finalize().to_vec();
+        state.signature = SigningKey::from_bytes(&self.signing_key).sign(&unsigned).to_bytes().to_vec();
         state
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use prost::Message;
-use sha2::{Digest, Sha256};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use thiserror::Error;
 
 use crate::{agent::state::{AgentState, StateError, StateStore}, config::MAX_MESSAGE_BYTES, proto::DesiredState};
@@ -61,9 +61,9 @@ impl<C: NetdClient> Agent<C> {
         let mut unsigned = desired.clone();
         let expected = unsigned.signature.clone();
         unsigned.signature.clear();
-        let mut digest = Sha256::new();
-        digest.update(&self.signing_key);
-        digest.update(unsigned.encode_to_vec());
-        expected == digest.finalize().to_vec()
+        let key: [u8; 32] = match self.signing_key.as_slice().try_into() { Ok(key) => key, Err(_) => return false };
+        let verifying_key = match VerifyingKey::from_bytes(&key) { Ok(key) => key, Err(_) => return false };
+        let signature = match Signature::from_slice(&expected) { Ok(signature) => signature, Err(_) => return false };
+        verifying_key.verify(&unsigned.encode_to_vec(), &signature).is_ok()
     }
 }

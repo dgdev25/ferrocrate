@@ -169,6 +169,16 @@ impl ManagerStore {
         })
     }
 
+    pub fn latest_revision(&self) -> Result<Option<(u64, Vec<u8>)>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let result = connection.query_row("SELECT revision, payload FROM desired_revisions ORDER BY revision DESC LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?)));
+        match result {
+            Ok((revision, payload)) => Ok(Some((revision, payload))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(StoreError::Sql(error)),
+        }
+    }
+
     pub fn acknowledge_revision(&self, node_id: &str, revision: i64) -> Result<(), StoreError> {
         self.transact(|tx| {
             tx.execute(

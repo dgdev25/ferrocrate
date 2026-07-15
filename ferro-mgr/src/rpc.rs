@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use prost::Message;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::{desired_state::DesiredStateBuilder, enrollment::EnrollmentService, pki::CertificateAuthority, proto::{admin_service_server::AdminService, control_service_server::ControlService, enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse, AgentMessage, EnrollRequest, EnrollResponse, ManagerMessage}, store::{Enrollment, ManagerStore}};
+use crate::{desired_state::DesiredStateBuilder, enrollment::EnrollmentService, pki::CertificateAuthority, proto::{admin_service_server::AdminService, control_service_server::ControlService, enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse, AgentMessage, DesiredState, EnrollRequest, EnrollResponse, ManagerMessage}, store::{Enrollment, ManagerStore}};
 
 pub struct EnrollmentServiceImpl {
     service: Arc<EnrollmentService>,
@@ -48,7 +49,14 @@ impl ControlService for ControlServiceImpl {
                     Ok(false) | Err(_) => { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node is not enrolled or has been revoked".into() })).await; continue; }
                 }
                 if message.acknowledged_revision > revision { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "acknowledged revision is ahead of manager".into() })).await; continue; }
-                let desired_state = builder.snapshot(revision, Vec::new(), chrono_like_now());
+                let desired_state = match store.latest_revision() {
+                    Ok(Some((_, payload))) => match DesiredState::decode(payload.as_slice()) {
+                        Ok(state) => state,
+                        Err(_) => { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "persisted desired state is invalid".into() })).await; continue; }
+                    },
+                    Ok(None) => builder.snapshot(revision, Vec::new(), chrono_like_now()),
+                    Err(_) => { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "manager state unavailable".into() })).await; continue; }
+                };
                 let _ = sender.send(Ok(ManagerMessage { desired_state: Some(desired_state), error: String::new() })).await;
             }
         });

@@ -51,3 +51,13 @@ fn recovery_advances_epoch_and_invalidates_nodes() {
     assert_eq!(store.node_count().unwrap(), 0);
     assert!(!store.node_is_active("node-a").unwrap());
 }
+
+#[test]
+fn latest_revision_returns_highest_persisted_payload() {
+    let store = store();
+    store.register_node(enrollment()).unwrap();
+    store.create_overlay(Overlay { id: "overlay-r".into(), cidr: "10.55.0.0/24".into() }).unwrap();
+    store.append_revision("overlay-r", b"first").unwrap();
+    store.append_revision("overlay-r", b"second").unwrap();
+    assert_eq!(store.latest_revision().unwrap(), Some((2, b"second".to_vec())));
+}

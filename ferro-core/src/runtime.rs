@@ -44,6 +44,7 @@ use ferro_net::netns;
 use ferro_net::portmap::{
     build_network_plan as build_portmap_plan, NetworkPlan,
 };
+use ferro_net::{WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use ferro_net::subnet::network_cidr_v4;
 use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
 use ferro_net::veth;
@@ -5192,117 +5193,64 @@ fn setup_wireguard(
     netns_name: &str,
     container_id: &str,
 ) -> Result<(Option<String>, Option<String>), RuntimeError> {
-    if !command_available("wg") {
-        return Err(RuntimeError::Network(
-            "wireguard networking requires wg command".to_string(),
-        ));
-    }
     let cfg = wireguard_config()?;
     let peer = wireguard_peer_config()?;
-    let create_iface = ip_netns_exec(
-        netns_name,
-        &["ip", "link", "add", &cfg.iface, "type", "wireguard"],
-    );
-    match run_cmd(&create_iface) {
-        Ok(()) => {}
-        Err(err) => {
-            let msg = err.to_string();
-            if msg.contains("Operation not supported")
-                || msg.contains("Unknown device type")
-                || msg.contains("not supported")
-            {
-                return Err(RuntimeError::Network(
-                    "wireguard kernel support is unavailable on this host".to_string(),
-                ));
-            }
-            return Err(err);
-        }
-    }
-
     let ipv4 = allocate_container_ip(container_id, &cfg.ipv4_gateway)?;
-    run_cmd(&ip_netns_exec(
-        netns_name,
-        &[
-            "ip",
-            "addr",
-            "add",
-            &format!("{ipv4}/{}", cfg.ipv4_prefix),
-            "dev",
-            &cfg.iface,
-        ],
-    ))?;
-
     let ipv6 = if let Some((gateway, prefix)) = cfg.ipv6_gateway.as_ref().zip(cfg.ipv6_prefix) {
         let assigned = allocate_container_ipv6(container_id, gateway, prefix);
-        run_cmd(&ip_netns_exec(
-            netns_name,
-            &[
-                "ip",
-                "-6",
-                "addr",
-                "add",
-                &format!("{assigned}/{prefix}"),
-                "dev",
-                &cfg.iface,
-            ],
-        ))?;
         Some(assigned)
     } else {
         None
     };
-
-    run_cmd(&ip_netns_exec(
-        netns_name,
-        &["ip", "link", "set", &cfg.iface, "up"],
-    ))?;
-
-    let private_key = if let Ok(key) = std::env::var("FERROCRATE_WG_PRIVATE_KEY") {
-        key
+    let manager = WireGuardManager::new(Some(netns_name.to_string()));
+    let key_path = if let Ok(path) = std::env::var("FERROCRATE_WG_PRIVATE_KEY_PATH") {
+        PathBuf::from(path)
+    } else if let Ok(key) = std::env::var("FERROCRATE_WG_PRIVATE_KEY") {
+        manager
+            .write_private_key(&cfg.iface, &key)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?
     } else {
-        run_cmd_capture_stdout(&["wg".to_string(), "genkey".to_string()])?
+        manager
+            .generate_private_key(&cfg.iface)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?
     };
-    let _public_key =
-        run_cmd_with_stdin_capture_stdout(&["wg".to_string(), "pubkey".to_string()], &private_key)?;
-    let key_path =
-        std::env::temp_dir().join(format!("ferrocrate-wg-{}.key", short_id(container_id, 12)));
-    std::fs::write(&key_path, format!("{private_key}\n"))?;
-    let key_path_str = key_path.display().to_string();
-    let listen_port = wireguard_listen_port(container_id).to_string();
-    run_cmd(&ip_netns_exec(
-        netns_name,
-        &[
-            "wg",
-            "set",
-            &cfg.iface,
-            "private-key",
-            &key_path_str,
-            "listen-port",
-            &listen_port,
-        ],
-    ))?;
-    let _ = std::fs::remove_file(&key_path);
-
-    if let Some(peer) = peer {
-        run_cmd(&ip_netns_exec(
-            netns_name,
-            &[
-                "wg",
-                "set",
-                &cfg.iface,
-                "peer",
-                &peer.public_key,
-                "endpoint",
-                &peer.endpoint,
-                "allowed-ips",
-                &peer.allowed_ips,
-            ],
-        ))?;
+    let mut addresses = vec![format!("{ipv4}/{}", cfg.ipv4_prefix)
+        .parse()
+        .map_err(|_| RuntimeError::Network("invalid WireGuard IPv4 assignment".to_string()))?];
+    if let Some(address) = &ipv6 {
+        addresses.push(format!("{address}/{}", cfg.ipv6_prefix.unwrap_or_default())
+            .parse()
+            .map_err(|_| RuntimeError::Network("invalid WireGuard IPv6 assignment".to_string()))?);
     }
-
-    run_cmd(&ip_netns_exec(
-        netns_name,
-        &["ip", "route", "replace", "default", "dev", &cfg.iface],
-    ))?;
+    let peers = match peer {
+        Some(peer) => {
+            let allowed_ips = peer
+                .allowed_ips
+                .split(',')
+                .map(str::trim)
+                .map(str::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| RuntimeError::Network("invalid WireGuard allowed IPs".to_string()))?;
+            vec![WireGuardPeer::new(
+                container_id.to_string(),
+                peer.public_key,
+                peer.endpoint.parse().map_err(|_| RuntimeError::Network("invalid WireGuard peer endpoint".to_string()))?,
+                allowed_ips,
+            )]
+        }
+        None => Vec::new(),
+    };
+    let config = WireGuardInterfaceConfig {
+        name: cfg.iface,
+        private_key_path: key_path.clone(),
+        listen_port: wireguard_listen_port(container_id),
+        addresses,
+    };
+    let applied = manager.apply(&config, &peers);
+    if std::env::var_os("FERROCRATE_WG_PRIVATE_KEY_PATH").is_none() {
+        let _ = fs::remove_file(&key_path);
+    }
+    applied.map_err(|error| RuntimeError::Network(error.to_string()))?;
     Ok((Some(ipv4), ipv6))
 }
 

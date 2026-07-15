@@ -16,6 +16,7 @@ pub mod rootless;
 pub mod subnet;
 pub mod validate;
 pub mod veth;
+pub mod wireguard;
 
 // Re-export executor types
 pub use executor::{exec_cmd, exec_cmd_capture, ExecError, Transaction};
@@ -41,3 +42,4 @@ pub use veth::{assign_ip, create_veth_pair, destroy_veth_pair, VethConfig, VethP
 
 // Re-export netns execution functions
 pub use netns::{create_netns, destroy_netns, enter_netns, move_to_netns, netns_path, NetnsError};
+pub use wireguard::{WireGuardError, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer, WireGuardSnapshot};

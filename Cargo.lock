@@ -891,6 +891,7 @@ version = "0.1.0"
 dependencies = [
  "aya",
  "aya-build",
+ "ipnet",
  "nix",
  "tempfile",
  "thiserror 2.0.18",

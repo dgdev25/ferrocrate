@@ -4,6 +4,7 @@ members = [
   "ferro-core",
   "ferro-net",
   "ferro-netd",
+  "ferro-mgr",
   "ferro-net-ebpf",
   "ferro-mind",
   "ferro-compose",

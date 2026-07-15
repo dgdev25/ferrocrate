@@ -1,0 +1,23 @@
+[package]
+name = "ferro-mgr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = "0.14"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+prost-build = "0.14"
+protoc-bin-vendored = "3"

@@ -1,0 +1,16 @@
+syntax = "proto3";
+package ferro.manager.v1;
+
+service EnrollmentService { rpc Enroll(EnrollRequest) returns (EnrollResponse); }
+service ControlService { rpc ControlStream(stream AgentMessage) returns (stream ManagerMessage); }
+service AdminService { rpc Inspect(AdminRequest) returns (AdminResponse); }
+
+message EnrollRequest { string node_id = 1; bytes public_key = 2; string enrollment_token = 3; }
+message EnrollResponse { string cluster_id = 1; uint64 cluster_epoch = 2; bytes certificate = 3; bytes ca_certificate = 4; }
+message OverlayState { string overlay_id = 1; repeated string routes = 2; repeated Peer peers = 3; }
+message Peer { string node_id = 1; bytes public_key = 2; string endpoint = 3; repeated string allowed_ips = 4; }
+message DesiredState { string cluster_id = 1; uint64 cluster_epoch = 2; uint64 revision = 3; repeated OverlayState overlays = 4; bytes signature = 5; int64 lease_expires_unix = 6; }
+message AgentMessage { string node_id = 1; uint64 acknowledged_revision = 2; bytes payload = 3; }
+message ManagerMessage { DesiredState desired_state = 1; string error = 2; }
+message AdminRequest { string cluster_id = 1; }
+message AdminResponse { uint32 node_count = 1; uint64 cluster_epoch = 2; }

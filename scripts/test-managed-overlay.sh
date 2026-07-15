@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root="${FERROCRATE_REPO_ROOT:-${PWD}}"
+if [[ ! -f "$repo_root/Cargo.toml" ]]; then
+  repo_root=$(cd "$(dirname -- "$0")/.." && pwd)
+fi
 cd "$repo_root"
 
 cargo test -p ferro-mgr --tests
 cargo test -p ferro-netd
-cargo test -p ferro-core managed_overlay network_backend
-cargo test -p ferro-cli managed_overlay network_backend
+cargo test -p ferro-core managed_overlay
+cargo test -p ferro-core network_backend
+cargo test -p ferro-cli managed_overlay
+cargo test -p ferro-cli network_backend
 
 if [[ "${FERROCRATE_RUN_PRIVILEGED_TESTS:-0}" != "1" ]]; then
   echo "privileged managed-overlay gate skipped; set FERROCRATE_RUN_PRIVILEGED_TESTS=1 to enable" >&2

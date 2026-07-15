@@ -1,6 +1,6 @@
 use std::{collections::{BTreeMap, BTreeSet}, fs::{self, OpenOptions}, io::Write, os::unix::fs::PermissionsExt};
 use serde::{Deserialize, Serialize};
-use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, netns::move_to_netns, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
+use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, exec_cmd_capture, netns::move_to_netns, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use std::path::PathBuf;
 use crate::policy::Policy;
 use crate::protocol::{NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
@@ -19,6 +19,9 @@ impl NetdServer {
             self.endpoints = state.endpoints;
         }
         self.journal = Some(path);
+        self.overlays.retain(|overlay| exec_cmd_capture(&vec!["ip".into(), "link".into(), "show".into(), "dev".into(), overlay.clone()]).is_ok());
+        self.endpoints.retain(|endpoint, _| exec_cmd_capture(&vec!["ip".into(), "link".into(), "show".into(), "dev".into(), endpoint.clone()]).is_ok());
+        self.persist()?;
         Ok(self)
     }
     fn persist(&self) -> Result<(), String> {

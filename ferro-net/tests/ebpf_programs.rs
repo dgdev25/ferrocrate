@@ -336,7 +336,7 @@ fn mirrored_metadata_abi_uses_one_coherent_fixed_width_config() {
         flags: host_abi::META_FLAG_SNAT_RANGE_RESERVED,
     };
     let expected = [
-        0, 0, 0, 1, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0, 0, 0, 2, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
         0xd6, 0xd8, 0xd6, 0xf7, 0, 1, 0, 0, 0, 1,
     ];
     assert_eq!(config.encode(), expected);

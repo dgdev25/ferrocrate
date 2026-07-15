@@ -128,7 +128,8 @@ impl MetaConfig {
             .copy_from_slice(&self.snat_port_start.to_be_bytes());
         bytes[META_SNAT_RANGE_END_OFFSET..META_FLAGS_OFFSET]
             .copy_from_slice(&self.snat_port_end.to_be_bytes());
-        bytes[META_FLAGS_OFFSET..META_VALUE_LEN].copy_from_slice(&self.flags.to_be_bytes());
+        bytes[META_FLAGS_OFFSET..META_LOOPBACK_IFINDEX_OFFSET]
+            .copy_from_slice(&self.flags.to_be_bytes());
         bytes
     }
 
@@ -166,7 +167,7 @@ impl MetaConfig {
                     .expect("fixed metadata SNAT end range"),
             ),
             flags: u16::from_be_bytes(
-                bytes[META_FLAGS_OFFSET..META_VALUE_LEN]
+                bytes[META_FLAGS_OFFSET..META_LOOPBACK_IFINDEX_OFFSET]
                     .try_into()
                     .expect("fixed metadata flags range"),
             ),
@@ -446,7 +447,7 @@ mod ebpf_abi_tests {
 
     #[test]
     fn abi_version_is_nonzero() {
-        assert_eq!(PROGRAM_ABI_VERSION, 1);
+        assert_eq!(PROGRAM_ABI_VERSION, 2);
     }
 
     #[test]

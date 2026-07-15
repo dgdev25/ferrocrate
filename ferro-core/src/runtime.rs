@@ -6711,6 +6711,14 @@ mod tests {
                         self.live.remove(index);
                     }
                 }
+                Some("-F") => {
+                    self.live.retain(|existing| {
+                        existing.get(1) != command.get(1)
+                            || existing.get(2) != command.get(2)
+                            || existing.get(3).map(String::as_str) != Some("-A")
+                            || existing.get(4) != command.get(4)
+                    });
+                }
                 _ => {}
             }
             Ok(())

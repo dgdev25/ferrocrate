@@ -14,6 +14,8 @@ use crate::image_config::{
 use crate::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
 use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
+#[cfg(target_os = "linux")]
+use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
 use crate::mac_profiles::generate_apparmor_profile;
 use crate::mounts::{
     apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts, BindMount, MountError, TmpfsMount,
@@ -2222,6 +2224,9 @@ fn setup_network(
     rollback: &mut CreationRollback,
     existing_records: &[ContainerRecord],
 ) -> Result<NetworkSetup, RuntimeError> {
+    if let Some(overlay_id) = network_mode.strip_prefix("managed:") {
+        return setup_managed_network(container_id, overlay_id, network_backend, rollback);
+    }
     match network_mode {
         "host" => {
             if !port_mappings.is_empty() {
@@ -2507,6 +2512,48 @@ fn setup_network(
         ownership: Some(ownership),
         ebpf_network: None,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn setup_managed_network(
+    container_id: &str,
+    overlay_id: &str,
+    _network_backend: NetworkBackend,
+    rollback: &mut CreationRollback,
+) -> Result<NetworkSetup, RuntimeError> {
+    if !nix::unistd::Uid::effective().is_root() {
+        return Err(RuntimeError::Network("managed overlay requires root".to_string()));
+    }
+    let socket = std::env::var("FERROCRATE_AGENT_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
+    let request = ManagedOverlayRequest::AttachContainer { overlay_id: overlay_id.to_string(), container_id: container_id.to_string(), now_unix: crate::container_store::now_unix() as i64 };
+    let response = ManagedOverlayClient::new(socket).request(&request).map_err(|error| RuntimeError::Network(format!("managed overlay agent unavailable: {error}")))?;
+    let ManagedOverlayResponse::Attached(attachment) = response else {
+        return Err(RuntimeError::Network("managed overlay agent rejected attachment".to_string()));
+    };
+    let netns_name = attachment.netns.clone();
+    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+    rollback.track_namespace_created(netns_name.clone())?;
+    rollback.identify_namespace(kernel_path_identity(&netns::netns_path(&netns_name))?)?;
+    let host_veth = format!("veth{}", short_id(container_id, 8));
+    let host_veth = host_veth[..host_veth.len().min(15)].to_string();
+    let cont_veth = format!("vc{}", short_id(container_id, 8));
+    let config = veth::VethConfig { pair: veth::VethPair { host: host_veth.clone(), container: cont_veth.clone() }, mtu: Some(attachment.mtu.into()), host_addr: None, container_addr: None };
+    run_cmd(&veth::build_ip_link_add_veth_cmd(&config)?)?;
+    rollback.track_veth_created(host_veth.clone())?;
+    let host_ifindex = interface_ifindex(&host_veth)?;
+    rollback.identify_veth(host_ifindex)?;
+    rollback.host_veth = Some((host_veth.clone(), Some(host_ifindex)));
+    rollback.netns_name = Some(netns_name.clone());
+    run_cmd(&bridge::build_ip_link_set_master_cmd(&host_veth, &attachment.bridge)?)?;
+    run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
+    run_cmd(&netns::build_ip_link_set_netns_cmd(&cont_veth, &netns_name)?)?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", &cont_veth, "name", "eth0"]))?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "addr", "add", &format!("{}/24", attachment.ipv4), "dev", "eth0"]))?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
+    run_cmd(&ip_netns_exec(&netns_name, &["ip", "route", "add", "default", "via", &attachment.gateway]))?;
+    rollback.track_network_context(attachment.ipv4.clone(), &[])?;
+    Ok(NetworkSetup::isolated(Some(netns_name), Some(attachment.ipv4), attachment.ipv6))
 }
 
 fn build_network_plan(

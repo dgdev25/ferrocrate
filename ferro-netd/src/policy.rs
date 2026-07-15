@@ -87,6 +87,10 @@ impl Policy {
         self.revisions.insert("__desired_state".into(), (state.cluster_epoch, state.revision));
         Ok(state)
     }
+
+    pub fn rollback(&mut self, scope: &str, epoch: u64, revision: u64) {
+        if self.revisions.get(scope) == Some(&(epoch, revision)) { self.revisions.remove(scope); }
+    }
 }
 
 fn bytes_for_state(state: &WireDesiredState) -> Vec<u8> { state.encode_to_vec() }

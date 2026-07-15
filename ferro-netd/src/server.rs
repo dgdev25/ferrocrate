@@ -62,7 +62,7 @@ impl NetdServer {
                     if manager.apply(&config, &peers).is_err() { return reject(RejectionCode::Busy, "failed to apply WireGuard overlay"); }
                 }
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() { return reject(RejectionCode::Busy, "failed to create overlay bridge"); }
-                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
+                if apply_overlay_routes(&overlay_id, &routes).is_err() { self.policy.rollback("__desired_state", state.cluster_epoch, state.revision); return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 self.overlays.insert(overlay_id.clone());
                 self.routes.insert(overlay_id.clone(), routes);
             }
@@ -76,7 +76,7 @@ impl NetdServer {
                 for endpoint in endpoints { self.endpoints.remove(&endpoint); let _ = destroy_veth_pair(&endpoint); }
                 let _ = destroy_bridge(&overlay_id);
             }
-            if self.persist().is_err() { return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
+            if self.persist().is_err() { self.policy.rollback("__desired_state", state.cluster_epoch, state.revision); return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
             return NetdResponse::Applied;
         }
         let envelope: SignedEnvelope = match serde_json::from_slice(&frame[4..]) { Ok(value) => value, Err(_) => return reject(RejectionCode::InvalidFrame, "invalid JSON") };
@@ -96,10 +96,10 @@ impl NetdServer {
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
-                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
+                if apply_overlay_routes(&overlay_id, &routes).is_err() { self.policy.rollback(&overlay_id, envelope.epoch, envelope.revision); return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 self.overlays.insert(overlay_id.clone());
                 self.routes.insert(overlay_id.clone(), routes);
-                if self.persist().is_err() { self.overlays.remove(&overlay_id); let _ = destroy_bridge(&overlay_id); return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
+                if self.persist().is_err() { self.policy.rollback(&overlay_id, envelope.epoch, envelope.revision); self.overlays.remove(&overlay_id); let _ = destroy_bridge(&overlay_id); return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {

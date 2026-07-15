@@ -6,17 +6,18 @@ use crate::policy::Policy;
 use crate::protocol::{DesiredStateEnvelope, NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PersistedState { overlays: BTreeSet<String>, endpoints: BTreeMap<String, String> }
+struct PersistedState { overlays: BTreeSet<String>, endpoints: BTreeMap<String, String>, #[serde(default)] routes: BTreeMap<String, Vec<String>> }
 
-pub struct NetdServer { uid: u32, policy: Policy, overlays: BTreeSet<String>, endpoints: BTreeMap<String, String>, wireguard: Option<(WireGuardManager, PathBuf, u16)>, journal: Option<PathBuf> }
+pub struct NetdServer { uid: u32, policy: Policy, overlays: BTreeSet<String>, endpoints: BTreeMap<String, String>, routes: BTreeMap<String, Vec<String>>, wireguard: Option<(WireGuardManager, PathBuf, u16)>, journal: Option<PathBuf> }
 impl NetdServer {
-    pub fn new(uid: u32, policy: Policy) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), wireguard: None, journal: None } }
-    pub fn with_wireguard(uid: u32, policy: Policy, private_key_path: PathBuf, listen_port: u16) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), wireguard: Some((WireGuardManager::new(None), private_key_path, listen_port)), journal: None } }
+    pub fn new(uid: u32, policy: Policy) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), routes: BTreeMap::new(), wireguard: None, journal: None } }
+    pub fn with_wireguard(uid: u32, policy: Policy, private_key_path: PathBuf, listen_port: u16) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new(), routes: BTreeMap::new(), wireguard: Some((WireGuardManager::new(None), private_key_path, listen_port)), journal: None } }
     pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
         if path.exists() {
             let state: PersistedState = serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
             self.overlays = state.overlays;
             self.endpoints = state.endpoints;
+            self.routes = state.routes;
         }
         self.journal = Some(path);
         self.overlays.retain(|overlay| exec_cmd_capture(&vec!["ip".into(), "link".into(), "show".into(), "dev".into(), overlay.clone()]).is_ok());
@@ -29,7 +30,7 @@ impl NetdServer {
         let temporary = path.with_extension("tmp");
         let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;
         file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
-        file.write_all(&serde_json::to_vec(&PersistedState { overlays: self.overlays.clone(), endpoints: self.endpoints.clone() }).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+        file.write_all(&serde_json::to_vec(&PersistedState { overlays: self.overlays.clone(), endpoints: self.endpoints.clone(), routes: self.routes.clone() }).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
         fs::rename(temporary, path).map_err(|error| error.to_string())
     }
@@ -60,14 +61,16 @@ impl NetdServer {
                     let config = WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses };
                     if manager.apply(&config, &peers).is_err() { return reject(RejectionCode::Busy, "failed to apply WireGuard overlay"); }
                 }
-                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() { return reject(RejectionCode::Busy, "failed to create overlay bridge"); }
-                self.overlays.insert(overlay_id);
+                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
+                self.overlays.insert(overlay_id.clone());
+                self.routes.insert(overlay_id.clone(), routes);
             }
             let stale: Vec<String> = self.overlays.difference(&desired_overlays).cloned().collect();
             for overlay_id in stale {
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard { let _ = manager.remove(&WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses: Vec::new() }); }
                 self.overlays.remove(&overlay_id);
+                if let Some(routes) = self.routes.remove(&overlay_id) { remove_overlay_routes(&overlay_id, &routes); }
                 let endpoints: Vec<String> = self.endpoints.iter().filter(|(_, overlay)| *overlay == &overlay_id).map(|(endpoint, _)| endpoint.clone()).collect();
                 for endpoint in endpoints { self.endpoints.remove(&endpoint); let _ = destroy_veth_pair(&endpoint); }
                 let _ = destroy_bridge(&overlay_id);
@@ -89,17 +92,18 @@ impl NetdServer {
                     let config = WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses };
                     if manager.apply(&config, &peers).is_err() { return reject(RejectionCode::Busy, "failed to apply WireGuard overlay"); }
                 }
-                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
+                if apply_overlay_routes(&overlay_id, &routes).is_err() { return reject(RejectionCode::Busy, "failed to apply overlay routes"); }
                 self.overlays.insert(overlay_id.clone());
+                self.routes.insert(overlay_id.clone(), routes);
                 if self.persist().is_err() { self.overlays.remove(&overlay_id); let _ = destroy_bridge(&overlay_id); return reject(RejectionCode::Busy, "failed to persist overlay ownership"); }
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
                 if let Some((manager, private_key_path, listen_port)) = &self.wireguard { let _ = manager.remove(&WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses: Vec::new() }); }
-                if self.overlays.remove(&overlay_id) { let _ = destroy_bridge(&overlay_id); }
+                if self.overlays.remove(&overlay_id) { if let Some(routes) = self.routes.remove(&overlay_id) { remove_overlay_routes(&overlay_id, &routes); } let _ = destroy_bridge(&overlay_id); }
                 let _ = self.persist();
                 NetdResponse::Removed
             }
@@ -125,5 +129,8 @@ fn apply_overlay_routes(interface: &str, routes: &[String]) -> Result<(), ()> {
         exec_cmd(&vec!["ip".into(), "route".into(), "replace".into(), route.clone(), "dev".into(), interface.to_string()]).map_err(|_| ())?;
     }
     Ok(())
+}
+fn remove_overlay_routes(interface: &str, routes: &[String]) {
+    for route in routes { let _ = exec_cmd(&vec!["ip".into(), "route".into(), "del".into(), route.clone(), "dev".into(), interface.to_string()]); }
 }
 fn reject(code: RejectionCode, reason: &str) -> NetdResponse { NetdResponse::Rejected { code, reason: reason.to_string() } }

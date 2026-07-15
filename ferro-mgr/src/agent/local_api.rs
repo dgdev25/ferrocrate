@@ -1,5 +1,9 @@
 use std::{collections::BTreeMap, sync::Mutex};
+#[cfg(unix)]
+use std::{fs, io::{Read, Write}, os::unix::net::UnixListener, path::Path};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 
 use thiserror::Error;
 
@@ -59,6 +63,8 @@ pub enum LocalApiResponse {
     Rejected { reason: String },
 }
 
+pub const MAX_LOCAL_API_FRAME_BYTES: usize = 256 * 1024;
+
 impl LocalApi {
     pub fn new(runtime_uid: u32, lease_expiry: i64, ipam: Ipam) -> Self { Self { runtime_uid, lease_expiry: Mutex::new(lease_expiry), ipam, overlays: Mutex::new(BTreeMap::new()), enforce_overlays: Mutex::new(false) } }
 
@@ -96,6 +102,32 @@ impl LocalApi {
     pub fn inspect(&self, caller_uid: u32, overlay_id: &str, now_unix: i64) -> Result<OverlayConfig, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
         self.overlays.lock().map_err(|_| LocalApiError::UnknownOverlay)?.get(overlay_id).cloned().ok_or(LocalApiError::UnknownOverlay)
+    }
+
+    #[cfg(unix)]
+    pub fn serve_unix(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        if path.exists() { fs::remove_file(path)?; }
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let listener = UnixListener::bind(path)?;
+        for stream in listener.incoming() {
+            let mut stream = match stream { Ok(stream) => stream, Err(_) => continue };
+            let caller_uid = getsockopt(&stream, PeerCredentials).map(|cred| cred.uid()).unwrap_or(u32::MAX);
+            let mut prefix = [0_u8; 4];
+            if stream.read_exact(&mut prefix).is_err() { continue; }
+            let length = u32::from_be_bytes(prefix) as usize;
+            if length > MAX_LOCAL_API_FRAME_BYTES { continue; }
+            let mut body = vec![0_u8; length];
+            if stream.read_exact(&mut body).is_err() { continue; }
+            let response = match serde_json::from_slice::<LocalApiRequest>(&body) {
+                Ok(request) => self.handle(caller_uid, request),
+                Err(error) => LocalApiResponse::Rejected { reason: format!("invalid local API request: {error}") },
+            };
+            let body = match serde_json::to_vec(&response) { Ok(body) => body, Err(_) => continue };
+            if body.len() > MAX_LOCAL_API_FRAME_BYTES { continue; }
+            let _ = stream.write_all(&(body.len() as u32).to_be_bytes()).and_then(|_| stream.write_all(&body));
+        }
+        Ok(())
     }
 
     pub fn renew_lease(&self, caller_uid: u32, expiry: i64) -> Result<(), LocalApiError> {

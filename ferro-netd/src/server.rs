@@ -50,9 +50,18 @@ impl NetdServer {
                     addresses: Vec::new(),
                 };
                 let NetdRequest::ApplyOverlay { overlay_id, peers, routes: _, addresses } = request else { unreachable!() };
+                if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
+                    let peers = match peers.iter().map(|peer| {
+                        let endpoint = peer.endpoint.parse().map_err(|_| ());
+                        let allowed_ips = peer.allowed_ips.iter().map(|route| route.parse().map_err(|_| ())).collect::<Result<Vec<_>, _>>();
+                        match (endpoint, allowed_ips) { (Ok(endpoint), Ok(allowed_ips)) => Ok(WireGuardPeer::new(peer.node_id.clone(), peer.public_key.clone(), endpoint, allowed_ips)), _ => Err(()) }
+                    }).collect::<Result<Vec<_>, _>>() { Ok(peers) => peers, Err(()) => return reject(RejectionCode::PolicyViolation, "invalid WireGuard peer") };
+                    let addresses = match addresses.iter().map(|address| address.parse()).collect::<Result<Vec<_>, _>>() { Ok(addresses) => addresses, Err(_) => return reject(RejectionCode::PolicyViolation, "invalid WireGuard interface address") };
+                    let config = WireGuardInterfaceConfig { name: overlay_id.clone(), private_key_path: private_key_path.clone(), listen_port: *listen_port, addresses };
+                    if manager.apply(&config, &peers).is_err() { return reject(RejectionCode::Busy, "failed to apply WireGuard overlay"); }
+                }
                 if !self.overlays.contains(&overlay_id) && create_bridge(&BridgeConfig { name: overlay_id.clone(), cidr: String::new(), ipv6_cidr: None }).is_err() { return reject(RejectionCode::Busy, "failed to create overlay bridge"); }
                 self.overlays.insert(overlay_id);
-                let _ = (peers, addresses);
             }
             let stale: Vec<String> = self.overlays.difference(&desired_overlays).cloned().collect();
             for overlay_id in stale {

@@ -39,7 +39,7 @@ impl LocalApi {
 
     pub fn detach(&self, caller_uid: u32, container_id: &str, now_unix: i64) -> Result<Option<Allocation>, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
-        Ok(self.ipam.release(container_id))
+        Ok(self.ipam.release(container_id)?)
     }
 
     pub fn renew_lease(&self, caller_uid: u32, expiry: i64) -> Result<(), LocalApiError> {

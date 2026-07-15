@@ -18,3 +18,15 @@ fn local_api_requires_uid_and_current_lease() {
     assert!(api.detach(1001, "c1", 100).unwrap().is_some());
     assert!(api.detach(1001, "c1", 100).unwrap().is_none());
 }
+
+#[test]
+fn ipam_state_survives_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ipam.json");
+    let pool = "10.3.0.0/29".parse().unwrap();
+    let first = Ipam::with_state(pool, "10.3.0.1".parse().unwrap(), vec![], &path).unwrap();
+    assert_eq!(first.allocate("c1").unwrap().address.to_string(), "10.3.0.2");
+    drop(first);
+    let second = Ipam::with_state(pool, "10.3.0.1".parse().unwrap(), vec![], path).unwrap();
+    assert_eq!(second.allocate("c2").unwrap().address.to_string(), "10.3.0.3");
+}

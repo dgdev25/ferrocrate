@@ -1,0 +1,41 @@
+use rusqlite::{Connection, Result};
+
+pub(super) fn apply(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS enrollment_tokens (
+             secret_hash BLOB PRIMARY KEY NOT NULL,
+             expected_node TEXT NOT NULL,
+             approved_endpoint TEXT NOT NULL,
+             overlay_scope TEXT NOT NULL,
+             expires_at INTEGER NOT NULL,
+             consumed_at INTEGER
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS nodes (
+             node_id TEXT PRIMARY KEY NOT NULL,
+             public_key BLOB UNIQUE NOT NULL,
+             endpoint TEXT UNIQUE NOT NULL,
+             revoked_at INTEGER,
+             revocation_reason TEXT
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS overlays (
+             overlay_id TEXT PRIMARY KEY NOT NULL,
+             cidr TEXT UNIQUE NOT NULL
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS node_subnets (
+             overlay_id TEXT NOT NULL REFERENCES overlays(overlay_id),
+             node_id TEXT NOT NULL REFERENCES nodes(node_id),
+             cidr TEXT UNIQUE NOT NULL,
+             PRIMARY KEY (overlay_id, node_id)
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS desired_revisions (
+             revision INTEGER PRIMARY KEY NOT NULL,
+             overlay_id TEXT NOT NULL REFERENCES overlays(overlay_id),
+             payload BLOB NOT NULL
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS acknowledgements (
+             node_id TEXT NOT NULL REFERENCES nodes(node_id),
+             revision INTEGER NOT NULL REFERENCES desired_revisions(revision),
+             PRIMARY KEY (node_id, revision)
+         ) STRICT;",
+    )
+}

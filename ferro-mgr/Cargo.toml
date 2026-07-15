@@ -16,6 +16,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"]
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+ipnet = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+tempfile = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

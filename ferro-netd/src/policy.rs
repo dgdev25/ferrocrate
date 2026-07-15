@@ -43,6 +43,11 @@ fn validate_request(request: &NetdRequest) -> Result<(), RejectionCode> {
             for route in &peer.allowed_ips { route.parse::<IpNet>().map_err(|_| RejectionCode::PolicyViolation)?; }
         }
     }
+    if let NetdRequest::AttachEndpoint { overlay_id, endpoint_id } | NetdRequest::DetachEndpoint { overlay_id, endpoint_id } = request {
+        validate_interface_name(overlay_id).map_err(|_| RejectionCode::PolicyViolation)?;
+        validate_interface_name(endpoint_id).map_err(|_| RejectionCode::PolicyViolation)?;
+        validate_interface_name(&format!("fc-{endpoint_id}")).map_err(|_| RejectionCode::PolicyViolation)?;
+    }
     Ok(())
 }
 

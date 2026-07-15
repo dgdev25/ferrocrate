@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
-use ferro_net::bridge::{create_bridge, destroy_bridge, BridgeConfig};
+use std::collections::{BTreeMap, BTreeSet};
+use ferro_net::{bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig}, exec_cmd, veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair}};
 use crate::policy::Policy;
 use crate::protocol::{NetdRequest, NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES};
 
-pub struct NetdServer { uid: u32, policy: Policy, overlays: BTreeSet<String> }
+pub struct NetdServer { uid: u32, policy: Policy, overlays: BTreeSet<String>, endpoints: BTreeMap<String, String> }
 impl NetdServer {
-    pub fn new(uid: u32, policy: Policy) -> Self { Self { uid, policy, overlays: BTreeSet::new() } }
+    pub fn new(uid: u32, policy: Policy) -> Self { Self { uid, policy, overlays: BTreeSet::new(), endpoints: BTreeMap::new() } }
     pub fn handle_peer(&mut self, uid: u32, frame: &[u8], now: u64) -> NetdResponse {
         if uid != self.uid { return reject(RejectionCode::UnauthorizedPeer, "unexpected Unix peer UID"); }
         if frame.len() > MAX_FRAME_BYTES + 4 { return reject(RejectionCode::OversizedFrame, "frame exceeds 1 MiB"); }
@@ -26,8 +26,17 @@ impl NetdServer {
                 if self.overlays.remove(&overlay_id) { let _ = destroy_bridge(&overlay_id); }
                 NetdResponse::Removed
             }
-            NetdRequest::AttachEndpoint { .. } => NetdResponse::Attached,
-            NetdRequest::DetachEndpoint { .. } => NetdResponse::Detached,
+            NetdRequest::AttachEndpoint { overlay_id, endpoint_id } => {
+                if self.endpoints.contains_key(&endpoint_id) { return NetdResponse::Attached; }
+                let container = format!("fc-{endpoint_id}");
+                let config = VethConfig { pair: VethPair { host: endpoint_id.clone(), container }, mtu: None, host_addr: None, container_addr: None };
+                if create_veth_pair(&config).is_err() { return reject(RejectionCode::Busy, "failed to create endpoint veth"); }
+                let master = match build_ip_link_set_master_cmd(&endpoint_id, &overlay_id) { Ok(command) => command, Err(_) => { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::PolicyViolation, "invalid endpoint interface"); } };
+                if exec_cmd(&master).is_err() { let _ = destroy_veth_pair(&endpoint_id); return reject(RejectionCode::Busy, "failed to attach endpoint veth"); }
+                self.endpoints.insert(endpoint_id, overlay_id);
+                NetdResponse::Attached
+            }
+            NetdRequest::DetachEndpoint { endpoint_id, .. } => { if self.endpoints.remove(&endpoint_id).is_some() { let _ = destroy_veth_pair(&endpoint_id); } NetdResponse::Detached }
             NetdRequest::Inspect { overlay_id } => NetdResponse::Snapshot { overlay_id, revision: envelope.revision },
         }
     }

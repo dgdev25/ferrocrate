@@ -1072,6 +1072,7 @@ dependencies = [
  "ferro-net",
  "ipnet",
  "nix",
+ "prost 0.14.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

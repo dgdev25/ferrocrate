@@ -185,6 +185,11 @@ impl ManagerStore {
             Ok(())
         })
     }
+
+    pub fn node_count(&self) -> Result<u32, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row("SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL", [], |row| row.get(0))?)
+    }
 }
 
 fn consume_token_tx(tx: &Transaction<'_>, hash: &[u8; 32], now_unix_secs: i64) -> Result<(String, String), StoreError> {

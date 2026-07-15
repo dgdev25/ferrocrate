@@ -62,7 +62,7 @@ impl AdminService for AdminServiceImpl {
     async fn inspect(&self, request: Request<AdminRequest>) -> Result<Response<AdminResponse>, Status> {
         let request = request.into_inner();
         if request.cluster_id.is_empty() { return Err(Status::invalid_argument("cluster_id is required")); }
-        let _ = &self.store;
-        Ok(Response::new(AdminResponse { node_count: 0, cluster_epoch: self.cluster_epoch }))
+        let node_count = self.store.node_count().map_err(|_| Status::internal("manager state unavailable"))?;
+        Ok(Response::new(AdminResponse { node_count, cluster_epoch: self.cluster_epoch }))
     }
 }

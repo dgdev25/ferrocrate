@@ -31,3 +31,12 @@ fn allocation_uses_lowest_non_reserved_subnet() {
     let allocated = store.allocate_node_subnet("overlay-a", "node-a", 26, &[reserved]).unwrap();
     assert_eq!(allocated.to_string(), "10.44.0.64/26");
 }
+
+#[test]
+fn node_count_excludes_revoked_nodes() {
+    let store = store();
+    store.register_node(enrollment()).unwrap();
+    assert_eq!(store.node_count().unwrap(), 1);
+    store.revoke_node("node-a", "test").unwrap();
+    assert_eq!(store.node_count().unwrap(), 0);
+}

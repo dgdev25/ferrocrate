@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::{enrollment::EnrollmentService, pki::CertificateAuthority, proto::{admin_service_server::AdminService, control_service_server::ControlService, enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse, AgentMessage, EnrollRequest, EnrollResponse, ManagerMessage}, store::{Enrollment, ManagerStore}};
+use crate::{desired_state::DesiredStateBuilder, enrollment::EnrollmentService, pki::CertificateAuthority, proto::{admin_service_server::AdminService, control_service_server::ControlService, enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse, AgentMessage, EnrollRequest, EnrollResponse, ManagerMessage}, store::{Enrollment, ManagerStore}};
 
 pub struct EnrollmentServiceImpl {
     service: Arc<EnrollmentService>,
@@ -24,8 +24,12 @@ impl EnrollmentRpc for EnrollmentServiceImpl {
     }
 }
 
-pub struct ControlServiceImpl { cluster_id: String, epoch: u64 }
-impl ControlServiceImpl { pub fn new(cluster_id: impl Into<String>, epoch: u64) -> Self { Self { cluster_id: cluster_id.into(), epoch } } }
+pub struct ControlServiceImpl { builder: Arc<DesiredStateBuilder>, revision: u64 }
+impl ControlServiceImpl {
+    pub fn new(cluster_id: impl Into<String>, epoch: u64, signing_key: Vec<u8>) -> Self {
+        Self { builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)), revision: 1 }
+    }
+}
 
 #[tonic::async_trait]
 impl ControlService for ControlServiceImpl {
@@ -33,16 +37,21 @@ impl ControlService for ControlServiceImpl {
     async fn control_stream(&self, request: Request<tonic::Streaming<AgentMessage>>) -> Result<Response<Self::ControlStreamStream>, Status> {
         let mut inbound = request.into_inner();
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        let cluster_id = self.cluster_id.clone();
-        let epoch = self.epoch;
+        let builder = self.builder.clone();
+        let revision = self.revision;
         tokio::spawn(async move {
             while let Ok(Some(message)) = inbound.message().await {
                 if message.node_id.is_empty() { let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: "node_id is required".into() })).await; continue; }
-                let _ = sender.send(Ok(ManagerMessage { desired_state: None, error: format!("connected to {cluster_id} at epoch {epoch}") })).await;
+                let desired_state = builder.snapshot(revision, Vec::new(), chrono_like_now());
+                let _ = sender.send(Ok(ManagerMessage { desired_state: Some(desired_state), error: String::new() })).await;
             }
         });
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
+}
+
+fn chrono_like_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs() as i64)
 }
 
 pub struct AdminServiceImpl { store: Arc<ManagerStore>, cluster_epoch: u64 }

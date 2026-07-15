@@ -1,3 +1,4 @@
+use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::proto::{DesiredState, OverlayState};
@@ -33,10 +34,8 @@ impl DesiredStateBuilder {
         let mut state = DesiredState { cluster_id: self.cluster_id.clone(), cluster_epoch: self.cluster_epoch, revision, overlays, signature: Vec::new(), lease_expires_unix };
         let mut digest = Sha256::new();
         digest.update(&self.signing_key);
-        digest.update(state.cluster_id.as_bytes());
-        digest.update(state.cluster_epoch.to_le_bytes());
-        digest.update(state.revision.to_le_bytes());
-        digest.update(state.lease_expires_unix.to_le_bytes());
+        let unsigned = state.encode_to_vec();
+        digest.update(unsigned);
         state.signature = digest.finalize().to_vec();
         state
     }

@@ -1,0 +1,21 @@
+[Unit]
+Description=FerroCrate managed-overlay agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferro-agent
+Group=ferrocrate
+EnvironmentFile=/etc/ferrocrate/agent.env
+ExecStart=/usr/local/bin/ferro-agent
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ferrocrate /run/ferrocrate
+
+[Install]
+WantedBy=multi-user.target

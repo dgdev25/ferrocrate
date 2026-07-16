@@ -14,6 +14,12 @@ The enrollment listener serves `FERROCRATE_MANAGER_ADDR` (default `127.0.0.1:500
 
 The helper authenticates Unix peer credentials before decoding frames, requires signed leases and monotonic revisions, and restricts runtime capabilities after binding its socket.
 
+## Agent service
+
+Install `packaging/systemd/ferro-agent.service`, `ferro-netd.service`, and `ferro-mgr.service` with their matching `/etc/ferrocrate/*.env` files. The agent requires `FERROCRATE_AGENT_RUNTIME_UID`, `FERROCRATE_AGENT_LEASE_EXPIRY_UNIX`, `FERROCRATE_AGENT_IPV4_POOL`, `FERROCRATE_AGENT_IPV4_GATEWAY`, `FERROCRATE_AGENT_IPAM_STATE`, and `FERROCRATE_AGENT_SOCKET`. Optional `FERROCRATE_AGENT_IPV4_RESERVED` is comma-separated. `FERROCRATE_AGENT_OVERLAYS_JSON` is a JSON object keyed by overlay ID, for example `{"prod":{"bridge":"fcprod","gateway":"10.42.0.1","prefix":24,"mtu":1420}}`.
+
+The runtime user must belong to the `ferrocrate` group so it can connect to the agent's group-readable Unix socket. The agent enforces its configured runtime UID with `SO_PEERCRED`; netd independently enforces the agent UID.
+
 ## Recovery
 
 Stop the manager before restoring a backup. Restore to a new path with `ferro_mgr::recovery::restore_backup`; the operation verifies SQLite integrity, advances the cluster epoch, expires tokens, revokes active node records, and writes a recovery audit row. Never replace the live database in place.

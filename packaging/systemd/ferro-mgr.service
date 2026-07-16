@@ -1,0 +1,21 @@
+[Unit]
+Description=FerroCrate managed-overlay manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferro-mgr
+Group=ferrocrate
+EnvironmentFile=/etc/ferrocrate/manager.env
+ExecStart=/usr/local/bin/ferro-mgr
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ferrocrate
+
+[Install]
+WantedBy=multi-user.target

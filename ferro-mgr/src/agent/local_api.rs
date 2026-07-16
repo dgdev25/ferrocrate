@@ -42,7 +42,7 @@ pub struct LocalApi {
     enforce_overlays: Mutex<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OverlayConfig {
     pub bridge: String,
     pub gateway: std::net::Ipv4Addr,

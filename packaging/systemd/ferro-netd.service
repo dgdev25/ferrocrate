@@ -1,0 +1,20 @@
+[Unit]
+Description=FerroCrate privileged managed-overlay helper
+After=network-online.target ferro-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=ferrocrate
+EnvironmentFile=/etc/ferrocrate/netd.env
+ExecStart=/usr/local/bin/ferro-netd
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+ReadWritePaths=/var/lib/ferrocrate /run/ferrocrate
+
+[Install]
+WantedBy=multi-user.target

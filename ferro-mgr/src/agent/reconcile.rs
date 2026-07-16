@@ -50,7 +50,11 @@ impl<C: NetdClient> Agent<C> {
         if desired.lease_expires_unix <= now_unix { return Err(AgentError::ExpiredLease); }
         if !self.verify_signature(&desired) { return Err(AgentError::InvalidSignature); }
         let mut current = self.state.lock().expect("agent state lock poisoned");
-        if desired.cluster_epoch < current.cluster_epoch || desired.revision <= current.applied_revision { return Err(AgentError::StaleRevision); }
+        if desired.cluster_epoch < current.cluster_epoch
+            || (desired.cluster_epoch == current.cluster_epoch
+                && (desired.revision < current.applied_revision
+                    || (desired.revision == current.applied_revision && desired.lease_expires_unix <= current.lease_expiry)))
+        { return Err(AgentError::StaleRevision); }
         self.netd.apply(&desired).map_err(AgentError::Netd)?;
         *current = AgentState { cluster_epoch: desired.cluster_epoch, applied_revision: desired.revision, overlays: desired.overlays.iter().map(|overlay| overlay.overlay_id.clone()).collect(), lease_expiry: desired.lease_expires_unix };
         self.store.save(&current)?;

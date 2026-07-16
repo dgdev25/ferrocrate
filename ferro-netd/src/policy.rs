@@ -46,7 +46,7 @@ pub(crate) struct WirePeer {
     pub(crate) allowed_ips: Vec<String>,
 }
 
-pub struct Policy { cluster: String, node: String, key: VerifyingKey, revisions: BTreeMap<String, (u64, u64)> }
+pub struct Policy { cluster: String, node: String, key: VerifyingKey, revisions: BTreeMap<String, (u64, u64, u64)> }
 
 impl Policy {
     pub fn new(cluster: String, node: String, key: &str) -> Result<Self, RejectionCode> {
@@ -63,10 +63,12 @@ impl Policy {
         self.key.verify(&serde_json::to_vec(&unsigned).map_err(|_| RejectionCode::InvalidFrame)?, &Signature::from_slice(&signature).map_err(|_| RejectionCode::InvalidSignature)?).map_err(|_| RejectionCode::InvalidSignature)?;
         validate_request(&envelope.request)?;
         let overlay = overlay_id(&envelope.request).to_string();
-        if let Some((epoch, revision)) = self.revisions.get(&overlay) {
-            if envelope.epoch < *epoch || (envelope.epoch == *epoch && envelope.revision <= *revision) { return Err(RejectionCode::StaleRevision); }
+        if let Some((epoch, revision, lease)) = self.revisions.get(&overlay) {
+            if envelope.epoch < *epoch
+                || (envelope.epoch == *epoch && (envelope.revision < *revision || (envelope.revision == *revision && envelope.lease_expires_unix_secs <= *lease)))
+            { return Err(RejectionCode::StaleRevision); }
         }
-        self.revisions.insert(overlay, (envelope.epoch, envelope.revision));
+        self.revisions.insert(overlay, (envelope.epoch, envelope.revision, envelope.lease_expires_unix_secs));
         Ok(())
     }
 
@@ -78,18 +80,20 @@ impl Policy {
         let signature = Signature::from_slice(&unsigned.signature).map_err(|_| RejectionCode::InvalidSignature)?;
         unsigned.signature.clear();
         self.key.verify(&bytes_for_state(&unsigned), &signature).map_err(|_| RejectionCode::InvalidSignature)?;
-        if let Some((epoch, revision)) = self.revisions.get("__desired_state") {
-            if state.cluster_epoch < *epoch || (state.cluster_epoch == *epoch && state.revision <= *revision) { return Err(RejectionCode::StaleRevision); }
+        if let Some((epoch, revision, lease)) = self.revisions.get("__desired_state") {
+            if state.cluster_epoch < *epoch
+                || (state.cluster_epoch == *epoch && (state.revision < *revision || (state.revision == *revision && state.lease_expires_unix as u64 <= *lease)))
+            { return Err(RejectionCode::StaleRevision); }
         }
         for overlay in &state.overlays {
             validate_request(&NetdRequest::ApplyOverlay { overlay_id: overlay.overlay_id.clone(), peers: overlay.peers.iter().map(|peer| crate::protocol::PeerSpec { node_id: peer.node_id.clone(), public_key: String::from_utf8_lossy(&peer.public_key).into_owned(), endpoint: peer.endpoint.clone(), allowed_ips: peer.allowed_ips.clone() }).collect(), routes: overlay.routes.clone(), addresses: Vec::new() })?;
         }
-        self.revisions.insert("__desired_state".into(), (state.cluster_epoch, state.revision));
+        self.revisions.insert("__desired_state".into(), (state.cluster_epoch, state.revision, state.lease_expires_unix as u64));
         Ok(state)
     }
 
     pub fn rollback(&mut self, scope: &str, epoch: u64, revision: u64) {
-        if self.revisions.get(scope) == Some(&(epoch, revision)) { self.revisions.remove(scope); }
+        if matches!(self.revisions.get(scope), Some((current_epoch, current_revision, _)) if *current_epoch == epoch && *current_revision == revision) { self.revisions.remove(scope); }
     }
 }
 

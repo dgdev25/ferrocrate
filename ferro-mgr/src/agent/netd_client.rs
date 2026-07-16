@@ -38,7 +38,7 @@ impl NetdClient for UnixNetdClient {
     fn apply(&self, desired_state: &DesiredState) -> Result<(), String> {
         let request = DesiredStateEnvelope {
             cluster_id: &desired_state.cluster_id,
-            node_id: "",
+            node_id: &self.node_id,
             epoch: desired_state.cluster_epoch,
             revision: desired_state.revision,
             lease_expires_unix_secs: desired_state.lease_expires_unix as u64,
@@ -56,12 +56,15 @@ impl NetdClient for UnixNetdClient {
 pub struct UnixNetdClient {
     socket: PathBuf,
     timeout: Duration,
+    node_id: String,
 }
 
 impl UnixNetdClient {
-    pub fn new(socket: impl Into<PathBuf>) -> Self { Self { socket: socket.into(), timeout: Duration::from_secs(5) } }
+    pub fn new(socket: impl Into<PathBuf>) -> Self { Self { socket: socket.into(), timeout: Duration::from_secs(5), node_id: String::new() } }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self { self.timeout = timeout; self }
+
+    pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self { self.node_id = node_id.into(); self }
 
     pub fn request<Request, Response>(&self, request: &Request) -> Result<Response, NetdClientError>
     where Request: Serialize, Response: DeserializeOwned {
@@ -92,8 +95,9 @@ mod tests {
 
     #[test]
     fn client_has_bounded_timeout_and_socket_path() {
-        let client = UnixNetdClient::new("/run/ferrocrate/netd.sock").with_timeout(std::time::Duration::from_millis(50));
+        let client = UnixNetdClient::new("/run/ferrocrate/netd.sock").with_node_id("node-a").with_timeout(std::time::Duration::from_millis(50));
         assert_eq!(client.socket.to_string_lossy(), "/run/ferrocrate/netd.sock");
+        assert_eq!(client.node_id, "node-a");
         let _ = Request { value: 1 };
         let _ = std::marker::PhantomData::<Response>;
     }

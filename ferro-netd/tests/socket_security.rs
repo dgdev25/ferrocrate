@@ -47,3 +47,21 @@ fn policy_revision_can_be_rolled_back_for_retry() {
     policy.rollback("wg0", 4, 9);
     assert!(policy.validate(&envelope, 1).is_ok());
 }
+
+fn signed_envelope(signing: &SigningKey, lease_expires_unix_secs: u64) -> SignedEnvelope {
+    let mut envelope = SignedEnvelope { cluster_id: "cluster".into(), node_id: "node".into(), epoch: 4, revision: 9, lease_expires_unix_secs, request: NetdRequest::Inspect { overlay_id: "wg0".into() }, signature: String::new() };
+    let unsigned = serde_json::to_vec(&envelope).unwrap();
+    envelope.signature = base64::engine::general_purpose::STANDARD.encode(ed25519_dalek::Signer::sign(signing, &unsigned).to_bytes());
+    envelope
+}
+
+#[test]
+fn policy_allows_same_revision_only_when_lease_is_extended() {
+    let signing = SigningKey::from_bytes(&[7; 32]);
+    let key = base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().as_bytes());
+    let mut policy = policy::Policy::new("cluster".into(), "node".into(), &key).unwrap();
+
+    assert!(policy.validate(&signed_envelope(&signing, 100), 1).is_ok());
+    assert_eq!(policy.validate(&signed_envelope(&signing, 100), 1), Err(RejectionCode::StaleRevision));
+    assert!(policy.validate(&signed_envelope(&signing, 200), 1).is_ok());
+}

@@ -20,7 +20,7 @@ Install `packaging/systemd/ferro-agent.service`, `ferro-netd.service`, and `ferr
 
 The runtime user must belong to the `ferrocrate` group so it can connect to the agent's group-readable Unix socket. The agent enforces its configured runtime UID with `SO_PEERCRED`; netd independently enforces the agent UID.
 
-On each prepared Linux host, install the three built binaries into `/usr/local/bin`, then run `sudo scripts/install-managed-overlay-services.sh`. The installer creates the service users/group, state and runtime directories, empty protected environment files, and installs the systemd units. Populate the environment files before enabling services.
+On each prepared Linux host, install the three built binaries into `/usr/local/bin`, then run `sudo scripts/install-managed-overlay-services.sh`. The installer creates the service users/group, state and runtime directories, empty protected environment files, and installs the systemd units. Copy and adapt the non-secret templates in `packaging/env/` before enabling services; never copy placeholder keys into production.
 
 ## Recovery
 

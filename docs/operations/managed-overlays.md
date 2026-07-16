@@ -20,6 +20,8 @@ Install `packaging/systemd/ferro-agent.service`, `ferro-netd.service`, and `ferr
 
 The runtime user must belong to the `ferrocrate` group so it can connect to the agent's group-readable Unix socket. The agent enforces its configured runtime UID with `SO_PEERCRED`; netd independently enforces the agent UID.
 
+On each prepared Linux host, install the three built binaries into `/usr/local/bin`, then run `sudo scripts/install-managed-overlay-services.sh`. The installer creates the service users/group, state and runtime directories, empty protected environment files, and installs the systemd units. Populate the environment files before enabling services.
+
 ## Recovery
 
 Stop the manager before restoring a backup. Restore to a new path with `ferro_mgr::recovery::restore_backup`; the operation verifies SQLite integrity, advances the cluster epoch, expires tokens, revokes active node records, and writes a recovery audit row. Never replace the live database in place.

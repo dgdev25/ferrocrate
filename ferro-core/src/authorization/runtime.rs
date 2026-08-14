@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 
 use super::gate::{
     AuthorizationGate, AuthorizedRequest, CanonicalRequest, ExecutionBindings, ImageBinding,
+    MountHandleDescriptor,
 };
 use super::policy::PolicyStore;
-use super::{Action, RequestContext, RequestFacts, Resource, ResourceState};
+use super::{Action, MountClass, RequestContext, RequestFacts, Resource, ResourceState};
 use crate::container_store::ContainerRecord;
 use crate::container_store::CreationProvenance;
 use crate::witness::{
@@ -35,6 +36,25 @@ pub(crate) struct RuntimeAuthorization {
     runtime_id: [u8; 16],
     boot_id: [u8; 16],
     pseudonym_key: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RunMountFact {
+    pub class: MountClass,
+    pub mount_id: u64,
+    pub device_id: u64,
+    pub inode: u64,
+    pub open_flags: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunSecurityFacts {
+    pub capabilities: Vec<String>,
+    pub mounts: Vec<RunMountFact>,
+    pub network_ids: Vec<String>,
+    pub privileged: bool,
+    pub readonly_rootfs: bool,
+    pub no_new_privileges: bool,
 }
 
 pub(crate) struct MutationPermit {
@@ -116,6 +136,23 @@ impl RuntimeAuthorization {
         action: Action,
         record: &ContainerRecord,
     ) -> Result<MutationPermit, MediationError> {
+        self.authorize_with_facts(action, record, None)
+    }
+
+    pub(crate) fn authorize_run(
+        &self,
+        record: &ContainerRecord,
+        facts: &RunSecurityFacts,
+    ) -> Result<MutationPermit, MediationError> {
+        self.authorize_with_facts(Action::ContainerRun, record, Some(facts))
+    }
+
+    fn authorize_with_facts(
+        &self,
+        action: Action,
+        record: &ContainerRecord,
+        run: Option<&RunSecurityFacts>,
+    ) -> Result<MutationPermit, MediationError> {
         let resource_uuid = canonical_uuid(&record.id);
         let state = lifecycle_state(&record.status).ok_or(MediationError::Stale)?;
         let generation = record.mutation_generation.max(1);
@@ -138,10 +175,30 @@ impl RuntimeAuthorization {
         let pin = self.gate.pin();
         let operation = OperationId::from_bytes(rand::rng().random());
         let request_id = uuid_from_bytes(*operation.as_bytes());
+        let run = run.cloned().unwrap_or_default();
+        let mount_handles = run
+            .mounts
+            .iter()
+            .map(|mount| {
+                MountHandleDescriptor::new(
+                    mount.class,
+                    mount.mount_id,
+                    mount.device_id,
+                    mount.inode,
+                    mount.open_flags,
+                )
+            })
+            .collect::<Vec<_>>();
         let facts = RequestFacts {
             image_digest: image.as_ref().map(|(_, digest)| digest.clone()),
+            mounts: run.mounts.iter().map(|mount| mount.class).collect(),
+            network_ids: run.network_ids,
+            requested_capabilities: run.capabilities,
+            privileged: run.privileged,
             lifecycle_state: Some(state),
-            ..RequestFacts::default()
+            readonly_rootfs: run.readonly_rootfs,
+            no_new_privileges: run.no_new_privileges,
+            ..Default::default()
         };
         let resource = Resource::canonical(
             super::ResourceKind::Container,
@@ -152,7 +209,7 @@ impl RuntimeAuthorization {
         let context = RequestContext::resolved(request_id, None, action, resource, facts);
         let image_binding = image.map(|(reference, digest)| ImageBinding::new(reference, digest));
         let bindings =
-            ExecutionBindings::new(image_binding, generation, Some(state), None, Vec::new());
+            ExecutionBindings::new(image_binding, generation, Some(state), None, mount_handles);
         let request = CanonicalRequest::new(context, pin, bindings.clone(), bindings);
         let template = self.record_template(&request, operation, action)?;
 

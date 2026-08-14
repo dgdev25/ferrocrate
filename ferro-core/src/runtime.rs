@@ -1,6 +1,8 @@
 #[cfg(target_os = "linux")]
 use crate::ai_runtime::AiRuntimeConfig;
-use crate::authorization::runtime::{MediationError, RuntimeAuthorization};
+use crate::authorization::runtime::{
+    MediationError, RunMountFact, RunSecurityFacts, RuntimeAuthorization,
+};
 use crate::authorization::{
     gate::{AuthorizationGate, AuthorizedRequest},
     Action,
@@ -54,6 +56,7 @@ use ferro_net::BackendProbe;
 pub use ferro_net::NetworkBackend;
 use ferro_net::{WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use rand::Rng;
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::CString;
 use std::fs;
@@ -62,6 +65,7 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(target_os = "linux")]
@@ -656,6 +660,16 @@ pub struct ContainerRuntime {
     authorization: RuntimeAuthorization,
 }
 
+struct NormalizedRunRequest {
+    facts: RunSecurityFacts,
+    capabilities: Vec<caps::Capability>,
+    network_mode: String,
+    network_backend: NetworkBackend,
+    bind_mounts: Vec<BindMount>,
+    tmpfs_mounts: Vec<TmpfsMount>,
+    _bind_handles: Vec<std::fs::File>,
+}
+
 impl ContainerRuntime {
     pub fn new(runtime_dir: &Path) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
@@ -1012,11 +1026,23 @@ impl ContainerRuntime {
                 )
             },
         );
-        let candidate =
+        let normalized = normalize_run_request(
+            capabilities,
+            mounts,
+            tmpfs_mounts,
+            readonly_rootfs,
+            no_new_privs,
+            network_mode,
+            network_backend,
+            port_mappings,
+        )?;
+        let mut candidate =
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
+        candidate.capabilities = normalized.facts.capabilities.clone();
+        candidate.network_name = Some(network_mode.to_owned());
         let permit = self
             .authorization
-            .authorize(Action::ContainerRun, &candidate)?;
+            .authorize_run(&candidate, &normalized.facts)?;
         let creation_provenance = permit.creation_provenance();
         let (proof, intent) = permit.execution_authority();
         let authorized_image = proof
@@ -1024,6 +1050,7 @@ impl ContainerRuntime {
             .image_reference()
             .unwrap_or(image)
             .to_owned();
+        validate_normalized_run(proof, &normalized)?;
         let result = self.run_with_store_authorized(
             proof,
             intent,
@@ -1037,18 +1064,18 @@ impl ContainerRuntime {
             annotations,
             health,
             restart_policy,
-            capabilities,
+            &normalized.capabilities,
             limits,
-            mounts,
-            tmpfs_mounts,
-            readonly_rootfs,
-            no_new_privs,
+            &normalized.bind_mounts,
+            &normalized.tmpfs_mounts,
+            normalized.facts.readonly_rootfs,
+            normalized.facts.no_new_privileges,
             workdir,
             user,
             name,
             port_mappings,
-            network_mode,
-            network_backend,
+            &normalized.network_mode,
+            normalized.network_backend,
             ai_config,
         );
         self.authorization.complete(permit, result.is_ok())?;
@@ -1871,6 +1898,155 @@ fn generate_container_id() -> String {
         write!(&mut hex, "{byte:02x}").expect("hex format");
     }
     hex
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_run_request(
+    capabilities: &[caps::Capability],
+    mounts: &[BindMount],
+    tmpfs_mounts: &[TmpfsMount],
+    readonly_rootfs: bool,
+    no_new_privileges: bool,
+    network_mode: &str,
+    network_backend: NetworkBackend,
+    ports: &[PortMappingRecord],
+) -> Result<NormalizedRunRequest, RuntimeError> {
+    let mut handles = Vec::with_capacity(mounts.len());
+    let mut normalized_mounts = Vec::with_capacity(mounts.len());
+    let mut mount_facts = Vec::with_capacity(mounts.len() + tmpfs_mounts.len());
+    for mount in mounts {
+        if mount.source.starts_with("/proc/self/fd") {
+            return Err(RuntimeError::InvalidState(
+                "caller-supplied runtime fd mount is forbidden".into(),
+            ));
+        }
+        let source = mount.source.canonicalize()?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC);
+        let handle = options.open(&source)?;
+        let metadata = handle.metadata()?;
+        let fd = handle.as_raw_fd();
+        let mount_id = fd_mount_id(fd)?;
+        mount_facts.push(RunMountFact {
+            class: if mount.read_only {
+                crate::authorization::MountClass::ReadOnly
+            } else {
+                crate::authorization::MountClass::HostPath
+            },
+            mount_id,
+            device_id: metadata.dev(),
+            inode: metadata.ino(),
+            open_flags: u64::from(mount.read_only),
+        });
+        normalized_mounts.push(BindMount {
+            source: PathBuf::from(format!("/proc/self/fd/{fd}")),
+            target: mount.target.clone(),
+            read_only: mount.read_only,
+        });
+        handles.push(handle);
+    }
+    let normalized_tmpfs = tmpfs_mounts.to_vec();
+    for (index, mount) in normalized_tmpfs.iter().enumerate() {
+        let mut digest = sha2::Sha256::new();
+        digest.update(b"ferrocrate/tmpfs-binding/v1");
+        digest.update(mount.target.as_os_str().as_bytes());
+        if let Some(size) = &mount.size {
+            digest.update(size.as_bytes());
+        }
+        let digest: [u8; 32] = digest.finalize().into();
+        mount_facts.push(RunMountFact {
+            class: crate::authorization::MountClass::Tmpfs,
+            mount_id: u64::MAX - index as u64,
+            device_id: 0,
+            inode: u64::from_be_bytes(digest[..8].try_into().expect("digest width")),
+            open_flags: 0,
+        });
+    }
+    let mut network_ids = vec![
+        format!("mode:{network_mode}"),
+        format!("backend:{network_backend:?}"),
+    ];
+    network_ids.extend(ports.iter().map(|port| {
+        format!(
+            "port:{}:{}/{}",
+            port.host_port, port.container_port, port.protocol
+        )
+    }));
+    Ok(NormalizedRunRequest {
+        facts: RunSecurityFacts {
+            capabilities: capabilities.iter().map(ToString::to_string).collect(),
+            mounts: mount_facts,
+            network_ids,
+            privileged: capabilities.contains(&caps::Capability::CAP_SYS_ADMIN),
+            readonly_rootfs,
+            no_new_privileges,
+        },
+        capabilities: capabilities.to_vec(),
+        network_mode: network_mode.to_owned(),
+        network_backend,
+        bind_mounts: normalized_mounts,
+        tmpfs_mounts: normalized_tmpfs,
+        _bind_handles: handles,
+    })
+}
+
+fn fd_mount_id(fd: i32) -> Result<u64, RuntimeError> {
+    let info = fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))?;
+    info.lines()
+        .find_map(|line| line.strip_prefix("mnt_id:\t"))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| {
+            RuntimeError::InvalidState("opened mount has no kernel mount identity".into())
+        })
+}
+
+fn validate_normalized_run(
+    proof: &AuthorizedRequest,
+    normalized: &NormalizedRunRequest,
+) -> Result<(), RuntimeError> {
+    let facts = proof.canonical().context().facts();
+    if facts.requested_capabilities() != normalized.facts.capabilities
+        || facts.network_ids() != normalized.facts.network_ids
+        || facts.privileged() != normalized.facts.privileged
+        || facts.readonly_rootfs() != normalized.facts.readonly_rootfs
+        || facts.no_new_privileges() != normalized.facts.no_new_privileges
+        || proof.canonical().mount_handles().len() != normalized.facts.mounts.len()
+    {
+        return Err(RuntimeError::Authorization(
+            "authorized run facts became stale".into(),
+        ));
+    }
+    for (expected, observed) in proof
+        .canonical()
+        .mount_handles()
+        .iter()
+        .zip(&normalized.facts.mounts)
+    {
+        if expected.class() != observed.class
+            || expected.mount_id() != observed.mount_id
+            || expected.device_id() != observed.device_id
+            || expected.inode() != observed.inode
+            || expected.open_flags() != observed.open_flags
+        {
+            return Err(RuntimeError::Authorization(
+                "authorized mount identity became stale".into(),
+            ));
+        }
+    }
+    for (index, handle) in normalized._bind_handles.iter().enumerate() {
+        let metadata = handle.metadata()?;
+        let observed = &normalized.facts.mounts[index];
+        if metadata.dev() != observed.device_id
+            || metadata.ino() != observed.inode
+            || fd_mount_id(handle.as_raw_fd())? != observed.mount_id
+        {
+            return Err(RuntimeError::Authorization(
+                "authorized mount handle was replaced".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn runtime_action_name(action: Action) -> &'static str {
@@ -6933,6 +7109,41 @@ mod tests {
         let cfg = super::runtime_dns_config();
         assert_eq!(cfg.servers, vec!["1.1.1.1", "8.8.8.8"]);
         assert_eq!(cfg.search, vec!["ferro.local"]);
+    }
+
+    #[test]
+    fn normalized_run_request_retains_fd_backed_mount_and_security_facts() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let request = super::normalize_run_request(
+            &[caps::Capability::CAP_NET_BIND_SERVICE],
+            &[crate::mounts::BindMount {
+                source,
+                target: "/data".into(),
+                read_only: true,
+            }],
+            &[crate::mounts::TmpfsMount {
+                target: "/tmp".into(),
+                size: Some("64m".into()),
+            }],
+            true,
+            true,
+            "bridge",
+            ferro_net::NetworkBackend::Iptables,
+            &[],
+        )
+        .unwrap();
+        assert!(request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
+        assert_eq!(request.facts.mounts.len(), 2);
+        assert!(request.facts.readonly_rootfs);
+        assert!(request.facts.no_new_privileges);
+        assert!(request
+            .facts
+            .network_ids
+            .iter()
+            .any(|id| id == "mode:bridge"));
+        assert_eq!(request.facts.capabilities, ["CAP_NET_BIND_SERVICE"]);
     }
 
     #[test]

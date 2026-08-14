@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const IMAGE_INDEX_TREE: &str = "image_index";
+const IMAGE_DIGEST_TREE: &str = "image_digest_index";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageRecord {
@@ -53,7 +54,10 @@ impl LocalImageStore {
 
         let encoded = serde_json::to_vec(&record)?;
         tree.insert(reference.as_bytes(), encoded)?;
+        let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
+        digest_tree.insert(digest.as_bytes(), serde_json::to_vec(&record)?)?;
         tree.flush()?;
+        digest_tree.flush()?;
         Ok(())
     }
 
@@ -74,13 +78,11 @@ impl LocalImageStore {
         }
         let requested_digest = reference.rsplit_once('@').map(|(_, digest)| digest);
         if let Some(digest) = requested_digest {
-            for entry in &tree {
-                let (_, bytes) = entry?;
-                let record = serde_json::from_slice::<ImageRecord>(&bytes)
-                    .map_err(ImageStoreError::Decode)?;
-                if record.digest == digest {
-                    return Ok(Some(record));
-                }
+            let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
+            if let Some(bytes) = digest_tree.get(digest.as_bytes())? {
+                return serde_json::from_slice::<ImageRecord>(&bytes)
+                    .map(Some)
+                    .map_err(ImageStoreError::Decode);
             }
         }
         Ok(None)
@@ -122,6 +124,9 @@ impl LocalImageStore {
             }
         }
         tree.flush()?;
+        let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
+        digest_tree.clear()?;
+        digest_tree.flush()?;
         Ok(removed)
     }
 }
@@ -160,6 +165,36 @@ mod tests {
         assert_eq!(
             resolved.digest,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn digest_qualified_resolution_survives_tag_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let old = format!("sha256:{}", "a".repeat(64));
+        let new = format!("sha256:{}", "b".repeat(64));
+        store
+            .put_reference("repo/app:latest", &old, "test", "{}")
+            .unwrap();
+        store
+            .put_reference("repo/app:latest", &new, "test", "{}")
+            .unwrap();
+        assert_eq!(
+            store
+                .resolve_reference(&format!("repo/app@{old}"))
+                .unwrap()
+                .unwrap()
+                .digest,
+            old
+        );
+        assert_eq!(
+            store
+                .resolve_reference("repo/app:latest")
+                .unwrap()
+                .unwrap()
+                .digest,
+            new
         );
     }
 

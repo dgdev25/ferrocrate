@@ -221,6 +221,7 @@ pub enum MountClass {
     Workspace,
     PersistentVolume,
     HostPath,
+    Tmpfs,
 }
 
 /// A canonical lifecycle state at the time of authorization.
@@ -244,6 +245,8 @@ pub struct RequestFacts {
     privileged: bool,
     device_classes: Vec<String>,
     lifecycle_state: Option<ResourceState>,
+    readonly_rootfs: bool,
+    no_new_privileges: bool,
 }
 
 impl RequestFacts {
@@ -273,6 +276,14 @@ impl RequestFacts {
 
     pub fn lifecycle_state(&self) -> Option<ResourceState> {
         self.lifecycle_state
+    }
+
+    pub fn readonly_rootfs(&self) -> bool {
+        self.readonly_rootfs
+    }
+
+    pub fn no_new_privileges(&self) -> bool {
+        self.no_new_privileges
     }
 }
 

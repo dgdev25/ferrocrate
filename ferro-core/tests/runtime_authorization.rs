@@ -93,6 +93,267 @@ fn runtime_instance_identity_survives_same_directory_restart() {
 }
 
 #[test]
+fn every_lifecycle_method_denies_once_before_executor_side_effects() {
+    for action in [
+        "run", "exec", "pause", "resume", "stop", "kill", "restart", "remove",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let policy_path = root.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "schema_version = 1\ngeneration = 1\nmode = \"enforce\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let gate = Arc::new(AuthorizationGate::new(Arc::new(
+            PolicyStore::load(&policy_path).unwrap(),
+        )));
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                root.path().join("witness"),
+                [action.as_bytes()[0]; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let id = "00112233445566778899aabbccddeeff";
+        if action != "run" {
+            let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+            let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
+                "id":id, "pid":std::process::id(), "image":"example.invalid/app:latest",
+                "command":["true"], "created_at_unix":1, "stdout_path":"", "stderr_path":"",
+                "status": if action == "resume" { "paused" } else { "running" }
+            }))
+            .unwrap();
+            record.mutation_generation = 1;
+            store.put(&record).unwrap();
+            drop(store);
+        }
+        let runtime =
+            ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
+                .unwrap();
+        let result = match action {
+            "run" => runtime
+                .run(
+                    "example.invalid/app:latest",
+                    &["true".into()],
+                    &[],
+                    &Default::default(),
+                    &Default::default(),
+                    None,
+                    Default::default(),
+                    &[],
+                    None,
+                    &[],
+                    &[],
+                    false,
+                    true,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    "none",
+                    ferro_core::runtime::NetworkBackend::Iptables,
+                    None,
+                )
+                .map(|_| ()),
+            "exec" => runtime.exec(id, &["true".into()]).map(|_| ()),
+            "pause" => runtime.pause(id),
+            "resume" => runtime.resume(id),
+            "stop" => runtime.stop(id, std::time::Duration::ZERO),
+            "kill" => runtime.kill(id),
+            "restart" => runtime.restart(id, std::time::Duration::ZERO),
+            "remove" => runtime.remove(id),
+            _ => unreachable!(),
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("authorization denied"),
+            "{action}"
+        );
+        if action != "run" {
+            let expected = if action == "resume" {
+                "paused"
+            } else {
+                "running"
+            };
+            assert_eq!(runtime.inspect(id).unwrap().status, expected, "{action}");
+        }
+        let stages = journal
+            .records()
+            .unwrap()
+            .iter()
+            .map(|bytes| decode_record(bytes).unwrap().stage())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            [
+                WitnessStage::RequestReceived,
+                WitnessStage::Decision,
+                WitnessStage::Denied
+            ],
+            "{action}"
+        );
+        drop(runtime);
+        drop(journal);
+    }
+}
+
+#[test]
+fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
+    for action in [
+        "run", "exec", "pause", "resume", "stop", "kill", "restart", "remove",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let cgroup = root.path().join("cgroup");
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::write(cgroup.join("cgroup.controllers"), "memory cpu pids").unwrap();
+        std::env::set_var("FERROCRATE_CGROUP_ROOT", &cgroup);
+        let policy_path = root.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let gate = Arc::new(AuthorizationGate::new(Arc::new(
+            PolicyStore::load(&policy_path).unwrap(),
+        )));
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                root.path().join("witness"),
+                [action.as_bytes()[0].wrapping_add(1); 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let id = "00112233445566778899aabbccddeeff";
+        let mut child = None;
+        if action != "run" {
+            let spawned = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let pid = spawned.id();
+            child = Some(spawned);
+            let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+            let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+                "id":id, "pid":pid, "image":"example.invalid/app:latest",
+                "command": if action == "restart" { Vec::<String>::new() } else { vec![String::from("true")] },
+                "created_at_unix":1, "stdout_path":"", "stderr_path":"",
+                "status": if action == "resume" { "paused" } else if action == "restart" || action == "remove" { "stopped" } else { "running" }
+            })).unwrap();
+            store.put(&record).unwrap();
+            drop(store);
+        }
+        let runtime =
+            ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
+                .unwrap();
+        let _ = match action {
+            "run" => runtime
+                .run(
+                    "example.invalid/app:latest",
+                    &["true".into()],
+                    &[],
+                    &Default::default(),
+                    &Default::default(),
+                    None,
+                    Default::default(),
+                    &[],
+                    None,
+                    &[],
+                    &[],
+                    false,
+                    true,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    "none",
+                    ferro_core::runtime::NetworkBackend::Iptables,
+                    None,
+                )
+                .map(|_| ()),
+            "exec" => runtime.exec(id, &["false".into()]).map(|_| ()),
+            "pause" => runtime.pause(id),
+            "resume" => runtime.resume(id),
+            "stop" => runtime.stop(id, std::time::Duration::ZERO),
+            "kill" => runtime.kill(id),
+            "restart" => runtime.restart(id, std::time::Duration::ZERO),
+            "remove" => runtime.remove(id),
+            _ => unreachable!(),
+        };
+        if action == "remove" {
+            assert_eq!(runtime.inspect(id).unwrap().status, "quarantined");
+        }
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let stages = journal
+            .records()
+            .unwrap()
+            .iter()
+            .map(|bytes| decode_record(bytes).unwrap().stage())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            [
+                WitnessStage::RequestReceived,
+                WitnessStage::Decision,
+                WitnessStage::Outcome
+            ],
+            "{action}"
+        );
+        drop(runtime);
+        drop(journal);
+        std::env::remove_var("FERROCRATE_CGROUP_ROOT");
+    }
+}
+
+#[test]
+fn disabled_journal_is_exactly_compatibility_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let policy_path = root.path().join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+        "id":"00112233445566778899aabbccddeeff", "pid":u32::MAX,
+        "image":"example.invalid/app:latest", "command":["true"],
+        "created_at_unix":1, "stdout_path":"", "stderr_path":"", "status":"stopped"
+    }))
+    .unwrap();
+    store.put(&record).unwrap();
+    drop(store);
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy_path).unwrap(),
+    )));
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            root.path().join("witness"),
+            [44; 16],
+            JournalMode::Disabled,
+        ))
+        .unwrap(),
+    );
+    let runtime =
+        ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone())).unwrap();
+    let result = runtime.exec(&record.id, &["true".into()]);
+    assert!(!result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.to_string().contains("journal is disabled")));
+    assert!(journal.records().unwrap().is_empty());
+}
+
+#[test]
 fn creation_provenance_requires_every_identity_binding() {
     let mut value = CreationProvenance::default();
     assert!(!value.is_verifiable());

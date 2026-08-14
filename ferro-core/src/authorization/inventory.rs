@@ -59,60 +59,6 @@ pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
         "ContainerRuntime::remove",
         "delete_keeps_operation_tombstone_until_terminal_ack",
     ),
-    entry(
-        "mutation.cli",
-        "CLI commands",
-        "AuthorizationGate::authorize",
-        "mediation_cli",
-    ),
-    entry(
-        "mutation.docker",
-        "Docker API",
-        "AuthorizationGate::authorize",
-        "mediation_docker",
-    ),
-    entry(
-        "mutation.compose",
-        "Compose children",
-        "AuthorizationGate::authorize",
-        "mediation_compose",
-    ),
-    entry(
-        "mutation.cri",
-        "CRI service",
-        "AuthorizationGate::authorize",
-        "mediation_cri",
-    ),
-    entry(
-        "mutation.runtime-background",
-        "runtime background work",
-        "AuthorizationGate::authorize",
-        "mediation_runtime_background",
-    ),
-    entry(
-        "mutation.images",
-        "image store",
-        "AuthorizationGate::authorize",
-        "mediation_images",
-    ),
-    entry(
-        "mutation.volumes",
-        "volume store",
-        "AuthorizationGate::authorize",
-        "mediation_volumes",
-    ),
-    entry(
-        "mutation.networks",
-        "network manager",
-        "AuthorizationGate::authorize",
-        "mediation_networks",
-    ),
-    entry(
-        "mutation.helper-calls",
-        "privileged helper calls",
-        "AuthorizationGate::authorize",
-        "mediation_helper_calls",
-    ),
 ];
 
 const fn entry(

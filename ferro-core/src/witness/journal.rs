@@ -1,4 +1,7 @@
-use super::{encode_record, hash_record, OperationId, RecoveryRecipe, WitnessRecord, WitnessStage};
+use super::{
+    encode_record, hash_record, OperationId, RecoveryRecipe, WitnessAction, WitnessOutcome,
+    WitnessRecord, WitnessStage,
+};
 use sled::transaction::{ConflictableTransactionError, Transactional};
 mod inspect;
 mod quota;
@@ -75,6 +78,50 @@ impl WitnessJournal {
             sequence,
             hash,
         })
+    }
+
+    pub fn append_checkpoint_publication(
+        &self,
+        artifact_digest: [u8; 32],
+        mut record: WitnessRecord,
+    ) -> Result<(), JournalError> {
+        if record.stage != WitnessStage::CheckpointPublished
+            || record.action != WitnessAction::CheckpointPublish
+            || record.outcome != WitnessOutcome::Succeeded
+        {
+            return Err(JournalError::InvalidStage);
+        }
+        record.result_digest = Some(artifact_digest);
+        super::validation::validate_record(&record)?;
+        let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.preflight(FlushBoundary::Outcome)?;
+        let (sequence, previous) = self.head()?;
+        record.sequence = sequence + 1;
+        record.previous_hash = previous;
+        let bytes = encode_record(self.journal_id, &record)?;
+        self.ensure_user_capacity(bytes.as_ref().len() as u64)?;
+        let next_hash = hash_record(&bytes);
+        let seq_key = record.sequence.to_be_bytes();
+        let expected_head = sequence.to_be_bytes();
+        (&self.records, &self.meta, &self.events)
+            .transaction(|(records, meta, events)| {
+                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
+                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
+                }
+                if events.get(record.event_id)?.is_some() {
+                    return Err(ConflictableTransactionError::Abort(
+                        JournalError::DuplicateEvent,
+                    ));
+                }
+                records.insert(&seq_key, bytes.as_ref())?;
+                events.insert(&record.event_id, &seq_key)?;
+                meta.insert(HEAD_SEQUENCE, &seq_key)?;
+                meta.insert(HEAD_HASH, &next_hash)?;
+                Ok(())
+            })
+            .map_err(transaction_error)?;
+        self.flush(FlushBoundary::Outcome, OperationId(record.request_id))?;
+        Ok(())
     }
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
         Self::open_with_faults(config, JournalFaults::new())

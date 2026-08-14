@@ -17,6 +17,8 @@
 //! whose canonical byte is 0 (absent), 1 (false), or 2 (true).
 
 mod checkpoint;
+mod checkpoint_coordinator;
+mod checkpoint_evidence;
 mod encoding;
 mod journal;
 mod keys;
@@ -25,9 +27,10 @@ mod validation;
 mod verify;
 
 pub use checkpoint::{
-    Checkpoint, CheckpointCoordinator, CheckpointError, CheckpointKind, CheckpointVerifier,
-    FlushedHead, Freshness, TrustBundle,
+    Checkpoint, CheckpointError, CheckpointKind, CheckpointVerifier, FlushedHead, Freshness,
+    TrustBundle,
 };
+pub use checkpoint_coordinator::CheckpointCoordinator;
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
 pub use journal::JournalHead;
 pub use journal::{
@@ -64,6 +67,7 @@ pub enum WitnessStage {
     Denied = 3,
     Outcome = 4,
     Recovery = 5,
+    CheckpointPublished = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,7 +93,7 @@ pub enum DisclosureClass {
     Accelerator = 6,
 }
 
-/// Closed mutation vocabulary persisted as the discriminants 1 through 22 in
+/// Closed mutation vocabulary persisted as the discriminants 1 through 23 in
 /// declaration order. Unknown values are never carried forward.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -116,6 +120,7 @@ pub enum WitnessAction {
     DeviceUse = 20,
     PolicyReload = 21,
     PolicyRollback = 22,
+    CheckpointPublish = 23,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -291,6 +296,10 @@ impl DecodedRecord {
 
     pub fn stage(&self) -> WitnessStage {
         self.record.stage
+    }
+
+    pub fn record_hash(&self) -> [u8; 32] {
+        hash_record(&self.bytes)
     }
 
     pub(super) fn record(&self) -> &ParsedRecord {

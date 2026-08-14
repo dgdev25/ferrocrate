@@ -303,6 +303,7 @@ fn action(value: u8) -> Result<WitnessAction, WitnessError> {
         20 => DeviceUse,
         21 => PolicyReload,
         22 => PolicyRollback,
+        23 => CheckpointPublish,
         _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
     };
     Ok(action)
@@ -331,6 +332,7 @@ fn stage(value: u8) -> Result<WitnessStage, WitnessError> {
         3 => Ok(WitnessStage::Denied),
         4 => Ok(WitnessStage::Outcome),
         5 => Ok(WitnessStage::Recovery),
+        6 => Ok(WitnessStage::CheckpointPublished),
         _ => Err(WitnessError::UnknownDiscriminant { field: "stage" }),
     }
 }

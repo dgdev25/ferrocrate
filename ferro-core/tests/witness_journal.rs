@@ -14,6 +14,7 @@ fn record(stage: WitnessStage) -> WitnessRecord {
         WitnessStage::Denied => 5,
         WitnessStage::Outcome => 6,
         WitnessStage::Recovery => 7,
+        WitnessStage::CheckpointPublished => 8,
     };
     WitnessRecord {
         sequence: 0,

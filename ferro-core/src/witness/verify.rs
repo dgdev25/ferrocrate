@@ -37,6 +37,7 @@ pub struct VerificationReport {
     pub lifecycle_consistent: bool,
     pub completeness_through_checkpoint: Option<bool>,
     pub unknown_tail_freshness: bool,
+    pub freshness: super::checkpoint::Freshness,
     pub records: u64,
     pub terminal_denied: u64,
     pub terminal_outcomes: u64,
@@ -108,6 +109,7 @@ where
         lifecycle_consistent: true,
         completeness_through_checkpoint: None,
         unknown_tail_freshness: false,
+        freshness: super::checkpoint::Freshness::UnknownTail,
         records: 0,
         terminal_denied: 0,
         terminal_outcomes: 0,
@@ -210,6 +212,7 @@ fn transition(
             }
             _ => return Err(WitnessError::InvalidLifecycle),
         },
+        WitnessStage::CheckpointPublished => {}
     }
     Ok(())
 }

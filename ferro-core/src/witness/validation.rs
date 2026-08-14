@@ -1,4 +1,7 @@
-use super::{ParsedRecord, ReasonCode, WitnessError, WitnessOutcome, WitnessRecord, WitnessStage};
+use super::{
+    ParsedRecord, ReasonCode, WitnessAction, WitnessError, WitnessOutcome, WitnessRecord,
+    WitnessStage,
+};
 
 pub(super) trait SemanticFields {
     fn stage(&self) -> WitnessStage;
@@ -9,6 +12,7 @@ pub(super) trait SemanticFields {
     fn reason(&self) -> Option<ReasonCode>;
     fn has_result_digest(&self) -> bool;
     fn has_recovery_link(&self) -> bool;
+    fn action(&self) -> WitnessAction;
 }
 
 macro_rules! semantic_fields {
@@ -37,6 +41,9 @@ macro_rules! semantic_fields {
             }
             fn has_recovery_link(&self) -> bool {
                 self.recovery_link.is_some()
+            }
+            fn action(&self) -> WitnessAction {
+                self.action
             }
         }
     };
@@ -103,6 +110,16 @@ pub(super) fn validate_record(record: &impl SemanticFields) -> Result<(), Witnes
                     WitnessOutcome::Quarantined => record.reason() == Some(ReasonCode::Quarantined),
                     _ => false,
                 }
+        }
+        WitnessStage::CheckpointPublished => {
+            record.action() == WitnessAction::CheckpointPublish
+                && record.outcome() == WitnessOutcome::Succeeded
+                && record.has_result_digest()
+                && !record.has_decision_id()
+                && !record.has_rule()
+                && record.decision().is_none()
+                && record.reason().is_none()
+                && !record.has_recovery_link()
         }
     };
     if valid {

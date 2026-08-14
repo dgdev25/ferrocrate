@@ -1,16 +1,11 @@
-use super::{JournalError, JournalHead, KeyId, VerificationReport, WitnessJournal};
+use super::{JournalError, JournalHead, KeyId, VerificationReport};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use std::{
-    collections::HashMap,
-    fs::{self, File, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, time::Duration};
 
 const DOMAIN: &[u8] = b"FERROCRATE-CHECKPOINT-V1";
 const MAGIC: &[u8; 8] = b"FCHKPT01";
-const MAX_CHECKPOINT_BYTES: usize = 1024;
+pub(super) const MAX_CHECKPOINT_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FlushedHead {
@@ -46,11 +41,15 @@ pub enum CheckpointKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
     pub head: FlushedHead,
+    pub first_sequence: u64,
+    pub schema_version: u8,
+    pub hash_algorithm: u8,
     pub created_at_secs: u64,
     pub kind: CheckpointKind,
     pub key_id: KeyId,
     pub public_key: [u8; 32],
     pub previous_epoch: u64,
+    pub previous_checkpoint_digest: [u8; 32],
     pub signature: [u8; 64],
     pub secondary_signature: Option<[u8; 64]>,
 }
@@ -107,6 +106,19 @@ impl Checkpoint {
         cp.secondary_signature = Some(new.sign(&cp.payload()).to_bytes());
         Ok(cp)
     }
+    pub fn rotate_after(
+        head: FlushedHead,
+        created_at_secs: u64,
+        predecessor: &Self,
+        old: &SigningKey,
+        new: &SigningKey,
+    ) -> Result<Self, CheckpointError> {
+        let mut cp = Self::rotate(head, created_at_secs, old, new)?;
+        cp.previous_checkpoint_digest = Sha256::digest(predecessor.encode()).into();
+        cp.signature = old.sign(&cp.payload()).to_bytes();
+        cp.secondary_signature = Some(new.sign(&cp.payload()).to_bytes());
+        Ok(cp)
+    }
     pub fn trust_reset(
         head: FlushedHead,
         created_at_secs: u64,
@@ -126,6 +138,17 @@ impl Checkpoint {
             None,
         ))
     }
+    pub fn trust_reset_after(
+        head: FlushedHead,
+        created_at_secs: u64,
+        predecessor: &Self,
+        new: &SigningKey,
+    ) -> Result<Self, CheckpointError> {
+        let mut cp = Self::trust_reset(head, created_at_secs, new, predecessor.head.epoch)?;
+        cp.previous_checkpoint_digest = Sha256::digest(predecessor.encode()).into();
+        cp.signature = new.sign(&cp.payload()).to_bytes();
+        Ok(cp)
+    }
     fn signed(
         head: FlushedHead,
         time: u64,
@@ -137,11 +160,15 @@ impl Checkpoint {
     ) -> Self {
         let mut cp = Self {
             head,
+            first_sequence: 1,
+            schema_version: 1,
+            hash_algorithm: 1,
             created_at_secs: time,
             kind,
             key_id: KeyId::from_public_key(&signer.verifying_key()),
             public_key,
             previous_epoch,
+            previous_checkpoint_digest: [0; 32],
             signature: [0; 64],
             secondary_signature,
         };
@@ -153,12 +180,16 @@ impl Checkpoint {
         out.extend_from_slice(DOMAIN);
         out.push(1);
         out.push(self.kind as u8);
+        out.push(self.schema_version);
+        out.push(self.hash_algorithm);
         out.extend_from_slice(&self.head.journal_id);
         out.extend_from_slice(&self.head.epoch.to_be_bytes());
+        out.extend_from_slice(&self.first_sequence.to_be_bytes());
         out.extend_from_slice(&self.head.sequence.to_be_bytes());
         out.extend_from_slice(&self.head.hash);
         out.extend_from_slice(&self.created_at_secs.to_be_bytes());
         out.extend_from_slice(&self.previous_epoch.to_be_bytes());
+        out.extend_from_slice(&self.previous_checkpoint_digest);
         out.extend_from_slice(&self.key_id.0);
         out.extend_from_slice(&self.public_key);
         out
@@ -200,12 +231,19 @@ impl Checkpoint {
             3 => CheckpointKind::TrustReset,
             _ => return Err(CheckpointError::InvalidArtifact),
         };
+        let schema_version = take_u8(bytes, &mut cursor)?;
+        let hash_algorithm = take_u8(bytes, &mut cursor)?;
+        if schema_version != 1 || hash_algorithm != 1 {
+            return Err(CheckpointError::InvalidArtifact);
+        }
         let journal_id = take_array::<16>(bytes, &mut cursor)?;
         let epoch = take_u64(bytes, &mut cursor)?;
+        let first_sequence = take_u64(bytes, &mut cursor)?;
         let sequence = take_u64(bytes, &mut cursor)?;
         let hash = take_array::<32>(bytes, &mut cursor)?;
         let created_at_secs = take_u64(bytes, &mut cursor)?;
         let previous_epoch = take_u64(bytes, &mut cursor)?;
+        let previous_checkpoint_digest = take_array::<32>(bytes, &mut cursor)?;
         let key_id = KeyId(take_array::<32>(bytes, &mut cursor)?);
         let public_key = take_array::<32>(bytes, &mut cursor)?;
         let signature = take_array::<64>(bytes, &mut cursor)?;
@@ -219,11 +257,15 @@ impl Checkpoint {
         }
         let checkpoint = Self {
             head: FlushedHead::new(journal_id, epoch, sequence, hash),
+            first_sequence,
+            schema_version,
+            hash_algorithm,
             created_at_secs,
             kind,
             key_id,
             public_key,
             previous_epoch,
+            previous_checkpoint_digest,
             signature,
             secondary_signature,
         };
@@ -305,32 +347,41 @@ impl CheckpointVerifier {
     }
     pub fn verify(
         &self,
+        evidence: &[Vec<u8>],
         checkpoints: &[Checkpoint],
         now_secs: u64,
         max_age: Duration,
     ) -> Result<VerificationReport, CheckpointError> {
-        if let Some(minimum) = &self.trust.minimum {
-            if minimum.head.journal_id != self.trust.journal_id
-                || verify_signature(minimum, &self.trust.initial).is_err()
-            {
-                return Err(CheckpointError::Untrusted);
-            }
-        }
         let mut trusted = self.trust.initial;
+        let mut trusted_keys = HashMap::from([(KeyId::from_public_key(&trusted), trusted)]);
         let mut last: Option<&Checkpoint> = None;
         let mut discontinuities = 0;
         for cp in checkpoints {
             if cp.head.journal_id != self.trust.journal_id {
                 return Err(CheckpointError::Untrusted);
             }
+            if !super::checkpoint_evidence::is_bound(evidence, cp) {
+                return Err(CheckpointError::Rollback);
+            }
             if let Some(prev) = last {
-                if cp.head.epoch < prev.head.epoch
+                let expected_predecessor: [u8; 32] = Sha256::digest(prev.encode()).into();
+                if (cp.kind != CheckpointKind::TrustReset && cp.head.epoch != prev.head.epoch)
+                    || (cp.kind == CheckpointKind::TrustReset
+                        && (cp.head.epoch != prev.head.epoch.saturating_add(1)
+                            || cp.previous_epoch != prev.head.epoch))
+                    || cp.previous_checkpoint_digest != expected_predecessor
                     || (cp.head.epoch == prev.head.epoch
-                        && (cp.head.sequence <= prev.head.sequence
+                        && (cp.head.sequence < prev.head.sequence
+                            || (cp.head.sequence == prev.head.sequence
+                                && cp.head.hash != prev.head.hash)
                             || cp.created_at_secs < prev.created_at_secs))
                 {
                     return Err(CheckpointError::Rollback);
                 }
+            } else if cp.kind == CheckpointKind::TrustReset
+                || cp.previous_checkpoint_digest != [0; 32]
+            {
+                return Err(CheckpointError::Untrusted);
             }
             match cp.kind {
                 CheckpointKind::Periodic => verify_signature(cp, &trusted)?,
@@ -346,6 +397,7 @@ impl CheckpointVerifier {
                     )
                     .map_err(|_| CheckpointError::Untrusted)?;
                     trusted = next;
+                    trusted_keys.insert(KeyId::from_public_key(&next), next);
                 }
                 CheckpointKind::TrustReset => {
                     let reset = self
@@ -358,12 +410,22 @@ impl CheckpointVerifier {
                     }
                     verify_signature(cp, reset)?;
                     trusted = *reset;
+                    trusted_keys.insert(KeyId::from_public_key(reset), *reset);
                     discontinuities += 1;
                 }
             }
             last = Some(cp);
         }
         let complete = self.trust.minimum.as_ref().map(|minimum| {
+            let minimum_signature_valid = trusted_keys
+                .get(&minimum.key_id)
+                .is_some_and(|key| verify_signature(minimum, key).is_ok());
+            if minimum.head.journal_id != self.trust.journal_id
+                || !minimum_signature_valid
+                || !super::checkpoint_evidence::contains_head(evidence, minimum)
+            {
+                return false;
+            }
             last.is_some_and(|cp| {
                 cp.head.epoch > minimum.head.epoch
                     || (cp.head.epoch == minimum.head.epoch
@@ -375,80 +437,27 @@ impl CheckpointVerifier {
         if complete == Some(false) {
             return Err(CheckpointError::Rollback);
         }
-        let fresh =
-            last.is_some_and(|cp| now_secs.saturating_sub(cp.created_at_secs) <= max_age.as_secs());
-        Ok(VerificationReport {
-            integrity: true,
-            lifecycle_consistent: true,
-            completeness_through_checkpoint: complete,
-            unknown_tail_freshness: fresh,
-            records: 0,
-            terminal_denied: 0,
-            terminal_outcomes: 0,
-            terminal_recoveries: 0,
-            discontinuities,
-        })
+        let last = last.ok_or(CheckpointError::Untrusted)?;
+        if last.created_at_secs > now_secs {
+            return Err(CheckpointError::InvalidArtifact);
+        }
+        let mut report = super::checkpoint_evidence::verify(evidence, last)?;
+        report.completeness_through_checkpoint = complete.or(Some(true));
+        report.unknown_tail_freshness = now_secs - last.created_at_secs <= max_age.as_secs();
+        report.freshness = if report.unknown_tail_freshness {
+            Freshness::Current
+        } else {
+            Freshness::Stale
+        };
+        report.discontinuities = discontinuities;
+        Ok(report)
     }
 }
+
 fn verify_signature(cp: &Checkpoint, key: &VerifyingKey) -> Result<(), CheckpointError> {
     if cp.key_id != KeyId::from_public_key(key) {
         return Err(CheckpointError::Untrusted);
     }
     key.verify(&cp.payload(), &Signature::from_bytes(&cp.signature))
         .map_err(|_| CheckpointError::Untrusted)
-}
-
-pub struct CheckpointCoordinator {
-    path: PathBuf,
-    max_age: Duration,
-    grace: Duration,
-}
-impl CheckpointCoordinator {
-    pub fn new(path: impl AsRef<Path>, max_age: Duration, grace: Duration) -> Self {
-        Self {
-            path: path.as_ref().to_owned(),
-            max_age,
-            grace,
-        }
-    }
-    pub fn capture_and_publish(
-        &self,
-        journal: &WitnessJournal,
-        now_secs: u64,
-        key: &SigningKey,
-    ) -> Result<Checkpoint, CheckpointError> {
-        let cp = Checkpoint::sign(
-            journal.flushed_head()?.into(),
-            now_secs,
-            key,
-            CheckpointKind::Periodic,
-        )?;
-        self.publish(&cp)?;
-        Ok(cp)
-    }
-    pub fn publish(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
-        let bytes = checkpoint.encode();
-        if bytes.len() > MAX_CHECKPOINT_BYTES {
-            return Err(CheckpointError::InvalidArtifact);
-        }
-        let parent = self.path.parent().ok_or(CheckpointError::InvalidArtifact)?;
-        fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(".checkpoint-{}.tmp", rand::random::<u64>()));
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        if let Err(error) = fs::rename(&tmp, &self.path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(error.into());
-        }
-        File::open(parent)?.sync_all()?;
-        Ok(())
-    }
-    pub fn allows_user_mutation(&self, newest_checkpoint_secs: u64, now_secs: u64) -> bool {
-        now_secs.saturating_sub(newest_checkpoint_secs)
-            <= self.max_age.saturating_add(self.grace).as_secs()
-    }
-    pub const fn allows_reserved_cleanup(&self) -> bool {
-        true
-    }
 }

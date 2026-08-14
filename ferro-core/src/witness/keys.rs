@@ -1,7 +1,9 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -54,43 +56,50 @@ impl KeyStore {
 
     pub fn create(&self, name: &str) -> Result<KeyMaterial, KeyStoreError> {
         validate_name(name)?;
-        fs::create_dir_all(&self.root)?;
-        reject_symlink_root(&self.root)?;
-        let path = self.path(name);
-        let temporary = self
-            .root
-            .join(format!(".{name}.{}.tmp", rand::random::<u64>()));
+        if !self.root.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                fs::DirBuilder::new().mode(0o700).create(&self.root)?;
+            }
+            #[cfg(not(unix))]
+            fs::create_dir(&self.root)?;
+        }
+        let root = secure_root(&self.root)?;
+        let filename = format!("{name}.key");
+        let temporary = format!(".{name}.{}.tmp", rand::random::<u64>());
         let bytes = rand::random::<[u8; 32]>();
-        let mut file = secure_create(&temporary)?;
+        let mut file = secure_create_at(&root, &temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        match fs::hard_link(&temporary, &path) {
+        match secure_link_at(&root, &temporary, &filename) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&temporary);
+                let _ = secure_unlink_at(&root, &temporary);
                 return Err(KeyStoreError::AlreadyExists);
             }
             Err(error) => {
-                let _ = fs::remove_file(&temporary);
+                let _ = secure_unlink_at(&root, &temporary);
                 return Err(error.into());
             }
         }
-        fs::remove_file(&temporary)?;
-        sync_directory(&self.root)?;
+        secure_unlink_at(&root, &temporary)?;
+        File::from(root).sync_all()?;
         Ok(KeyMaterial(SigningKey::from_bytes(&bytes)))
     }
 
     pub fn load(&self, name: &str) -> Result<KeyMaterial, KeyStoreError> {
         validate_name(name)?;
-        reject_symlink_root(&self.root)?;
-        let mut file = secure_open(&self.path(name))?;
+        let root = secure_root(&self.root)?;
+        let mut file = secure_open_at(&root, &format!("{name}.key"))?;
         let metadata = file.metadata()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if !metadata.file_type().is_file()
                 || metadata.mode() & 0o777 != 0o600
-                || metadata.uid() != fs::metadata(&self.root)?.uid()
+                || metadata.uid() != nix::unistd::geteuid().as_raw()
+                || metadata.nlink() != 1
             {
                 return Err(KeyStoreError::InsecureFile);
             }
@@ -102,18 +111,30 @@ impl KeyStore {
         file.read_exact(&mut bytes)?;
         Ok(KeyMaterial(SigningKey::from_bytes(&bytes)))
     }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.root.join(format!("{name}.key"))
-    }
 }
 
-fn reject_symlink_root(root: &Path) -> Result<(), KeyStoreError> {
-    let metadata = fs::symlink_metadata(root)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+#[cfg(unix)]
+fn secure_root(root: &Path) -> Result<OwnedFd, KeyStoreError> {
+    use nix::{
+        fcntl::{open, OFlag},
+        sys::stat::Mode,
+    };
+    use std::os::unix::fs::MetadataExt;
+    let fd = open(
+        root,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let metadata = File::from(fd.try_clone()?).metadata()?;
+    if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
         return Err(KeyStoreError::InsecureFile);
     }
-    Ok(())
+    Ok(fd)
+}
+#[cfg(not(unix))]
+fn secure_root(root: &Path) -> Result<File, KeyStoreError> {
+    Ok(File::open(root)?)
 }
 
 fn validate_name(name: &str) -> Result<(), KeyStoreError> {
@@ -129,33 +150,65 @@ fn validate_name(name: &str) -> Result<(), KeyStoreError> {
 }
 
 #[cfg(unix)]
-fn secure_create(path: &Path) -> Result<File, std::io::Error> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)
+fn secure_create_at(root: &OwnedFd, name: &str) -> Result<File, std::io::Error> {
+    use nix::{
+        fcntl::{openat, OFlag},
+        sys::stat::Mode,
+    };
+    openat(
+        root,
+        name,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
 }
 #[cfg(not(unix))]
-fn secure_create(path: &Path) -> Result<File, std::io::Error> {
+fn secure_create_at(_root: &File, path: &str) -> Result<File, std::io::Error> {
+    use std::fs::OpenOptions;
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 #[cfg(unix)]
-fn secure_open(path: &Path) -> Result<File, std::io::Error> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)
+fn secure_open_at(root: &OwnedFd, name: &str) -> Result<File, std::io::Error> {
+    use nix::{
+        fcntl::{openat, OFlag},
+        sys::stat::Mode,
+    };
+    openat(
+        root,
+        name,
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
 }
 #[cfg(not(unix))]
-fn secure_open(path: &Path) -> Result<File, std::io::Error> {
+fn secure_open_at(_root: &File, path: &str) -> Result<File, std::io::Error> {
+    use std::fs::OpenOptions;
     OpenOptions::new().read(true).open(path)
 }
 
-fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
-    File::open(path)?.sync_all()
+#[cfg(unix)]
+fn secure_link_at(root: &OwnedFd, old: &str, new: &str) -> Result<(), std::io::Error> {
+    nix::unistd::linkat(root, old, root, new, nix::fcntl::AtFlags::empty())
+        .map_err(std::io::Error::from)
+}
+#[cfg(unix)]
+fn secure_unlink_at(root: &OwnedFd, name: &str) -> Result<(), std::io::Error> {
+    nix::unistd::unlinkat(root, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
+        .map_err(std::io::Error::from)
+}
+#[cfg(not(unix))]
+fn secure_link_at(_root: &File, _old: &str, _new: &str) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "descriptor-relative key publication unsupported",
+    ))
+}
+#[cfg(not(unix))]
+fn secure_unlink_at(_root: &File, _name: &str) -> Result<(), std::io::Error> {
+    Ok(())
 }

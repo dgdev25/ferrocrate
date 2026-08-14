@@ -27,6 +27,7 @@ impl WitnessJournal {
             OperationState::decode(&self.operations.get(id.0)?.ok_or(JournalError::NotPending)?)
                 .ok_or(JournalError::Corrupt)?;
         if state.state == COMPLETE {
+            self.flush(FlushBoundary::Outcome, id)?;
             return Err(JournalError::AlreadyComplete);
         }
         if state.state != ALLOWED || !state.terminal_matches(&record) {
@@ -63,7 +64,8 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Outcome, id)?;
-        self.seal_active_segment()
+        self.post_ack_rotation();
+        Ok(())
     }
 
     pub fn complete_recovery(
@@ -78,7 +80,6 @@ impl WitnessJournal {
             return Err(JournalError::InvalidStage);
         }
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
-        self.preflight(FlushBoundary::Outcome)?;
         let state =
             OperationState::decode(&self.operations.get(id.0)?.ok_or(JournalError::NotPending)?)
                 .ok_or(JournalError::Corrupt)?;
@@ -96,6 +97,16 @@ impl WitnessJournal {
             return Err(JournalError::DuplicateEvent);
         }
         let reserve_after = self.begin_cleanup_reservation(id, bytes.as_ref().len() as u64)?;
+        if self
+            .faults
+            .take(super::FaultPoint::BeforeTransaction(FlushBoundary::Outcome))
+            || self
+                .faults
+                .take(super::FaultPoint::Transaction(FlushBoundary::Outcome))
+        {
+            self.stop_automation();
+            return Err(JournalError::AutomationStopped);
+        }
         let next_hash = hash_record(&bytes);
         let seq_key = record.sequence.to_be_bytes();
         let expected_head = sequence.to_be_bytes();
@@ -134,6 +145,7 @@ impl WitnessJournal {
             return Err(JournalError::AutomationStopped);
         }
         self.finish_cleanup_reservation(reserve_after)?;
-        self.seal_active_segment()
+        self.post_ack_rotation();
+        Ok(())
     }
 }

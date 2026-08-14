@@ -153,7 +153,7 @@ fn flush_ambiguity_is_indeterminate_and_requires_reread() {
     journal
         .append_received(id, 7, recipe(), record(WitnessStage::RequestReceived))
         .unwrap();
-    faults.fail_ambiguous_once(FlushBoundary::Decision);
+    faults.fail_enospc_once(FaultPoint::AfterFlush(FlushBoundary::Decision));
     let mut decision = record(WitnessStage::Decision);
     decision.decision_id = Some([3; 16]);
     decision.rule = Some(RuleSummary::from_id([1; 16]));
@@ -178,7 +178,7 @@ fn outcome_and_pending_removal_are_atomic_and_recovery_is_not_replay() {
     decision.rule = Some(RuleSummary::from_id([1; 16]));
     decision.decision = Some(true);
     let intent = journal.append_decision(id, decision).unwrap();
-    faults.fail_ambiguous_once(FlushBoundary::Outcome);
+    faults.fail_enospc_once(FaultPoint::AfterFlush(FlushBoundary::Outcome));
     let mut outcome = record(WitnessStage::Outcome);
     outcome.decision_id = Some([4; 16]);
     outcome.result_digest = Some([1; 32]);
@@ -206,7 +206,7 @@ fn outcome_and_pending_removal_are_atomic_and_recovery_is_not_replay() {
 fn cleanup_reserve_failure_stops_automation() {
     let root = tempdir().unwrap();
     let faults = JournalFaults::new();
-    faults.fail_ambiguous_once(FlushBoundary::Reserve);
+    faults.fail_enospc_once(FaultPoint::AfterFlush(FlushBoundary::Reserve));
     assert!(matches!(
         WitnessJournal::open_with_faults(config(root.path()), faults),
         Err(JournalError::AutomationStopped)
@@ -490,6 +490,48 @@ fn lost_visible_terminal_is_reconciled_without_consumed_proof_or_reexecution() {
 }
 
 #[test]
+fn visible_complete_requires_explicit_reack_before_classification() {
+    let root = tempdir().unwrap();
+    let faults = JournalFaults::new();
+    let journal = WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+    let id = OperationId::from_bytes([151; 16]);
+    journal
+        .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    let mut decision = record(WitnessStage::Decision);
+    decision.decision_id = Some([151; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    let intent = journal.append_decision(id, decision).unwrap();
+    faults.fail_enospc_once(FaultPoint::DuringFlush(FlushBoundary::Outcome));
+    let mut outcome = record(WitnessStage::Outcome);
+    outcome.event_id = [152; 16];
+    outcome.decision_id = Some([151; 16]);
+    outcome.result_digest = Some([1; 32]);
+    outcome.outcome = WitnessOutcome::Succeeded;
+    assert!(matches!(
+        journal.complete(intent, outcome),
+        Err(JournalError::Indeterminate { .. })
+    ));
+    let mut unknown = record(WitnessStage::Outcome);
+    unknown.event_id = [153; 16];
+    unknown.decision_id = Some([151; 16]);
+    unknown.result_digest = Some([2; 32]);
+    unknown.reason = Some(ferro_core::witness::ReasonCode::ExecutionFailed);
+    unknown.outcome = WitnessOutcome::OutcomeUnknown;
+    assert!(matches!(
+        journal.record_outcome_unknown(id, unknown),
+        Err(JournalError::AlreadyComplete)
+    ));
+    drop(journal); // explicit re-ack above makes this equivalent to hard termination
+    let journal = WitnessJournal::open(config(root.path())).unwrap();
+    assert!(matches!(
+        journal.recover(id),
+        Err(JournalError::AlreadyComplete)
+    ));
+}
+
+#[test]
 fn crash_after_cleanup_reservation_reopens_fail_stopped() {
     let root = tempdir().unwrap();
     let faults = JournalFaults::new();
@@ -510,7 +552,7 @@ fn crash_after_cleanup_reservation_reopens_fail_stopped() {
     unknown.reason = Some(ferro_core::witness::ReasonCode::ExecutionFailed);
     unknown.outcome = WitnessOutcome::OutcomeUnknown;
     journal.complete(intent, unknown).unwrap();
-    faults.fail_ambiguous_once(FlushBoundary::Reserve);
+    faults.fail_enospc_once(FaultPoint::AfterFlush(FlushBoundary::Reserve));
     let mut recovery = record(WitnessStage::Recovery);
     recovery.event_id = [123; 16];
     recovery.decision_id = Some([121; 16]);
@@ -612,6 +654,28 @@ fn segment_rotation_handoff_preserves_chain_across_reopen() {
         .unwrap()
         .integrity
     );
-    journal.reclaim_segment(0).unwrap();
-    assert!(journal.export_segment(0).is_err());
+    // Task 5 exposes no deletion API; sealed evidence remains locally retained.
+    assert!(!journal.export_segment(0).unwrap().is_empty());
+}
+
+#[test]
+fn durable_decision_survives_deferred_rotation_failure() {
+    let root = tempdir().unwrap();
+    let faults = JournalFaults::new();
+    let config = config(root.path()).segment_bytes(400);
+    let journal = WitnessJournal::open_with_faults(config, faults.clone()).unwrap();
+    let id = OperationId::from_bytes([141; 16]);
+    journal
+        .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    faults.fail_once(FaultPoint::RotationSeal);
+    let mut decision = record(WitnessStage::Decision);
+    decision.decision_id = Some([141; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    let intent = journal
+        .append_decision(id, decision)
+        .expect("durable proof is not suppressed by maintenance");
+    assert_eq!(intent.operation_id(), id);
+    assert_eq!(journal.recover(id).unwrap().operation_id(), id);
 }

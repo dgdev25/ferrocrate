@@ -46,20 +46,6 @@ impl WitnessJournal {
         parse_segment(&blob)
     }
 
-    /// Explicit retention action. Callers must independently retain an export
-    /// and its handoff before reclaiming local capacity.
-    pub fn reclaim_segment(&self, segment: u64) -> Result<(), JournalError> {
-        if self
-            .sealed_segments
-            .remove(segment.to_be_bytes())?
-            .is_none()
-        {
-            return Err(JournalError::NotPending);
-        }
-        self.db.flush()?;
-        Ok(())
-    }
-
     pub fn recover(&self, id: OperationId) -> Result<PendingOperation, JournalError> {
         let value = self
             .pending

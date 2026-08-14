@@ -28,6 +28,7 @@ const RESERVE_INFLIGHT: &[u8] = b"cleanup-reserve-inflight";
 const AUTOMATION_STOPPED: &[u8] = b"automation-stopped";
 const MAX_BYTES: &[u8] = b"max-journal-bytes";
 const CURRENT_SEGMENT: &[u8] = b"current-segment";
+const ROTATION_DEFERRED: &[u8] = b"rotation-deferred";
 const EPOCH: &[u8] = b"epoch";
 
 pub struct WitnessJournal {
@@ -145,8 +146,6 @@ impl WitnessJournal {
         self.meta.insert(HEAD_SEQUENCE, &0_u64.to_be_bytes())?;
         self.meta.insert(HEAD_HASH, &[0_u8; 32])?;
         self.meta.insert(EPOCH, &1_u64.to_be_bytes())?;
-        // Bounded preallocation is represented by durable quota metadata. Sled
-        // owns physical allocation; cleanup consumption is accounted separately.
         self.meta.insert(RESERVE, &reserve_bytes.to_be_bytes())?;
         self.meta
             .insert(RESERVE_TOTAL, &reserve_bytes.to_be_bytes())?;
@@ -250,7 +249,8 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Received, id)?;
-        self.seal_active_segment()
+        self.post_ack_rotation();
+        Ok(())
     }
 
     pub fn append_decision(
@@ -280,7 +280,7 @@ impl WitnessJournal {
         let decision_id = record.decision_id.ok_or(JournalError::InvalidStage)?;
         let decision_digest = self.append_decision_record(id, &mut record, &mut state)?;
         self.flush(FlushBoundary::Decision, id)?;
-        self.seal_active_segment()?;
+        self.post_ack_rotation();
         Ok(DurableIntent {
             journal_id: self.journal_id,
             epoch: self.epoch,
@@ -292,8 +292,6 @@ impl WitnessJournal {
         })
     }
 
-    /// Persist a denied decision and its terminal record atomically. A denied
-    /// operation can never yield execution authority.
     pub fn deny(
         &self,
         id: OperationId,
@@ -367,7 +365,8 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Decision, id)?;
-        self.seal_active_segment()
+        self.post_ack_rotation();
+        Ok(())
     }
 
     pub fn complete(
@@ -453,7 +452,8 @@ impl WitnessJournal {
             Err(JournalError::Indeterminate { operation_id: id })
         } else {
             self.flush(FlushBoundary::Outcome, id)?;
-            self.seal_active_segment()
+            self.post_ack_rotation();
+            Ok(())
         }
     }
 

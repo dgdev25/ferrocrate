@@ -26,6 +26,7 @@ pub enum FaultPoint {
     BeforeFlush(FlushBoundary),
     DuringFlush(FlushBoundary),
     AfterFlush(FlushBoundary),
+    RotationSeal,
 }
 
 #[derive(Clone, Default)]
@@ -119,6 +120,8 @@ pub enum JournalError {
     AutomationStopped,
     #[error("journal quota reached before reserved cleanup capacity")]
     QuotaExceeded,
+    #[error("single witness record exceeds the configured segment bound")]
+    OversizedRecord,
     #[error("journal storage unavailable before record visibility")]
     UnavailableBeforeVisibility,
     #[error("witness journal is disabled")]

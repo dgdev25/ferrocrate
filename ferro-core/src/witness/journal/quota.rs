@@ -3,10 +3,14 @@ use super::{
     RESERVE_INFLIGHT,
 };
 use sled::transaction::Transactional;
+use std::io::Write;
 use std::sync::atomic::Ordering;
 
 impl WitnessJournal {
     pub(super) fn ensure_user_capacity(&self, additional: u64) -> Result<(), JournalError> {
+        if additional > self.segment_bytes {
+            return Err(JournalError::OversizedRecord);
+        }
         let used = self.records.iter().try_fold(0_u64, |sum, entry| {
             let (_, bytes) = entry?;
             Ok::<_, sled::Error>(sum.saturating_add(bytes.len() as u64))
@@ -31,6 +35,16 @@ impl WitnessJournal {
         id: crate::witness::OperationId,
         bytes: u64,
     ) -> Result<u64, JournalError> {
+        if self
+            .faults
+            .take(FaultPoint::BeforeTransaction(FlushBoundary::Reserve))
+            || self
+                .faults
+                .take(FaultPoint::Transaction(FlushBoundary::Reserve))
+        {
+            self.stop_automation();
+            return Err(JournalError::AutomationStopped);
+        }
         if self.automation_stopped.load(Ordering::Acquire)
             || self.meta.get(RESERVE_INFLIGHT)?.is_some()
             || self.meta.get(AUTOMATION_STOPPED)?.is_some()
@@ -55,6 +69,16 @@ impl WitnessJournal {
         reservation[..16].copy_from_slice(id.as_bytes());
         reservation[16..].copy_from_slice(&bytes.to_be_bytes());
         self.meta.insert(RESERVE_INFLIGHT, &reservation)?;
+        if self
+            .faults
+            .take(FaultPoint::BeforeFlush(FlushBoundary::Reserve))
+            || self
+                .faults
+                .take(FaultPoint::DuringFlush(FlushBoundary::Reserve))
+        {
+            self.stop_automation();
+            return Err(JournalError::AutomationStopped);
+        }
         if self.db.flush().is_err() {
             self.stop_automation();
             return Err(JournalError::AutomationStopped);
@@ -91,17 +115,29 @@ impl WitnessJournal {
         let _ = self.meta.insert(AUTOMATION_STOPPED, &[1_u8]);
         let _ = self.db.flush();
         let marker = self.root.join("witness.automation-stopped");
-        if let Ok(file) = std::fs::OpenOptions::new()
+        let temporary = self.root.join("witness.automation-stopped.tmp");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
-            .open(marker)
+            .create_new(true)
+            .open(&temporary)
         {
-            let _ = file.sync_all();
+            if file
+                .write_all(b"stopped-v1")
+                .and_then(|_| file.sync_all())
+                .is_ok()
+                && std::fs::rename(&temporary, &marker).is_ok()
+            {
+                if let Ok(directory) = std::fs::File::open(&self.root) {
+                    let _ = directory.sync_all();
+                }
+            }
         }
     }
 
     pub(super) fn seal_active_segment(&self) -> Result<(), JournalError> {
+        if self.faults.take(FaultPoint::RotationSeal) {
+            return Err(JournalError::UnavailableBeforeVisibility);
+        }
         let entries: Vec<_> = self.records.iter().collect::<Result<_, _>>()?;
         let used: u64 = entries.iter().map(|(_, value)| value.len() as u64).sum();
         if used <= self.segment_bytes {
@@ -163,5 +199,14 @@ impl WitnessJournal {
             .map_err(super::transaction_error)?;
         self.db.flush()?;
         Ok(())
+    }
+
+    pub(super) fn post_ack_rotation(&self) {
+        if self.seal_active_segment().is_err() {
+            let _ = self.meta.insert(super::ROTATION_DEFERRED, &[1_u8]);
+            let _ = self.db.flush();
+        } else {
+            let _ = self.meta.remove(super::ROTATION_DEFERRED);
+        }
     }
 }

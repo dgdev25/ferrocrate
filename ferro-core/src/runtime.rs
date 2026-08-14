@@ -30,7 +30,7 @@ use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, Manage
 use crate::mounts::{
     apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts,
     normalize_mount_target, open_existing_mount_target_beneath, open_mount_source_beneath,
-    BindMount, MountError, TmpfsMount,
+    open_mount_target_beneath, BindMount, MountError, TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
@@ -119,13 +119,56 @@ struct CreationRollback {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 enum ResourcePlan {
-    Rootfs { path: PathBuf, generation: u64 },
-    BindMount { target: PathBuf, generation: u64 },
-    TmpfsMount { target: PathBuf, generation: u64 },
-    RootfsReadonly { target: PathBuf, generation: u64 },
-    NetworkAllocation { canonical: String, generation: u64 },
-    Cgroup { name: String, generation: u64 },
-    Process { generation: u64 },
+    Rootfs {
+        path: PathBuf,
+        generation: u64,
+    },
+    BindMount {
+        target: PathBuf,
+        generation: u64,
+        source_device: u64,
+        source_inode: u64,
+        baseline_device: u64,
+        baseline_inode: u64,
+        baseline_mount_id: Option<u64>,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
+    },
+    TmpfsMount {
+        target: PathBuf,
+        generation: u64,
+        baseline_device: u64,
+        baseline_inode: u64,
+        baseline_mount_id: Option<u64>,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
+    },
+    RootfsReadonly {
+        target: PathBuf,
+        generation: u64,
+        baseline_device: u64,
+        baseline_inode: u64,
+        baseline_mount_id: Option<u64>,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
+    },
+    NetworkAllocation {
+        canonical: String,
+        generation: u64,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
+    },
+    Cgroup {
+        name: String,
+        generation: u64,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
+        #[serde(default)]
+        expected_controllers: Vec<String>,
+    },
+    Process {
+        generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -688,7 +731,92 @@ impl CreationRollback {
             _ => None,
         });
         let mut quarantine = false;
-        for applied in resource_cleanup_order(&self.typed_applied_resources) {
+        let mut observed_resources = self.typed_applied_resources.clone();
+        for (plan_index, plan) in self.resource_plans.iter().enumerate() {
+            if observed_resources
+                .iter()
+                .any(|resource| resource.plan_index == plan_index)
+            {
+                continue;
+            }
+            let synthesized = match plan {
+                ResourcePlan::BindMount {
+                    target,
+                    source_device,
+                    source_inode,
+                    baseline_device,
+                    baseline_inode,
+                    baseline_mount_id,
+                    ..
+                } => classify_unmarked_mount(
+                    rootfs.as_deref(),
+                    target,
+                    (*baseline_device, *baseline_inode, *baseline_mount_id),
+                    Some((*source_device, *source_inode, None)),
+                    None,
+                ),
+                ResourcePlan::TmpfsMount {
+                    target,
+                    baseline_device,
+                    baseline_inode,
+                    baseline_mount_id,
+                    ..
+                } => classify_unmarked_mount(
+                    rootfs.as_deref(),
+                    target,
+                    (*baseline_device, *baseline_inode, *baseline_mount_id),
+                    None,
+                    Some("tmpfs"),
+                ),
+                ResourcePlan::RootfsReadonly {
+                    baseline_device,
+                    baseline_inode,
+                    baseline_mount_id,
+                    ..
+                } => classify_unmarked_mount(
+                    rootfs.as_deref(),
+                    Path::new("."),
+                    (*baseline_device, *baseline_inode, *baseline_mount_id),
+                    None,
+                    Some("readonly"),
+                ),
+                ResourcePlan::Cgroup { name, .. } => {
+                    if self.cgroup_root.join(name).exists() {
+                        Err(())
+                    } else {
+                        Ok(None)
+                    }
+                }
+                ResourcePlan::NetworkAllocation { .. } => {
+                    if self.netns_name.is_some() || self.network_ownership.is_some() {
+                        Ok(Some(ResourceIdentity::Network {
+                            identity: self.namespace_identity,
+                        }))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                ResourcePlan::Rootfs { path, .. } => match fs::metadata(path) {
+                    Ok(metadata) => Ok(Some(ResourceIdentity::Path {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                        mount_id: mount_id_for_path(path).ok().flatten(),
+                    })),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(_) => Err(()),
+                },
+                ResourcePlan::Process { .. } => Ok(None),
+            };
+            match synthesized {
+                Ok(Some(identity)) => observed_resources.push(AppliedResource {
+                    plan_index,
+                    identity,
+                }),
+                Ok(None) => {}
+                Err(()) => quarantine = true,
+            }
+        }
+        for applied in resource_cleanup_order(&observed_resources) {
             let Some(plan) = self.resource_plans.get(applied.plan_index) else {
                 quarantine = true;
                 continue;
@@ -990,6 +1118,11 @@ pub enum LifecyclePhasePoint {
     NetworkApplied,
     CgroupApplied,
     RestartOldStopped,
+    BindKernelEffect,
+    TmpfsKernelEffect,
+    ReadonlyKernelEffect,
+    NetworkKernelEffect,
+    CgroupKernelEffect,
     SpawnPrepared,
     LaunchIdentityDurable,
     KernelEffectApplied,
@@ -1717,35 +1850,10 @@ impl ContainerRuntime {
             path: rootfs_dir.clone(),
             generation: 1,
         })?;
-        let bind_plans = mounts
-            .iter()
-            .map(|mount| {
-                rollback.plan_typed_resource(ResourcePlan::BindMount {
-                    target: mount.target.clone(),
-                    generation: 1,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let tmpfs_plans = tmpfs_mounts
-            .iter()
-            .map(|mount| {
-                rollback.plan_typed_resource(ResourcePlan::TmpfsMount {
-                    target: mount.target.clone(),
-                    generation: 1,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let readonly_plan = readonly_rootfs
-            .then(|| {
-                rollback.plan_typed_resource(ResourcePlan::RootfsReadonly {
-                    target: PathBuf::from("."),
-                    generation: 1,
-                })
-            })
-            .transpose()?;
         let network_plan = rollback.plan_typed_resource(ResourcePlan::NetworkAllocation {
             canonical: format!("{network_mode}:{network_backend}"),
             generation: 1,
+            operation_id: creation_provenance.creator_operation_id,
         })?;
         let cgroup_plan = limits
             .is_some()
@@ -1753,6 +1861,8 @@ impl ContainerRuntime {
                 rollback.plan_typed_resource(ResourcePlan::Cgroup {
                     name: format!("ferrocrate/{container_id}"),
                     generation: 1,
+                    operation_id: creation_provenance.creator_operation_id,
+                    expected_controllers: vec!["cpu".into(), "memory".into(), "pids".into()],
                 })
             })
             .transpose()?;
@@ -1781,8 +1891,75 @@ impl ContainerRuntime {
         rollback.mark_resource_applied("rootfs", kernel_path_identity(&rootfs_dir).ok())?;
         rollback.mark_typed_resource(rootfs_plan, path_resource_identity(&rootfs_dir)?)?;
 
+        let mut bind_plans = Vec::with_capacity(mounts.len());
+        for mount in mounts {
+            let _target = open_mount_target_beneath(&rootfs_dir, &mount.target)?;
+            let target = path_resource_identity(&rootfs_dir.join(&mount.target))?;
+            let source_metadata = fs::metadata(&mount.source)?;
+            let ResourceIdentity::Path {
+                device,
+                inode,
+                mount_id,
+            } = target
+            else {
+                unreachable!()
+            };
+            bind_plans.push(rollback.plan_typed_resource(ResourcePlan::BindMount {
+                target: mount.target.clone(),
+                generation: 1,
+                source_device: source_metadata.dev(),
+                source_inode: source_metadata.ino(),
+                baseline_device: device,
+                baseline_inode: inode,
+                baseline_mount_id: mount_id,
+                operation_id: creation_provenance.creator_operation_id,
+            })?);
+        }
+        let mut tmpfs_plans = Vec::with_capacity(tmpfs_mounts.len());
+        for mount in tmpfs_mounts {
+            let _target = open_mount_target_beneath(&rootfs_dir, &mount.target)?;
+            let ResourceIdentity::Path {
+                device,
+                inode,
+                mount_id,
+            } = path_resource_identity(&rootfs_dir.join(&mount.target))?
+            else {
+                unreachable!()
+            };
+            tmpfs_plans.push(rollback.plan_typed_resource(ResourcePlan::TmpfsMount {
+                target: mount.target.clone(),
+                generation: 1,
+                baseline_device: device,
+                baseline_inode: inode,
+                baseline_mount_id: mount_id,
+                operation_id: creation_provenance.creator_operation_id,
+            })?);
+        }
+        let readonly_plan = if readonly_rootfs {
+            let ResourceIdentity::Path {
+                device,
+                inode,
+                mount_id,
+            } = path_resource_identity(&rootfs_dir)?
+            else {
+                unreachable!()
+            };
+            Some(rollback.plan_typed_resource(ResourcePlan::RootfsReadonly {
+                target: PathBuf::from("."),
+                generation: 1,
+                baseline_device: device,
+                baseline_inode: inode,
+                baseline_mount_id: mount_id,
+                operation_id: creation_provenance.creator_operation_id,
+            })?)
+        } else {
+            None
+        };
+
         for (index, mount) in mounts.iter().enumerate() {
             apply_authorized_bind_mounts(&rootfs_dir, std::slice::from_ref(mount))?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::BindKernelEffect)?;
             {
                 rollback.mark_resource_applied(&format!("mount:{index}"), None)?;
                 rollback.mark_typed_resource(
@@ -1793,6 +1970,8 @@ impl ContainerRuntime {
         }
         for (index, mount) in tmpfs_mounts.iter().enumerate() {
             apply_tmpfs_mounts(&rootfs_dir, std::slice::from_ref(mount))?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::TmpfsKernelEffect)?;
             rollback.mark_typed_resource(
                 tmpfs_plans[index],
                 path_resource_identity(&rootfs_dir.join(&mount.target))?,
@@ -1800,6 +1979,8 @@ impl ContainerRuntime {
         }
         if readonly_rootfs {
             apply_readonly_rootfs(&rootfs_dir)?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::ReadonlyKernelEffect)?;
             rollback.mark_typed_resource(
                 readonly_plan.expect("readonly plan exists"),
                 path_resource_identity(&rootfs_dir)?,
@@ -1818,6 +1999,8 @@ impl ContainerRuntime {
             &mut rollback,
             &existing_records,
         )?;
+        self.phase_hook
+            .reached("run", LifecyclePhasePoint::NetworkKernelEffect)?;
         // Track network resources for rollback
         rollback.track_network(&mut network_setup, port_mappings)?;
         rollback.mark_resource_applied(
@@ -1902,6 +2085,8 @@ impl ContainerRuntime {
             let manager = CgroupV2Manager::new(&self.cgroup_root);
             let cgroup_name = format!("ferrocrate/{container_id}");
             let group = manager.create_group(&cgroup_name)?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::CgroupKernelEffect)?;
             rollback.track_cgroup(cgroup_name)?;
             let cgroup_metadata = fs::metadata(&group)?;
             rollback.mark_typed_resource(
@@ -4933,6 +5118,69 @@ fn mount_id_for_path(path: &Path) -> Result<Option<u64>, RuntimeError> {
     }))
 }
 
+fn mountinfo_for_path(path: &Path) -> Result<Option<(u64, String, bool)>, RuntimeError> {
+    let canonical = fs::canonicalize(path)?;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(mountinfo.lines().find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() <= 6 || Path::new(fields[4]) != canonical {
+            return None;
+        }
+        let separator = fields.iter().position(|field| *field == "-")?;
+        Some((
+            fields[0].parse().ok()?,
+            fields.get(separator + 1)?.to_string(),
+            fields[5].split(',').any(|option| option == "ro"),
+        ))
+    }))
+}
+
+fn classify_unmarked_mount(
+    rootfs: Option<&Path>,
+    target: &Path,
+    baseline: (u64, u64, Option<u64>),
+    expected_bind: Option<(u64, u64, Option<u64>)>,
+    expected_kind: Option<&str>,
+) -> Result<Option<ResourceIdentity>, ()> {
+    let rootfs = rootfs.ok_or(())?;
+    let path = if target == Path::new(".") {
+        rootfs.to_path_buf()
+    } else {
+        rootfs.join(target)
+    };
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let mount = mountinfo_for_path(&path).map_err(|_| ())?;
+    if metadata.dev() == baseline.0
+        && metadata.ino() == baseline.1
+        && mount.as_ref().map(|value| value.0) == baseline.2
+    {
+        return Ok(None);
+    }
+    let exact = if let Some((source_device, source_inode, _)) = expected_bind {
+        metadata.dev() == source_device && metadata.ino() == source_inode && mount.is_some()
+    } else if expected_kind == Some("tmpfs") {
+        mount.as_ref().is_some_and(|value| value.1 == "tmpfs")
+    } else if expected_kind == Some("readonly") {
+        mount.as_ref().is_some_and(|value| value.2)
+            && metadata.dev() == baseline.0
+            && metadata.ino() == baseline.1
+    } else {
+        false
+    };
+    if !exact {
+        return Err(());
+    }
+    Ok(Some(ResourceIdentity::Path {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mount_id: mount.map(|value| value.0),
+    }))
+}
+
 #[derive(Debug, Clone)]
 struct EbpfExternalRoute {
     interface: String,
@@ -7651,7 +7899,7 @@ mod tests {
     use crate::image_tagging::canonicalize_reference;
     use crate::witness::{decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage};
     use std::collections::HashMap;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::Mutex;
 
     static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -8627,10 +8875,19 @@ mod tests {
             target: "bind".into(),
             read_only: false,
         };
+        let _ = crate::mounts::open_mount_target_beneath(&rootfs, &bind.target).unwrap();
+        let bind_baseline = std::fs::metadata(rootfs.join(&bind.target)).unwrap();
+        let source_identity = std::fs::metadata(&bind.source).unwrap();
         let bind_plan = rollback
             .plan_typed_resource(super::ResourcePlan::BindMount {
                 target: bind.target.clone(),
                 generation: 1,
+                source_device: source_identity.dev(),
+                source_inode: source_identity.ino(),
+                baseline_device: bind_baseline.dev(),
+                baseline_inode: bind_baseline.ino(),
+                baseline_mount_id: super::mount_id_for_path(&rootfs.join(&bind.target)).unwrap(),
+                operation_id: Some([8; 16]),
             })
             .unwrap();
         if let Err(error) =
@@ -8649,10 +8906,16 @@ mod tests {
             target: "tmp".into(),
             size: Some("1m".into()),
         };
+        let _ = crate::mounts::open_mount_target_beneath(&rootfs, &tmpfs.target).unwrap();
+        let tmpfs_baseline = std::fs::metadata(rootfs.join(&tmpfs.target)).unwrap();
         let tmpfs_plan = rollback
             .plan_typed_resource(super::ResourcePlan::TmpfsMount {
                 target: tmpfs.target.clone(),
                 generation: 1,
+                baseline_device: tmpfs_baseline.dev(),
+                baseline_inode: tmpfs_baseline.ino(),
+                baseline_mount_id: super::mount_id_for_path(&rootfs.join(&tmpfs.target)).unwrap(),
+                operation_id: Some([8; 16]),
             })
             .unwrap();
         crate::mounts::apply_tmpfs_mounts(&rootfs, std::slice::from_ref(&tmpfs)).unwrap();
@@ -8681,6 +8944,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3, 2, 1, 0]
         );
+    }
+
+    #[test]
+    fn unmarked_mount_plan_classifies_unchanged_or_quarantines_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = temp.path().join("container/rootfs");
+        let target = rootfs.join("data");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let baseline = std::fs::metadata(&target).unwrap();
+        let baseline_mount_id = super::mount_id_for_path(&target).unwrap();
+        let source_identity = std::fs::metadata(&source).unwrap();
+        let plan = super::ResourcePlan::BindMount {
+            target: "data".into(),
+            generation: 1,
+            source_device: source_identity.dev(),
+            source_inode: source_identity.ino(),
+            baseline_device: baseline.dev(),
+            baseline_inode: baseline.ino(),
+            baseline_mount_id,
+            operation_id: Some([9; 16]),
+        };
+        assert!(super::classify_unmarked_mount(
+            Some(&rootfs),
+            std::path::Path::new("data"),
+            (baseline.dev(), baseline.ino(), baseline_mount_id),
+            Some((source_identity.dev(), source_identity.ino(), None)),
+            None,
+        )
+        .unwrap()
+        .is_none());
+        std::fs::remove_dir(&target).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        assert!(super::classify_unmarked_mount(
+            Some(&rootfs),
+            match &plan {
+                super::ResourcePlan::BindMount { target, .. } => target,
+                _ => unreachable!(),
+            },
+            (baseline.dev(), baseline.ino(), baseline_mount_id),
+            Some((source_identity.dev(), source_identity.ino(), None)),
+            None,
+        )
+        .is_err());
     }
 
     #[test]

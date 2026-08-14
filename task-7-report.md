@@ -66,6 +66,16 @@ mismatches quarantine the ledger. `remove_dir_all` is forbidden while mountinfo
 shows any live mount below the container directory, and the ledger is removed
 only after the linked recovery witness is durable.
 
+The effect-to-marker window is also classified from the durable plan. Mount
+plans bind the pre-effect target mount ID/device/inode, bind-source identity,
+expected tmpfs/readonly transition, operation ID, and generation. On reopen an
+unchanged baseline is `NotApplied`; an exact planned transition is promoted to
+trusted observed-applied cleanup; every other state is quarantined. Cgroup and
+network plans bind their operation/allocation identities and classify an
+unmarked live object conservatively. Dedicated kernel-effect barriers exist
+immediately after bind, tmpfs, readonly, network, and cgroup syscalls and before
+their applied marker.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode
@@ -73,7 +83,7 @@ Verification on 2026-08-15:
   persistence-failure/reopen cases, plus the 3x5 crash/reopen matrix.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
-- `ferro-core --lib`: 274 passed, 1 ignored. Entitlement tests now serialize
+- `ferro-core --lib`: 275 passed, 1 ignored. Entitlement tests now serialize
   their process-global environment and the repeated full run is stable.
 - Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.

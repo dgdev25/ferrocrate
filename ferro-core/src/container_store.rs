@@ -525,6 +525,19 @@ impl LocalContainerStore {
             .transpose()
     }
 
+    pub(crate) fn lifecycle_operations(
+        &self,
+    ) -> Result<Vec<LifecycleOperation>, ContainerStoreError> {
+        self.db
+            .open_tree(LIFECYCLE_OPERATION_TREE)?
+            .iter()
+            .map(|entry| {
+                let (_, bytes) = entry?;
+                serde_json::from_slice(&bytes).map_err(ContainerStoreError::Decode)
+            })
+            .collect()
+    }
+
     pub(crate) fn mark_mutation_effect(
         &self,
         id: &str,

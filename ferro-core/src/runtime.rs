@@ -688,6 +688,27 @@ pub struct ContainerRuntime {
     /// Cancellation tokens for resource monitor threads (Task 5.1)
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
     authorization: RuntimeAuthorization,
+    phase_hook: Arc<dyn LifecyclePhaseHook>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecyclePhasePoint {
+    DecisionDurable,
+    ReservationDurable,
+    EffectObserved,
+    TerminalDurable,
+    ReservationCleared,
+}
+
+pub trait LifecyclePhaseHook: Send + Sync {
+    fn reached(&self, action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError>;
+}
+
+struct NoopLifecyclePhaseHook;
+impl LifecyclePhaseHook for NoopLifecyclePhaseHook {
+    fn reached(&self, _action: &str, _phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 struct NormalizedRunRequest {
@@ -707,12 +728,14 @@ impl ContainerRuntime {
         Self::initialize(
             runtime_dir,
             RuntimeAuthorization::compatibility_with_id(runtime_id),
+            Arc::new(NoopLifecyclePhaseHook),
         )
     }
 
     fn initialize(
         runtime_dir: &Path,
         authorization: RuntimeAuthorization,
+        phase_hook: Arc<dyn LifecyclePhaseHook>,
     ) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
         let store = LocalContainerStore::open(runtime_dir.join("containers.db"))?;
@@ -726,6 +749,7 @@ impl ContainerRuntime {
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization,
+            phase_hook,
         };
         runtime.reconcile_pending_mutations()?;
         recover_pending_network_cleanups(
@@ -750,6 +774,22 @@ impl ContainerRuntime {
         Self::initialize(
             runtime_dir,
             RuntimeAuthorization::new_with_id(gate, journal, runtime_id),
+            Arc::new(NoopLifecyclePhaseHook),
+        )
+    }
+
+    pub fn new_with_authorization_and_phase_hook(
+        runtime_dir: &Path,
+        gate: Arc<AuthorizationGate>,
+        journal: Option<Arc<crate::witness::WitnessJournal>>,
+        phase_hook: Arc<dyn LifecyclePhaseHook>,
+    ) -> Result<Self, RuntimeError> {
+        fs::create_dir_all(runtime_dir)?;
+        let runtime_id = load_or_create_runtime_id(runtime_dir)?;
+        Self::initialize(
+            runtime_dir,
+            RuntimeAuthorization::new_with_id(gate, journal, runtime_id),
+            phase_hook,
         )
     }
 
@@ -890,6 +930,24 @@ impl ContainerRuntime {
             } else {
                 self.store
                     .finish_mutation(&record.id, reservation.operation_id)?;
+            }
+        }
+        // A crash after the terminal journal flush but before store cleanup
+        // leaves no journal-pending entry. The independent operation tree is
+        // authoritative for completing that final idempotent clear.
+        for operation in self.store.lifecycle_operations()? {
+            let id = crate::witness::OperationId::from_bytes(operation.operation_id);
+            if !matches!(
+                journal.recover(id),
+                Err(crate::witness::JournalError::AlreadyComplete)
+            ) {
+                continue;
+            }
+            if operation.phase == LifecyclePhase::StoreDeleted {
+                self.store.acknowledge_mutation(operation.operation_id)?;
+            } else if self.store.get(&operation.container_id)?.is_some() {
+                self.store
+                    .finish_mutation(&operation.container_id, operation.operation_id)?;
             }
         }
         Ok(())
@@ -1115,6 +1173,8 @@ impl ContainerRuntime {
         let permit = self
             .authorization
             .authorize_run(&candidate, &normalized.facts)?;
+        self.phase_hook
+            .reached("container.run", LifecyclePhasePoint::DecisionDurable)?;
         let creation_provenance = permit.creation_provenance();
         let operation_id = permit.operation_id();
         let witnessed = self.authorization.requires_provenance();
@@ -1129,6 +1189,8 @@ impl ContainerRuntime {
             // Durable create provenance and reservation precede every external
             // creation side effect, closing the decision-to-store crash window.
             self.store.put_reserved_creation(&candidate)?;
+            self.phase_hook
+                .reached("container.run", LifecyclePhasePoint::ReservationDurable)?;
         }
         let (proof, intent) = permit.execution_authority();
         let authorized_image = proof
@@ -1167,10 +1229,16 @@ impl ContainerRuntime {
         if witnessed {
             self.store
                 .mark_mutation_effect(&container_id, operation_id, result.is_ok())?;
+            self.phase_hook
+                .reached("container.run", LifecyclePhasePoint::EffectObserved)?;
         }
         self.authorization.complete(permit, result.is_ok())?;
+        self.phase_hook
+            .reached("container.run", LifecyclePhasePoint::TerminalDurable)?;
         if witnessed {
             self.store.finish_mutation(&container_id, operation_id)?;
+            self.phase_hook
+                .reached("container.run", LifecyclePhasePoint::ReservationCleared)?;
         }
         result
     }
@@ -1499,8 +1567,14 @@ impl ContainerRuntime {
         let result = self.exec_authorized(proof, intent, id, cmd);
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
         self.store.finish_mutation(id, operation_id)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
     }
 
@@ -1942,6 +2016,10 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let permit = self.authorization.authorize(action, &record)?;
+        self.phase_hook.reached(
+            runtime_action_name(action),
+            LifecyclePhasePoint::DecisionDurable,
+        )?;
         let current = self
             .store
             .get(id)?
@@ -1960,6 +2038,10 @@ impl ContainerRuntime {
             self.authorization.complete(permit, false)?;
             return Err(error.into());
         }
+        self.phase_hook.reached(
+            runtime_action_name(action),
+            LifecyclePhasePoint::ReservationDurable,
+        )?;
         Ok(permit)
     }
 
@@ -1979,13 +2061,33 @@ impl ContainerRuntime {
         let result = execute(self, proof, intent);
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook.reached(
+            runtime_action_name(action),
+            LifecyclePhasePoint::EffectObserved,
+        )?;
         if action == Action::ContainerDelete && result.is_ok() {
             self.store.delete_for_mutation(id, operation_id)?;
             self.authorization.complete(permit, true)?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::TerminalDurable,
+            )?;
             self.store.acknowledge_mutation(operation_id)?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::ReservationCleared,
+            )?;
         } else {
             self.authorization.complete(permit, result.is_ok())?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::TerminalDurable,
+            )?;
             self.store.finish_mutation(id, operation_id)?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::ReservationCleared,
+            )?;
         }
         result
     }

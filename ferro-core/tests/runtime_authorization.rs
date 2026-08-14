@@ -1,12 +1,75 @@
 use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore};
 use ferro_core::container_store::CreationProvenance;
 use ferro_core::container_store::{ContainerRecord, LocalContainerStore};
-use ferro_core::runtime::ContainerRuntime;
+use ferro_core::runtime::{
+    ContainerRuntime, LifecyclePhaseHook, LifecyclePhasePoint, RuntimeError,
+};
 use ferro_core::witness::{
     decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
+use std::sync::Mutex;
+
+#[derive(Default)]
+struct RecordingPhaseHook(Mutex<Vec<LifecyclePhasePoint>>);
+impl LifecyclePhaseHook for RecordingPhaseHook {
+    fn reached(&self, _action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
+        self.0.lock().unwrap().push(phase);
+        Ok(())
+    }
+}
+
+#[test]
+fn exec_exposes_every_durable_crash_boundary_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let policy_path = root.path().join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy_path).unwrap(),
+    )));
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            root.path().join("witness"),
+            [61; 16],
+            JournalMode::Required,
+        ))
+        .unwrap(),
+    );
+    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+        "id":"00112233445566778899aabbccddeeff", "pid":std::process::id(),
+        "image":"example.invalid/app:latest", "command":["true"],
+        "created_at_unix":1, "stdout_path":"", "stderr_path":"", "status":"running"
+    }))
+    .unwrap();
+    store.put(&record).unwrap();
+    drop(store);
+    let hook = Arc::new(RecordingPhaseHook::default());
+    let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
+        root.path(),
+        gate,
+        Some(journal),
+        hook.clone(),
+    )
+    .unwrap();
+    runtime.exec(&record.id, &["true".into()]).unwrap();
+    assert_eq!(
+        *hook.0.lock().unwrap(),
+        [
+            LifecyclePhasePoint::DecisionDurable,
+            LifecyclePhasePoint::ReservationDurable,
+            LifecyclePhasePoint::EffectObserved,
+            LifecyclePhasePoint::TerminalDurable,
+            LifecyclePhasePoint::ReservationCleared,
+        ]
+    );
+}
 
 #[test]
 fn creation_provenance_is_absent_for_legacy_records() {

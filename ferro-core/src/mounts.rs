@@ -26,11 +26,26 @@ pub enum MountError {
 }
 
 pub fn apply_bind_mounts(rootfs: &Path, mounts: &[BindMount]) -> Result<(), MountError> {
+    apply_bind_mounts_inner(rootfs, mounts, false)
+}
+
+pub(crate) fn apply_authorized_bind_mounts(
+    rootfs: &Path,
+    mounts: &[BindMount],
+) -> Result<(), MountError> {
+    apply_bind_mounts_inner(rootfs, mounts, true)
+}
+
+fn apply_bind_mounts_inner(
+    rootfs: &Path,
+    mounts: &[BindMount],
+    allow_runtime_fd: bool,
+) -> Result<(), MountError> {
     for mount_spec in mounts {
         // Security: Canonicalize source path to resolve symlinks
         // This prevents symlink-based attacks where an attacker could create
         // a symlink to escape the rootfs
-        let source = if mount_spec.source.starts_with("/proc/self/fd/") {
+        let source = if allow_runtime_fd && mount_spec.source.starts_with("/proc/self/fd/") {
             mount_spec.source.clone()
         } else {
             mount_spec.source.canonicalize().map_err(|e| {

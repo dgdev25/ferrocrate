@@ -27,7 +27,8 @@ use crate::mac_profiles::generate_apparmor_profile;
 #[cfg(target_os = "linux")]
 use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
 use crate::mounts::{
-    apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts, BindMount, MountError, TmpfsMount,
+    apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts, BindMount, MountError,
+    TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
@@ -1181,7 +1182,7 @@ impl ContainerRuntime {
         }
 
         if !mounts.is_empty() {
-            apply_bind_mounts(&rootfs_dir, mounts)?;
+            apply_authorized_bind_mounts(&rootfs_dir, mounts)?;
         }
         if !tmpfs_mounts.is_empty() {
             apply_tmpfs_mounts(&rootfs_dir, tmpfs_mounts)?;

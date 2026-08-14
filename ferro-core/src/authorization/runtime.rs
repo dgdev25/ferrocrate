@@ -69,18 +69,9 @@ impl MutationPermit {
 }
 
 impl RuntimeAuthorization {
-    pub(crate) fn compatibility() -> Self {
-        let policies = Arc::new(PolicyStore::compatibility_disabled());
-        Self::new(Arc::new(AuthorizationGate::new(policies)), None)
-    }
-
     pub(crate) fn compatibility_with_id(runtime_id: [u8; 16]) -> Self {
         let policies = Arc::new(PolicyStore::compatibility_disabled());
         Self::new_with_id(Arc::new(AuthorizationGate::new(policies)), None, runtime_id)
-    }
-
-    pub(crate) fn new(gate: Arc<AuthorizationGate>, journal: Option<Arc<WitnessJournal>>) -> Self {
-        Self::new_with_id(gate, journal, rand::rng().random())
     }
 
     pub(crate) fn new_with_id(
@@ -98,10 +89,6 @@ impl RuntimeAuthorization {
             boot_id: read_boot_id().unwrap_or_else(|| rng.random()),
             pseudonym_key: rng.random(),
         }
-    }
-
-    pub(crate) fn ids(&self) -> ([u8; 16], [u8; 16]) {
-        (self.runtime_id, self.boot_id)
     }
 
     pub(crate) fn requires_provenance(&self) -> bool {

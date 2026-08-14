@@ -9,7 +9,8 @@ pub mod principal;
 #[cfg(target_os = "linux")]
 pub use principal::{
     DelegatedPrincipal, DelegationPolicy, EffectivePrincipal, IdMapEntry, InvocationChannel,
-    LinuxProcessIdentity, PrincipalResolutionError, PrincipalResolver, TransportPrincipal,
+    LinuxProcessIdentity, PrincipalResolutionError, PrincipalResolver, SupplementaryGroupPolicy,
+    TransportPrincipal,
 };
 
 #[cfg(test)]

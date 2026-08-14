@@ -27,9 +27,7 @@ fn peer_credentials_bind_the_host_visible_process_identity() {
 #[test]
 fn untrusted_cri_metadata_never_replaces_the_transport_principal() {
     let (peer, _other_end) = UnixStream::pair().expect("Unix socket pair");
-    let transport =
-        PrincipalResolver::from_peer_credentials_for_channel(&peer, InvocationChannel::Cri)
-            .expect("transport identity");
+    let transport = PrincipalResolver::from_peer_credentials(&peer).expect("transport identity");
     let transport_id = transport.principal().id().as_str().to_owned();
     let transport_role = transport.principal().role();
     let assertion = DelegatedPrincipal::from_untrusted_cri_metadata(

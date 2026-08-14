@@ -51,6 +51,8 @@ pub struct Checkpoint {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
+    #[error("a checkpoint publication is already pending recovery")]
+    PendingExists,
     #[error("checkpoint does not descend from explicit trust")]
     Untrusted,
     #[error("checkpoint regresses or conflicts with a pinned head")]
@@ -93,6 +95,21 @@ impl Checkpoint {
         }
         let mut cp = Self::sign(head, created_at_secs, key, CheckpointKind::Periodic)?;
         cp.previous_checkpoint_digest = Sha256::digest(predecessor.encode()).into();
+        cp.signature = key.sign(&cp.payload()).to_bytes();
+        Ok(cp)
+    }
+    pub fn sign_chunk_after(
+        head: FlushedHead,
+        first_sequence: u64,
+        created_at_secs: u64,
+        predecessor: &Self,
+        key: &SigningKey,
+    ) -> Result<Self, CheckpointError> {
+        if first_sequence <= predecessor.head.sequence || first_sequence > head.sequence + 1 {
+            return Err(CheckpointError::Rollback);
+        }
+        let mut cp = Self::sign_after(head, created_at_secs, predecessor, key)?;
+        cp.first_sequence = first_sequence;
         cp.signature = key.sign(&cp.payload()).to_bytes();
         Ok(cp)
     }
@@ -317,6 +334,9 @@ pub struct TrustBundle {
     journal_id: [u8; 16],
     starting_epoch: u64,
     max_records: u64,
+    first_sequence: u64,
+    predecessor_hash: [u8; 32],
+    boundary: Option<Checkpoint>,
     initial: VerifyingKey,
     minimum: Option<Checkpoint>,
     resets: HashMap<u64, VerifyingKey>,
@@ -327,10 +347,41 @@ impl TrustBundle {
             journal_id,
             starting_epoch: 1,
             max_records: 1_000_000,
+            first_sequence: 1,
+            predecessor_hash: [0; 32],
+            boundary: None,
             initial,
             minimum: None,
             resets: HashMap::new(),
         }
+    }
+    pub fn from_boundary(
+        journal_id: [u8; 16],
+        epoch: u64,
+        first_sequence: u64,
+        predecessor_hash: [u8; 32],
+        checkpoint: Checkpoint,
+        key: VerifyingKey,
+    ) -> Result<Self, CheckpointError> {
+        if checkpoint.head.journal_id != journal_id
+            || checkpoint.head.epoch != epoch
+            || first_sequence <= checkpoint.head.sequence
+            || predecessor_hash == [0; 32]
+        {
+            return Err(CheckpointError::Untrusted);
+        }
+        verify_signature(&checkpoint, &key)?;
+        Ok(Self {
+            journal_id,
+            starting_epoch: epoch,
+            max_records: 1_000_000,
+            first_sequence,
+            predecessor_hash,
+            boundary: Some(checkpoint),
+            initial: key,
+            minimum: None,
+            resets: HashMap::new(),
+        })
     }
     pub fn with_max_records(mut self, max_records: u64) -> Self {
         self.max_records = max_records;
@@ -381,12 +432,14 @@ impl CheckpointVerifier {
         if checkpoints.is_empty() || checkpoints.len() > MAX_CHECKPOINTS {
             return Err(CheckpointError::InvalidArtifact);
         }
-        if checkpoints[0].head.epoch != self.trust.starting_epoch {
+        if checkpoints[0].head.epoch != self.trust.starting_epoch
+            || checkpoints[0].first_sequence != self.trust.first_sequence
+        {
             return Err(CheckpointError::Untrusted);
         }
         let mut trusted = self.trust.initial;
         let mut trusted_keys = HashMap::from([(KeyId::from_public_key(&trusted), trusted)]);
-        let mut last: Option<&Checkpoint> = None;
+        let mut last: Option<&Checkpoint> = self.trust.boundary.as_ref();
         let mut discontinuities = 0;
         for cp in checkpoints {
             if cp.head.journal_id != self.trust.journal_id {
@@ -475,6 +528,9 @@ impl CheckpointVerifier {
             self.trust.journal_id,
             checkpoints,
             self.trust.max_records,
+            self.trust.starting_epoch,
+            self.trust.first_sequence,
+            self.trust.predecessor_hash,
         )?;
         report.completeness_through_checkpoint = complete.or(Some(true));
         let age = now_secs - last.created_at_secs;

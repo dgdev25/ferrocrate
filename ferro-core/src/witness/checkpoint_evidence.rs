@@ -10,22 +10,20 @@ pub(super) fn verify_streaming<'a, I>(
     journal_id: [u8; 16],
     checkpoints: &[Checkpoint],
     max_records: u64,
+    starting_epoch: u64,
+    first_sequence: u64,
+    predecessor_hash: [u8; 32],
 ) -> Result<VerificationReport, CheckpointError>
 where
     I: IntoIterator<Item = &'a [u8]>,
 {
-    let first_checkpoint = checkpoints.first().ok_or(CheckpointError::Untrusted)?;
+    checkpoints.first().ok_or(CheckpointError::Untrusted)?;
     let mut verifier = StreamVerifier::new(
-        StreamTrust::new(
-            journal_id,
-            first_checkpoint.head.epoch,
-            first_checkpoint.first_sequence,
-            [0; 32],
-        )
-        .with_max_records(max_records),
+        StreamTrust::new(journal_id, starting_epoch, first_sequence, predecessor_hash)
+            .with_max_records(max_records),
     );
     let mut checkpoint_cursor = 0_usize;
-    let mut current_epoch = first_checkpoint.head.epoch;
+    let mut current_epoch = starting_epoch;
 
     for bytes in evidence {
         let decoded = decode_record(bytes).map_err(|_| CheckpointError::Rollback)?;

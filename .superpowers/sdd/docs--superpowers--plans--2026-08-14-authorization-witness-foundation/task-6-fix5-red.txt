@@ -1,0 +1,8 @@
+Task 6 final review round RED evidence
+
+- Protocol inspection showed artifact publication occurred before durable sidecar creation and reset epoch advancement could precede recoverable intent.
+- Existing-sidecar tests originally had no `PendingExists` error or preflight on periodic, rotation, and reset workflows.
+- Partial-range tests originally had no independently pinned boundary constructor and checkpoints always encoded first_sequence=1.
+- Sidecar inspection found ordinary path-based read/write/unlink operations, failing the descriptor-relative no-follow requirement.
+
+The focused tests were kept red/compile-failing while the missing APIs and state transitions were introduced, then rerun after each minimal implementation step.

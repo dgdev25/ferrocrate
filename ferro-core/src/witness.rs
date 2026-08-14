@@ -29,7 +29,9 @@ mod verify;
 pub use checkpoint::{
     Checkpoint, CheckpointError, CheckpointKind, CheckpointVerifier, FlushedHead, TrustBundle,
 };
-pub use checkpoint_coordinator::{CheckpointCoordinator, PendingBinding, PublicationOutcome};
+pub use checkpoint_coordinator::{
+    CheckpointCoordinator, PendingBinding, PendingState, PublicationOutcome, Recoverability,
+};
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
 pub use journal::JournalHead;
 pub use journal::{

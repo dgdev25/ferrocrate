@@ -488,6 +488,38 @@ fn crash_after_artifact_rename_returns_pending_and_reconciles_idempotently() {
         ferro_core::witness::PublicationOutcome::PendingBinding(pending) => pending,
         _ => panic!("flush ambiguity must be pending"),
     };
+    assert!(matches!(
+        coordinator.capture_publish_bind(
+            &journal,
+            2,
+            &key,
+            Some(pending.checkpoint()),
+            publication_record
+        ),
+        Err(ferro_core::witness::CheckpointError::PendingExists)
+    ));
+    let replacement = SigningKey::from_bytes(&[34; 32]);
+    assert!(matches!(
+        coordinator.capture_rotate_publish_bind(
+            &journal,
+            2,
+            &key,
+            &replacement,
+            pending.checkpoint(),
+            publication_record
+        ),
+        Err(ferro_core::witness::CheckpointError::PendingExists)
+    ));
+    assert!(matches!(
+        coordinator.capture_reset_publish_bind(
+            &journal,
+            2,
+            &replacement,
+            pending.checkpoint(),
+            publication_record
+        ),
+        Err(ferro_core::witness::CheckpointError::PendingExists)
+    ));
     coordinator
         .reconcile_binding(&journal, &pending, publication_record(pending.checkpoint()))
         .unwrap();
@@ -709,10 +741,62 @@ fn pending_binding_survives_a_hard_coordinator_restart() {
         Duration::from_secs(5),
         Duration::from_secs(1),
     );
-    assert!(restarted.pending_binding().unwrap().is_some());
+    assert_eq!(
+        restarted.pending_binding().unwrap().unwrap().state(),
+        ferro_core::witness::PendingState::Published
+    );
     restarted.reconcile_pending(&journal).unwrap();
     assert!(restarted.pending_binding().unwrap().is_none());
     assert_eq!(journal.records().unwrap().len(), 1);
+}
+
+#[test]
+fn prepared_sidecar_republishes_a_missing_artifact_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let faults = JournalFaults::new();
+    faults.fail_once(FaultPoint::DuringFlush(FlushBoundary::Outcome));
+    let journal = WitnessJournal::open_with_faults(
+        JournalConfig::new(dir.path().join("journal"), [72; 16], JournalMode::Required),
+        faults,
+    )
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let artifact = published.join("head.chk");
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        &artifact,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let key = SigningKey::from_bytes(&[72; 32]);
+    coordinator
+        .capture_publish_bind(&journal, 1, &key, None, publication_record)
+        .unwrap();
+    let sidecar = published.join("head.chk.pending");
+    let mut bytes = fs::read(&sidecar).unwrap();
+    bytes[8] = 1;
+    let end = bytes.len() - 32;
+    let checksum: [u8; 32] = Sha256::digest(&bytes[..end]).into();
+    bytes[end..].copy_from_slice(&checksum);
+    fs::write(&sidecar, bytes).unwrap();
+    fs::remove_file(&artifact).unwrap();
+    let restarted = ferro_core::witness::CheckpointCoordinator::new(
+        &artifact,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    assert_eq!(
+        restarted.pending_binding().unwrap().unwrap().state(),
+        ferro_core::witness::PendingState::Prepared
+    );
+    restarted.reconcile_pending(&journal).unwrap();
+    assert!(artifact.exists());
+    assert!(restarted.pending_binding().unwrap().is_none());
 }
 
 #[test]
@@ -754,4 +838,66 @@ fn pending_binding_rejects_tampering_and_a_cross_journal_reconcile() {
     bytes[20] ^= 1;
     fs::write(&pending_path, bytes).unwrap();
     assert!(coordinator.pending_binding().is_err());
+}
+
+#[test]
+fn independently_pinned_chunks_enforce_exact_boundary() {
+    let key = SigningKey::from_bytes(&[71; 32]);
+    let first = Checkpoint::sign(
+        FlushedHead::new([71; 16], 1, 0, [0; 32]),
+        1,
+        &key,
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    let first_evidence = publication_evidence(&first);
+    CheckpointVerifier::new(TrustBundle::new([71; 16], key.verifying_key()).with_max_records(1))
+        .verify(&first_evidence, &[first.clone()], 1, Duration::from_secs(5))
+        .unwrap();
+    let predecessor = publication_hash(&first);
+    let second = Checkpoint::sign_chunk_after(
+        FlushedHead::new([71; 16], 1, 1, predecessor),
+        2,
+        2,
+        &first,
+        &key,
+    )
+    .unwrap();
+    let trust = TrustBundle::from_boundary(
+        [71; 16],
+        1,
+        2,
+        predecessor,
+        first.clone(),
+        key.verifying_key(),
+    )
+    .unwrap()
+    .with_max_records(1);
+    CheckpointVerifier::new(trust)
+        .verify(
+            &publication_evidence(&second),
+            &[second.clone()],
+            2,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert!(TrustBundle::from_boundary(
+        [71; 16],
+        2,
+        2,
+        predecessor,
+        first.clone(),
+        key.verifying_key()
+    )
+    .is_err());
+    let wrong =
+        TrustBundle::from_boundary([71; 16], 1, 2, [9; 32], first, key.verifying_key()).unwrap();
+    assert!(CheckpointVerifier::new(wrong)
+        .verify(
+            &publication_evidence(&second),
+            &[second],
+            2,
+            Duration::from_secs(5)
+        )
+        .is_err());
 }

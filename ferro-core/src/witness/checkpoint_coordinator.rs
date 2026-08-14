@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::{
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -32,10 +32,29 @@ pub struct PendingBinding {
     expected_epoch: u64,
     expected_sequence: u64,
     record_bytes: Vec<u8>,
+    state: PendingState,
+    recoverability: Recoverability,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingState {
+    Prepared,
+    Published,
+    Bound,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Recoverability {
+    Retryable,
+    Indeterminate,
 }
 impl PendingBinding {
     pub fn checkpoint(&self) -> &Checkpoint {
         &self.checkpoint
+    }
+    pub fn state(&self) -> PendingState {
+        self.state
+    }
+    pub fn recoverability(&self) -> Recoverability {
+        self.recoverability
     }
 }
 
@@ -58,26 +77,38 @@ impl CheckpointCoordinator {
     where
         F: FnOnce(&Checkpoint) -> WitnessRecord,
     {
+        self.preflight()?;
         let head = journal.flushed_head()?.into();
         let cp = match predecessor {
             Some(previous) => Checkpoint::sign_after(head, now_secs, previous, key)?,
             None => Checkpoint::sign(head, now_secs, key, super::CheckpointKind::Periodic)?,
         };
-        self.publish(&cp)?;
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
         let prepared = prepare_binding(&cp, record(&cp), digest)?;
-        let pending = pending(cp.clone(), &prepared)?;
+        let mut pending = pending(cp.clone(), &prepared)?;
         self.persist_pending(&pending)?;
+        self.publish(&cp)?;
+        pending.state = PendingState::Published;
+        self.persist_pending_replace(&pending)?;
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
                 Ok(()) => {
+                    pending.state = PendingState::Bound;
+                    self.persist_pending_replace(&pending)?;
                     self.clear_pending()?;
                     PublicationOutcome::Bound(cp)
                 }
                 Err(JournalError::Indeterminate { .. }) => {
+                    pending.recoverability = Recoverability::Indeterminate;
+                    self.persist_pending_replace(&pending)?;
                     PublicationOutcome::PendingBinding(pending)
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    if nonretryable(&error) {
+                        self.clear_pending()?;
+                    }
+                    return Err(error.into());
+                }
             },
         )
     }
@@ -92,6 +123,7 @@ impl CheckpointCoordinator {
     where
         F: FnOnce(&Checkpoint) -> WitnessRecord,
     {
+        self.preflight()?;
         let current = journal.flushed_head()?;
         if current.epoch != predecessor.head.epoch {
             return Err(CheckpointError::Rollback);
@@ -107,28 +139,33 @@ impl CheckpointCoordinator {
             current.hash,
         );
         let cp = Checkpoint::trust_reset_after(head, now_secs, predecessor, new_key)?;
-        self.publish(&cp)?;
-        if journal.advance_epoch(current.epoch).is_err() {
-            let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
-            let prepared = prepare_binding(&cp, record(&cp), digest)?;
-            let pending = pending(cp, &prepared)?;
-            self.persist_pending(&pending)?;
-            return Ok(PublicationOutcome::PendingBinding(pending));
-        }
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
         let prepared = prepare_binding(&cp, record(&cp), digest)?;
-        let pending = pending(cp.clone(), &prepared)?;
+        let mut pending = pending(cp.clone(), &prepared)?;
         self.persist_pending(&pending)?;
+        self.publish(&cp)?;
+        pending.state = PendingState::Published;
+        self.persist_pending_replace(&pending)?;
+        journal.advance_epoch(current.epoch)?;
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
                 Ok(()) => {
+                    pending.state = PendingState::Bound;
+                    self.persist_pending_replace(&pending)?;
                     self.clear_pending()?;
                     PublicationOutcome::Bound(cp)
                 }
                 Err(JournalError::Indeterminate { .. }) => {
+                    pending.recoverability = Recoverability::Indeterminate;
+                    self.persist_pending_replace(&pending)?;
                     PublicationOutcome::PendingBinding(pending)
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    if nonretryable(&error) {
+                        self.clear_pending()?;
+                    }
+                    return Err(error.into());
+                }
             },
         )
     }
@@ -144,23 +181,35 @@ impl CheckpointCoordinator {
     where
         F: FnOnce(&Checkpoint) -> WitnessRecord,
     {
+        self.preflight()?;
         let head = journal.flushed_head()?.into();
         let cp = Checkpoint::rotate_after(head, now_secs, predecessor, old_key, new_key)?;
-        self.publish(&cp)?;
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
         let prepared = prepare_binding(&cp, record(&cp), digest)?;
-        let pending = pending(cp.clone(), &prepared)?;
+        let mut pending = pending(cp.clone(), &prepared)?;
         self.persist_pending(&pending)?;
+        self.publish(&cp)?;
+        pending.state = PendingState::Published;
+        self.persist_pending_replace(&pending)?;
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
                 Ok(()) => {
+                    pending.state = PendingState::Bound;
+                    self.persist_pending_replace(&pending)?;
                     self.clear_pending()?;
                     PublicationOutcome::Bound(cp)
                 }
                 Err(JournalError::Indeterminate { .. }) => {
+                    pending.recoverability = Recoverability::Indeterminate;
+                    self.persist_pending_replace(&pending)?;
                     PublicationOutcome::PendingBinding(pending)
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    if nonretryable(&error) {
+                        self.clear_pending()?;
+                    }
+                    return Err(error.into());
+                }
             },
         )
     }
@@ -218,27 +267,35 @@ impl CheckpointCoordinator {
             return Err(CheckpointError::Rollback);
         }
         journal.append_checkpoint_publication(digest, prepared)?;
+        let mut bound = pending.clone();
+        bound.state = PendingState::Bound;
+        self.persist_pending_replace(&bound)?;
         self.clear_pending()?;
         Ok(())
     }
     pub fn pending_binding(&self) -> Result<Option<PendingBinding>, CheckpointError> {
         let path = self.pending_path();
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let bytes = match secure_read(&path, MAX_CHECKPOINT_BYTES + super::MAX_RECORD_BYTES + 50)? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         };
         let pending = decode_pending(&bytes)?;
-        let artifact = fs::read(&self.path)?;
-        if artifact != pending.checkpoint.encode() {
-            return Err(CheckpointError::Rollback);
+        match secure_read(&self.path, MAX_CHECKPOINT_BYTES)? {
+            Some(artifact) if artifact == pending.checkpoint.encode() => {}
+            None if pending.state == PendingState::Prepared => {}
+            _ => return Err(CheckpointError::Rollback),
         }
         Ok(Some(pending))
     }
     pub fn reconcile_pending(&self, journal: &WitnessJournal) -> Result<(), CheckpointError> {
-        let pending = self
+        let mut pending = self
             .pending_binding()?
             .ok_or(CheckpointError::InvalidArtifact)?;
+        if pending.state == PendingState::Prepared {
+            self.publish(&pending.checkpoint)?;
+            pending.state = PendingState::Published;
+            self.persist_pending_replace(&pending)?;
+        }
         let decoded =
             decode_record(&pending.record_bytes).map_err(|_| CheckpointError::InvalidArtifact)?;
         let record = restore_record(decoded.record());
@@ -250,16 +307,20 @@ impl CheckpointCoordinator {
         PathBuf::from(name)
     }
     fn persist_pending(&self, pending: &PendingBinding) -> Result<(), CheckpointError> {
-        atomic_write(&self.pending_path(), &encode_pending(pending))
+        secure_write(&self.pending_path(), &encode_pending(pending), false)
+    }
+    fn persist_pending_replace(&self, pending: &PendingBinding) -> Result<(), CheckpointError> {
+        secure_write(&self.pending_path(), &encode_pending(pending), true)
+    }
+    fn preflight(&self) -> Result<(), CheckpointError> {
+        if self.pending_binding()?.is_some() {
+            Err(CheckpointError::PendingExists)
+        } else {
+            Ok(())
+        }
     }
     fn clear_pending(&self) -> Result<(), CheckpointError> {
-        match fs::remove_file(self.pending_path()) {
-            Ok(()) => File::open(self.path.parent().ok_or(CheckpointError::InvalidArtifact)?)?
-                .sync_all()?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
+        secure_unlink(&self.pending_path())
     }
     pub fn allows_user_mutation(&self, newest_checkpoint_secs: u64, now_secs: u64) -> bool {
         now_secs >= newest_checkpoint_secs
@@ -269,6 +330,20 @@ impl CheckpointCoordinator {
     pub const fn allows_reserved_cleanup(&self) -> bool {
         true
     }
+}
+
+fn nonretryable(error: &JournalError) -> bool {
+    matches!(
+        error,
+        JournalError::Disabled
+            | JournalError::JournalMismatch
+            | JournalError::UnsupportedVersion
+            | JournalError::ProofMismatch
+            | JournalError::BindingMismatch
+            | JournalError::InvalidStage
+            | JournalError::AlreadyComplete
+            | JournalError::NotPending
+    )
 }
 
 fn prepare_binding(
@@ -310,12 +385,23 @@ fn pending(
             .map_err(|_| CheckpointError::InvalidArtifact)?
             .as_ref()
             .to_vec(),
+        state: PendingState::Prepared,
+        recoverability: Recoverability::Retryable,
     })
 }
 
 fn encode_pending(pending: &PendingBinding) -> Vec<u8> {
     let checkpoint = pending.checkpoint.encode();
-    let mut out = b"FPEND001".to_vec();
+    let mut out = b"FPEND002".to_vec();
+    out.push(match pending.state {
+        PendingState::Prepared => 1,
+        PendingState::Published => 2,
+        PendingState::Bound => 3,
+    });
+    out.push(match pending.recoverability {
+        Recoverability::Retryable => 1,
+        Recoverability::Indeterminate => 2,
+    });
     out.extend_from_slice(&(checkpoint.len() as u32).to_be_bytes());
     out.extend_from_slice(&(pending.record_bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(&checkpoint);
@@ -325,26 +411,39 @@ fn encode_pending(pending: &PendingBinding) -> Vec<u8> {
     out
 }
 fn decode_pending(bytes: &[u8]) -> Result<PendingBinding, CheckpointError> {
-    if bytes.len() < 48
-        || &bytes[..8] != b"FPEND001"
-        || bytes.len() > MAX_CHECKPOINT_BYTES + super::MAX_RECORD_BYTES + 48
+    if bytes.len() < 50
+        || &bytes[..8] != b"FPEND002"
+        || bytes.len() > MAX_CHECKPOINT_BYTES + super::MAX_RECORD_BYTES + 50
     {
         return Err(CheckpointError::InvalidArtifact);
     }
-    let cp_len = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let record_len = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    let end = 16usize
+    let state = match bytes[8] {
+        1 => PendingState::Prepared,
+        2 => PendingState::Published,
+        3 => PendingState::Bound,
+        _ => return Err(CheckpointError::InvalidArtifact),
+    };
+    let recoverability = match bytes[9] {
+        1 => Recoverability::Retryable,
+        2 => Recoverability::Indeterminate,
+        _ => return Err(CheckpointError::InvalidArtifact),
+    };
+    let cp_len = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
+    let record_len = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
+    let end = 18usize
         .checked_add(cp_len)
         .and_then(|v| v.checked_add(record_len))
         .ok_or(CheckpointError::InvalidArtifact)?;
     if end + 32 != bytes.len() || Sha256::digest(&bytes[..end]).as_slice() != &bytes[end..] {
         return Err(CheckpointError::InvalidArtifact);
     }
-    let checkpoint = Checkpoint::decode(&bytes[16..16 + cp_len])?;
-    let record_bytes = bytes[16 + cp_len..end].to_vec();
+    let checkpoint = Checkpoint::decode(&bytes[18..18 + cp_len])?;
+    let record_bytes = bytes[18 + cp_len..end].to_vec();
     let decoded = decode_record(&record_bytes).map_err(|_| CheckpointError::InvalidArtifact)?;
     let record = restore_record(decoded.record());
-    let expected = pending(checkpoint, &record)?;
+    let mut expected = pending(checkpoint, &record)?;
+    expected.state = state;
+    expected.recoverability = recoverability;
     if expected.record_bytes != record_bytes {
         return Err(CheckpointError::InvalidArtifact);
     }
@@ -384,7 +483,8 @@ fn restore_record(record: &super::ParsedRecord) -> WitnessRecord {
         correlation_digest: record.correlation_digest,
     }
 }
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
+#[cfg(not(target_os = "linux"))]
+fn secure_write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), CheckpointError> {
     let parent = path.parent().ok_or(CheckpointError::InvalidArtifact)?;
     validate_publication_dir(parent)?;
     let tmp = parent.join(format!(".pending-{}.tmp", rand::random::<u64>()));
@@ -398,9 +498,148 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
     let mut file = options.open(&tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    if !replace && path.exists() {
+        return Err(CheckpointError::PendingExists);
+    }
     fs::rename(&tmp, path)?;
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+#[cfg(not(target_os = "linux"))]
+fn secure_read(path: &Path, bound: usize) -> Result<Option<Vec<u8>>, CheckpointError> {
+    let mut file = match fs::OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take((bound + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > bound {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    Ok(Some(bytes))
+}
+#[cfg(not(target_os = "linux"))]
+fn secure_unlink(path: &Path) -> Result<(), CheckpointError> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            File::open(path.parent().ok_or(CheckpointError::InvalidArtifact)?)?.sync_all()?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn secure_dir(path: &Path) -> Result<std::os::fd::OwnedFd, CheckpointError> {
+    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::Mode;
+    validate_publication_dir(path)?;
+    let anchor = open(
+        "/",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let relative = path
+        .strip_prefix("/")
+        .map_err(|_| CheckpointError::InvalidArtifact)?;
+    let how = OpenHow::new()
+        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+        .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+    openat2(&anchor, relative, how).map_err(|e| std::io::Error::from(e).into())
+}
+#[cfg(target_os = "linux")]
+fn secure_read(path: &Path, bound: usize) -> Result<Option<Vec<u8>>, CheckpointError> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::MetadataExt;
+    let parent = path.parent().ok_or(CheckpointError::InvalidArtifact)?;
+    let dir = secure_dir(parent)?;
+    let fd = match openat(
+        &dir,
+        path.file_name().ok_or(CheckpointError::InvalidArtifact)?,
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(e) => return Err(std::io::Error::from(e).into()),
+    };
+    let mut file = File::from(fd);
+    let meta = file.metadata()?;
+    if !meta.is_file()
+        || meta.mode() & 0o777 != 0o600
+        || meta.uid() != nix::unistd::geteuid().as_raw()
+        || meta.nlink() != 1
+    {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take((bound + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > bound {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    Ok(Some(bytes))
+}
+#[cfg(target_os = "linux")]
+fn secure_write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), CheckpointError> {
+    use nix::fcntl::{openat, renameat, renameat2, OFlag, RenameFlags};
+    use nix::sys::stat::Mode;
+    use nix::unistd::{unlinkat, UnlinkatFlags};
+    let parent = path.parent().ok_or(CheckpointError::InvalidArtifact)?;
+    let dir = secure_dir(parent)?;
+    let tmp = format!(".pending-{}.tmp", rand::random::<u64>());
+    let fd = openat(
+        &dir,
+        tmp.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(std::io::Error::from)?;
+    let mut file = File::from(fd);
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    let target = path.file_name().ok_or(CheckpointError::InvalidArtifact)?;
+    let result = if replace {
+        renameat(&dir, tmp.as_str(), &dir, target)
+    } else {
+        renameat2(
+            &dir,
+            tmp.as_str(),
+            &dir,
+            target,
+            RenameFlags::RENAME_NOREPLACE,
+        )
+    };
+    if let Err(error) = result {
+        let _ = unlinkat(&dir, tmp.as_str(), UnlinkatFlags::NoRemoveDir);
+        return if error == nix::errno::Errno::EEXIST {
+            Err(CheckpointError::PendingExists)
+        } else {
+            Err(std::io::Error::from(error).into())
+        };
+    }
+    File::from(dir).sync_all()?;
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn secure_unlink(path: &Path) -> Result<(), CheckpointError> {
+    use nix::unistd::{unlinkat, UnlinkatFlags};
+    let parent = path.parent().ok_or(CheckpointError::InvalidArtifact)?;
+    let dir = secure_dir(parent)?;
+    match unlinkat(
+        &dir,
+        path.file_name().ok_or(CheckpointError::InvalidArtifact)?,
+        UnlinkatFlags::NoRemoveDir,
+    ) {
+        Ok(()) => File::from(dir).sync_all().map_err(Into::into),
+        Err(nix::errno::Errno::ENOENT) => Ok(()),
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
 }
 
 #[cfg(target_os = "linux")]

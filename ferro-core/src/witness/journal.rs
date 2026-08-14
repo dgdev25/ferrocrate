@@ -92,6 +92,9 @@ impl WitnessJournal {
     pub const fn journal_id(&self) -> [u8; 16] {
         self.journal_id
     }
+    pub const fn mode(&self) -> JournalMode {
+        self.mode
+    }
     pub(super) fn current_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }

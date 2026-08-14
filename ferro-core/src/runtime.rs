@@ -63,7 +63,7 @@ use std::io::Read;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -658,6 +658,18 @@ pub struct ContainerRuntime {
 impl ContainerRuntime {
     pub fn new(runtime_dir: &Path) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
+        let runtime_id = load_or_create_runtime_id(runtime_dir)?;
+        Self::initialize(
+            runtime_dir,
+            RuntimeAuthorization::compatibility_with_id(runtime_id),
+        )
+    }
+
+    fn initialize(
+        runtime_dir: &Path,
+        authorization: RuntimeAuthorization,
+    ) -> Result<Self, RuntimeError> {
+        fs::create_dir_all(runtime_dir)?;
         let store = LocalContainerStore::open(runtime_dir.join("containers.db"))?;
         let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
             .map(PathBuf::from)
@@ -669,7 +681,7 @@ impl ContainerRuntime {
             cgroup_root,
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
-            authorization: RuntimeAuthorization::compatibility(),
+            authorization,
             mutation_lock: Mutex::new(()),
         };
         runtime.reconcile_persisted_state()?;
@@ -683,9 +695,12 @@ impl ContainerRuntime {
         gate: Arc<AuthorizationGate>,
         journal: Option<Arc<crate::witness::WitnessJournal>>,
     ) -> Result<Self, RuntimeError> {
-        let mut runtime = Self::new(runtime_dir)?;
-        runtime.authorization = RuntimeAuthorization::new(gate, journal);
-        Ok(runtime)
+        fs::create_dir_all(runtime_dir)?;
+        let runtime_id = load_or_create_runtime_id(runtime_dir)?;
+        Self::initialize(
+            runtime_dir,
+            RuntimeAuthorization::new_with_id(gate, journal, runtime_id),
+        )
     }
 
     fn reconcile_persisted_state(&self) -> Result<(), RuntimeError> {
@@ -949,13 +964,18 @@ impl ContainerRuntime {
             .authorize(Action::ContainerRun, &candidate)?;
         let creation_provenance = permit.creation_provenance();
         let (proof, intent) = permit.execution_authority();
+        let authorized_image = proof
+            .canonical()
+            .image_reference()
+            .unwrap_or(image)
+            .to_owned();
         let result = self.run_with_store_authorized(
             proof,
             intent,
             creation_provenance,
             container_id,
             store,
-            image,
+            &authorized_image,
             cmd,
             env,
             labels,
@@ -1781,6 +1801,36 @@ fn generate_container_id() -> String {
         write!(&mut hex, "{byte:02x}").expect("hex format");
     }
     hex
+}
+
+fn load_or_create_runtime_id(runtime_dir: &Path) -> Result<[u8; 16], RuntimeError> {
+    let path = runtime_dir.join("runtime-instance-id");
+    match fs::read(&path) {
+        Ok(bytes) => {
+            return bytes.try_into().map_err(|_| {
+                RuntimeError::Authorization("runtime instance identity is malformed".into())
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let id: [u8; 16] = rand::rng().random();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(&id)?;
+            file.sync_all()?;
+            Ok(id)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let bytes = fs::read(path)?;
+            bytes.try_into().map_err(|_| {
+                RuntimeError::Authorization("runtime instance identity is malformed".into())
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn process_exists(pid: u32) -> bool {

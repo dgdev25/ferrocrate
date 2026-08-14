@@ -64,11 +64,26 @@ impl LocalImageStore {
         let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
 
         let maybe_record = tree.get(reference.as_bytes())?;
-        maybe_record
+        let exact = maybe_record
             .map(|bytes| {
                 serde_json::from_slice::<ImageRecord>(&bytes).map_err(ImageStoreError::Decode)
             })
-            .transpose()
+            .transpose()?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
+        let requested_digest = reference.rsplit_once('@').map(|(_, digest)| digest);
+        if let Some(digest) = requested_digest {
+            for entry in &tree {
+                let (_, bytes) = entry?;
+                let record = serde_json::from_slice::<ImageRecord>(&bytes)
+                    .map_err(ImageStoreError::Decode)?;
+                if record.digest == digest {
+                    return Ok(Some(record));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn remove_reference(&self, reference: &str) -> Result<bool, ImageStoreError> {

@@ -205,6 +205,10 @@ impl CanonicalRequest {
         self.expected.image.as_ref().map(ImageBinding::digest)
     }
 
+    pub fn image_reference(&self) -> Option<&str> {
+        self.expected.image.as_ref().map(ImageBinding::reference)
+    }
+
     pub fn resource_id(&self) -> &str {
         self.context.resource().id().as_str()
     }

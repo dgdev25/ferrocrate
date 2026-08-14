@@ -17,10 +17,17 @@
 //! whose canonical byte is 0 (absent), 1 (false), or 2 (true).
 
 mod encoding;
+mod journal;
+mod recovery;
 mod validation;
 mod verify;
 
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
+pub use journal::{
+    DurableIntent, FlushBoundary, JournalConfig, JournalError, JournalFaults, JournalMode,
+    WitnessJournal,
+};
+pub use recovery::{OperationId, PendingOperation, RecoveryRecipe};
 pub use verify::{verify_stream, StreamTrust, VerificationReport};
 
 use std::fmt;

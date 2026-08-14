@@ -56,6 +56,7 @@ pub(crate) struct RunSecurityFacts {
     pub privileged: bool,
     pub readonly_rootfs: bool,
     pub no_new_privileges: bool,
+    pub mount_sources_approved: Option<bool>,
 }
 
 pub(crate) struct MutationPermit {
@@ -242,8 +243,8 @@ impl RuntimeAuthorization {
             .is_some_and(|journal| journal.mode() == crate::witness::JournalMode::Required)
     }
 
-    pub(crate) fn enforces_mount_roots(&self) -> bool {
-        self.gate.mode() == crate::authorization::AuthorizationMode::Enforce
+    pub(crate) fn authorization_mode(&self) -> crate::authorization::AuthorizationMode {
+        self.gate.mode()
     }
 
     pub(crate) fn journal(&self) -> Option<&WitnessJournal> {
@@ -328,6 +329,7 @@ impl RuntimeAuthorization {
             lifecycle_state: Some(state),
             readonly_rootfs: run.readonly_rootfs,
             no_new_privileges: run.no_new_privileges,
+            mount_sources_approved: run.mount_sources_approved,
             ..Default::default()
         };
         let resource = Resource::canonical(

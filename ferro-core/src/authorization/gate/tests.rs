@@ -122,6 +122,26 @@ fn authorization_gate_shadow_mode_preserves_the_hypothetical_denial() {
 }
 
 #[test]
+fn shadow_mode_records_unapproved_mount_source_as_hypothetical_denial() {
+    let fixture = Fixture::new(AuthorizationMode::Shadow);
+    let mut request = fixture.request(
+        Some(Role::Administrator),
+        false,
+        &format!("registry/app@{IMAGE_DIGEST}"),
+    );
+    request.context.facts.mount_sources_approved = Some(false);
+    let proof = fixture
+        .gate
+        .authorize(request)
+        .expect("shadow compatibility");
+    assert_eq!(proof.decision().reason, ReasonCode::ShadowAllowed);
+    assert_eq!(
+        proof.decision().hypothetical_denial,
+        Some(ReasonCode::MountSourceDenied)
+    );
+}
+
+#[test]
 fn authorization_gate_enforcement_returns_a_stable_denial() {
     let fixture = Fixture::new(AuthorizationMode::Enforce);
     let denial = fixture

@@ -1241,7 +1241,7 @@ impl ContainerRuntime {
             network_mode,
             network_backend,
             port_mappings,
-            self.authorization.enforces_mount_roots(),
+            self.authorization.authorization_mode(),
         )?;
         let mut candidate =
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
@@ -2277,35 +2277,42 @@ fn normalize_run_request(
     network_mode: &str,
     network_backend: NetworkBackend,
     ports: &[PortMappingRecord],
-    enforce_approved_roots: bool,
+    authorization_mode: crate::authorization::AuthorizationMode,
 ) -> Result<NormalizedRunRequest, RuntimeError> {
     let mut handles = Vec::with_capacity(mounts.len());
     let mut normalized_mounts = Vec::with_capacity(mounts.len());
     let mut mount_facts = Vec::with_capacity(mounts.len() + tmpfs_mounts.len());
+    let mut mount_sources_approved = None;
     for mount in mounts {
         if mount.source.starts_with("/proc/self/fd") {
             return Err(RuntimeError::InvalidState(
                 "caller-supplied runtime fd mount is forbidden".into(),
             ));
         }
-        let handle = if enforce_approved_roots {
-            let configured =
-                std::env::var_os("FERROCRATE_APPROVED_MOUNT_ROOTS").ok_or_else(|| {
-                    RuntimeError::InvalidState("bind source has no approved root".into())
-                })?;
+        let handle = if authorization_mode != crate::authorization::AuthorizationMode::Disabled {
+            let configured = std::env::var_os("FERROCRATE_APPROVED_MOUNT_ROOTS");
             let mut opened = None;
-            for root in std::env::split_paths(&configured) {
-                let root = root.canonicalize()?;
-                if let Ok(relative) = mount.source.strip_prefix(&root) {
-                    if let Ok(handle) = open_mount_source_beneath(&root, relative) {
-                        opened = Some(handle);
-                        break;
+            if let Some(configured) = configured {
+                for root in std::env::split_paths(&configured) {
+                    let root = root.canonicalize()?;
+                    if let Ok(relative) = mount.source.strip_prefix(&root) {
+                        if let Ok(handle) = open_mount_source_beneath(&root, relative) {
+                            opened = Some(handle);
+                            break;
+                        }
                     }
                 }
             }
-            opened.ok_or_else(|| {
-                RuntimeError::InvalidState("bind source is outside approved roots".into())
-            })?
+            mount_sources_approved = Some(opened.is_some());
+            if let Some(handle) = opened {
+                handle
+            } else {
+                let source = mount.source.canonicalize()?;
+                let mut options = OpenOptions::new();
+                options.read(true);
+                options.custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC);
+                options.open(&source)?
+            }
         } else {
             let source = mount.source.canonicalize()?;
             let mut options = OpenOptions::new();
@@ -2380,6 +2387,7 @@ fn normalize_run_request(
             privileged: capabilities.contains(&caps::Capability::CAP_SYS_ADMIN),
             readonly_rootfs,
             no_new_privileges,
+            mount_sources_approved,
         },
         capabilities: capabilities.to_vec(),
         network_mode: network_mode.to_owned(),
@@ -7682,7 +7690,7 @@ mod tests {
             "bridge",
             ferro_net::NetworkBackend::Iptables,
             &[],
-            false,
+            crate::authorization::AuthorizationMode::Disabled,
         )
         .unwrap();
         assert!(request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
@@ -7721,14 +7729,14 @@ mod tests {
                 "none",
                 ferro_net::NetworkBackend::Iptables,
                 &[],
-                false,
+                crate::authorization::AuthorizationMode::Disabled,
             );
             assert!(result.is_err(), "accepted target {target:?}");
         }
     }
 
     #[test]
-    fn enforced_bind_sources_must_resolve_beneath_an_approved_root() {
+    fn mount_source_approval_is_a_canonical_policy_fact() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let temp = tempfile::tempdir().unwrap();
         let approved = temp.path().join("approved");
@@ -7750,15 +7758,29 @@ mod tests {
                 "none",
                 ferro_net::NetworkBackend::Iptables,
                 &[],
-                true,
+                crate::authorization::AuthorizationMode::Enforce,
             )
         };
-        assert!(normalize(approved.join("missing")).is_err());
         std::fs::create_dir(approved.join("source")).unwrap();
-        assert!(normalize(approved.join("source")).is_ok());
+        assert_eq!(
+            normalize(approved.join("source"))
+                .unwrap()
+                .facts
+                .mount_sources_approved,
+            Some(true)
+        );
         std::os::unix::fs::symlink(&outside, approved.join("link")).unwrap();
-        assert!(normalize(approved.join("link")).is_err());
-        assert!(normalize(outside).is_err());
+        assert_eq!(
+            normalize(approved.join("link"))
+                .unwrap()
+                .facts
+                .mount_sources_approved,
+            Some(false)
+        );
+        assert_eq!(
+            normalize(outside).unwrap().facts.mount_sources_approved,
+            Some(false)
+        );
         std::env::remove_var("FERROCRATE_APPROVED_MOUNT_ROOTS");
     }
 

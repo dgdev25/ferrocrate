@@ -247,6 +247,7 @@ pub struct RequestFacts {
     lifecycle_state: Option<ResourceState>,
     readonly_rootfs: bool,
     no_new_privileges: bool,
+    mount_sources_approved: Option<bool>,
 }
 
 impl RequestFacts {
@@ -369,6 +370,7 @@ pub enum ReasonCode {
     RoleNotAuthorized,
     PolicyAdministrationDenied,
     CleanupActionDenied,
+    MountSourceDenied,
 }
 
 /// An effective decision and, in shadow mode, its hypothetical denial.
@@ -419,6 +421,14 @@ impl PolicyDocument {
     }
 
     fn enforced_decision(&self, request: &RequestContext) -> Decision {
+        if request.facts.mount_sources_approved == Some(false) {
+            return self.decision(
+                false,
+                ReasonCode::MountSourceDenied,
+                "container.mount-source.approved-root",
+                None,
+            );
+        }
         let Some(principal) = &request.principal else {
             return self.decision(
                 false,

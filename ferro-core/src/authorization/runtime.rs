@@ -110,6 +110,10 @@ impl RuntimeAuthorization {
             .is_some_and(|journal| journal.mode() == crate::witness::JournalMode::Required)
     }
 
+    pub(crate) fn journal(&self) -> Option<&WitnessJournal> {
+        self.journal.as_deref()
+    }
+
     pub(crate) fn provenance_matches(&self, record: &ContainerRecord) -> bool {
         let provenance = &record.creation_provenance;
         provenance.is_verifiable()

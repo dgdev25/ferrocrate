@@ -630,6 +630,8 @@ pub enum RuntimeError {
     Timeout(Duration),
     #[error("runtime mutation mediation failed: {0}")]
     Authorization(String),
+    #[error("witness journal error: {0}")]
+    Witness(#[from] crate::witness::JournalError),
 }
 
 impl From<MediationError> for RuntimeError {
@@ -673,7 +675,6 @@ impl ContainerRuntime {
         let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup"));
-        recover_pending_network_cleanups(runtime_dir, &store, &cgroup_root)?;
         let runtime = Self {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
@@ -682,6 +683,8 @@ impl ContainerRuntime {
             resource_cancel: DashMap::new(),
             authorization,
         };
+        runtime.reconcile_pending_mutations()?;
+        recover_pending_network_cleanups(runtime_dir, &runtime.store, &runtime.cgroup_root)?;
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
     }
@@ -746,6 +749,64 @@ impl ContainerRuntime {
             );
         }
         Ok(())
+    }
+
+    fn reconcile_pending_mutations(&self) -> Result<(), RuntimeError> {
+        let records = self.store.list()?;
+        for mut record in records {
+            let Some(reservation) = record.pending_mutation.clone() else {
+                continue;
+            };
+            let Some(journal) = self.authorization.journal() else {
+                self.store
+                    .finish_mutation(&record.id, reservation.operation_id)?;
+                continue;
+            };
+            let operation = crate::witness::OperationId::from_bytes(reservation.operation_id);
+            let pending = match journal.recover(operation) {
+                Ok(pending) => pending,
+                Err(_) => {
+                    record.status = "quarantined".into();
+                    self.store.put(&record)?;
+                    continue;
+                }
+            };
+            let action_matches = runtime_witness_action_name(pending.recipe().original_action())
+                == reservation.action;
+            let generation_matches =
+                pending.recipe().resource_generation() == reservation.generation;
+            let classification = if action_matches && generation_matches {
+                self.classify_pending_store_state(&mut record, &reservation.action);
+                crate::witness::RecoveryClassification::Recovered
+            } else {
+                record.status = "quarantined".into();
+                crate::witness::RecoveryClassification::Quarantined
+            };
+            self.store.put(&record)?;
+            journal.reconcile_observed(
+                operation,
+                *pending.recipe().observation_digest(),
+                classification,
+            )?;
+            self.store
+                .finish_mutation(&record.id, reservation.operation_id)?;
+            if reservation.action == "container.delete"
+                && classification == crate::witness::RecoveryClassification::Recovered
+            {
+                self.store.remove(&record.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn classify_pending_store_state(&self, record: &mut ContainerRecord, action: &str) {
+        match action {
+            "container.stop" if !process_exists(record.pid) => record.status = "stopped".into(),
+            "container.kill" if !process_exists(record.pid) => record.status = "killed".into(),
+            "container.restart" if process_exists(record.pid) => record.status = "running".into(),
+            "container.delete" => record.status = "removed-pending".into(),
+            _ => {}
+        }
     }
 
     fn reconcile_network_state(&self, records: &[ContainerRecord]) -> Result<(), RuntimeError> {
@@ -1713,7 +1774,7 @@ impl ContainerRuntime {
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
         }
-        self.store.remove(id)?;
+        self.store.update_status(id, "removed-pending")?;
         if let Ok(containers) = self.store.list() {
             if let Err(e) = update_container_hosts(&self.runtime_dir, &containers) {
                 warn!("failed to update hosts file: {e}");
@@ -1767,6 +1828,7 @@ impl ContainerRuntime {
             &current.status,
             current.mutation_generation.max(1),
             permit.operation_id(),
+            runtime_action_name(action),
         ) {
             self.authorization.complete(permit, false)?;
             return Err(error.into());
@@ -1792,6 +1854,9 @@ impl ContainerRuntime {
         let completion = self.authorization.complete(permit, result.is_ok());
         finish?;
         completion?;
+        if action == Action::ContainerDelete && result.is_ok() {
+            self.store.remove(id)?;
+        }
         result
     }
 }
@@ -1806,6 +1871,34 @@ fn generate_container_id() -> String {
         write!(&mut hex, "{byte:02x}").expect("hex format");
     }
     hex
+}
+
+fn runtime_action_name(action: Action) -> &'static str {
+    match action {
+        Action::ContainerRun => "container.run",
+        Action::ContainerExec => "container.exec",
+        Action::ContainerPause => "container.pause",
+        Action::ContainerResume => "container.resume",
+        Action::ContainerStop => "container.stop",
+        Action::ContainerKill => "container.kill",
+        Action::ContainerRestart => "container.restart",
+        Action::ContainerDelete => "container.delete",
+        _ => "container.unsupported",
+    }
+}
+
+fn runtime_witness_action_name(action: crate::witness::WitnessAction) -> &'static str {
+    match action {
+        crate::witness::WitnessAction::ContainerRun => "container.run",
+        crate::witness::WitnessAction::ContainerExec => "container.exec",
+        crate::witness::WitnessAction::ContainerPause => "container.pause",
+        crate::witness::WitnessAction::ContainerResume => "container.resume",
+        crate::witness::WitnessAction::ContainerStop => "container.stop",
+        crate::witness::WitnessAction::ContainerKill => "container.kill",
+        crate::witness::WitnessAction::ContainerRestart => "container.restart",
+        crate::witness::WitnessAction::ContainerDelete => "container.delete",
+        _ => "container.unsupported",
+    }
 }
 
 fn load_or_create_runtime_id(runtime_dir: &Path) -> Result<[u8; 16], RuntimeError> {

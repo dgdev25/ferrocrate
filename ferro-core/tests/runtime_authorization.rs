@@ -48,11 +48,12 @@ fn denied_exec_is_witnessed_once_and_has_no_side_effect() {
     let runtime =
         ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone())).unwrap();
 
+    let secret_canary = "SUPER_SECRET_RUNTIME_CANARY";
     let error = runtime
         .exec(
             &record.id,
             &[
-                "touch".into(),
+                secret_canary.into(),
                 root.path().join("forbidden").display().to_string(),
             ],
         )
@@ -63,6 +64,9 @@ fn denied_exec_is_witnessed_once_and_has_no_side_effect() {
     );
     assert!(!root.path().join("forbidden").exists());
     let records = journal.records().unwrap();
+    assert!(records.iter().all(|bytes| !bytes
+        .windows(secret_canary.len())
+        .any(|window| window == secret_canary.as_bytes())));
     assert_eq!(records.len(), 3);
     let decoded = records
         .iter()
@@ -71,6 +75,21 @@ fn denied_exec_is_witnessed_once_and_has_no_side_effect() {
     assert_eq!(decoded[0].stage(), WitnessStage::RequestReceived);
     assert_eq!(decoded[1].stage(), WitnessStage::Decision);
     assert_eq!(decoded[2].stage(), WitnessStage::Denied);
+}
+
+#[test]
+fn runtime_instance_identity_survives_same_directory_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = ContainerRuntime::new(root.path()).unwrap();
+    drop(runtime);
+    let first = std::fs::read(root.path().join("runtime-instance-id")).unwrap();
+    assert_eq!(first.len(), 16);
+    let runtime = ContainerRuntime::new(root.path()).unwrap();
+    drop(runtime);
+    assert_eq!(
+        std::fs::read(root.path().join("runtime-instance-id")).unwrap(),
+        first
+    );
 }
 
 #[test]

@@ -120,6 +120,7 @@ pub struct MutationReservation {
     pub operation_id: [u8; 16],
     pub generation: u64,
     pub expected_status: String,
+    pub action: String,
 }
 
 impl ContainerRecord {
@@ -382,6 +383,7 @@ impl LocalContainerStore {
         expected_status: &str,
         expected_generation: u64,
         operation_id: [u8; 16],
+        action: &str,
     ) -> Result<(), ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
         tree.transaction(|tree| {
@@ -407,6 +409,7 @@ impl LocalContainerStore {
                 operation_id,
                 generation: expected_generation,
                 expected_status: expected_status.to_owned(),
+                action: action.to_owned(),
             });
             let encoded = serde_json::to_vec(&record).map_err(|error| {
                 sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Encode(
@@ -590,10 +593,10 @@ mod tests {
         record.status = "running".into();
         store.put(&record).unwrap();
         store
-            .reserve_mutation("cas", "running", 1, [1; 16])
+            .reserve_mutation("cas", "running", 1, [1; 16], "container.stop")
             .unwrap();
         assert!(matches!(
-            store.reserve_mutation("cas", "running", 1, [2; 16]),
+            store.reserve_mutation("cas", "running", 1, [2; 16], "container.kill"),
             Err(ContainerStoreError::MutationConflict)
         ));
         store.finish_mutation("cas", [1; 16]).unwrap();

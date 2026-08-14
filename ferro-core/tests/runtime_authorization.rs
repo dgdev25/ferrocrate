@@ -15,7 +15,9 @@ use std::sync::{MutexGuard, OnceLock};
 
 fn runtime_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Default)]
@@ -37,6 +39,228 @@ impl LifecyclePhaseHook for FailAfterKernelEffect {
         }
         Ok(())
     }
+}
+
+struct AbortAtPhase(LifecyclePhasePoint);
+impl LifecyclePhaseHook for AbortAtPhase {
+    fn reached(&self, _action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
+        if phase == self.0 {
+            return Err(RuntimeError::InvalidState("simulated hard crash".into()));
+        }
+        Ok(())
+    }
+}
+
+fn assert_abort_reopen_matrix(action: &str) {
+    let _guard = runtime_test_guard();
+    let phases = [
+        LifecyclePhasePoint::DecisionDurable,
+        LifecyclePhasePoint::ReservationDurable,
+        LifecyclePhasePoint::EffectObserved,
+        LifecyclePhasePoint::TerminalDurable,
+        LifecyclePhasePoint::ReservationCleared,
+    ];
+    for (phase_index, phase) in phases.into_iter().enumerate() {
+        let root = tempfile::tempdir().unwrap();
+        let cgroup = root.path().join("cgroup");
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::write(cgroup.join("cgroup.controllers"), "memory cpu pids").unwrap();
+        std::env::set_var("FERROCRATE_CGROUP_ROOT", &cgroup);
+        let runtime_id = [101; 16];
+        std::fs::write(root.path().join("runtime-instance-id"), runtime_id).unwrap();
+        let policy_path = root.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let policies = Arc::new(PolicyStore::load(&policy_path).unwrap());
+        let journal_path = root.path().join("witness");
+        let journal_id = [110 + phase_index as u8 + action.as_bytes()[0] % 7; 16];
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                &journal_path,
+                journal_id,
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let id = "00112233445566778899aabbccddeeff";
+        let mut child = None;
+        if action == "run" {
+            LocalImageStore::open(root.path().join("images")).unwrap().put_reference(
+                "alpine",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "application/vnd.oci.image.manifest.v1+json",
+                r#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":0},"layers":[]}"#,
+            ).unwrap();
+        } else {
+            let spawned = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+            let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
+                "id":id,"pid":spawned.id(),"image":"example.invalid/app:latest","command":["true"],
+                "created_at_unix":1,"stdout_path":"","stderr_path":"","status": if action == "remove" { "stopped" } else { "running" }
+            })).unwrap();
+            if action == "remove" {
+                let compact = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .unwrap()
+                    .trim()
+                    .replace('-', "");
+                let mut boot_id = [0; 16];
+                for (index, byte) in boot_id.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).unwrap();
+                }
+                record.creation_provenance = CreationProvenance {
+                    runtime_instance_id: Some(runtime_id),
+                    boot_id: Some(boot_id),
+                    journal_id: Some(journal_id),
+                    resource_uuid: Some("00112233-4455-6677-8899-aabbccddeeff".into()),
+                    resource_generation: 1,
+                    creator_operation_id: Some([102; 16]),
+                    image_digest: None,
+                };
+            }
+            store.put(&record).unwrap();
+            child = Some(spawned);
+        }
+        let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
+            root.path(),
+            Arc::new(AuthorizationGate::new(policies.clone())),
+            Some(journal.clone()),
+            Arc::new(AbortAtPhase(phase)),
+        )
+        .unwrap();
+        let result = match action {
+            "run" => runtime
+                .run(
+                    "alpine",
+                    &["true".into()],
+                    &[],
+                    &Default::default(),
+                    &Default::default(),
+                    None,
+                    Default::default(),
+                    &[],
+                    None,
+                    &[],
+                    &[],
+                    false,
+                    true,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    "none",
+                    ferro_core::runtime::NetworkBackend::Iptables,
+                    None,
+                )
+                .map(|_| ()),
+            "exec" => runtime.exec(id, &["true".into()]).map(|_| ()),
+            "remove" => runtime.remove(id),
+            _ => unreachable!(),
+        };
+        assert!(result.is_err(), "{action} unexpectedly crossed {phase:?}");
+        let expected_journal_pending = phase_index <= 2;
+        assert_eq!(
+            !journal.pending().unwrap().is_empty(),
+            expected_journal_pending,
+            "pre-reopen journal state for {action} {phase:?}"
+        );
+        let records_before_reopen = runtime.list().unwrap();
+        let expected_store_pending = match phase {
+            LifecyclePhasePoint::ReservationDurable | LifecyclePhasePoint::EffectObserved => true,
+            LifecyclePhasePoint::TerminalDurable => action != "remove",
+            _ => false,
+        };
+        assert_eq!(
+            records_before_reopen
+                .iter()
+                .any(|record| record.pending_mutation.is_some()),
+            expected_store_pending,
+            "pre-reopen reservation state for {action} {phase:?}"
+        );
+        if action == "remove"
+            && matches!(
+                phase,
+                LifecyclePhasePoint::TerminalDurable | LifecyclePhasePoint::ReservationCleared
+            )
+        {
+            assert!(records_before_reopen.is_empty(), "remove tombstone phase");
+        }
+        // Returning from the phase hook bypasses every later lifecycle phase. Dropping
+        // these handles without invoking API cleanup therefore models abrupt daemon
+        // loss; the reopened durable adapters are the only recovery source of truth.
+        // A short-lived run command also lets its detached status observer release the
+        // sled handle, as a real daemon process exit would do automatically.
+        if action == "run" {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        drop(runtime);
+        drop(journal);
+        let reopened = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                &journal_path,
+                journal_id,
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let runtime = ContainerRuntime::new_with_authorization(
+            root.path(),
+            Arc::new(AuthorizationGate::new(policies)),
+            Some(reopened.clone()),
+        )
+        .unwrap();
+        assert!(reopened.pending().unwrap().is_empty(), "{action} {phase:?}");
+        for record in runtime.list().unwrap() {
+            assert!(record.pending_mutation.is_none(), "{action} {phase:?}");
+            if action == "run" {
+                assert!(record.creation_provenance.is_verifiable());
+            }
+        }
+        let decoded = reopened
+            .records()
+            .unwrap()
+            .iter()
+            .map(|bytes| decode_record(bytes).unwrap())
+            .collect::<Vec<_>>();
+        let recovery_count = decoded
+            .iter()
+            .filter(|record| record.stage() == WitnessStage::Recovery)
+            .count();
+        assert!(recovery_count <= 1, "{action} {phase:?}");
+        assert_eq!(
+            recovery_count,
+            usize::from(phase_index <= 2 || (action == "run" && phase_index == 3)),
+            "terminal recovery uniqueness for {action} {phase:?}"
+        );
+        assert!(matches!(
+            decoded.last().unwrap().stage(),
+            WitnessStage::Outcome | WitnessStage::Recovery | WitnessStage::Denied
+        ));
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        std::env::remove_var("FERROCRATE_CGROUP_ROOT");
+    }
+}
+
+#[test]
+fn run_five_phase_abort_reopens_without_orphan_or_replay() {
+    assert_abort_reopen_matrix("run");
+}
+#[test]
+fn exec_five_phase_abort_reopens_without_orphan_or_replay() {
+    assert_abort_reopen_matrix("exec");
+}
+#[test]
+fn remove_five_phase_abort_reopens_without_orphan_or_replay() {
+    assert_abort_reopen_matrix("remove");
 }
 
 fn assert_post_effect_unknown_reconciles(action: &str) {

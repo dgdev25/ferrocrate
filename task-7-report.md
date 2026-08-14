@@ -30,11 +30,17 @@ intact rather than being mistaken for an unapplied candidate. Shadow mode binds
 the same mount-root approval fact and records its hypothetical denial while
 retaining compatibility execution.
 
-Verification on 2026-08-14:
+The run, exec, and remove crash matrix uses an injected phase adapter which
+returns before any later lifecycle or wrapper cleanup and then drops the daemon
+handles. Fresh store and journal adapters are opened for recovery. This models
+hard process loss while keeping the test deterministic, and covers all five
+decision-to-clear durability boundaries (15 interruption/reopen cases).
 
-- `runtime_authorization`: 21 passed, including separately named required-mode
+Verification on 2026-08-15:
+
+- `runtime_authorization`: 24 passed, including separately named required-mode
   evidence for all eight lifecycle actions and four post-effect
-  persistence-failure/reopen cases.
+  persistence-failure/reopen cases, plus the 3x5 crash/reopen matrix.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
 - `ferro-core --lib`: 262 passed, 1 ignored. Entitlement tests now serialize

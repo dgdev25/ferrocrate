@@ -242,6 +242,10 @@ impl RuntimeAuthorization {
             .is_some_and(|journal| journal.mode() == crate::witness::JournalMode::Required)
     }
 
+    pub(crate) fn enforces_mount_roots(&self) -> bool {
+        self.gate.mode() == crate::authorization::AuthorizationMode::Enforce
+    }
+
     pub(crate) fn journal(&self) -> Option<&WitnessJournal> {
         self.journal.as_deref()
     }

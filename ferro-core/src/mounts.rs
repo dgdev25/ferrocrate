@@ -108,6 +108,35 @@ pub(crate) fn open_mount_target_beneath(rootfs: &Path, target: &Path) -> Result<
     Ok(directory)
 }
 
+pub(crate) fn open_mount_source_beneath(root: &Path, relative: &Path) -> Result<File, MountError> {
+    let relative = normalize_mount_target(relative)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(nix::libc::O_PATH | nix::libc::O_DIRECTORY | nix::libc::O_CLOEXEC);
+    let root = options.open(root)?;
+    let name = CString::new(relative.as_os_str().as_encoded_bytes())
+        .map_err(|_| MountError::InvalidTarget("NUL in source".into()))?;
+    let how = OpenHow {
+        flags: (nix::libc::O_PATH | nix::libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: 0x02 | 0x04 | 0x08,
+    };
+    let fd = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_openat2,
+            root.as_raw_fd(),
+            name.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        ) as i32
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 pub fn apply_bind_mounts(rootfs: &Path, mounts: &[BindMount]) -> Result<(), MountError> {
     apply_bind_mounts_inner(rootfs, mounts, false)
 }

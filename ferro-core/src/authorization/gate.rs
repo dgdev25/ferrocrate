@@ -365,6 +365,10 @@ impl AuthorizationGate {
         }
     }
 
+    pub(crate) fn mode(&self) -> super::AuthorizationMode {
+        self.policies.snapshot().document.mode
+    }
+
     /// Validate immutable bindings, evaluate the pinned policy, and mint a proof.
     pub fn authorize(&self, request: CanonicalRequest) -> Result<AuthorizedRequest, Denial> {
         validate_policy_binding(&request)?;

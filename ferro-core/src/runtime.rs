@@ -29,7 +29,7 @@ use crate::mac_profiles::generate_apparmor_profile;
 use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
 use crate::mounts::{
     apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts,
-    normalize_mount_target, BindMount, MountError, TmpfsMount,
+    normalize_mount_target, open_mount_source_beneath, BindMount, MountError, TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
@@ -1206,6 +1206,7 @@ impl ContainerRuntime {
             network_mode,
             network_backend,
             port_mappings,
+            self.authorization.enforces_mount_roots(),
         )?;
         let mut candidate =
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
@@ -1997,7 +1998,7 @@ impl ContainerRuntime {
     fn remove_authorized(
         &self,
         _proof: &AuthorizedRequest,
-        _intent: Option<&crate::witness::DurableIntent>,
+        intent: Option<&crate::witness::DurableIntent>,
         id: &str,
     ) -> Result<(), RuntimeError> {
         // Clean up health check cancellation token if present
@@ -2016,7 +2017,7 @@ impl ContainerRuntime {
         if self.authorization.requires_provenance()
             && !self.authorization.provenance_matches(&record)
         {
-            self.store.update_status(id, "quarantined")?;
+            self.update_reserved_status(id, "quarantined", intent)?;
             return Err(RuntimeError::InvalidState(format!(
                 "container {id} has unverifiable creation provenance and was quarantined"
             )));
@@ -2032,7 +2033,7 @@ impl ContainerRuntime {
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
         }
-        self.store.update_status(id, "removed-pending")?;
+        self.update_reserved_status(id, "removed-pending", intent)?;
         if let Ok(containers) = self.store.list() {
             if let Err(e) = update_container_hosts(&self.runtime_dir, &containers) {
                 warn!("failed to update hosts file: {e}");
@@ -2060,6 +2061,26 @@ impl ContainerRuntime {
                 None,
             ),
         );
+        Ok(())
+    }
+
+    fn update_reserved_status(
+        &self,
+        id: &str,
+        status: &str,
+        intent: Option<&crate::witness::DurableIntent>,
+    ) -> Result<(), RuntimeError> {
+        if let Some(intent) = intent {
+            let mut record = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
+            record.status = status.to_owned();
+            self.store
+                .put_for_mutation(&record, *intent.operation_id().as_bytes())?;
+        } else {
+            self.store.update_status(id, status)?;
+        }
         Ok(())
     }
 
@@ -2191,6 +2212,7 @@ fn normalize_run_request(
     network_mode: &str,
     network_backend: NetworkBackend,
     ports: &[PortMappingRecord],
+    enforce_approved_roots: bool,
 ) -> Result<NormalizedRunRequest, RuntimeError> {
     let mut handles = Vec::with_capacity(mounts.len());
     let mut normalized_mounts = Vec::with_capacity(mounts.len());
@@ -2201,11 +2223,31 @@ fn normalize_run_request(
                 "caller-supplied runtime fd mount is forbidden".into(),
             ));
         }
-        let source = mount.source.canonicalize()?;
-        let mut options = OpenOptions::new();
-        options.read(true);
-        options.custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC);
-        let handle = options.open(&source)?;
+        let handle = if enforce_approved_roots {
+            let configured =
+                std::env::var_os("FERROCRATE_APPROVED_MOUNT_ROOTS").ok_or_else(|| {
+                    RuntimeError::InvalidState("bind source has no approved root".into())
+                })?;
+            let mut opened = None;
+            for root in std::env::split_paths(&configured) {
+                let root = root.canonicalize()?;
+                if let Ok(relative) = mount.source.strip_prefix(&root) {
+                    if let Ok(handle) = open_mount_source_beneath(&root, relative) {
+                        opened = Some(handle);
+                        break;
+                    }
+                }
+            }
+            opened.ok_or_else(|| {
+                RuntimeError::InvalidState("bind source is outside approved roots".into())
+            })?
+        } else {
+            let source = mount.source.canonicalize()?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            options.custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC);
+            options.open(&source)?
+        };
         let metadata = handle.metadata()?;
         let fd = handle.as_raw_fd();
         let mount_id = fd_mount_id(fd)?;
@@ -7575,6 +7617,7 @@ mod tests {
             "bridge",
             ferro_net::NetworkBackend::Iptables,
             &[],
+            false,
         )
         .unwrap();
         assert!(request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
@@ -7613,9 +7656,45 @@ mod tests {
                 "none",
                 ferro_net::NetworkBackend::Iptables,
                 &[],
+                false,
             );
             assert!(result.is_err(), "accepted target {target:?}");
         }
+    }
+
+    #[test]
+    fn enforced_bind_sources_must_resolve_beneath_an_approved_root() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let temp = tempfile::tempdir().unwrap();
+        let approved = temp.path().join("approved");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&approved).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::env::set_var("FERROCRATE_APPROVED_MOUNT_ROOTS", &approved);
+        let normalize = |source| {
+            super::normalize_run_request(
+                &[],
+                &[crate::mounts::BindMount {
+                    source,
+                    target: "data".into(),
+                    read_only: true,
+                }],
+                &[],
+                false,
+                true,
+                "none",
+                ferro_net::NetworkBackend::Iptables,
+                &[],
+                true,
+            )
+        };
+        assert!(normalize(approved.join("missing")).is_err());
+        std::fs::create_dir(approved.join("source")).unwrap();
+        assert!(normalize(approved.join("source")).is_ok());
+        std::os::unix::fs::symlink(&outside, approved.join("link")).unwrap();
+        assert!(normalize(approved.join("link")).is_err());
+        assert!(normalize(outside).is_err());
+        std::env::remove_var("FERROCRATE_APPROVED_MOUNT_ROOTS");
     }
 
     #[test]

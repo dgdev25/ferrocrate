@@ -568,7 +568,12 @@ impl LocalContainerStore {
                 operation.pid = record.pid;
                 operation.process_start_time = process_start_time(record.pid);
                 operation.state = record.status;
-                operation.execution_generation_after = Some(record.mutation_generation);
+                operation.execution_generation_after =
+                    Some(if operation.action == "container.restart" && succeeded {
+                        record.mutation_generation.saturating_add(1)
+                    } else {
+                        record.mutation_generation
+                    });
                 let mut digest = Sha256::new();
                 digest.update(b"ferrocrate/lifecycle-result/v1");
                 digest.update(operation_id);
@@ -985,5 +990,30 @@ mod tests {
         assert!(operation.result_digest.is_some());
         assert!(operation.process_start_time.is_some());
         assert_eq!(operation.execution_generation_after, Some(1));
+    }
+
+    #[test]
+    fn restart_effect_records_old_and_new_execution_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("restart-marker".into(), "image".into());
+        record.status = "stopped".into();
+        store.put(&record).unwrap();
+        store
+            .reserve_mutation(
+                "restart-marker",
+                "stopped",
+                1,
+                [10; 16],
+                "container.restart",
+            )
+            .unwrap();
+        store
+            .mark_mutation_effect("restart-marker", [10; 16], true)
+            .unwrap();
+        let operation = store.lifecycle_operation([10; 16]).unwrap().unwrap();
+        assert_eq!(operation.generation, 1);
+        assert_eq!(operation.execution_generation_after, Some(2));
     }
 }

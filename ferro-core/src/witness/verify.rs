@@ -13,6 +13,7 @@ pub struct StreamTrust {
     expected_epoch: u64,
     expected_first_sequence: u64,
     expected_predecessor_hash: [u8; 32],
+    max_records: u64,
 }
 
 impl StreamTrust {
@@ -30,7 +31,14 @@ impl StreamTrust {
             expected_epoch,
             expected_first_sequence,
             expected_predecessor_hash,
+            max_records: 1_000_000,
         }
+    }
+    /// Bounds duplicate-ID tracking memory. Verify larger retained ranges in
+    /// independently anchored chunks no larger than this limit.
+    pub fn with_max_records(mut self, max_records: u64) -> Self {
+        self.max_records = max_records;
+        self
     }
 }
 
@@ -160,6 +168,9 @@ impl StreamVerifier {
     }
 
     pub(super) fn push(&mut self, bytes: &[u8]) -> Result<(), WitnessError> {
+        if self.report.records >= self.trust.max_records {
+            return Err(WitnessError::TooManyRecords);
+        }
         let decoded = decode_record(bytes)?;
         if decoded.journal_id() != &self.trust.expected_journal_id {
             return Err(WitnessError::WrongJournal);

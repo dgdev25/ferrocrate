@@ -650,3 +650,108 @@ fn stale_checkpoint_does_not_claim_known_tail() {
         Some(ferro_core::witness::CheckpointAge::Stale { seconds: 19 })
     );
 }
+
+#[test]
+fn trust_bundle_rejects_an_arbitrary_starting_epoch() {
+    let key = SigningKey::from_bytes(&[61; 32]);
+    let checkpoint = Checkpoint::sign(
+        FlushedHead::new([3; 16], 7, 0, [0; 32]),
+        1,
+        &key,
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    assert!(
+        CheckpointVerifier::new(TrustBundle::new([3; 16], key.verifying_key()))
+            .verify(
+                &publication_evidence(&checkpoint),
+                &[checkpoint],
+                1,
+                Duration::from_secs(5)
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn pending_binding_survives_a_hard_coordinator_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let faults = JournalFaults::new();
+    faults.fail_once(FaultPoint::DuringFlush(FlushBoundary::Outcome));
+    let journal = WitnessJournal::open_with_faults(
+        JournalConfig::new(dir.path().join("journal"), [62; 16], JournalMode::Required),
+        faults,
+    )
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = published.join("head.chk");
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        &path,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let key = SigningKey::from_bytes(&[62; 32]);
+    assert!(matches!(
+        coordinator
+            .capture_publish_bind(&journal, 1, &key, None, publication_record)
+            .unwrap(),
+        ferro_core::witness::PublicationOutcome::PendingBinding(_)
+    ));
+    drop(coordinator);
+    let restarted = ferro_core::witness::CheckpointCoordinator::new(
+        &path,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    assert!(restarted.pending_binding().unwrap().is_some());
+    restarted.reconcile_pending(&journal).unwrap();
+    assert!(restarted.pending_binding().unwrap().is_none());
+    assert_eq!(journal.records().unwrap().len(), 1);
+}
+
+#[test]
+fn pending_binding_rejects_tampering_and_a_cross_journal_reconcile() {
+    let dir = tempfile::tempdir().unwrap();
+    let faults = JournalFaults::new();
+    faults.fail_once(FaultPoint::DuringFlush(FlushBoundary::Outcome));
+    let journal = WitnessJournal::open_with_faults(
+        JournalConfig::new(dir.path().join("one"), [63; 16], JournalMode::Required),
+        faults,
+    )
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = published.join("head.chk");
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        &path,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let key = SigningKey::from_bytes(&[63; 32]);
+    coordinator
+        .capture_publish_bind(&journal, 1, &key, None, publication_record)
+        .unwrap();
+    let other = WitnessJournal::open(JournalConfig::new(
+        dir.path().join("two"),
+        [64; 16],
+        JournalMode::Required,
+    ))
+    .unwrap();
+    assert!(coordinator.reconcile_pending(&other).is_err());
+    let pending_path = published.join("head.chk.pending");
+    let mut bytes = fs::read(&pending_path).unwrap();
+    bytes[20] ^= 1;
+    fs::write(&pending_path, bytes).unwrap();
+    assert!(coordinator.pending_binding().is_err());
+}

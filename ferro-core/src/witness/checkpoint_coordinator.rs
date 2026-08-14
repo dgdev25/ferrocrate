@@ -1,5 +1,6 @@
 use super::{
-    checkpoint::MAX_CHECKPOINT_BYTES, Checkpoint, CheckpointError, WitnessJournal, WitnessRecord,
+    checkpoint::MAX_CHECKPOINT_BYTES, decode_record, encode_record, Checkpoint, CheckpointError,
+    JournalError, WitnessJournal, WitnessRecord,
 };
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
@@ -30,6 +31,7 @@ pub struct PendingBinding {
     event_id: [u8; 16],
     expected_epoch: u64,
     expected_sequence: u64,
+    record_bytes: Vec<u8>,
 }
 impl PendingBinding {
     pub fn checkpoint(&self) -> &Checkpoint {
@@ -64,10 +66,18 @@ impl CheckpointCoordinator {
         self.publish(&cp)?;
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
         let prepared = prepare_binding(&cp, record(&cp), digest)?;
+        let pending = pending(cp.clone(), &prepared)?;
+        self.persist_pending(&pending)?;
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
-                Ok(()) => PublicationOutcome::Bound(cp),
-                Err(_) => PublicationOutcome::PendingBinding(pending(cp, &prepared)?),
+                Ok(()) => {
+                    self.clear_pending()?;
+                    PublicationOutcome::Bound(cp)
+                }
+                Err(JournalError::Indeterminate { .. }) => {
+                    PublicationOutcome::PendingBinding(pending)
+                }
+                Err(error) => return Err(error.into()),
             },
         )
     }
@@ -101,14 +111,24 @@ impl CheckpointCoordinator {
         if journal.advance_epoch(current.epoch).is_err() {
             let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
             let prepared = prepare_binding(&cp, record(&cp), digest)?;
-            return Ok(PublicationOutcome::PendingBinding(pending(cp, &prepared)?));
+            let pending = pending(cp, &prepared)?;
+            self.persist_pending(&pending)?;
+            return Ok(PublicationOutcome::PendingBinding(pending));
         }
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
         let prepared = prepare_binding(&cp, record(&cp), digest)?;
+        let pending = pending(cp.clone(), &prepared)?;
+        self.persist_pending(&pending)?;
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
-                Ok(()) => PublicationOutcome::Bound(cp),
-                Err(_) => PublicationOutcome::PendingBinding(pending(cp, &prepared)?),
+                Ok(()) => {
+                    self.clear_pending()?;
+                    PublicationOutcome::Bound(cp)
+                }
+                Err(JournalError::Indeterminate { .. }) => {
+                    PublicationOutcome::PendingBinding(pending)
+                }
+                Err(error) => return Err(error.into()),
             },
         )
     }
@@ -129,10 +149,18 @@ impl CheckpointCoordinator {
         self.publish(&cp)?;
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
         let prepared = prepare_binding(&cp, record(&cp), digest)?;
+        let pending = pending(cp.clone(), &prepared)?;
+        self.persist_pending(&pending)?;
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
-                Ok(()) => PublicationOutcome::Bound(cp),
-                Err(_) => PublicationOutcome::PendingBinding(pending(cp, &prepared)?),
+                Ok(()) => {
+                    self.clear_pending()?;
+                    PublicationOutcome::Bound(cp)
+                }
+                Err(JournalError::Indeterminate { .. }) => {
+                    PublicationOutcome::PendingBinding(pending)
+                }
+                Err(error) => return Err(error.into()),
             },
         )
     }
@@ -173,6 +201,9 @@ impl CheckpointCoordinator {
     ) -> Result<(), CheckpointError> {
         let current = journal.flushed_head()?;
         let checkpoint = &pending.checkpoint;
+        if current.journal_id != checkpoint.head.journal_id {
+            return Err(CheckpointError::Untrusted);
+        }
         if checkpoint.kind == super::CheckpointKind::TrustReset
             && current.epoch.checked_add(1) == Some(checkpoint.head.epoch)
         {
@@ -187,6 +218,47 @@ impl CheckpointCoordinator {
             return Err(CheckpointError::Rollback);
         }
         journal.append_checkpoint_publication(digest, prepared)?;
+        self.clear_pending()?;
+        Ok(())
+    }
+    pub fn pending_binding(&self) -> Result<Option<PendingBinding>, CheckpointError> {
+        let path = self.pending_path();
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let pending = decode_pending(&bytes)?;
+        let artifact = fs::read(&self.path)?;
+        if artifact != pending.checkpoint.encode() {
+            return Err(CheckpointError::Rollback);
+        }
+        Ok(Some(pending))
+    }
+    pub fn reconcile_pending(&self, journal: &WitnessJournal) -> Result<(), CheckpointError> {
+        let pending = self
+            .pending_binding()?
+            .ok_or(CheckpointError::InvalidArtifact)?;
+        let decoded =
+            decode_record(&pending.record_bytes).map_err(|_| CheckpointError::InvalidArtifact)?;
+        let record = restore_record(decoded.record());
+        self.reconcile_binding(journal, &pending, record)
+    }
+    fn pending_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".pending");
+        PathBuf::from(name)
+    }
+    fn persist_pending(&self, pending: &PendingBinding) -> Result<(), CheckpointError> {
+        atomic_write(&self.pending_path(), &encode_pending(pending))
+    }
+    fn clear_pending(&self) -> Result<(), CheckpointError> {
+        match fs::remove_file(self.pending_path()) {
+            Ok(()) => File::open(self.path.parent().ok_or(CheckpointError::InvalidArtifact)?)?
+                .sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
     }
     pub fn allows_user_mutation(&self, newest_checkpoint_secs: u64, now_secs: u64) -> bool {
@@ -228,12 +300,107 @@ fn pending(
     checkpoint: Checkpoint,
     record: &WitnessRecord,
 ) -> Result<PendingBinding, CheckpointError> {
+    let journal_id = checkpoint.head.journal_id;
     Ok(PendingBinding {
         checkpoint,
         event_id: record.event_id,
         expected_epoch: record.epoch,
         expected_sequence: record.sequence,
+        record_bytes: encode_record(journal_id, record)
+            .map_err(|_| CheckpointError::InvalidArtifact)?
+            .as_ref()
+            .to_vec(),
     })
+}
+
+fn encode_pending(pending: &PendingBinding) -> Vec<u8> {
+    let checkpoint = pending.checkpoint.encode();
+    let mut out = b"FPEND001".to_vec();
+    out.extend_from_slice(&(checkpoint.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(pending.record_bytes.len() as u32).to_be_bytes());
+    out.extend_from_slice(&checkpoint);
+    out.extend_from_slice(&pending.record_bytes);
+    let digest: [u8; 32] = Sha256::digest(&out).into();
+    out.extend_from_slice(&digest);
+    out
+}
+fn decode_pending(bytes: &[u8]) -> Result<PendingBinding, CheckpointError> {
+    if bytes.len() < 48
+        || &bytes[..8] != b"FPEND001"
+        || bytes.len() > MAX_CHECKPOINT_BYTES + super::MAX_RECORD_BYTES + 48
+    {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    let cp_len = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let record_len = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let end = 16usize
+        .checked_add(cp_len)
+        .and_then(|v| v.checked_add(record_len))
+        .ok_or(CheckpointError::InvalidArtifact)?;
+    if end + 32 != bytes.len() || Sha256::digest(&bytes[..end]).as_slice() != &bytes[end..] {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    let checkpoint = Checkpoint::decode(&bytes[16..16 + cp_len])?;
+    let record_bytes = bytes[16 + cp_len..end].to_vec();
+    let decoded = decode_record(&record_bytes).map_err(|_| CheckpointError::InvalidArtifact)?;
+    let record = restore_record(decoded.record());
+    let expected = pending(checkpoint, &record)?;
+    if expected.record_bytes != record_bytes {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    Ok(expected)
+}
+
+fn restore_record(record: &super::ParsedRecord) -> WitnessRecord {
+    WitnessRecord {
+        epoch: record.epoch,
+        sequence: record.sequence,
+        previous_hash: record.previous_hash,
+        event_id: record.event_id,
+        request_id: record.request_id,
+        runtime_instance_id: record.runtime_instance_id,
+        boot_id: record.boot_id,
+        principal: super::PrincipalSummary(record.principal_digest),
+        invocation: record.invocation,
+        action: record.action,
+        resource_kind: record.resource_kind,
+        resource: super::ResourceSummary(record.resource_digest),
+        resource_generation: record.resource_generation,
+        policy_version: record.policy_version,
+        policy_digest: record.policy_digest,
+        decision_id: record.decision_id,
+        rule: record.rule,
+        decision: record.decision,
+        reason: record.reason,
+        request_digest: record.request_digest,
+        result_digest: record.result_digest,
+        wall_time_ns: record.wall_time_ns,
+        monotonic_ns: record.monotonic_ns,
+        stage: record.stage,
+        outcome: record.outcome,
+        recovery_link: record.recovery_link,
+        path_class: record.path_class,
+        device_class: record.device_class,
+        correlation_digest: record.correlation_digest,
+    }
+}
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
+    let parent = path.parent().ok_or(CheckpointError::InvalidArtifact)?;
+    validate_publication_dir(parent)?;
+    let tmp = parent.join(format!(".pending-{}.tmp", rand::random::<u64>()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&tmp, path)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

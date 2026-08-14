@@ -318,3 +318,14 @@ fn seeded_secrets_never_enter_encoded_records_or_errors() {
     )
     .contains(secret));
 }
+
+#[test]
+fn verifier_rejects_evidence_beyond_the_configured_record_limit() {
+    let records = encoded_chain(vec![
+        record(1, [0; 32], WitnessStage::RequestReceived),
+        decision(2, false),
+        terminal_denied(3),
+    ]);
+    let trust = StreamTrust::new(JOURNAL, 1, 1, [0; 32]).with_max_records(2);
+    assert!(verify_stream(records.iter().map(AsRef::as_ref), &trust).is_err());
+}

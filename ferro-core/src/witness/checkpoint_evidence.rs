@@ -9,17 +9,21 @@ pub(super) fn verify_streaming<'a, I>(
     evidence: I,
     journal_id: [u8; 16],
     checkpoints: &[Checkpoint],
+    max_records: u64,
 ) -> Result<VerificationReport, CheckpointError>
 where
     I: IntoIterator<Item = &'a [u8]>,
 {
     let first_checkpoint = checkpoints.first().ok_or(CheckpointError::Untrusted)?;
-    let mut verifier = StreamVerifier::new(StreamTrust::new(
-        journal_id,
-        first_checkpoint.head.epoch,
-        first_checkpoint.first_sequence,
-        [0; 32],
-    ));
+    let mut verifier = StreamVerifier::new(
+        StreamTrust::new(
+            journal_id,
+            first_checkpoint.head.epoch,
+            first_checkpoint.first_sequence,
+            [0; 32],
+        )
+        .with_max_records(max_records),
+    );
     let mut checkpoint_cursor = 0_usize;
     let mut current_epoch = first_checkpoint.head.epoch;
 

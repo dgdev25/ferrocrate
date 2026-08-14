@@ -394,6 +394,8 @@ pub enum WitnessError {
     InvalidLifecycle,
     #[error("witness verifier has too many open requests")]
     TooManyOpenRequests,
+    #[error("witness verifier record limit exceeded")]
+    TooManyRecords,
     #[error("pseudonymization purpose must be nonempty and bounded")]
     InvalidPurpose,
 }

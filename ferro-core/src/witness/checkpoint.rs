@@ -2,11 +2,9 @@ use super::{CheckpointAge, Freshness, JournalError, JournalHead, KeyId, Verifica
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::Duration};
-
 const DOMAIN: &[u8] = b"FERROCRATE-CHECKPOINT-V2";
 const MAGIC: &[u8; 8] = b"FCHKPT02";
 pub(super) const MAX_CHECKPOINT_BYTES: usize = 1024;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FlushedHead {
     pub journal_id: [u8; 16],
@@ -29,7 +27,6 @@ impl From<JournalHead> for FlushedHead {
         Self::new(h.journal_id, h.epoch, h.sequence, h.hash)
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum CheckpointKind {
@@ -37,7 +34,6 @@ pub enum CheckpointKind {
     Rotation = 2,
     TrustReset = 3,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
     pub head: FlushedHead,
@@ -53,7 +49,6 @@ pub struct Checkpoint {
     pub signature: [u8; 64],
     pub secondary_signature: Option<[u8; 64]>,
 }
-
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
     #[error("checkpoint does not descend from explicit trust")]
@@ -67,7 +62,6 @@ pub enum CheckpointError {
     #[error("journal capture failed: {0}")]
     Journal(#[from] JournalError),
 }
-
 impl Checkpoint {
     pub fn sign(
         head: FlushedHead,
@@ -318,10 +312,11 @@ fn take_array<const N: usize>(
         .try_into()
         .map_err(|_| CheckpointError::InvalidArtifact)
 }
-
 #[derive(Clone)]
 pub struct TrustBundle {
     journal_id: [u8; 16],
+    starting_epoch: u64,
+    max_records: u64,
     initial: VerifyingKey,
     minimum: Option<Checkpoint>,
     resets: HashMap<u64, VerifyingKey>,
@@ -330,10 +325,16 @@ impl TrustBundle {
     pub fn new(journal_id: [u8; 16], initial: VerifyingKey) -> Self {
         Self {
             journal_id,
+            starting_epoch: 1,
+            max_records: 1_000_000,
             initial,
             minimum: None,
             resets: HashMap::new(),
         }
+    }
+    pub fn with_max_records(mut self, max_records: u64) -> Self {
+        self.max_records = max_records;
+        self
     }
     pub fn with_minimum(mut self, checkpoint: Checkpoint) -> Self {
         self.minimum = Some(checkpoint);
@@ -344,7 +345,6 @@ impl TrustBundle {
         self
     }
 }
-
 pub struct CheckpointVerifier {
     trust: TrustBundle,
 }
@@ -380,6 +380,9 @@ impl CheckpointVerifier {
         const MAX_CHECKPOINTS: usize = 4096;
         if checkpoints.is_empty() || checkpoints.len() > MAX_CHECKPOINTS {
             return Err(CheckpointError::InvalidArtifact);
+        }
+        if checkpoints[0].head.epoch != self.trust.starting_epoch {
+            return Err(CheckpointError::Untrusted);
         }
         let mut trusted = self.trust.initial;
         let mut trusted_keys = HashMap::from([(KeyId::from_public_key(&trusted), trusted)]);
@@ -471,6 +474,7 @@ impl CheckpointVerifier {
             evidence,
             self.trust.journal_id,
             checkpoints,
+            self.trust.max_records,
         )?;
         report.completeness_through_checkpoint = complete.or(Some(true));
         let age = now_secs - last.created_at_secs;

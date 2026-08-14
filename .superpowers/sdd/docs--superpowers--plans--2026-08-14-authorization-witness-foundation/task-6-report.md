@@ -74,3 +74,11 @@ The coordinator owns deterministic PendingBinding identity and expected epoch/se
 Key creation now requires a pre-provisioned private root. Journal trees are explicitly V2, while discovery of V1 trees returns UnsupportedVersion with a migrate-or-new-epoch diagnostic instead of silently opening disjoint storage.
 
 Round 3 focused verification passes 18 checkpoint tests, 26 journal tests, and 12 witness-vector tests.
+
+## Review fix round 4
+
+Trust bundles now explicitly pin genesis epoch 1, rejecting supplied lineages that begin at an arbitrary epoch. Stream verification has an operator-configurable record ceiling (default one million) in addition to the 4096-open-lifecycle ceiling, bounding the global duplicate-ID sets; larger retained ranges must be verified as independently anchored chunks.
+
+After artifact fsync, the coordinator atomically persists a bounded, checksummed pending-binding frame containing the exact checkpoint and canonical publication record before attempting the journal append. Restarted coordinators discover and validate the sidecar against the artifact, reconcile without caller-held state, reject tampering and cross-journal replay, and remove the sidecar only after durable/idempotent binding. Only the journal's indeterminate post-append outcome is returned as PendingBinding; deterministic append failures remain explicit errors while the durable sidecar preserves recovery state.
+
+Round 4 verification passes 21 checkpoint tests, 26 journal tests, 13 witness-vector tests, and the ferro-core build. Journal-root first creation remains a tracked Task 5 durability minor; Task 6 continues to require a pre-provisioned private checkpoint publication directory and key root.

@@ -1,0 +1,6 @@
+Task 6 review fix round 4 RED evidence
+
+- Restart recovery test initially failed to compile because `pending_binding()` and `reconcile_pending()` did not exist.
+- Cross-journal recovery test then failed at `assert!(coordinator.reconcile_pending(&other).is_err())`, proving a pending publication could be replayed into another journal.
+- The record-bound test initially failed to compile because `StreamTrust::with_max_records` did not exist.
+- The arbitrary-starting-epoch test captured the missing explicit epoch pin; TrustBundle previously inferred the starting epoch from supplied checkpoints.

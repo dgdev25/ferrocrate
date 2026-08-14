@@ -5,6 +5,32 @@ use ferro_core::witness::{
     FORMAT_VERSION,
 };
 
+#[test]
+fn container_recovery_truth_table_is_closed() {
+    use ferro_core::witness::RecoveryTruthStrategy;
+    use ferro_core::witness::RecoveryTruthStrategy::*;
+    use WitnessAction::*;
+
+    let cases = [
+        (ContainerCreate, ContainerAbsent),
+        (ContainerRun, ContainerAbsent),
+        (ContainerExec, ExecutionObserved),
+        (ContainerPause, ContainerRunning),
+        (ContainerResume, ContainerPaused),
+        (ContainerStop, ContainerRunning),
+        (ContainerKill, ContainerRunning),
+        (ContainerRestart, RestartObserved),
+        (ContainerDelete, ContainerPresent),
+    ];
+    for (action, expected) in cases {
+        assert_eq!(
+            RecoveryTruthStrategy::for_container_action(action),
+            Some(expected)
+        );
+    }
+    assert_eq!(RecoveryTruthStrategy::for_container_action(ImagePull), None);
+}
+
 const JOURNAL: [u8; 16] = [6; 16];
 
 fn record(sequence: u64, previous_hash: [u8; 32], stage: WitnessStage) -> WitnessRecord {

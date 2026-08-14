@@ -1,8 +1,9 @@
 use ferro_core::witness::{
     verify_stream, DisclosureClass, DurableIntent, FaultPoint, FlushBoundary, Invocation,
-    JournalConfig, JournalError, JournalFaults, JournalMode, OperationId, PrincipalSummary,
-    RecoveryRecipe, ResourceSummary, RuleSummary, StreamTrust, WitnessAction, WitnessJournal,
-    WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
+    JournalConfig, JournalError, JournalFaults, JournalMode, ObservationDigest, ObservationHandle,
+    OperationId, PrincipalSummary, RecoveryRecipe, RecoveryTruthStrategy, ResourceSummary,
+    RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord,
+    WitnessResourceKind, WitnessStage,
 };
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -94,6 +95,53 @@ fn recipe() -> RecoveryRecipe {
         1,
     )
     .unwrap()
+}
+
+#[test]
+fn recovery_recipe_persists_action_specific_truth_without_disclosing_observations() {
+    let recipe = RecoveryRecipe::for_original_with_observation(
+        WitnessAction::ContainerExec,
+        WitnessResourceKind::Container,
+        WitnessAction::ContainerDelete,
+        [8; 32],
+        1,
+        RecoveryTruthStrategy::ExecutionObserved,
+        ObservationDigest::from_bytes([9; 32]),
+        ObservationHandle::from_bytes([10; 16]),
+    )
+    .unwrap();
+
+    let dir = tempdir().unwrap();
+    let id = OperationId::from_bytes([33; 16]);
+    {
+        let journal = WitnessJournal::open(config(dir.path())).unwrap();
+        let mut received = record(WitnessStage::RequestReceived);
+        received.action = WitnessAction::ContainerExec;
+        journal.append_received(id, 7, recipe, received).unwrap();
+    }
+    let journal = WitnessJournal::open(config(dir.path())).unwrap();
+    let pending = journal.pending().unwrap();
+    let recipe = pending[0].recipe();
+
+    assert_eq!(
+        recipe.truth_strategy(),
+        RecoveryTruthStrategy::ExecutionObserved
+    );
+    assert_eq!(recipe.observation_digest().as_bytes(), &[9; 32]);
+    assert_eq!(recipe.observation_handle().as_bytes(), &[10; 16]);
+    assert!(matches!(
+        RecoveryRecipe::for_original_with_observation(
+            WitnessAction::ContainerExec,
+            WitnessResourceKind::Container,
+            WitnessAction::ContainerDelete,
+            [8; 32],
+            1,
+            RecoveryTruthStrategy::ContainerAbsent,
+            ObservationDigest::from_bytes([9; 32]),
+            ObservationHandle::from_bytes([10; 16]),
+        ),
+        Err(ferro_core::witness::RecoveryRecipeError::InvalidTruthStrategy)
+    ));
 }
 
 fn allow(journal: &WitnessJournal, id: OperationId, byte: u8) -> DurableIntent {

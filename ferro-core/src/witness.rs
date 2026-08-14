@@ -39,7 +39,10 @@ pub use journal::{
     JournalMode, WitnessJournal,
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
-pub use recovery::{OperationId, PendingOperation, RecoveryRecipe, RecoveryRecipeError};
+pub use recovery::{
+    ObservationDigest, ObservationHandle, OperationId, PendingOperation, RecoveryRecipe,
+    RecoveryRecipeError, RecoveryTruthStrategy, RECOVERY_RECIPE_SCHEMA_VERSION,
+};
 pub use verify::{verify_stream, StreamTrust, VerificationReport};
 
 use std::fmt;

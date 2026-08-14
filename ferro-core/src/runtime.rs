@@ -123,6 +123,8 @@ struct CleanupAuthority {
     generation: u64,
 }
 
+struct LegacyCleanupAuthority;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 enum ResourcePlan {
     Rootfs {
@@ -753,6 +755,19 @@ impl CreationRollback {
         self.rollback();
     }
 
+    fn rollback_with_legacy_authority(&mut self, _authority: &LegacyCleanupAuthority) {
+        // Legacy authority is deletion-only and can act solely on exact typed
+        // applied identities. Name-only network/cgroup cleanup remains quarantined.
+        if self.typed_applied_resources.is_empty() {
+            self.cleanup_quarantined = true;
+            return;
+        }
+        self.network_ownership = None;
+        self.netns_name = None;
+        self.cgroup_name = None;
+        self.rollback();
+    }
+
     /// Returns true when an identity mismatch requires quarantine.
     fn cleanup_typed_resources(&mut self) -> bool {
         let rootfs = self.resource_plans.iter().find_map(|plan| match plan {
@@ -1025,33 +1040,47 @@ fn recover_pending_network_cleanups(
                 journal_path.display()
             )));
         }
-        let authority = match validate_cleanup_authority(&pending, store, authorization)? {
-            Some(authority) => authority,
-            None => {
-                return Err(RuntimeError::Network(format!(
-                    "pending cleanup journal {} has stale or mixed authority; quarantined",
-                    journal_path.display()
-                )));
+        let witnessed_authority = validate_cleanup_authority(&pending, store, authorization)?;
+        let legacy_authority = validate_legacy_cleanup_authority(&pending, authorization);
+        if witnessed_authority.is_none() && legacy_authority.is_none() {
+            warn!(
+                "pending cleanup journal {} has stale, mixed, or unverifiable authority; retained in quarantine",
+                journal_path.display()
+            );
+            if authorization.journal().is_some() {
+                let recovery =
+                    authorization.begin_internal_network_recovery(&pending.container_id)?;
+                authorization.finish_internal_recovery(
+                    recovery,
+                    internal_cleanup_observation(&pending.container_id, false),
+                    false,
+                )?;
             }
-        };
+            continue;
+        }
         let recovery = authorization.begin_internal_network_recovery(&pending.container_id)?;
         let mut rollback = CreationRollback::from_pending(
             container_dir.clone(),
             cgroup_root.to_path_buf(),
             pending,
         )?;
-        rollback.rollback_with_authority(&authority);
+        if let Some(authority) = witnessed_authority.as_ref() {
+            rollback.rollback_with_authority(authority);
+        } else if let Some(authority) = legacy_authority.as_ref() {
+            rollback.rollback_with_legacy_authority(authority);
+        }
         if rollback.cleanup_quarantined {
             authorization.finish_internal_recovery(
                 recovery,
                 internal_cleanup_observation(&entry.file_name().to_string_lossy(), false),
                 false,
             )?;
-            return Err(RuntimeError::Network(format!(
-                "pending network cleanup for {} remains incomplete; inspect {}",
+            warn!(
+                "pending cleanup for {} remains quarantined at {}",
                 entry.file_name().to_string_lossy(),
                 journal_path.display()
-            )));
+            );
+            continue;
         }
         authorization.finish_internal_recovery(
             recovery,
@@ -1065,6 +1094,25 @@ fn recover_pending_network_cleanups(
         }
     }
     Ok(())
+}
+
+fn validate_legacy_cleanup_authority(
+    pending: &PendingNetworkCleanup,
+    authorization: &RuntimeAuthorization,
+) -> Option<LegacyCleanupAuthority> {
+    (pending.schema_version == 1
+        && authorization.authorization_mode() == crate::authorization::AuthorizationMode::Disabled
+        && authorization
+            .journal()
+            .is_none_or(|journal| journal.mode() == crate::witness::JournalMode::Disabled)
+        && authorization
+            .legacy_provenance_matches(&pending.creation_provenance, &pending.container_id)
+        && !pending.resource_plans.is_empty()
+        && pending
+            .typed_applied_resources
+            .iter()
+            .all(|applied| applied.plan_index < pending.resource_plans.len()))
+    .then_some(LegacyCleanupAuthority)
 }
 
 fn validate_cleanup_authority(
@@ -8972,14 +9020,8 @@ mod tests {
 
         let authorization =
             crate::authorization::runtime::RuntimeAuthorization::compatibility_with_id([1; 16]);
-        let error = super::recover_pending_network_cleanups(
-            temp.path(),
-            &store,
-            temp.path(),
-            &authorization,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("quarantined"));
+        super::recover_pending_network_cleanups(temp.path(), &store, temp.path(), &authorization)
+            .unwrap();
         assert!(container_dir.exists());
     }
 
@@ -10282,7 +10324,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
         for action in ["run", "restart"] {
             let phases: &[&str] = if action == "run" {
-                &["network", "cgroup", "spawn", "identity"]
+                &[
+                    "network-effect",
+                    "network",
+                    "cgroup-effect",
+                    "cgroup",
+                    "spawn",
+                    "identity",
+                ]
             } else {
                 &["network", "old-stopped", "spawn", "identity"]
             };

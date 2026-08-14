@@ -86,6 +86,15 @@ replays are quarantined before any cleanup effect. Resource-ledger recovery now
 runs before lifecycle reconciliation so the independent tombstone cannot be
 acknowledged before cleanup consumes it.
 
+Compatibility recovery is isolated behind `LegacyCleanupAuthority`. It is
+available only for explicitly legacy ledgers when authorization is Disabled and
+no witness journal is active, and it can consume only exact typed applied
+identities for deletion-only cleanup. Unverifiable legacy and Required/Shadow
+ledgers remain quarantined; startup continues with a surfaced warning instead
+of performing an unsafe mutation. The public crash matrix now executes the real
+network-effect and cgroup-effect pre-marker barriers as well as applied, spawn,
+and identity-release boundaries.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode

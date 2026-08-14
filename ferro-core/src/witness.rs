@@ -16,17 +16,25 @@
 //! fields. Optional values use tag 0 (absent) or 1 (present), except optional bool,
 //! whose canonical byte is 0 (absent), 1 (false), or 2 (true).
 
+mod checkpoint;
 mod encoding;
 mod journal;
+mod keys;
 mod recovery;
 mod validation;
 mod verify;
 
+pub use checkpoint::{
+    Checkpoint, CheckpointCoordinator, CheckpointError, CheckpointKind, CheckpointVerifier,
+    FlushedHead, Freshness, TrustBundle,
+};
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
+pub use journal::JournalHead;
 pub use journal::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
     JournalMode, WitnessJournal,
 };
+pub use keys::{KeyId, KeyMaterial, KeyStore};
 pub use recovery::{OperationId, PendingOperation, RecoveryRecipe, RecoveryRecipeError};
 pub use verify::{verify_stream, StreamTrust, VerificationReport};
 

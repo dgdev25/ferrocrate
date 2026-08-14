@@ -53,7 +53,29 @@ pub struct WitnessJournal {
     automation_stopped: AtomicBool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JournalHead {
+    pub journal_id: [u8; 16],
+    pub epoch: u64,
+    pub sequence: u64,
+    pub hash: [u8; 32],
+}
+
 impl WitnessJournal {
+    /// Flush all journal trees and capture the head while holding the sole
+    /// append coordinator. Checkpoint signers must use this snapshot rather
+    /// than separately reading sequence and hash metadata.
+    pub fn flushed_head(&self) -> Result<JournalHead, JournalError> {
+        let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.db.flush()?;
+        let (sequence, hash) = self.head()?;
+        Ok(JournalHead {
+            journal_id: self.journal_id,
+            epoch: self.epoch,
+            sequence,
+            hash,
+        })
+    }
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
         Self::open_with_faults(config, JournalFaults::new())
     }

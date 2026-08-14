@@ -41,6 +41,7 @@ pub struct VerificationReport {
     pub terminal_denied: u64,
     pub terminal_outcomes: u64,
     pub terminal_recoveries: u64,
+    pub discontinuities: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +112,7 @@ where
         terminal_denied: 0,
         terminal_outcomes: 0,
         terminal_recoveries: 0,
+        discontinuities: 0,
     };
 
     for bytes in records {

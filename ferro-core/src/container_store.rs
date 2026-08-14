@@ -20,6 +20,12 @@ pub(crate) struct LifecycleOperation {
     pub pid: u32,
     pub process_start_time: Option<u64>,
     pub state: String,
+    #[serde(default)]
+    pub pid_after: Option<u32>,
+    #[serde(default)]
+    pub process_start_time_after: Option<u64>,
+    #[serde(default)]
+    pub state_after: Option<String>,
     pub ownership_digest: [u8; 32],
     #[serde(default)]
     pub execution_generation_after: Option<u64>,
@@ -578,9 +584,9 @@ impl LocalContainerStore {
                     ));
                 }
                 operation.phase = LifecyclePhase::EffectApplied;
-                operation.pid = record.pid;
-                operation.process_start_time = process_start_time(record.pid);
-                operation.state = record.status;
+                operation.pid_after = Some(record.pid);
+                operation.process_start_time_after = process_start_time(record.pid);
+                operation.state_after = Some(record.status);
                 operation.execution_generation_after =
                     Some(if operation.action == "container.restart" && succeeded {
                         record.mutation_generation.saturating_add(1)
@@ -752,6 +758,9 @@ fn lifecycle_operation(
         pid: record.pid,
         process_start_time: process_start_time(record.pid),
         state: record.status.clone(),
+        pid_after: None,
+        process_start_time_after: None,
+        state_after: None,
         ownership_digest: digest.finalize().into(),
         execution_generation_after: None,
         result_digest: None,

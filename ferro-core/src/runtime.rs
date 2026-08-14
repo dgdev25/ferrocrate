@@ -2233,13 +2233,37 @@ fn recovery_truth_matches(
         "container.exec" => operation.is_some_and(|operation| {
             operation.phase == LifecyclePhase::EffectApplied
                 && operation.result_digest.is_some()
-                && operation.process_start_time == process_start_time_for_pid(record.pid)
+                && operation.pid_after == Some(record.pid)
+                && operation.process_start_time_after == process_start_time_for_pid(record.pid)
         }),
-        "container.pause" => record.status == "paused",
-        "container.resume" => record.status == "running" && process_exists(record.pid),
-        "container.stop" => record.status == "stopped" && !process_exists(record.pid),
-        "container.kill" => record.status == "killed" && !process_exists(record.pid),
-        "container.restart" => record.status == "running" && process_exists(record.pid),
+        "container.pause" => {
+            record.status == "paused"
+                && operation.and_then(|op| op.state_after.as_deref()) == Some("paused")
+        }
+        "container.resume" => {
+            record.status == "running"
+                && operation.and_then(|op| op.state_after.as_deref()) == Some("running")
+                && process_exists(record.pid)
+        }
+        "container.stop" | "container.kill" => operation.is_some_and(|operation| {
+            let expected = if action == "container.stop" {
+                "stopped"
+            } else {
+                "killed"
+            };
+            record.status == expected
+                && operation.state_after.as_deref() == Some(expected)
+                && process_start_time_for_pid(operation.pid) != operation.process_start_time
+        }),
+        "container.restart" => {
+            record.status == "running"
+                && process_exists(record.pid)
+                && operation.is_some_and(|op| {
+                    op.execution_generation_after == Some(op.generation.saturating_add(1))
+                        && op.pid_after == Some(record.pid)
+                        && op.process_start_time_after == process_start_time_for_pid(record.pid)
+                })
+        }
         "container.delete" => record.status == "removed-pending",
         "container.run" => record.creation_provenance.is_verifiable(),
         _ => false,

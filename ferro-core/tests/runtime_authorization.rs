@@ -10,6 +10,12 @@ use ferro_core::witness::{
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::{MutexGuard, OnceLock};
+
+fn runtime_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 #[derive(Default)]
 struct RecordingPhaseHook(Mutex<Vec<LifecyclePhasePoint>>);
@@ -22,6 +28,7 @@ impl LifecyclePhaseHook for RecordingPhaseHook {
 
 #[test]
 fn exec_exposes_every_durable_crash_boundary_in_order() {
+    let _guard = runtime_test_guard();
     let root = tempfile::tempdir().unwrap();
     let policy_path = root.path().join("policy.toml");
     std::fs::write(
@@ -79,6 +86,7 @@ fn creation_provenance_is_absent_for_legacy_records() {
 
 #[test]
 fn denied_exec_is_witnessed_once_and_has_no_side_effect() {
+    let _guard = runtime_test_guard();
     let root = tempfile::tempdir().unwrap();
     let policy_path = root.path().join("policy.toml");
     std::fs::write(
@@ -157,6 +165,7 @@ fn runtime_instance_identity_survives_same_directory_restart() {
 
 #[test]
 fn every_lifecycle_method_denies_once_before_executor_side_effects() {
+    let _guard = runtime_test_guard();
     for action in [
         "run", "exec", "pause", "resume", "stop", "kill", "restart", "remove",
     ] {
@@ -266,6 +275,7 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
 
 #[test]
 fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
+    let _guard = runtime_test_guard();
     for action in [
         "run", "exec", "pause", "resume", "stop", "kill", "restart", "remove",
     ] {
@@ -378,6 +388,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
 
 #[test]
 fn disabled_journal_is_exactly_compatibility_absent() {
+    let _guard = runtime_test_guard();
     let root = tempfile::tempdir().unwrap();
     let policy_path = root.path().join("policy.toml");
     std::fs::write(

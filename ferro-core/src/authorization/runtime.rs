@@ -155,7 +155,7 @@ impl RuntimeAuthorization {
             boot_id: self.boot_id,
             principal,
             invocation: Invocation::InternalCleanup,
-            action: cleanup_action,
+            action: original_action,
             resource_kind,
             resource,
             resource_generation: 1,
@@ -541,6 +541,46 @@ fn lifecycle_state(status: &str) -> Option<ResourceState> {
         "paused" => Some(ResourceState::Paused),
         "stopped" | "killed" | "exited" => Some(ResourceState::Stopped),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::authorization::policy::PolicyStore;
+    use crate::witness::{JournalConfig, JournalMode};
+
+    #[test]
+    fn internal_network_recovery_binds_attach_intent_to_network_detach_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                root.path(),
+                [71; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let gate = Arc::new(AuthorizationGate::new(Arc::new(
+            PolicyStore::compatibility_disabled(),
+        )));
+        let authorization =
+            RuntimeAuthorization::new_with_id(gate, Some(journal.clone()), [72; 16]);
+        let operation = authorization
+            .begin_internal_network_recovery("00112233445566778899aabbccddeeff")
+            .unwrap()
+            .unwrap();
+        let pending = journal.recover(operation).unwrap();
+        assert_eq!(
+            pending.recipe().original_action(),
+            WitnessAction::NetworkAttach
+        );
+        assert_eq!(pending.recipe().action(), WitnessAction::NetworkDetach);
+        assert_eq!(
+            pending.recipe().resource_kind(),
+            WitnessResourceKind::Network
+        );
+        assert_eq!(journal.records().unwrap().len(), 2);
     }
 }
 

@@ -13,8 +13,9 @@ use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
     now_unix, ContainerRecord, ContainerStoreError, EbpfFilterOwnershipRecord,
-    EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LocalContainerStore,
-    MutationReservation, NetworkOwnershipRecord, PortMappingRecord, RestartPolicy,
+    EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LifecycleOperation,
+    LifecyclePhase, LocalContainerStore, MutationReservation, NetworkOwnershipRecord,
+    PortMappingRecord, RestartPolicy,
 };
 use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
@@ -790,11 +791,26 @@ impl ContainerRuntime {
                     .is_some_and(|reservation| reservation.operation_id == *operation.as_bytes())
             });
             let Some(record) = matched else {
+                let tombstone = self.store.lifecycle_operation(*operation.as_bytes())?;
+                let recovered_delete = tombstone.as_ref().is_some_and(|entry| {
+                    entry.action == "container.delete"
+                        && entry.phase == LifecyclePhase::StoreDeleted
+                });
                 journal.reconcile_observed(
                     operation,
-                    recovery_observation(None, pending.recipe().original_action()),
-                    crate::witness::RecoveryClassification::Quarantined,
+                    recovery_observation_tombstone(
+                        tombstone.as_ref(),
+                        pending.recipe().original_action(),
+                    ),
+                    if recovered_delete {
+                        crate::witness::RecoveryClassification::Recovered
+                    } else {
+                        crate::witness::RecoveryClassification::Quarantined
+                    },
                 )?;
+                if tombstone.is_some() {
+                    self.store.acknowledge_mutation(*operation.as_bytes())?;
+                }
                 continue;
             };
             let reservation = record
@@ -814,18 +830,24 @@ impl ContainerRuntime {
                 record.status = "quarantined".into();
                 crate::witness::RecoveryClassification::Quarantined
             };
-            self.store.put(&record)?;
+            let recovered_delete = reservation.action == "container.delete"
+                && classification == crate::witness::RecoveryClassification::Recovered;
+            if recovered_delete {
+                self.store
+                    .delete_for_mutation(&record.id, reservation.operation_id)?;
+            } else {
+                self.store.put(&record)?;
+            }
             journal.reconcile_observed(
                 operation,
                 recovery_observation(Some(record), pending.recipe().original_action()),
                 classification,
             )?;
-            self.store
-                .finish_mutation(&record.id, reservation.operation_id)?;
-            if reservation.action == "container.delete"
-                && classification == crate::witness::RecoveryClassification::Recovered
-            {
-                self.store.remove(&record.id)?;
+            if recovered_delete {
+                self.store.acknowledge_mutation(reservation.operation_id)?;
+            } else {
+                self.store
+                    .finish_mutation(&record.id, reservation.operation_id)?;
             }
         }
         Ok(())
@@ -1064,7 +1086,7 @@ impl ContainerRuntime {
             });
             // Durable create provenance and reservation precede every external
             // creation side effect, closing the decision-to-store crash window.
-            self.store.put(&candidate)?;
+            self.store.put_reserved_creation(&candidate)?;
         }
         let (proof, intent) = permit.execution_authority();
         let authorized_image = proof
@@ -1907,10 +1929,13 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = execute(self, proof, intent);
-        self.authorization.complete(permit, result.is_ok())?;
-        self.store.finish_mutation(id, operation_id)?;
         if action == Action::ContainerDelete && result.is_ok() {
-            self.store.remove(id)?;
+            self.store.delete_for_mutation(id, operation_id)?;
+            self.authorization.complete(permit, true)?;
+            self.store.acknowledge_mutation(operation_id)?;
+        } else {
+            self.authorization.complete(permit, result.is_ok())?;
+            self.store.finish_mutation(id, operation_id)?;
         }
         result
     }
@@ -2078,6 +2103,25 @@ fn recovery_observation(
         digest.update([u8::from(process_exists(record.pid))]);
     } else {
         digest.update(b"reservation-absent");
+    }
+    crate::witness::ObservationDigest::from_bytes(digest.finalize().into())
+}
+
+fn recovery_observation_tombstone(
+    operation: Option<&LifecycleOperation>,
+    action: crate::witness::WitnessAction,
+) -> crate::witness::ObservationDigest {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ferrocrate/live-recovery-tombstone/v1");
+    digest.update([action as u8]);
+    if let Some(operation) = operation {
+        digest.update(operation.operation_id);
+        digest.update(operation.container_id.as_bytes());
+        digest.update(operation.generation.to_be_bytes());
+        digest.update(operation.ownership_digest);
+        digest.update([operation.phase as u8]);
+    } else {
+        digest.update(b"operation-absent");
     }
     crate::witness::ObservationDigest::from_bytes(digest.finalize().into())
 }

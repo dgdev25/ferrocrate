@@ -1,11 +1,33 @@
 use crate::ai_runtime::AiRuntimeConfig;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use sled::transaction::Transactional;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub const CONTAINER_INDEX_TREE: &str = "container_index";
+pub const LIFECYCLE_OPERATION_TREE: &str = "lifecycle_operations";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LifecycleOperation {
+    pub operation_id: [u8; 16],
+    pub container_id: String,
+    pub action: String,
+    pub generation: u64,
+    pub phase: LifecyclePhase,
+    pub pid: u32,
+    pub process_start_time: Option<u64>,
+    pub state: String,
+    pub ownership_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum LifecyclePhase {
+    Reserved,
+    StoreDeleted,
+}
 
 /// Immutable authority used to prove that deletion-only cleanup still targets
 /// the resource created by the witnessed operation. Legacy records deserialize
@@ -302,6 +324,48 @@ impl LocalContainerStore {
         Ok(())
     }
 
+    pub(crate) fn put_reserved_creation(
+        &self,
+        record: &ContainerRecord,
+    ) -> Result<(), ContainerStoreError> {
+        let reservation = record
+            .pending_mutation
+            .as_ref()
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        let containers = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        let record_bytes = serde_json::to_vec(record)?;
+        let operation = lifecycle_operation(
+            record,
+            reservation.operation_id,
+            &reservation.action,
+            LifecyclePhase::Reserved,
+        );
+        let operation_bytes = serde_json::to_vec(&operation)?;
+        (&containers, &operations)
+            .transaction(|(containers, operations)| {
+                if containers.get(record.id.as_bytes())?.is_some()
+                    || operations.get(&reservation.operation_id)?.is_some()
+                {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                containers.insert(record.id.as_bytes(), record_bytes.as_slice())?;
+                operations.insert(&reservation.operation_id, operation_bytes.as_slice())?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
+            })?;
+        containers.flush()?;
+        operations.flush()?;
+        Ok(())
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<ContainerRecord>, ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
         let maybe = tree.get(id.as_bytes())?;
@@ -386,44 +450,133 @@ impl LocalContainerStore {
         action: &str,
     ) -> Result<(), ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
-        tree.transaction(|tree| {
-            let bytes = tree.get(id.as_bytes())?.ok_or_else(|| {
-                sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                )
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        (&tree, &operations)
+            .transaction(|(tree, operations)| {
+                let bytes = tree.get(id.as_bytes())?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let mut record: ContainerRecord =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(error),
+                        )
+                    })?;
+                if record.status != expected_status
+                    || record.mutation_generation != expected_generation
+                    || record.pending_mutation.is_some()
+                {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                record.pending_mutation = Some(MutationReservation {
+                    operation_id,
+                    generation: expected_generation,
+                    expected_status: expected_status.to_owned(),
+                    action: action.to_owned(),
+                });
+                let operation =
+                    lifecycle_operation(&record, operation_id, action, LifecyclePhase::Reserved);
+                let operation = serde_json::to_vec(&operation).map_err(|error| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Encode(error),
+                    )
+                })?;
+                if operations.insert(&operation_id, operation)?.is_some() {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                let encoded = serde_json::to_vec(&record).map_err(|error| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Encode(error),
+                    )
+                })?;
+                tree.insert(id.as_bytes(), encoded)?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
             })?;
-            let mut record: ContainerRecord = serde_json::from_slice(&bytes).map_err(|error| {
-                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Decode(
-                    error,
-                ))
-            })?;
-            if record.status != expected_status
-                || record.mutation_generation != expected_generation
-                || record.pending_mutation.is_some()
-            {
-                return Err(sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                ));
-            }
-            record.pending_mutation = Some(MutationReservation {
-                operation_id,
-                generation: expected_generation,
-                expected_status: expected_status.to_owned(),
-                action: action.to_owned(),
-            });
-            let encoded = serde_json::to_vec(&record).map_err(|error| {
-                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Encode(
-                    error,
-                ))
-            })?;
-            tree.insert(id.as_bytes(), encoded)?;
-            Ok(())
-        })
-        .map_err(|error| match error {
-            sled::transaction::TransactionError::Abort(error) => error,
-            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
-        })?;
         tree.flush()?;
+        operations.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn lifecycle_operation(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<Option<LifecycleOperation>, ContainerStoreError> {
+        self.db
+            .open_tree(LIFECYCLE_OPERATION_TREE)?
+            .get(operation_id)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(ContainerStoreError::Decode))
+            .transpose()
+    }
+
+    pub(crate) fn delete_for_mutation(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+    ) -> Result<(), ContainerStoreError> {
+        let containers = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        (&containers, &operations)
+            .transaction(|(containers, operations)| {
+                let bytes = containers.get(id.as_bytes())?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let record: ContainerRecord = serde_json::from_slice(&bytes).map_err(|error| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Decode(error),
+                    )
+                })?;
+                if record.pending_mutation.as_ref().map(|p| p.operation_id) != Some(operation_id) {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                let operation = lifecycle_operation(
+                    &record,
+                    operation_id,
+                    "container.delete",
+                    LifecyclePhase::StoreDeleted,
+                );
+                let encoded = serde_json::to_vec(&operation).map_err(|error| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Encode(error),
+                    )
+                })?;
+                operations.insert(&operation_id, encoded)?;
+                containers.remove(id.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
+            })?;
+        containers.flush()?;
+        operations.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn acknowledge_mutation(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<(), ContainerStoreError> {
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        operations.remove(operation_id)?;
+        operations.flush()?;
         Ok(())
     }
 
@@ -433,48 +586,93 @@ impl LocalContainerStore {
         operation_id: [u8; 16],
     ) -> Result<(), ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
-        tree.transaction(|tree| {
-            let Some(bytes) = tree.get(id.as_bytes())? else {
-                return Ok(());
-            };
-            let mut record: ContainerRecord = serde_json::from_slice(&bytes).map_err(|error| {
-                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Decode(
-                    error,
-                ))
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        (&tree, &operations)
+            .transaction(|(tree, operations)| {
+                let Some(bytes) = tree.get(id.as_bytes())? else {
+                    return Ok(());
+                };
+                let mut record: ContainerRecord =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(error),
+                        )
+                    })?;
+                let reservation = record.pending_mutation.as_ref().ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                if reservation.operation_id != operation_id
+                    || reservation.generation != record.mutation_generation
+                {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                record.pending_mutation = None;
+                record.mutation_generation = record.mutation_generation.saturating_add(1);
+                let encoded = serde_json::to_vec(&record).map_err(|error| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Encode(error),
+                    )
+                })?;
+                tree.insert(id.as_bytes(), encoded)?;
+                operations.remove(&operation_id)?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
             })?;
-            let reservation = record.pending_mutation.as_ref().ok_or_else(|| {
-                sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                )
-            })?;
-            if reservation.operation_id != operation_id
-                || reservation.generation != record.mutation_generation
-            {
-                return Err(sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                ));
-            }
-            record.pending_mutation = None;
-            record.mutation_generation = record.mutation_generation.saturating_add(1);
-            let encoded = serde_json::to_vec(&record).map_err(|error| {
-                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Encode(
-                    error,
-                ))
-            })?;
-            tree.insert(id.as_bytes(), encoded)?;
-            Ok(())
-        })
-        .map_err(|error| match error {
-            sled::transaction::TransactionError::Abort(error) => error,
-            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
-        })?;
         tree.flush()?;
+        operations.flush()?;
         Ok(())
     }
 
     pub fn clone_db(&self) -> sled::Db {
         self.db.clone()
     }
+}
+
+fn lifecycle_operation(
+    record: &ContainerRecord,
+    operation_id: [u8; 16],
+    action: &str,
+    phase: LifecyclePhase,
+) -> LifecycleOperation {
+    let mut digest = Sha256::new();
+    digest.update(b"ferrocrate/lifecycle-ownership/v1");
+    digest.update(record.id.as_bytes());
+    digest.update(
+        record
+            .creation_provenance
+            .runtime_instance_id
+            .unwrap_or_default(),
+    );
+    digest.update(record.creation_provenance.resource_generation.to_be_bytes());
+    LifecycleOperation {
+        operation_id,
+        container_id: record.id.clone(),
+        action: action.to_owned(),
+        generation: record.mutation_generation,
+        phase,
+        pid: record.pid,
+        process_start_time: process_start_time(record.pid),
+        state: record.status.clone(),
+        ownership_digest: digest.finalize().into(),
+    }
+}
+
+fn process_start_time(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat.rsplit_once(')')?.1.split_whitespace();
+    fields.skip(19).next()?.parse().ok()
 }
 
 /// Get current Unix timestamp in seconds.
@@ -500,7 +698,8 @@ fn default_health_status() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        now_unix, ContainerRecord, ContainerStoreError, LocalContainerStore, RestartPolicy,
+        now_unix, ContainerRecord, ContainerStoreError, LifecyclePhase, LocalContainerStore,
+        RestartPolicy,
     };
     use std::collections::HashMap;
 
@@ -653,5 +852,42 @@ mod tests {
             .unwrap()
             .pending_mutation
             .is_some());
+    }
+
+    #[test]
+    fn delete_keeps_operation_tombstone_until_terminal_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("remove-cas".into(), "image".into());
+        record.status = "stopped".into();
+        store.put(&record).unwrap();
+        store
+            .reserve_mutation("remove-cas", "stopped", 1, [7; 16], "container.delete")
+            .unwrap();
+        store.delete_for_mutation("remove-cas", [7; 16]).unwrap();
+        assert!(store.get("remove-cas").unwrap().is_none());
+        let operation = store.lifecycle_operation([7; 16]).unwrap().unwrap();
+        assert_eq!(operation.phase, LifecyclePhase::StoreDeleted);
+        assert_eq!(operation.container_id, "remove-cas");
+        store.acknowledge_mutation([7; 16]).unwrap();
+        assert!(store.lifecycle_operation([7; 16]).unwrap().is_none());
+    }
+
+    #[test]
+    fn witnessed_creation_persists_record_and_operation_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("create-cas".into(), "image".into());
+        record.pending_mutation = Some(super::MutationReservation {
+            operation_id: [8; 16],
+            generation: 1,
+            expected_status: "created".into(),
+            action: "container.run".into(),
+        });
+        store.put_reserved_creation(&record).unwrap();
+        assert!(store.get("create-cas").unwrap().is_some());
+        assert!(store.lifecycle_operation([8; 16]).unwrap().is_some());
     }
 }

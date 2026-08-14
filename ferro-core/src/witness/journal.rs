@@ -11,7 +11,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::PathBuf,
-    sync::Mutex,
+    sync::{atomic::AtomicBool, Mutex},
 };
 use storage::{lock_journal, transaction_error};
 pub use types::{
@@ -28,7 +28,6 @@ const RESERVE_INFLIGHT: &[u8] = b"cleanup-reserve-inflight";
 const AUTOMATION_STOPPED: &[u8] = b"automation-stopped";
 const MAX_BYTES: &[u8] = b"max-journal-bytes";
 const CURRENT_SEGMENT: &[u8] = b"current-segment";
-const SEGMENT_START_BYTES: &[u8] = b"segment-start-bytes";
 const EPOCH: &[u8] = b"epoch";
 
 pub struct WitnessJournal {
@@ -40,6 +39,7 @@ pub struct WitnessJournal {
     pending: sled::Tree,
     meta: sled::Tree,
     segments: sled::Tree,
+    sealed_segments: sled::Tree,
     journal_id: [u8; 16],
     epoch: u64,
     max_bytes: u64,
@@ -49,6 +49,7 @@ pub struct WitnessJournal {
     _lock: File,
     coordinator: Mutex<()>,
     faults: JournalFaults,
+    automation_stopped: AtomicBool,
 }
 
 impl WitnessJournal {
@@ -71,6 +72,7 @@ impl WitnessJournal {
             pending: db.open_tree("witness-pending-v1")?,
             meta: db.open_tree("witness-meta-v1")?,
             segments: db.open_tree("witness-segments-v1")?,
+            sealed_segments: db.open_tree("witness-sealed-segments-v1")?,
             db,
             journal_id: config.journal_id,
             epoch: 1,
@@ -81,12 +83,18 @@ impl WitnessJournal {
             _lock: lock,
             coordinator: Mutex::new(()),
             faults,
+            automation_stopped: AtomicBool::new(false),
         };
         journal.initialize(config.cleanup_reserve_bytes)?;
         Ok(journal)
     }
 
     fn initialize(&self, reserve_bytes: u64) -> Result<(), JournalError> {
+        if self.root.join("witness.automation-stopped").exists() {
+            self.automation_stopped
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(JournalError::AutomationStopped);
+        }
         if let Some(id) = self.meta.get(JOURNAL_ID)? {
             if id.as_ref() != self.journal_id {
                 return Err(JournalError::JournalMismatch);
@@ -144,8 +152,6 @@ impl WitnessJournal {
             .insert(RESERVE_TOTAL, &reserve_bytes.to_be_bytes())?;
         self.meta.insert(MAX_BYTES, &self.max_bytes.to_be_bytes())?;
         self.meta.insert(CURRENT_SEGMENT, &0_u64.to_be_bytes())?;
-        self.meta
-            .insert(SEGMENT_START_BYTES, &0_u64.to_be_bytes())?;
         let mut genesis = [0_u8; 40];
         genesis[..8].copy_from_slice(&1_u64.to_be_bytes());
         self.segments
@@ -243,7 +249,8 @@ impl WitnessJournal {
                 Ok(())
             })
             .map_err(transaction_error)?;
-        self.flush(FlushBoundary::Received, id).map(|_| ())
+        self.flush(FlushBoundary::Received, id)?;
+        self.seal_active_segment()
     }
 
     pub fn append_decision(
@@ -273,6 +280,7 @@ impl WitnessJournal {
         let decision_id = record.decision_id.ok_or(JournalError::InvalidStage)?;
         let decision_digest = self.append_decision_record(id, &mut record, &mut state)?;
         self.flush(FlushBoundary::Decision, id)?;
+        self.seal_active_segment()?;
         Ok(DurableIntent {
             journal_id: self.journal_id,
             epoch: self.epoch,
@@ -358,7 +366,8 @@ impl WitnessJournal {
                 Ok(())
             })
             .map_err(transaction_error)?;
-        self.flush(FlushBoundary::Decision, id)
+        self.flush(FlushBoundary::Decision, id)?;
+        self.seal_active_segment()
     }
 
     pub fn complete(
@@ -443,7 +452,8 @@ impl WitnessJournal {
         if forced_unknown {
             Err(JournalError::Indeterminate { operation_id: id })
         } else {
-            self.flush(FlushBoundary::Outcome, id).map(|_| ())
+            self.flush(FlushBoundary::Outcome, id)?;
+            self.seal_active_segment()
         }
     }
 

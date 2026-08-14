@@ -26,14 +26,38 @@ impl WitnessJournal {
     }
 
     pub fn records(&self) -> Result<Vec<Vec<u8>>, JournalError> {
-        self.records
-            .iter()
-            .map(|entry| {
-                entry
-                    .map(|(_, bytes)| bytes.to_vec())
-                    .map_err(JournalError::Storage)
-            })
-            .collect()
+        let mut out = Vec::new();
+        for entry in self.sealed_segments.iter() {
+            let (_, blob) = entry?;
+            out.extend(parse_segment(&blob)?);
+        }
+        for entry in self.records.iter() {
+            let (_, bytes) = entry?;
+            out.push(bytes.to_vec());
+        }
+        Ok(out)
+    }
+
+    pub fn export_segment(&self, segment: u64) -> Result<Vec<Vec<u8>>, JournalError> {
+        let blob = self
+            .sealed_segments
+            .get(segment.to_be_bytes())?
+            .ok_or(JournalError::NotPending)?;
+        parse_segment(&blob)
+    }
+
+    /// Explicit retention action. Callers must independently retain an export
+    /// and its handoff before reclaiming local capacity.
+    pub fn reclaim_segment(&self, segment: u64) -> Result<(), JournalError> {
+        if self
+            .sealed_segments
+            .remove(segment.to_be_bytes())?
+            .is_none()
+        {
+            return Err(JournalError::NotPending);
+        }
+        self.db.flush()?;
+        Ok(())
     }
 
     pub fn recover(&self, id: OperationId) -> Result<PendingOperation, JournalError> {
@@ -57,4 +81,26 @@ impl WitnessJournal {
             recipe,
         })
     }
+}
+
+fn parse_segment(blob: &[u8]) -> Result<Vec<Vec<u8>>, JournalError> {
+    let mut position = 0;
+    let mut out = Vec::new();
+    while position < blob.len() {
+        let header = blob
+            .get(position..position + 12)
+            .ok_or(JournalError::Corrupt)?;
+        let length = u32::from_be_bytes(
+            header[8..12]
+                .try_into()
+                .map_err(|_| JournalError::Corrupt)?,
+        ) as usize;
+        position += 12;
+        let value = blob
+            .get(position..position + length)
+            .ok_or(JournalError::Corrupt)?;
+        out.push(value.to_vec());
+        position += length;
+    }
+    Ok(out)
 }

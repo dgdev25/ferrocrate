@@ -218,7 +218,7 @@ fn injected_fault_phases_distinguish_safe_previsibility_from_ambiguity() {
     let root = tempdir().unwrap();
     let faults = JournalFaults::new();
     let journal = WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
-    faults.fail_once(FaultPoint::Transaction(FlushBoundary::Received));
+    faults.fail_enospc_once(FaultPoint::Transaction(FlushBoundary::Received));
     assert!(matches!(
         journal.append_received(
             OperationId::from_bytes([71; 16]),
@@ -229,7 +229,7 @@ fn injected_fault_phases_distinguish_safe_previsibility_from_ambiguity() {
         Err(JournalError::UnavailableBeforeVisibility)
     ));
     assert!(journal.pending().unwrap().is_empty());
-    faults.fail_once(FaultPoint::DuringFlush(FlushBoundary::Received));
+    faults.fail_enospc_once(FaultPoint::DuringFlush(FlushBoundary::Received));
     let id = OperationId::from_bytes([72; 16]);
     assert!(
         matches!(journal.append_received(id, 1, recipe(), record(WitnessStage::RequestReceived)), Err(JournalError::Indeterminate { operation_id }) if operation_id == id)
@@ -464,6 +464,32 @@ fn terminal_flush_ambiguity_reopens_as_complete_or_linked_unknown() {
 }
 
 #[test]
+fn lost_visible_terminal_is_reconciled_without_consumed_proof_or_reexecution() {
+    let root = tempdir().unwrap();
+    let journal = WitnessJournal::open(config(root.path())).unwrap();
+    let id = OperationId::from_bytes([131; 16]);
+    journal
+        .append_received(id, 44, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    let mut decision = record(WitnessStage::Decision);
+    decision.decision_id = Some([131; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    {
+        let consumed = journal.append_decision(id, decision).unwrap();
+        assert_eq!(consumed.execution_generation(), 44);
+    } // proof was consumed before an unacknowledged terminal write
+    let mut unknown = record(WitnessStage::Outcome);
+    unknown.event_id = [132; 16];
+    unknown.decision_id = Some([131; 16]);
+    unknown.result_digest = Some([1; 32]);
+    unknown.reason = Some(ferro_core::witness::ReasonCode::ExecutionFailed);
+    unknown.outcome = WitnessOutcome::OutcomeUnknown;
+    journal.record_outcome_unknown(id, unknown).unwrap();
+    assert_eq!(journal.recover(id).unwrap().execution_generation(), 44);
+}
+
+#[test]
 fn crash_after_cleanup_reservation_reopens_fail_stopped() {
     let root = tempdir().unwrap();
     let faults = JournalFaults::new();
@@ -574,6 +600,7 @@ fn segment_rotation_handoff_preserves_chain_across_reopen() {
     outcome.outcome = WitnessOutcome::Succeeded;
     journal.complete(intent, outcome).unwrap();
     assert!(journal.segment_count().unwrap() >= 2);
+    assert!(!journal.export_segment(0).unwrap().is_empty());
     drop(journal);
     let journal = WitnessJournal::open(rotating).unwrap();
     assert!(journal.segment_count().unwrap() >= 2);
@@ -585,4 +612,6 @@ fn segment_rotation_handoff_preserves_chain_across_reopen() {
         .unwrap()
         .integrity
     );
+    journal.reclaim_segment(0).unwrap();
+    assert!(journal.export_segment(0).is_err());
 }

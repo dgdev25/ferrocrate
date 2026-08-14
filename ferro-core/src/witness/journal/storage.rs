@@ -38,6 +38,13 @@ pub(super) fn lock_journal(root: &Path, journal_id: [u8; 16]) -> Result<File, Jo
     Ok(file)
 }
 
+pub(super) fn path_entry_exists(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 impl WitnessJournal {
     pub(super) fn head(&self) -> Result<(u64, [u8; 32]), JournalError> {
         let seq = self

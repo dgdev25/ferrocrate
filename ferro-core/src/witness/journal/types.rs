@@ -122,6 +122,8 @@ pub enum JournalError {
     QuotaExceeded,
     #[error("single witness record exceeds the configured segment bound")]
     OversizedRecord,
+    #[error("segment maintenance failed before record visibility")]
+    RotationUnavailable,
     #[error("journal storage unavailable before record visibility")]
     UnavailableBeforeVisibility,
     #[error("witness journal is disabled")]

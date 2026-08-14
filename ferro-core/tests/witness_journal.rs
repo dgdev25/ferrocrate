@@ -1,8 +1,8 @@
 use ferro_core::witness::{
-    verify_stream, DisclosureClass, FaultPoint, FlushBoundary, Invocation, JournalConfig,
-    JournalError, JournalFaults, JournalMode, OperationId, PrincipalSummary, RecoveryRecipe,
-    ResourceSummary, RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome,
-    WitnessRecord, WitnessResourceKind, WitnessStage,
+    verify_stream, DisclosureClass, DurableIntent, FaultPoint, FlushBoundary, Invocation,
+    JournalConfig, JournalError, JournalFaults, JournalMode, OperationId, PrincipalSummary,
+    RecoveryRecipe, ResourceSummary, RuleSummary, StreamTrust, WitnessAction, WitnessJournal,
+    WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
 };
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -60,6 +60,30 @@ fn recipe() -> RecoveryRecipe {
         1,
     )
     .unwrap()
+}
+
+fn allow(journal: &WitnessJournal, id: OperationId, byte: u8) -> DurableIntent {
+    journal
+        .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    let mut decision = record(WitnessStage::Decision);
+    decision.event_id = [byte.wrapping_add(1); 16];
+    decision.decision_id = Some([byte; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    journal.append_decision(id, decision).unwrap()
+}
+
+fn outcome(byte: u8, value: WitnessOutcome) -> WitnessRecord {
+    let mut outcome = record(WitnessStage::Outcome);
+    outcome.event_id = [byte.wrapping_add(2); 16];
+    outcome.decision_id = Some([byte; 16]);
+    outcome.result_digest = Some([byte; 32]);
+    outcome.outcome = value;
+    if value == WitnessOutcome::OutcomeUnknown {
+        outcome.reason = Some(ferro_core::witness::ReasonCode::ExecutionFailed);
+    }
+    outcome
 }
 
 #[test]
@@ -641,6 +665,11 @@ fn segment_rotation_handoff_preserves_chain_across_reopen() {
     outcome.result_digest = Some([1; 32]);
     outcome.outcome = WitnessOutcome::Succeeded;
     journal.complete(intent, outcome).unwrap();
+    assert!(journal
+        .segment_sizes()
+        .unwrap()
+        .into_iter()
+        .all(|size| size <= 400));
     assert!(journal.segment_count().unwrap() >= 2);
     assert!(!journal.export_segment(0).unwrap().is_empty());
     drop(journal);
@@ -659,7 +688,7 @@ fn segment_rotation_handoff_preserves_chain_across_reopen() {
 }
 
 #[test]
-fn durable_decision_survives_deferred_rotation_failure() {
+fn pre_append_rotation_failure_is_non_durable_and_retryable() {
     let root = tempdir().unwrap();
     let faults = JournalFaults::new();
     let config = config(root.path()).segment_bytes(400);
@@ -673,9 +702,231 @@ fn durable_decision_survives_deferred_rotation_failure() {
     decision.decision_id = Some([141; 16]);
     decision.rule = Some(RuleSummary::from_id([1; 16]));
     decision.decision = Some(true);
-    let intent = journal
-        .append_decision(id, decision)
-        .expect("durable proof is not suppressed by maintenance");
+    assert!(matches!(
+        journal.append_decision(id, decision.clone()),
+        Err(JournalError::RotationUnavailable)
+    ));
+    assert_eq!(journal.records().unwrap().len(), 1);
+    assert_eq!(journal.segment_count().unwrap(), 1);
+    let intent = journal.append_decision(id, decision).unwrap();
     assert_eq!(intent.operation_id(), id);
     assert_eq!(journal.recover(id).unwrap().operation_id(), id);
+    assert!(journal
+        .segment_sizes()
+        .unwrap()
+        .into_iter()
+        .all(|size| size <= 400));
+}
+
+#[test]
+fn explicit_maintenance_retries_deferred_rotation_without_empty_segments() {
+    let root = tempdir().unwrap();
+    let faults = JournalFaults::new();
+    let journal =
+        WitnessJournal::open_with_faults(config(root.path()).segment_bytes(400), faults.clone())
+            .unwrap();
+    journal
+        .append_received(
+            OperationId::from_bytes([161; 16]),
+            1,
+            recipe(),
+            record(WitnessStage::RequestReceived),
+        )
+        .unwrap();
+    faults.fail_once(FaultPoint::RotationSeal);
+    assert!(matches!(
+        journal.maintain(),
+        Err(JournalError::UnavailableBeforeVisibility)
+    ));
+    assert_eq!(journal.segment_count().unwrap(), 1);
+    journal.maintain().unwrap();
+    assert_eq!(journal.segment_count().unwrap(), 2);
+    assert!(journal
+        .segment_sizes()
+        .unwrap()
+        .into_iter()
+        .all(|n| n <= 400));
+}
+
+#[test]
+fn temp_only_stop_marker_and_repeated_stop_are_fail_closed() {
+    let root = tempdir().unwrap();
+    std::fs::write(
+        root.path().join("witness.automation-stopped.tmp"),
+        b"stopped-v1",
+    )
+    .unwrap();
+    assert!(matches!(
+        WitnessJournal::open(config(root.path())),
+        Err(JournalError::AutomationStopped)
+    ));
+    assert!(matches!(
+        WitnessJournal::open(config(root.path())),
+        Err(JournalError::AutomationStopped)
+    ));
+    #[cfg(unix)]
+    {
+        let symlink_root = tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            symlink_root.path().join("missing-target"),
+            symlink_root.path().join("witness.automation-stopped.tmp"),
+        )
+        .unwrap();
+        assert!(matches!(
+            WitnessJournal::open(config(symlink_root.path())),
+            Err(JournalError::AutomationStopped)
+        ));
+    }
+}
+
+#[test]
+fn enospc_received_transaction_and_flush_matrix_reopens_safely() {
+    for (point, previsible) in [
+        (FaultPoint::Transaction(FlushBoundary::Received), true),
+        (FaultPoint::BeforeFlush(FlushBoundary::Received), false),
+        (FaultPoint::DuringFlush(FlushBoundary::Received), false),
+        (FaultPoint::AfterFlush(FlushBoundary::Received), false),
+    ] {
+        let root = tempdir().unwrap();
+        let faults = JournalFaults::new();
+        let journal =
+            WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+        let id = OperationId::from_bytes([171; 16]);
+        faults.fail_enospc_once(point);
+        let error = journal
+            .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+            .unwrap_err();
+        assert_eq!(
+            matches!(error, JournalError::UnavailableBeforeVisibility),
+            previsible
+        );
+        drop(journal);
+        let reopened = WitnessJournal::open(config(root.path())).unwrap();
+        if previsible {
+            assert!(matches!(
+                reopened.recover(id),
+                Err(JournalError::NotPending)
+            ));
+        } else {
+            assert_eq!(reopened.recover(id).unwrap().operation_id(), id);
+        }
+    }
+}
+
+#[test]
+fn enospc_decision_transaction_and_each_flush_boundary_reopen_safely() {
+    for (point, previsible) in [
+        (FaultPoint::Transaction(FlushBoundary::Decision), true),
+        (FaultPoint::BeforeFlush(FlushBoundary::Decision), false),
+        (FaultPoint::DuringFlush(FlushBoundary::Decision), false),
+        (FaultPoint::AfterFlush(FlushBoundary::Decision), false),
+    ] {
+        let root = tempdir().unwrap();
+        let faults = JournalFaults::new();
+        let journal =
+            WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+        let id = OperationId::from_bytes([172; 16]);
+        journal
+            .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+            .unwrap();
+        let mut decision = record(WitnessStage::Decision);
+        decision.event_id = [173; 16];
+        decision.decision_id = Some([172; 16]);
+        decision.rule = Some(RuleSummary::from_id([1; 16]));
+        decision.decision = Some(true);
+        faults.fail_enospc_once(point);
+        let error = journal.append_decision(id, decision).unwrap_err();
+        assert_eq!(
+            matches!(error, JournalError::UnavailableBeforeVisibility),
+            previsible
+        );
+        drop(journal);
+        assert_eq!(
+            WitnessJournal::open(config(root.path()))
+                .unwrap()
+                .recover(id)
+                .unwrap()
+                .operation_id(),
+            id
+        );
+    }
+}
+
+#[test]
+fn enospc_outcome_transaction_and_each_flush_boundary_reopen_safely() {
+    for (point, previsible) in [
+        (FaultPoint::Transaction(FlushBoundary::Outcome), true),
+        (FaultPoint::BeforeFlush(FlushBoundary::Outcome), false),
+        (FaultPoint::DuringFlush(FlushBoundary::Outcome), false),
+        (FaultPoint::AfterFlush(FlushBoundary::Outcome), false),
+    ] {
+        let root = tempdir().unwrap();
+        let faults = JournalFaults::new();
+        let journal =
+            WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+        let id = OperationId::from_bytes([174; 16]);
+        let intent = allow(&journal, id, 174);
+        faults.fail_enospc_once(point);
+        let error = journal
+            .complete(intent, outcome(174, WitnessOutcome::Succeeded))
+            .unwrap_err();
+        assert_eq!(
+            matches!(error, JournalError::UnavailableBeforeVisibility),
+            previsible
+        );
+        drop(journal);
+        let reopened = WitnessJournal::open(config(root.path())).unwrap();
+        let classification = reopened.recover(id);
+        assert!(matches!(
+            classification,
+            Ok(_) | Err(JournalError::AlreadyComplete)
+        ));
+    }
+}
+
+#[test]
+fn enospc_reserve_and_cleanup_result_boundaries_latch_fail_stop() {
+    let points = [
+        FaultPoint::Transaction(FlushBoundary::Reserve),
+        FaultPoint::BeforeFlush(FlushBoundary::Reserve),
+        FaultPoint::DuringFlush(FlushBoundary::Reserve),
+        FaultPoint::AfterFlush(FlushBoundary::Reserve),
+        FaultPoint::Transaction(FlushBoundary::Outcome),
+        FaultPoint::BeforeFlush(FlushBoundary::Outcome),
+        FaultPoint::DuringFlush(FlushBoundary::Outcome),
+        FaultPoint::AfterFlush(FlushBoundary::Outcome),
+    ];
+    for (index, point) in points.into_iter().enumerate() {
+        let root = tempdir().unwrap();
+        let faults = JournalFaults::new();
+        let journal =
+            WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+        let byte = 181_u8.wrapping_add(index as u8);
+        let id = OperationId::from_bytes([byte; 16]);
+        let intent = allow(&journal, id, byte);
+        let unknown = outcome(byte, WitnessOutcome::OutcomeUnknown);
+        let unknown_event = unknown.event_id;
+        journal.complete(intent, unknown).unwrap();
+        let mut recovery = record(WitnessStage::Recovery);
+        recovery.event_id = [byte.wrapping_add(3); 16];
+        recovery.decision_id = Some([byte; 16]);
+        recovery.result_digest = Some([byte; 32]);
+        recovery.reason = Some(ferro_core::witness::ReasonCode::RecoveryCompleted);
+        recovery.outcome = WitnessOutcome::Recovered;
+        recovery.recovery_link = Some(unknown_event);
+        faults.fail_enospc_once(point);
+        assert!(matches!(
+            journal.complete_recovery(id, recovery.clone()),
+            Err(JournalError::AutomationStopped)
+        ));
+        assert!(matches!(
+            journal.complete_recovery(id, recovery),
+            Err(JournalError::AutomationStopped)
+        ));
+        drop(journal);
+        assert!(matches!(
+            WitnessJournal::open(config(root.path())),
+            Err(JournalError::AutomationStopped)
+        ));
+    }
 }

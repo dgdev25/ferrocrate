@@ -13,7 +13,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicBool, Mutex},
 };
-use storage::{lock_journal, transaction_error};
+use storage::{lock_journal, path_entry_exists, transaction_error};
 pub use types::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
     JournalMode,
@@ -89,9 +89,10 @@ impl WitnessJournal {
         journal.initialize(config.cleanup_reserve_bytes)?;
         Ok(journal)
     }
-
     fn initialize(&self, reserve_bytes: u64) -> Result<(), JournalError> {
-        if self.root.join("witness.automation-stopped").exists() {
+        if path_entry_exists(&self.root.join("witness.automation-stopped"))
+            || path_entry_exists(&self.root.join("witness.automation-stopped.tmp"))
+        {
             self.automation_stopped
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(JournalError::AutomationStopped);

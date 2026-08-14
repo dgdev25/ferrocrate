@@ -5,6 +5,26 @@ use super::{
 use crate::witness::{OperationId, PendingOperation, RecoveryRecipe};
 
 impl WitnessJournal {
+    pub fn maintain(&self) -> Result<(), JournalError> {
+        self.seal_active_segment(true)
+    }
+
+    pub fn rotation_deferred(&self) -> Result<bool, JournalError> {
+        Ok(self.meta.get(super::ROTATION_DEFERRED)?.is_some())
+    }
+
+    pub fn segment_sizes(&self) -> Result<Vec<u64>, JournalError> {
+        let mut sizes = Vec::new();
+        for entry in self.sealed_segments.iter() {
+            let (_, blob) = entry?;
+            sizes.push(parse_segment(&blob)?.iter().map(|v| v.len() as u64).sum());
+        }
+        sizes.push(self.records.iter().try_fold(0_u64, |sum, entry| {
+            let (_, value) = entry?;
+            Ok::<_, sled::Error>(sum + value.len() as u64)
+        })?);
+        Ok(sizes)
+    }
     pub fn segment_count(&self) -> Result<usize, JournalError> {
         Ok(self.segments.len())
     }

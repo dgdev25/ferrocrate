@@ -24,10 +24,13 @@ impl WitnessJournal {
             .checked_sub(self.reserve_total)
             .ok_or(JournalError::QuotaExceeded)?;
         if used.saturating_add(sealed).saturating_add(additional) > user_limit {
-            Err(JournalError::QuotaExceeded)
-        } else {
-            Ok(())
+            return Err(JournalError::QuotaExceeded);
         }
+        if used != 0 && used.saturating_add(additional) > self.segment_bytes {
+            self.seal_active_segment(true)
+                .map_err(|_| JournalError::RotationUnavailable)?;
+        }
+        Ok(())
     }
 
     pub(super) fn begin_cleanup_reservation(
@@ -134,13 +137,13 @@ impl WitnessJournal {
         }
     }
 
-    pub(super) fn seal_active_segment(&self) -> Result<(), JournalError> {
+    pub(super) fn seal_active_segment(&self, force: bool) -> Result<(), JournalError> {
         if self.faults.take(FaultPoint::RotationSeal) {
             return Err(JournalError::UnavailableBeforeVisibility);
         }
         let entries: Vec<_> = self.records.iter().collect::<Result<_, _>>()?;
         let used: u64 = entries.iter().map(|(_, value)| value.len() as u64).sum();
-        if used <= self.segment_bytes {
+        if entries.is_empty() || (!force && used < self.segment_bytes) {
             return Ok(());
         }
         let current = self
@@ -202,7 +205,7 @@ impl WitnessJournal {
     }
 
     pub(super) fn post_ack_rotation(&self) {
-        if self.seal_active_segment().is_err() {
+        if self.seal_active_segment(false).is_err() {
             let _ = self.meta.insert(super::ROTATION_DEFERRED, &[1_u8]);
             let _ = self.db.flush();
         } else {

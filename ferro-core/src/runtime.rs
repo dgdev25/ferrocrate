@@ -697,6 +697,7 @@ pub struct ContainerRuntime {
 pub enum LifecyclePhasePoint {
     DecisionDurable,
     ReservationDurable,
+    KernelEffectApplied,
     EffectObserved,
     TerminalDurable,
     ReservationCleared,
@@ -1910,6 +1911,14 @@ impl ContainerRuntime {
         next_status: &str,
     ) -> Result<(), RuntimeError> {
         let result = if let Some(intent) = intent {
+            self.phase_hook
+                .reached(
+                    "container.lifecycle-effect",
+                    LifecyclePhasePoint::KernelEffectApplied,
+                )
+                .map_err(|_| {
+                    RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
+                })?;
             self.store.transition_status_for_mutation(
                 id,
                 *intent.operation_id().as_bytes(),

@@ -26,6 +26,137 @@ impl LifecyclePhaseHook for RecordingPhaseHook {
     }
 }
 
+struct FailAfterKernelEffect;
+impl LifecyclePhaseHook for FailAfterKernelEffect {
+    fn reached(&self, _action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
+        if phase == LifecyclePhasePoint::KernelEffectApplied {
+            return Err(RuntimeError::InvalidState(
+                "injected post-effect store failure".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn assert_post_effect_unknown_reconciles(action: &str) {
+    let _guard = runtime_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let cgroup = root.path().join("cgroup");
+    let group = cgroup.join("ferrocrate/00112233445566778899aabbccddeeff");
+    std::fs::create_dir_all(&group).unwrap();
+    std::fs::write(cgroup.join("cgroup.controllers"), "memory cpu pids").unwrap();
+    std::fs::write(group.join("cgroup.procs"), "").unwrap();
+    std::fs::write(
+        group.join("cgroup.freeze"),
+        if action == "resume" { "1" } else { "0" },
+    )
+    .unwrap();
+    std::env::set_var("FERROCRATE_CGROUP_ROOT", &cgroup);
+    let policy_path = root.path().join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let policies = Arc::new(PolicyStore::load(&policy_path).unwrap());
+    let journal_path = root.path().join("witness");
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            &journal_path,
+            [83; 16],
+            JournalMode::Required,
+        ))
+        .unwrap(),
+    );
+    let id = "00112233445566778899aabbccddeeff";
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+        "id":id, "pid":child.id(), "image":"example.invalid/app:latest", "command":["true"],
+        "created_at_unix":1, "stdout_path":"", "stderr_path":"",
+        "status": if action == "resume" { "paused" } else { "running" }
+    }))
+    .unwrap();
+    store.put(&record).unwrap();
+    drop(store);
+    let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
+        root.path(),
+        Arc::new(AuthorizationGate::new(policies.clone())),
+        Some(journal.clone()),
+        Arc::new(FailAfterKernelEffect),
+    )
+    .unwrap();
+    let result = match action {
+        "pause" => runtime.pause(id),
+        "resume" => runtime.resume(id),
+        "stop" => runtime.stop(id, std::time::Duration::ZERO),
+        "kill" => runtime.kill(id),
+        _ => unreachable!(),
+    };
+    assert!(matches!(
+        result,
+        Err(RuntimeError::PostEffectPersistence(_))
+    ));
+    assert_eq!(journal.pending().unwrap().len(), 1);
+    assert!(runtime.inspect(id).unwrap().pending_mutation.is_some());
+    let outcomes = journal
+        .records()
+        .unwrap()
+        .iter()
+        .map(|bytes| decode_record(bytes).unwrap().stage())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes,
+        [
+            WitnessStage::RequestReceived,
+            WitnessStage::Decision,
+            WitnessStage::Outcome
+        ]
+    );
+    drop(runtime);
+    drop(journal);
+    let reopened = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            &journal_path,
+            [83; 16],
+            JournalMode::Required,
+        ))
+        .unwrap(),
+    );
+    let runtime = ContainerRuntime::new_with_authorization(
+        root.path(),
+        Arc::new(AuthorizationGate::new(policies)),
+        Some(reopened.clone()),
+    )
+    .unwrap();
+    assert!(reopened.pending().unwrap().is_empty());
+    assert!(runtime.inspect(id).unwrap().pending_mutation.is_none());
+    let _ = child.kill();
+    let _ = child.wait();
+    std::env::remove_var("FERROCRATE_CGROUP_ROOT");
+}
+
+#[test]
+fn pause_post_effect_store_failure_reopens_without_replay() {
+    assert_post_effect_unknown_reconciles("pause");
+}
+#[test]
+fn resume_post_effect_store_failure_reopens_without_replay() {
+    assert_post_effect_unknown_reconciles("resume");
+}
+#[test]
+fn stop_post_effect_store_failure_reopens_without_replay() {
+    assert_post_effect_unknown_reconciles("stop");
+}
+#[test]
+fn kill_post_effect_store_failure_reopens_without_replay() {
+    assert_post_effect_unknown_reconciles("kill");
+}
+
 #[test]
 fn exec_exposes_every_durable_crash_boundary_in_order() {
     let _guard = runtime_test_guard();
@@ -378,7 +509,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
         let runtime =
             ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
                 .unwrap();
-        let _ = match action {
+        let result = match action {
             "run" => runtime
                 .run(
                     "example.invalid/app:latest",
@@ -412,6 +543,11 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             "remove" => runtime.remove(id),
             _ => unreachable!(),
         };
+        if matches!(action, "run" | "remove" | "restart") {
+            assert!(result.is_err(), "{action} fixture should fail explicitly");
+        } else {
+            assert!(result.is_ok(), "{action} failed unexpectedly: {result:?}");
+        }
         if action == "remove" {
             assert_eq!(runtime.inspect(id).unwrap().status, "quarantined");
         }

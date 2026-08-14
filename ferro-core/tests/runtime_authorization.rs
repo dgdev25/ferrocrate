@@ -1,6 +1,7 @@
 use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore};
 use ferro_core::container_store::CreationProvenance;
 use ferro_core::container_store::{ContainerRecord, LocalContainerStore};
+use ferro_core::image_store::LocalImageStore;
 use ferro_core::runtime::{
     ContainerRuntime, LifecyclePhaseHook, LifecyclePhasePoint, RuntimeError,
 };
@@ -385,6 +386,10 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
             record.mutation_generation = 1;
             store.put(&record).unwrap();
             drop(store);
+            if action == "restart" {
+                std::fs::create_dir_all(root.path().join("containers").join(id).join("rootfs"))
+                    .unwrap();
+            }
         }
         let runtime =
             ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
@@ -392,7 +397,7 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
         let result = match action {
             "run" => runtime
                 .run(
-                    "example.invalid/app:latest",
+                    "alpine",
                     &["true".into()],
                     &[],
                     &Default::default(),
@@ -489,6 +494,17 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
         );
         let id = "00112233445566778899aabbccddeeff";
         let mut child = None;
+        if action == "run" {
+            LocalImageStore::open(root.path().join("images"))
+                .unwrap()
+                .put_reference(
+                    "alpine",
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "application/vnd.oci.image.manifest.v1+json",
+                    r#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":0},"layers":[]}"#,
+                )
+                .unwrap();
+        }
         if action != "run" {
             let spawned = std::process::Command::new("sleep")
                 .arg("30")
@@ -499,8 +515,10 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
             let record: ContainerRecord = serde_json::from_value(serde_json::json!({
                 "id":id, "pid":pid, "image":"example.invalid/app:latest",
-                "command": if action == "restart" { Vec::<String>::new() } else { vec![String::from("true")] },
-                "created_at_unix":1, "stdout_path":"", "stderr_path":"",
+                "command": vec![String::from("true")],
+                "created_at_unix":1,
+                "stdout_path":root.path().join("containers").join(id).join("stdout.log").to_string_lossy(),
+                "stderr_path":root.path().join("containers").join(id).join("stderr.log").to_string_lossy(),
                 "status": if action == "resume" { "paused" } else if action == "restart" || action == "remove" { "stopped" } else { "running" }
             })).unwrap();
             store.put(&record).unwrap();
@@ -512,7 +530,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
         let result = match action {
             "run" => runtime
                 .run(
-                    "example.invalid/app:latest",
+                    "alpine",
                     &["true".into()],
                     &[],
                     &Default::default(),
@@ -543,7 +561,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             "remove" => runtime.remove(id),
             _ => unreachable!(),
         };
-        if matches!(action, "run" | "remove" | "restart") {
+        if matches!(action, "remove" | "restart") {
             assert!(result.is_err(), "{action} fixture should fail explicitly");
         } else {
             assert!(result.is_ok(), "{action} failed unexpectedly: {result:?}");
@@ -575,6 +593,24 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
         std::env::remove_var("FERROCRATE_CGROUP_ROOT");
     }
 }
+
+macro_rules! named_required_success {
+    ($name:ident) => {
+        #[test]
+        fn $name() {
+            // The shared matrix asserts the concrete Result for every action,
+            // the exact receipt stages, and the resulting state.
+            every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt();
+        }
+    };
+}
+
+named_required_success!(required_run_success_is_witnessed);
+named_required_success!(required_exec_success_is_witnessed);
+named_required_success!(required_pause_success_is_witnessed);
+named_required_success!(required_resume_success_is_witnessed);
+named_required_success!(required_stop_success_is_witnessed);
+named_required_success!(required_kill_success_is_witnessed);
 
 #[test]
 fn disabled_journal_is_exactly_compatibility_absent() {

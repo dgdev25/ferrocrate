@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod policy;
 
+#[cfg(test)]
+mod tests;
+
 /// A stable, closed vocabulary for runtime mutations.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum Action {
@@ -81,13 +84,117 @@ pub enum ResourceKind {
     Administrative,
 }
 
+/// An authenticated principal identifier minted by the resolver boundary.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct PrincipalId(String);
+
+impl PrincipalId {
+    #[allow(dead_code)] // Used by the trusted resolver submodule added in Task 2.
+    fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A resolver-produced principal with a trusted native role.
+///
+/// External callers cannot mint one:
+///
+/// ```compile_fail
+/// use ferro_core::authorization::{ResolvedPrincipal, Role};
+/// let _ = ResolvedPrincipal::new("caller-supplied", Role::Administrator);
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ResolvedPrincipal {
+    id: PrincipalId,
+    role: Role,
+}
+
+impl ResolvedPrincipal {
+    #[allow(dead_code)] // Used by the trusted resolver submodule added in Task 2.
+    fn new(id: impl Into<String>, role: Role) -> Self {
+        Self {
+            id: PrincipalId::new(id),
+            role,
+        }
+    }
+
+    pub fn id(&self) -> &PrincipalId {
+        &self.id
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
+    }
+}
+
+/// An immutable resource identifier minted by canonicalization.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ResourceId(String);
+
+impl ResourceId {
+    #[allow(dead_code)] // Used by the trusted canonicalization submodule.
+    fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// An immutable resource identity used for a decision.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// Resource canonicalization is restricted to the authorization boundary:
+///
+/// ```compile_fail
+/// use ferro_core::authorization::{Resource, ResourceKind};
+/// let _ = Resource::canonical(ResourceKind::Container, "raw-name", None, 1);
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Resource {
-    pub kind: ResourceKind,
-    pub id: String,
-    pub owner: Option<String>,
-    pub generation: u64,
+    kind: ResourceKind,
+    id: ResourceId,
+    owner: Option<PrincipalId>,
+    generation: u64,
+}
+
+impl Resource {
+    #[allow(dead_code)] // Used by the trusted canonicalization submodule.
+    fn canonical(
+        kind: ResourceKind,
+        id: impl Into<String>,
+        owner: Option<PrincipalId>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            kind,
+            id: ResourceId::new(id),
+            owner,
+            generation,
+        }
+    }
+
+    pub fn kind(&self) -> ResourceKind {
+        self.kind
+    }
+
+    pub fn id(&self) -> &ResourceId {
+        &self.id
+    }
+
+    pub fn owner(&self) -> Option<&PrincipalId> {
+        self.owner.as_ref()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// A normalized mount category; raw host paths are not policy inputs.
@@ -112,26 +219,101 @@ pub enum ResourceState {
 }
 
 /// Normalized facts that can constrain a typed action.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct RequestFacts {
-    pub image_digest: Option<String>,
-    pub mounts: Vec<MountClass>,
-    pub network_ids: Vec<String>,
-    pub requested_capabilities: Vec<String>,
-    pub privileged: bool,
-    pub device_classes: Vec<String>,
-    pub lifecycle_state: Option<ResourceState>,
+    image_digest: Option<String>,
+    mounts: Vec<MountClass>,
+    network_ids: Vec<String>,
+    requested_capabilities: Vec<String>,
+    privileged: bool,
+    device_classes: Vec<String>,
+    lifecycle_state: Option<ResourceState>,
+}
+
+impl RequestFacts {
+    pub fn image_digest(&self) -> Option<&str> {
+        self.image_digest.as_deref()
+    }
+
+    pub fn mounts(&self) -> &[MountClass] {
+        &self.mounts
+    }
+
+    pub fn network_ids(&self) -> &[String] {
+        &self.network_ids
+    }
+
+    pub fn requested_capabilities(&self) -> &[String] {
+        &self.requested_capabilities
+    }
+
+    pub fn privileged(&self) -> bool {
+        self.privileged
+    }
+
+    pub fn device_classes(&self) -> &[String] {
+        &self.device_classes
+    }
+
+    pub fn lifecycle_state(&self) -> Option<ResourceState> {
+        self.lifecycle_state
+    }
 }
 
 /// The authenticated and normalized input to policy evaluation.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// Trusted request contexts cannot be reconstructed from caller input:
+///
+/// ```compile_fail
+/// use ferro_core::authorization::RequestContext;
+/// let _: RequestContext = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RequestContext {
-    pub request_id: String,
-    pub principal: Option<String>,
-    pub role: Option<Role>,
-    pub action: Action,
-    pub resource: Resource,
-    pub facts: RequestFacts,
+    request_id: String,
+    principal: Option<ResolvedPrincipal>,
+    action: Action,
+    resource: Resource,
+    facts: RequestFacts,
+}
+
+impl RequestContext {
+    #[allow(dead_code)] // Used by resolver/gate submodules, never external callers.
+    fn resolved(
+        request_id: impl Into<String>,
+        principal: Option<ResolvedPrincipal>,
+        action: Action,
+        resource: Resource,
+        facts: RequestFacts,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            principal,
+            action,
+            resource,
+            facts,
+        }
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn principal(&self) -> Option<&ResolvedPrincipal> {
+        self.principal.as_ref()
+    }
+
+    pub fn action(&self) -> Action {
+        self.action
+    }
+
+    pub fn resource(&self) -> &Resource {
+        &self.resource
+    }
+
+    pub fn facts(&self) -> &RequestFacts {
+        &self.facts
+    }
 }
 
 /// Rollout behavior for authorization.
@@ -210,7 +392,7 @@ impl PolicyDocument {
     }
 
     fn enforced_decision(&self, request: &RequestContext) -> Decision {
-        let (Some(principal), Some(role)) = (&request.principal, request.role) else {
+        let Some(principal) = &request.principal else {
             return self.decision(
                 false,
                 ReasonCode::UnknownPrincipal,
@@ -219,7 +401,7 @@ impl PolicyDocument {
             );
         };
 
-        match role {
+        match principal.role {
             Role::Administrator => {
                 self.decision(true, ReasonCode::RoleAllowed, "role.administrator", None)
             }
@@ -244,14 +426,13 @@ impl PolicyDocument {
                     None,
                 )
             }
-            Role::Developer if request.resource.owner.as_deref() != Some(principal.as_str()) => {
-                self.decision(
+            Role::Developer if request.resource.owner.as_ref() != Some(&principal.id) => self
+                .decision(
                     false,
                     ReasonCode::ResourceOwnerMismatch,
                     "role.developer.owner",
                     None,
-                )
-            }
+                ),
             Role::Developer if is_policy_administration(request.action) => self.decision(
                 false,
                 ReasonCode::PolicyAdministrationDenied,

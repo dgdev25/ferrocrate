@@ -11,7 +11,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::PolicyDocument;
+use super::{PolicyDocument, ResolvedPrincipal, Role};
 
 /// Maximum accepted policy source size (1 MiB).
 pub const MAX_POLICY_BYTES: usize = 1024 * 1024;
@@ -36,15 +36,13 @@ pub struct PolicyStore {
 /// Only the authorization module can mint this proof.
 #[derive(Debug)]
 pub struct PolicyRollbackAuthorization {
-    actor: String,
+    actor: ResolvedPrincipal,
 }
 
 impl PolicyRollbackAuthorization {
-    #[allow(dead_code)]
-    pub(crate) fn new(actor: impl Into<String>) -> Self {
-        Self {
-            actor: actor.into(),
-        }
+    #[allow(dead_code)] // Minted only by the authorization gate in a later task.
+    pub(super) fn new(actor: ResolvedPrincipal) -> Self {
+        Self { actor }
     }
 }
 
@@ -73,6 +71,8 @@ pub enum PolicyError {
         "policy generation rollback from {current} to {candidate} requires separate authorization"
     )]
     Rollback { current: u64, candidate: u64 },
+    #[error("policy reload requires a resolved administrator principal")]
+    UnauthorizedReload,
     #[error("policy store lock is unavailable")]
     LockPoisoned,
     #[error("policy file operation failed: {0}")]
@@ -100,8 +100,11 @@ impl PolicyStore {
     pub fn reload(
         &self,
         path: impl AsRef<Path>,
-        _actor: &str,
+        actor: &ResolvedPrincipal,
     ) -> Result<PolicySnapshot, PolicyError> {
+        if actor.role() != Role::Administrator {
+            return Err(PolicyError::UnauthorizedReload);
+        }
         self.replace(path.as_ref(), false)
     }
 
@@ -180,21 +183,36 @@ fn validate_metadata(file: &File) -> Result<(), PolicyError> {
 
     #[cfg(unix)]
     {
-        let expected = nix::unistd::geteuid().as_raw();
-        let actual = metadata.uid();
-        if actual != expected {
-            return Err(PolicyError::WrongOwner { expected, actual });
-        }
-        let mode = metadata.mode() & 0o777;
-        if mode & 0o022 != 0 {
-            return Err(PolicyError::UnsafeMode { mode });
-        }
+        validate_unix_owner_and_mode(
+            nix::unistd::geteuid().as_raw(),
+            metadata.uid(),
+            metadata.mode(),
+        )?;
     }
 
     if metadata.len() > MAX_POLICY_BYTES as u64 {
         return Err(PolicyError::TooLarge {
             maximum: MAX_POLICY_BYTES,
         });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unix_owner_and_mode(
+    expected_owner: u32,
+    actual_owner: u32,
+    raw_mode: u32,
+) -> Result<(), PolicyError> {
+    if actual_owner != expected_owner {
+        return Err(PolicyError::WrongOwner {
+            expected: expected_owner,
+            actual: actual_owner,
+        });
+    }
+    let mode = raw_mode & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(PolicyError::UnsafeMode { mode });
     }
     Ok(())
 }
@@ -216,7 +234,73 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{PolicyRollbackAuthorization, PolicyStore};
+    use super::{
+        validate_unix_owner_and_mode, PolicyError, PolicyRollbackAuthorization, PolicyStore,
+    };
+    use crate::authorization::{ResolvedPrincipal, Role};
+
+    #[test]
+    fn mismatched_owner_is_rejected_deterministically() {
+        let error =
+            validate_unix_owner_and_mode(1000, 1001, 0o600).expect_err("mismatched uid must fail");
+
+        assert!(matches!(
+            error,
+            PolicyError::WrongOwner {
+                expected: 1000,
+                actual: 1001
+            }
+        ));
+    }
+
+    #[test]
+    fn reload_rejects_generation_rollback_and_keeps_the_active_snapshot() {
+        let dir = TempDir::new().expect("tempdir");
+        let current = dir.path().join("current.toml");
+        let rollback = dir.path().join("rollback.toml");
+        write_policy(&current, 2, "enforce");
+        write_policy(&rollback, 1, "disabled");
+        let store = PolicyStore::load(&current).expect("load current policy");
+        let original_digest = store.snapshot().digest;
+        let actor = ResolvedPrincipal::new("host-administrator", Role::Administrator);
+
+        let error = store
+            .reload(&rollback, &actor)
+            .expect_err("rollback must fail");
+
+        assert!(matches!(
+            error,
+            PolicyError::Rollback {
+                current: 2,
+                candidate: 1
+            }
+        ));
+        let retained = store.snapshot();
+        assert_eq!(retained.generation, 2);
+        assert_eq!(retained.digest, original_digest);
+        assert_eq!(
+            retained.document.mode,
+            super::super::AuthorizationMode::Enforce
+        );
+    }
+
+    #[test]
+    fn reload_rejects_a_resolved_non_administrator() {
+        let dir = TempDir::new().expect("tempdir");
+        let current = dir.path().join("current.toml");
+        let candidate = dir.path().join("candidate.toml");
+        write_policy(&current, 1, "enforce");
+        write_policy(&candidate, 2, "disabled");
+        let store = PolicyStore::load(&current).expect("load current policy");
+        let actor = ResolvedPrincipal::new("developer", Role::Developer);
+
+        let error = store
+            .reload(&candidate, &actor)
+            .expect_err("non-administrator reload must fail");
+
+        assert!(matches!(error, PolicyError::UnauthorizedReload));
+        assert_eq!(store.snapshot().generation, 1);
+    }
 
     #[test]
     fn separately_authorized_path_can_install_an_older_generation() {
@@ -237,7 +321,8 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("policy mode");
         }
         let store = PolicyStore::load(&current).expect("load current");
-        let authorization = PolicyRollbackAuthorization::new("host-administrator");
+        let actor = ResolvedPrincipal::new("host-administrator", Role::Administrator);
+        let authorization = PolicyRollbackAuthorization::new(actor);
 
         let installed = store
             .reload_authorized_rollback(&rollback, &authorization)
@@ -245,5 +330,14 @@ mod tests {
 
         assert_eq!(installed.generation, 1);
         assert_eq!(store.snapshot().generation, 1);
+    }
+
+    fn write_policy(path: &std::path::Path, generation: u64, mode: &str) {
+        fs::write(
+            path,
+            format!("schema_version = 1\ngeneration = {generation}\nmode = \"{mode}\"\n"),
+        )
+        .expect("write policy");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("policy mode");
     }
 }

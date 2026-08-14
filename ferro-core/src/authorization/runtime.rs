@@ -90,6 +90,133 @@ impl MutationPermit {
 }
 
 impl RuntimeAuthorization {
+    pub(crate) fn begin_internal_network_recovery(
+        &self,
+        container_id: &str,
+    ) -> Result<Option<OperationId>, MediationError> {
+        self.begin_internal_recovery(
+            container_id,
+            WitnessAction::NetworkAttach,
+            WitnessAction::NetworkDetach,
+            WitnessResourceKind::Network,
+        )
+    }
+
+    pub(crate) fn begin_internal_container_recovery(
+        &self,
+        container_id: &str,
+    ) -> Result<Option<OperationId>, MediationError> {
+        self.begin_internal_recovery(
+            container_id,
+            WitnessAction::ContainerRun,
+            WitnessAction::ContainerDelete,
+            WitnessResourceKind::Container,
+        )
+    }
+
+    fn begin_internal_recovery(
+        &self,
+        container_id: &str,
+        original_action: WitnessAction,
+        cleanup_action: WitnessAction,
+        resource_kind: WitnessResourceKind,
+    ) -> Result<Option<OperationId>, MediationError> {
+        let Some(journal) = &self.journal else {
+            return Ok(None);
+        };
+        let operation = OperationId::from_bytes(rand::rng().random());
+        let request_digest: [u8; 32] = Sha256::digest(
+            [
+                b"ferrocrate/internal-network-recovery/v1".as_slice(),
+                container_id.as_bytes(),
+            ]
+            .concat(),
+        )
+        .into();
+        let resource = ResourceSummary::pseudonymize(
+            &self.pseudonym_key,
+            canonical_uuid(container_id).as_bytes(),
+        )
+        .map_err(|_| MediationError::Identity)?;
+        let principal =
+            PrincipalSummary::pseudonymize(&self.pseudonym_key, b"ferrocrate.internal-recovery")
+                .map_err(|_| MediationError::Identity)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let template = WitnessRecord {
+            epoch: 1,
+            sequence: 0,
+            previous_hash: [0; 32],
+            event_id: rand::rng().random(),
+            request_id: *operation.as_bytes(),
+            runtime_instance_id: self.runtime_id,
+            boot_id: self.boot_id,
+            principal,
+            invocation: Invocation::InternalCleanup,
+            action: cleanup_action,
+            resource_kind,
+            resource,
+            resource_generation: 1,
+            policy_version: 0,
+            policy_digest: [0; 32],
+            decision_id: None,
+            rule: None,
+            decision: None,
+            reason: None,
+            request_digest,
+            result_digest: None,
+            wall_time_ns: now.as_nanos().min(i64::MAX as u128) as i64,
+            monotonic_ns: now.as_nanos().min(u64::MAX as u128) as u64,
+            stage: WitnessStage::RequestReceived,
+            outcome: WitnessOutcome::None,
+            recovery_link: None,
+            path_class: None,
+            device_class: None,
+            correlation_digest: None,
+        };
+        let recipe = RecoveryRecipe::for_original(
+            original_action,
+            resource_kind,
+            cleanup_action,
+            request_digest,
+            1,
+        )
+        .map_err(|_| MediationError::Identity)?;
+        journal.append_received(
+            operation,
+            1,
+            recipe,
+            at_stage(&template, WitnessStage::RequestReceived, 1),
+        )?;
+        let mut decision = at_stage(&template, WitnessStage::Decision, 2);
+        decision.decision = Some(true);
+        decision.decision_id = Some(rand::rng().random());
+        decision.rule = Some(rule_summary(b"internal.recovery.owned-intent"));
+        let _ = journal.append_decision(operation, decision)?;
+        Ok(Some(operation))
+    }
+
+    pub(crate) fn finish_internal_recovery(
+        &self,
+        operation: Option<OperationId>,
+        observation: ObservationDigest,
+        recovered: bool,
+    ) -> Result<(), MediationError> {
+        if let (Some(journal), Some(operation)) = (&self.journal, operation) {
+            journal.reconcile_observed(
+                operation,
+                observation,
+                if recovered {
+                    crate::witness::RecoveryClassification::Recovered
+                } else {
+                    crate::witness::RecoveryClassification::Quarantined
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn compatibility_with_id(runtime_id: [u8; 16]) -> Self {
         let policies = Arc::new(PolicyStore::compatibility_disabled());
         Self::new_with_id(Arc::new(AuthorizationGate::new(policies)), None, runtime_id)

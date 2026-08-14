@@ -21,11 +21,16 @@ pub(crate) struct LifecycleOperation {
     pub process_start_time: Option<u64>,
     pub state: String,
     pub ownership_digest: [u8; 32],
+    #[serde(default)]
+    pub execution_generation_after: Option<u64>,
+    #[serde(default)]
+    pub result_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum LifecyclePhase {
     Reserved,
+    EffectApplied,
     StoreDeleted,
 }
 
@@ -520,6 +525,73 @@ impl LocalContainerStore {
             .transpose()
     }
 
+    pub(crate) fn mark_mutation_effect(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        succeeded: bool,
+    ) -> Result<(), ContainerStoreError> {
+        let containers = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        (&containers, &operations)
+            .transaction(|(containers, operations)| {
+                let record_bytes = containers.get(id.as_bytes())?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let record: ContainerRecord =
+                    serde_json::from_slice(&record_bytes).map_err(|e| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(e),
+                        )
+                    })?;
+                let operation_bytes = operations.get(&operation_id)?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let mut operation: LifecycleOperation = serde_json::from_slice(&operation_bytes)
+                    .map_err(|e| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(e),
+                        )
+                    })?;
+                if operation.container_id != id
+                    || operation.generation != record.mutation_generation
+                {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                operation.phase = LifecyclePhase::EffectApplied;
+                operation.pid = record.pid;
+                operation.process_start_time = process_start_time(record.pid);
+                operation.state = record.status;
+                operation.execution_generation_after = Some(record.mutation_generation);
+                let mut digest = Sha256::new();
+                digest.update(b"ferrocrate/lifecycle-result/v1");
+                digest.update(operation_id);
+                digest.update([u8::from(succeeded)]);
+                operation.result_digest = Some(digest.finalize().into());
+                let encoded = serde_json::to_vec(&operation).map_err(|e| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Encode(e),
+                    )
+                })?;
+                operations.insert(&operation_id, encoded)?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
+            })?;
+        operations.flush()?;
+        Ok(())
+    }
+
     pub(crate) fn delete_for_mutation(
         &self,
         id: &str,
@@ -663,6 +735,8 @@ fn lifecycle_operation(
         process_start_time: process_start_time(record.pid),
         state: record.status.clone(),
         ownership_digest: digest.finalize().into(),
+        execution_generation_after: None,
+        result_digest: None,
     }
 }
 
@@ -889,5 +963,27 @@ mod tests {
         store.put_reserved_creation(&record).unwrap();
         assert!(store.get("create-cas").unwrap().is_some());
         assert!(store.lifecycle_operation([8; 16]).unwrap().is_some());
+    }
+
+    #[test]
+    fn effect_marker_is_redacted_and_bound_to_operation_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("exec-marker".into(), "image".into());
+        record.status = "running".into();
+        record.pid = std::process::id();
+        store.put(&record).unwrap();
+        store
+            .reserve_mutation("exec-marker", "running", 1, [9; 16], "container.exec")
+            .unwrap();
+        store
+            .mark_mutation_effect("exec-marker", [9; 16], true)
+            .unwrap();
+        let operation = store.lifecycle_operation([9; 16]).unwrap().unwrap();
+        assert_eq!(operation.phase, LifecyclePhase::EffectApplied);
+        assert!(operation.result_digest.is_some());
+        assert!(operation.process_start_time.is_some());
+        assert_eq!(operation.execution_generation_after, Some(1));
     }
 }

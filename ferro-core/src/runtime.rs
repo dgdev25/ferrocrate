@@ -542,6 +542,7 @@ fn recover_pending_network_cleanups(
     runtime_dir: &Path,
     store: &LocalContainerStore,
     cgroup_root: &Path,
+    authorization: &RuntimeAuthorization,
 ) -> Result<(), RuntimeError> {
     let containers = runtime_dir.join("containers");
     let entries = match fs::read_dir(&containers) {
@@ -573,8 +574,14 @@ fn recover_pending_network_cleanups(
                 journal_path.display()
             )));
         }
+        let recovery = authorization.begin_internal_network_recovery(&pending.container_id)?;
         if store.get(&pending.container_id)?.is_some() {
             fs::remove_file(&journal_path)?;
+            authorization.finish_internal_recovery(
+                recovery,
+                internal_cleanup_observation(&pending.container_id, true),
+                true,
+            )?;
             continue;
         }
         let mut rollback = CreationRollback::from_pending(
@@ -584,14 +591,35 @@ fn recover_pending_network_cleanups(
         )?;
         rollback.rollback();
         if journal_path.exists() {
+            authorization.finish_internal_recovery(
+                recovery,
+                internal_cleanup_observation(&entry.file_name().to_string_lossy(), false),
+                false,
+            )?;
             return Err(RuntimeError::Network(format!(
                 "pending network cleanup for {} remains incomplete; inspect {}",
                 entry.file_name().to_string_lossy(),
                 journal_path.display()
             )));
         }
+        authorization.finish_internal_recovery(
+            recovery,
+            internal_cleanup_observation(&entry.file_name().to_string_lossy(), true),
+            true,
+        )?;
     }
     Ok(())
+}
+
+fn internal_cleanup_observation(
+    container_id: &str,
+    absent: bool,
+) -> crate::witness::ObservationDigest {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ferrocrate/internal-cleanup-observation/v1");
+    digest.update(container_id.as_bytes());
+    digest.update([u8::from(absent)]);
+    crate::witness::ObservationDigest::from_bytes(digest.finalize().into())
 }
 
 #[derive(Debug, Error)]
@@ -700,7 +728,12 @@ impl ContainerRuntime {
             authorization,
         };
         runtime.reconcile_pending_mutations()?;
-        recover_pending_network_cleanups(runtime_dir, &runtime.store, &runtime.cgroup_root)?;
+        recover_pending_network_cleanups(
+            runtime_dir,
+            &runtime.store,
+            &runtime.cgroup_root,
+            &runtime.authorization,
+        )?;
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
     }
@@ -737,11 +770,19 @@ impl ContainerRuntime {
                 record.status,
                 record.pid
             );
+            let recovery = self
+                .authorization
+                .begin_internal_container_recovery(&record.id)?;
             record.status = "exited".to_string();
             if record.last_exit_code.is_none() {
                 record.last_exit_code = Some(-1);
             }
             self.store.put(&record)?;
+            self.authorization.finish_internal_recovery(
+                recovery,
+                internal_cleanup_observation(&record.id, true),
+                true,
+            )?;
             let _ = log_event(
                 &self.runtime_dir,
                 make_event(
@@ -821,9 +862,10 @@ impl ContainerRuntime {
                 == reservation.action;
             let generation_matches =
                 pending.recipe().resource_generation() == reservation.generation;
+            let durable_operation = self.store.lifecycle_operation(reservation.operation_id)?;
             let truth_matches = action_matches
                 && generation_matches
-                && recovery_truth_matches(record, &reservation.action);
+                && recovery_truth_matches(record, durable_operation.as_ref(), &reservation.action);
             let classification = if truth_matches {
                 crate::witness::RecoveryClassification::Recovered
             } else {
@@ -1122,6 +1164,10 @@ impl ContainerRuntime {
             normalized.network_backend,
             ai_config,
         );
+        if witnessed {
+            self.store
+                .mark_mutation_effect(&container_id, operation_id, result.is_ok())?;
+        }
         self.authorization.complete(permit, result.is_ok())?;
         if witnessed {
             self.store.finish_mutation(&container_id, operation_id)?;
@@ -1451,6 +1497,8 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd);
+        self.store
+            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.authorization.complete(permit, result.is_ok())?;
         self.store.finish_mutation(id, operation_id)?;
         result
@@ -1929,6 +1977,8 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = execute(self, proof, intent);
+        self.store
+            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         if action == Action::ContainerDelete && result.is_ok() {
             self.store.delete_for_mutation(id, operation_id)?;
             self.authorization.complete(permit, true)?;
@@ -2072,11 +2122,17 @@ fn mount_target_digest(target: &Path) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn recovery_truth_matches(record: &ContainerRecord, action: &str) -> bool {
+fn recovery_truth_matches(
+    record: &ContainerRecord,
+    operation: Option<&LifecycleOperation>,
+    action: &str,
+) -> bool {
     match action {
-        // Exec needs a durable per-execution result marker. Container presence
-        // alone cannot prove that an unknown command completed.
-        "container.exec" => false,
+        "container.exec" => operation.is_some_and(|operation| {
+            operation.phase == LifecyclePhase::EffectApplied
+                && operation.result_digest.is_some()
+                && operation.process_start_time == process_start_time_for_pid(record.pid)
+        }),
         "container.pause" => record.status == "paused",
         "container.resume" => record.status == "running" && process_exists(record.pid),
         "container.stop" => record.status == "stopped" && !process_exists(record.pid),
@@ -2086,6 +2142,19 @@ fn recovery_truth_matches(record: &ContainerRecord, action: &str) -> bool {
         "container.run" => record.creation_provenance.is_verifiable(),
         _ => false,
     }
+}
+
+fn process_start_time_for_pid(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 fn recovery_observation(
@@ -7574,7 +7643,10 @@ mod tests {
             crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
                 .unwrap();
 
-        super::recover_pending_network_cleanups(temp.path(), &store, temp.path()).unwrap();
+        let authorization =
+            crate::authorization::runtime::RuntimeAuthorization::compatibility_with_id([1; 16]);
+        super::recover_pending_network_cleanups(temp.path(), &store, temp.path(), &authorization)
+            .unwrap();
         assert!(!container_dir.exists());
     }
 

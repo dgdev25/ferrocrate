@@ -1,139 +1,43 @@
-use super::{
-    encode_record, hash_record, OperationId, PendingOperation, RecoveryRecipe, WitnessRecord,
-    WitnessStage,
-};
+use super::{encode_record, hash_record, OperationId, RecoveryRecipe, WitnessRecord, WitnessStage};
 use sled::transaction::{ConflictableTransactionError, Transactional};
+mod inspect;
+mod quota;
+mod state;
+mod storage;
+mod types;
+use state::{OperationState, ALLOWED, COMPLETE, RECEIVED, UNKNOWN};
 use std::{
-    collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    io::Write,
+    path::PathBuf,
+    sync::Mutex,
+};
+use storage::{lock_journal, transaction_error};
+pub use types::{
+    DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
+    JournalMode,
 };
 
 const HEAD_SEQUENCE: &[u8] = b"head-sequence";
 const HEAD_HASH: &[u8] = b"head-hash";
 const JOURNAL_ID: &[u8] = b"journal-id";
 const RESERVE: &[u8] = b"cleanup-reserve";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JournalMode {
-    Optional,
-    Required,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum FlushBoundary {
-    Reserve,
-    Received,
-    Decision,
-    Outcome,
-}
-
-/// Deterministic fault seam. Public for integration qualification; production
-/// callers should use [`WitnessJournal::open`].
-#[derive(Clone, Default)]
-pub struct JournalFaults(Arc<Mutex<HashSet<FlushBoundary>>>);
-
-impl JournalFaults {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn fail_ambiguous_once(&self, boundary: FlushBoundary) {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(boundary);
-    }
-    fn take(&self, boundary: FlushBoundary) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&boundary)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct JournalConfig {
-    root: PathBuf,
-    journal_id: [u8; 16],
-    mode: JournalMode,
-    cleanup_reserve_bytes: u64,
-}
-
-impl JournalConfig {
-    pub fn new(root: impl AsRef<Path>, journal_id: [u8; 16], mode: JournalMode) -> Self {
-        Self {
-            root: root.as_ref().to_owned(),
-            journal_id,
-            mode,
-            cleanup_reserve_bytes: 64 * 1024,
-        }
-    }
-    pub fn cleanup_reserve_bytes(mut self, bytes: u64) -> Self {
-        self.cleanup_reserve_bytes = bytes;
-        self
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum JournalError {
-    #[error("witness journal is owned by another append coordinator")]
-    Locked,
-    #[error("configured journal identity does not match durable storage")]
-    JournalMismatch,
-    #[error("operation ID already exists")]
-    DuplicateOperation,
-    #[error("operation is not pending")]
-    NotPending,
-    #[error("operation already has a terminal outcome")]
-    AlreadyComplete,
-    #[error("witness durability is indeterminate; recover by operation ID")]
-    Indeterminate { operation_id: OperationId },
-    #[error("automated state changes stopped because cleanup reserve is not durable")]
-    AutomationStopped,
-    #[error("invalid witness stage for journal transition")]
-    InvalidStage,
-    #[error("corrupt witness journal metadata")]
-    Corrupt,
-    #[error("witness journal I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("witness journal storage failed: {0}")]
-    Storage(#[from] sled::Error),
-    #[error("witness record failed validation: {0}")]
-    Record(#[from] super::WitnessError),
-}
-
-/// Proof that the decision and its pending recovery state received an explicit
-/// successful storage flush. Deliberately neither `Clone` nor publicly constructible.
-#[derive(Debug)]
-pub struct DurableIntent {
-    operation_id: OperationId,
-    execution_generation: u64,
-}
-
-impl DurableIntent {
-    /// The proof is intentionally affine and cannot be duplicated.
-    /// ```compile_fail
-    /// use ferro_core::witness::DurableIntent;
-    /// fn duplicate(value: DurableIntent) { let _ = value.clone(); }
-    /// ```
-    pub const fn operation_id(&self) -> OperationId {
-        self.operation_id
-    }
-    pub const fn execution_generation(&self) -> u64 {
-        self.execution_generation
-    }
-}
+const RESERVE_TOTAL: &[u8] = b"cleanup-reserve-total";
+const MAX_BYTES: &[u8] = b"max-journal-bytes";
+const EPOCH: &[u8] = b"epoch";
 
 pub struct WitnessJournal {
     root: PathBuf,
     db: sled::Db,
     records: sled::Tree,
     operations: sled::Tree,
+    events: sled::Tree,
     pending: sled::Tree,
     meta: sled::Tree,
     journal_id: [u8; 16],
+    epoch: u64,
+    max_bytes: u64,
+    reserve_total: u64,
     _mode: JournalMode,
     _lock: File,
     coordinator: Mutex<()>,
@@ -156,10 +60,14 @@ impl WitnessJournal {
             root: config.root.clone(),
             records: db.open_tree("witness-records-v1")?,
             operations: db.open_tree("witness-operations-v1")?,
+            events: db.open_tree("witness-events-v1")?,
             pending: db.open_tree("witness-pending-v1")?,
             meta: db.open_tree("witness-meta-v1")?,
             db,
             journal_id: config.journal_id,
+            epoch: 1,
+            max_bytes: config.max_journal_bytes,
+            reserve_total: config.cleanup_reserve_bytes,
             _mode: config.mode,
             _lock: lock,
             coordinator: Mutex::new(()),
@@ -177,8 +85,35 @@ impl WitnessJournal {
             if self.meta.get(RESERVE)?.is_none() {
                 return Err(JournalError::AutomationStopped);
             }
+            let epoch = self.meta.get(EPOCH)?.ok_or(JournalError::Corrupt)?;
+            if epoch.as_ref() != self.epoch.to_be_bytes() {
+                return Err(JournalError::Corrupt);
+            }
+            let stored_reserve = self
+                .meta
+                .get(RESERVE)?
+                .ok_or(JournalError::AutomationStopped)?;
+            let stored_reserve = u64::from_be_bytes(
+                stored_reserve
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| JournalError::AutomationStopped)?,
+            );
+            let total = self.meta.get(RESERVE_TOTAL)?.ok_or(JournalError::Corrupt)?;
+            let total = u64::from_be_bytes(
+                total
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| JournalError::Corrupt)?,
+            );
+            let max = self.meta.get(MAX_BYTES)?.ok_or(JournalError::Corrupt)?;
+            let max =
+                u64::from_be_bytes(max.as_ref().try_into().map_err(|_| JournalError::Corrupt)?);
+            if total != self.reserve_total || max != self.max_bytes {
+                return Err(JournalError::Corrupt);
+            }
             let reserve = self.reserve_file()?;
-            if reserve.metadata()?.len() != reserve_bytes {
+            if reserve.metadata()?.len() != stored_reserve {
                 return Err(JournalError::AutomationStopped);
             }
             return Ok(());
@@ -186,9 +121,13 @@ impl WitnessJournal {
         self.meta.insert(JOURNAL_ID, &self.journal_id)?;
         self.meta.insert(HEAD_SEQUENCE, &0_u64.to_be_bytes())?;
         self.meta.insert(HEAD_HASH, &[0_u8; 32])?;
+        self.meta.insert(EPOCH, &1_u64.to_be_bytes())?;
         // Bounded preallocation is represented by durable quota metadata. Sled
         // owns physical allocation; cleanup consumption is accounted separately.
         self.meta.insert(RESERVE, &reserve_bytes.to_be_bytes())?;
+        self.meta
+            .insert(RESERVE_TOTAL, &reserve_bytes.to_be_bytes())?;
+        self.meta.insert(MAX_BYTES, &self.max_bytes.to_be_bytes())?;
         let mut reserve = self.reserve_file()?;
         reserve.set_len(0)?;
         let zeroes = [0_u8; 4096];
@@ -201,7 +140,10 @@ impl WitnessJournal {
         }
         reserve.sync_all()?;
         self.db.flush()?;
-        if self.faults.take(FlushBoundary::Reserve) {
+        if self
+            .faults
+            .take(FaultPoint::AfterFlush(FlushBoundary::Reserve))
+        {
             return Err(JournalError::AutomationStopped);
         }
         Ok(())
@@ -227,7 +169,13 @@ impl WitnessJournal {
         if record.stage != WitnessStage::RequestReceived {
             return Err(JournalError::InvalidStage);
         }
+        if recipe.precondition_digest() != &record.request_digest
+            || recipe.resource_generation() != record.resource_generation
+        {
+            return Err(JournalError::BindingMismatch);
+        }
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.preflight(FlushBoundary::Received)?;
         if self.operations.contains_key(id.0)? {
             return Err(JournalError::DuplicateOperation);
         }
@@ -235,18 +183,32 @@ impl WitnessJournal {
         record.sequence = sequence + 1;
         record.previous_hash = previous;
         let bytes = encode_record(self.journal_id, &record)?;
+        self.ensure_user_capacity(bytes.as_ref().len() as u64)?;
         let next_hash = hash_record(&bytes);
         let seq_key = record.sequence.to_be_bytes();
         let pending_value = recipe.encode(generation);
-        (&self.records, &self.operations, &self.pending, &self.meta)
-            .transaction(|(records, operations, pending, meta)| {
+        let operation = OperationState::received(&record, generation).encode();
+        (
+            &self.records,
+            &self.operations,
+            &self.pending,
+            &self.meta,
+            &self.events,
+        )
+            .transaction(|(records, operations, pending, meta, events)| {
                 if operations.get(id.0)?.is_some() {
                     return Err(ConflictableTransactionError::Abort(
                         JournalError::DuplicateOperation,
                     ));
                 }
+                if events.get(record.event_id)?.is_some() {
+                    return Err(ConflictableTransactionError::Abort(
+                        JournalError::DuplicateEvent,
+                    ));
+                }
                 records.insert(&seq_key, bytes.as_ref())?;
-                operations.insert(&id.0, &[1_u8][..])?;
+                events.insert(&record.event_id, &seq_key)?;
+                operations.insert(&id.0, operation.as_slice())?;
                 pending.insert(&id.0, &pending_value[..])?;
                 meta.insert(HEAD_SEQUENCE, &seq_key)?;
                 meta.insert(HEAD_HASH, &next_hash)?;
@@ -265,18 +227,106 @@ impl WitnessJournal {
             return Err(JournalError::InvalidStage);
         }
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.preflight(FlushBoundary::Decision)?;
         let pending = self.pending.get(id.0)?.ok_or(JournalError::NotPending)?;
         let (generation, _) = RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
-        let state = self.operations.get(id.0)?.ok_or(JournalError::NotPending)?;
-        if state.as_ref() != [1] {
+        let mut state =
+            OperationState::decode(&self.operations.get(id.0)?.ok_or(JournalError::NotPending)?)
+                .ok_or(JournalError::Corrupt)?;
+        if state.state != RECEIVED {
             return Err(JournalError::DuplicateOperation);
         }
-        self.append_record_and_state(id, &mut record, 2)?;
+        if !state.binding_matches(&record) {
+            return Err(JournalError::BindingMismatch);
+        }
+        if record.decision != Some(true) {
+            return Err(JournalError::InvalidStage);
+        }
+        let decision_id = record.decision_id.ok_or(JournalError::InvalidStage)?;
+        let decision_digest = self.append_decision_record(id, &mut record, &mut state)?;
         self.flush(FlushBoundary::Decision, id)?;
         Ok(DurableIntent {
+            journal_id: self.journal_id,
+            epoch: self.epoch,
             operation_id: id,
             execution_generation: generation,
+            pending_generation: state.pending_generation,
+            decision_id,
+            decision_digest,
         })
+    }
+
+    /// Persist a denied decision and its terminal record atomically. A denied
+    /// operation can never yield execution authority.
+    pub fn deny(
+        &self,
+        id: OperationId,
+        mut decision: WitnessRecord,
+        mut denied: WitnessRecord,
+    ) -> Result<(), JournalError> {
+        if decision.stage != WitnessStage::Decision
+            || decision.decision != Some(false)
+            || denied.stage != WitnessStage::Denied
+        {
+            return Err(JournalError::InvalidStage);
+        }
+        let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.preflight(FlushBoundary::Decision)?;
+        let state =
+            OperationState::decode(&self.operations.get(id.0)?.ok_or(JournalError::NotPending)?)
+                .ok_or(JournalError::Corrupt)?;
+        if state.state != RECEIVED
+            || !state.binding_matches(&decision)
+            || !state.binding_matches(&denied)
+            || decision.decision_id != denied.decision_id
+        {
+            return Err(JournalError::BindingMismatch);
+        }
+        let (sequence, previous) = self.head()?;
+        decision.sequence = sequence + 1;
+        decision.previous_hash = previous;
+        let decision_bytes = encode_record(self.journal_id, &decision)?;
+        denied.sequence = sequence + 2;
+        denied.previous_hash = hash_record(&decision_bytes);
+        let denied_bytes = encode_record(self.journal_id, &denied)?;
+        self.ensure_user_capacity(
+            (decision_bytes.as_ref().len() + denied_bytes.as_ref().len()) as u64,
+        )?;
+        let terminal_hash = hash_record(&denied_bytes);
+        let first_key = decision.sequence.to_be_bytes();
+        let terminal_key = denied.sequence.to_be_bytes();
+        let mut terminal = state;
+        terminal.state = COMPLETE;
+        terminal.pending_generation += 1;
+        let terminal_state = terminal.encode();
+        (
+            &self.records,
+            &self.operations,
+            &self.pending,
+            &self.meta,
+            &self.events,
+        )
+            .transaction(|(records, operations, pending, meta, events)| {
+                if events.get(decision.event_id)?.is_some()
+                    || events.get(denied.event_id)?.is_some()
+                    || decision.event_id == denied.event_id
+                {
+                    return Err(ConflictableTransactionError::Abort(
+                        JournalError::DuplicateEvent,
+                    ));
+                }
+                records.insert(&first_key, decision_bytes.as_ref())?;
+                records.insert(&terminal_key, denied_bytes.as_ref())?;
+                events.insert(&decision.event_id, &first_key)?;
+                events.insert(&denied.event_id, &terminal_key)?;
+                operations.insert(&id.0, terminal_state.as_slice())?;
+                pending.remove(&id.0)?;
+                meta.insert(HEAD_SEQUENCE, &terminal_key)?;
+                meta.insert(HEAD_HASH, &terminal_hash)?;
+                Ok(())
+            })
+            .map_err(transaction_error)?;
+        self.flush(FlushBoundary::Decision, id)
     }
 
     pub fn complete(
@@ -284,27 +334,64 @@ impl WitnessJournal {
         intent: DurableIntent,
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
-        if record.stage != WitnessStage::Outcome && record.stage != WitnessStage::Recovery {
+        if record.stage != WitnessStage::Outcome {
             return Err(JournalError::InvalidStage);
         }
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.preflight(FlushBoundary::Outcome)?;
         let id = intent.operation_id;
+        if intent.journal_id != self.journal_id || intent.epoch != self.epoch {
+            return Err(JournalError::ProofMismatch);
+        }
+        let state_bytes = self.operations.get(id.0)?.ok_or(JournalError::NotPending)?;
+        let state = OperationState::decode(&state_bytes).ok_or(JournalError::Corrupt)?;
+        if state.state != ALLOWED
+            || state.execution_generation != intent.execution_generation
+            || state.pending_generation != intent.pending_generation
+            || state.decision_id != intent.decision_id
+            || state.decision_digest != intent.decision_digest
+        {
+            return Err(JournalError::ProofMismatch);
+        }
+        if !state.terminal_matches(&record) {
+            return Err(JournalError::BindingMismatch);
+        }
         let (sequence, previous) = self.head()?;
         record.sequence = sequence + 1;
         record.previous_hash = previous;
         let bytes = encode_record(self.journal_id, &record)?;
+        self.ensure_user_capacity(bytes.as_ref().len() as u64)?;
         let next_hash = hash_record(&bytes);
         let seq_key = record.sequence.to_be_bytes();
-        (&self.records, &self.operations, &self.pending, &self.meta)
-            .transaction(|(records, operations, pending, meta)| {
+        (
+            &self.records,
+            &self.operations,
+            &self.pending,
+            &self.meta,
+            &self.events,
+        )
+            .transaction(|(records, operations, pending, meta, events)| {
                 if pending.get(id.0)?.is_none() {
                     return Err(ConflictableTransactionError::Abort(
                         JournalError::AlreadyComplete,
                     ));
                 }
+                if events.get(record.event_id)?.is_some() {
+                    return Err(ConflictableTransactionError::Abort(
+                        JournalError::DuplicateEvent,
+                    ));
+                }
                 records.insert(&seq_key, bytes.as_ref())?;
-                operations.insert(&id.0, &[3_u8][..])?;
-                pending.remove(&id.0)?;
+                events.insert(&record.event_id, &seq_key)?;
+                let mut terminal = state.clone();
+                let unknown = record.outcome == super::WitnessOutcome::OutcomeUnknown;
+                terminal.state = if unknown { UNKNOWN } else { COMPLETE };
+                terminal.unknown_event_id = if unknown { record.event_id } else { [0; 16] };
+                terminal.pending_generation += 1;
+                operations.insert(&id.0, terminal.encode())?;
+                if !unknown {
+                    pending.remove(&id.0)?;
+                }
                 meta.insert(HEAD_SEQUENCE, &seq_key)?;
                 meta.insert(HEAD_HASH, &next_hash)?;
                 Ok(())
@@ -313,111 +400,97 @@ impl WitnessJournal {
         self.flush(FlushBoundary::Outcome, id).map(|_| ())
     }
 
-    fn append_record_and_state(
+    pub fn complete_recovery(
         &self,
         id: OperationId,
-        record: &mut WitnessRecord,
-        state: u8,
+        mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
+        if record.stage != WitnessStage::Recovery {
+            return Err(JournalError::InvalidStage);
+        }
+        let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        self.preflight(FlushBoundary::Outcome)?;
+        let state =
+            OperationState::decode(&self.operations.get(id.0)?.ok_or(JournalError::NotPending)?)
+                .ok_or(JournalError::Corrupt)?;
+        if state.state != UNKNOWN
+            || !state.terminal_matches(&record)
+            || record.recovery_link != Some(state.unknown_event_id)
+        {
+            return Err(JournalError::BindingMismatch);
+        }
         let (sequence, previous) = self.head()?;
         record.sequence = sequence + 1;
         record.previous_hash = previous;
-        let bytes = encode_record(self.journal_id, record)?;
+        let bytes = encode_record(self.journal_id, &record)?;
+        if self.events.contains_key(record.event_id)? {
+            return Err(JournalError::DuplicateEvent);
+        }
+        self.consume_cleanup_reserve(bytes.as_ref().len() as u64)?;
         let next_hash = hash_record(&bytes);
         let seq_key = record.sequence.to_be_bytes();
-        (&self.records, &self.operations, &self.meta)
-            .transaction(|(records, operations, meta)| {
+        let mut terminal = state;
+        terminal.state = COMPLETE;
+        terminal.pending_generation += 1;
+        let terminal = terminal.encode();
+        (
+            &self.records,
+            &self.operations,
+            &self.pending,
+            &self.meta,
+            &self.events,
+        )
+            .transaction(|(records, operations, pending, meta, events)| {
+                if events.get(record.event_id)?.is_some() {
+                    return Err(ConflictableTransactionError::Abort(
+                        JournalError::DuplicateEvent,
+                    ));
+                }
                 records.insert(&seq_key, bytes.as_ref())?;
-                operations.insert(&id.0, &[state][..])?;
+                events.insert(&record.event_id, &seq_key)?;
+                operations.insert(&id.0, terminal.as_slice())?;
+                pending.remove(&id.0)?;
                 meta.insert(HEAD_SEQUENCE, &seq_key)?;
                 meta.insert(HEAD_HASH, &next_hash)?;
                 Ok(())
             })
-            .map_err(transaction_error)
+            .map_err(transaction_error)?;
+        self.flush(FlushBoundary::Outcome, id)
     }
 
-    pub fn pending(&self) -> Result<Vec<PendingOperation>, JournalError> {
-        self.pending
-            .iter()
-            .map(|entry| {
-                let (key, value) = entry?;
-                let id = OperationId(key.as_ref().try_into().map_err(|_| JournalError::Corrupt)?);
-                let (execution_generation, recipe) =
-                    RecoveryRecipe::decode(&value).ok_or(JournalError::Corrupt)?;
-                Ok(PendingOperation {
-                    operation_id: id,
-                    execution_generation,
-                    recipe,
-                })
+    fn append_decision_record(
+        &self,
+        id: OperationId,
+        record: &mut WitnessRecord,
+        state: &mut OperationState,
+    ) -> Result<[u8; 32], JournalError> {
+        let (sequence, previous) = self.head()?;
+        record.sequence = sequence + 1;
+        record.previous_hash = previous;
+        let bytes = encode_record(self.journal_id, record)?;
+        self.ensure_user_capacity(bytes.as_ref().len() as u64)?;
+        let next_hash = hash_record(&bytes);
+        state.state = ALLOWED;
+        state.pending_generation += 1;
+        state.decision_id = record.decision_id.ok_or(JournalError::InvalidStage)?;
+        state.decision_digest = next_hash;
+        let operation = state.encode();
+        let seq_key = record.sequence.to_be_bytes();
+        (&self.records, &self.operations, &self.meta, &self.events)
+            .transaction(|(records, operations, meta, events)| {
+                if events.get(record.event_id)?.is_some() {
+                    return Err(ConflictableTransactionError::Abort(
+                        JournalError::DuplicateEvent,
+                    ));
+                }
+                records.insert(&seq_key, bytes.as_ref())?;
+                events.insert(&record.event_id, &seq_key)?;
+                operations.insert(&id.0, operation.as_slice())?;
+                meta.insert(HEAD_SEQUENCE, &seq_key)?;
+                meta.insert(HEAD_HASH, &next_hash)?;
+                Ok(())
             })
-            .collect()
+            .map_err(transaction_error)?;
+        Ok(next_hash)
     }
-
-    pub fn recover(&self, id: OperationId) -> Result<PendingOperation, JournalError> {
-        let value = self
-            .pending
-            .get(id.0)?
-            .ok_or_else(|| match self.operations.get(id.0) {
-                Ok(Some(state)) if state.as_ref() == [3] => JournalError::AlreadyComplete,
-                _ => JournalError::NotPending,
-            })?;
-        let (execution_generation, recipe) =
-            RecoveryRecipe::decode(&value).ok_or(JournalError::Corrupt)?;
-        Ok(PendingOperation {
-            operation_id: id,
-            execution_generation,
-            recipe,
-        })
-    }
-
-    fn head(&self) -> Result<(u64, [u8; 32]), JournalError> {
-        let seq = self.meta.get(HEAD_SEQUENCE)?.ok_or(JournalError::Corrupt)?;
-        let hash = self.meta.get(HEAD_HASH)?.ok_or(JournalError::Corrupt)?;
-        Ok((
-            u64::from_be_bytes(seq.as_ref().try_into().map_err(|_| JournalError::Corrupt)?),
-            hash.as_ref()
-                .try_into()
-                .map_err(|_| JournalError::Corrupt)?,
-        ))
-    }
-
-    fn flush(&self, boundary: FlushBoundary, id: OperationId) -> Result<(), JournalError> {
-        self.db.flush()?;
-        if self.faults.take(boundary) {
-            Err(JournalError::Indeterminate { operation_id: id })
-        } else {
-            Ok(())
-        }
-    }
-}
-
-fn transaction_error(error: sled::transaction::TransactionError<JournalError>) -> JournalError {
-    match error {
-        sled::transaction::TransactionError::Abort(error) => error,
-        sled::transaction::TransactionError::Storage(error) => JournalError::Storage(error),
-    }
-}
-
-fn lock_journal(root: &Path, journal_id: [u8; 16]) -> Result<File, JournalError> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join("witness.lock"))?;
-    file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => JournalError::Locked,
-        std::fs::TryLockError::Error(error) => JournalError::Io(error),
-    })?;
-    let mut existing = Vec::new();
-    file.read_to_end(&mut existing)?;
-    if !existing.is_empty() && existing != journal_id {
-        return Err(JournalError::JournalMismatch);
-    }
-    if existing.is_empty() {
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&journal_id)?;
-        file.sync_all()?;
-    }
-    Ok(file)
 }

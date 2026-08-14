@@ -24,8 +24,8 @@ mod verify;
 
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
 pub use journal::{
-    DurableIntent, FlushBoundary, JournalConfig, JournalError, JournalFaults, JournalMode,
-    WitnessJournal,
+    DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
+    JournalMode, WitnessJournal,
 };
 pub use recovery::{OperationId, PendingOperation, RecoveryRecipe};
 pub use verify::{verify_stream, StreamTrust, VerificationReport};

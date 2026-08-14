@@ -20,11 +20,23 @@ with `openat2` beneath/no-magic-link/no-symlink resolution. Public proc-fd
 sources remain rejected while the executor consumes retained runtime-owned
 descriptors.
 
+Pause, resume, stop, and kill persist their post-kernel state through an exact
+operation/generation/pre-state CAS. A post-effect persistence ambiguity writes
+`OutcomeUnknown` and retains the reservation for startup truth collection.
+Recovery evidence construction and reconciliation are crate-private; the public
+pending-operation view cannot mint a classification. Live run effects found
+before an effect marker are quarantined with their provenance and reservation
+intact rather than being mistaken for an unapplied candidate. Shadow mode binds
+the same mount-root approval fact and records its hypothetical denial while
+retaining compatibility execution.
+
 Verification on 2026-08-14:
 
 - `runtime_authorization`: 9 passed.
-- `witness_journal`: 30 passed.
-- `ferro-core --lib`: 259 passed, 1 ignored.
+- `witness_journal`: 28 passed; recovery entry is now private and exercised by
+  runtime startup tests rather than the public integration API.
+- `ferro-core --lib`: 261 passed, 1 ignored.
+- Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.
 - Strict workspace dependency clippy remains blocked by pre-existing warnings
   in `ferro-net` and unrelated existing warnings in `ferro-core`; the Task 7

@@ -5,6 +5,9 @@ use super::{
 use crate::witness::{OperationId, PendingOperation, RecoveryRecipe};
 
 impl WitnessJournal {
+    pub fn segment_count(&self) -> Result<usize, JournalError> {
+        Ok(self.segments.len())
+    }
     pub fn pending(&self) -> Result<Vec<PendingOperation>, JournalError> {
         self.pending
             .iter()

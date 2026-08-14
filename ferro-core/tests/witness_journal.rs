@@ -1,8 +1,8 @@
 use ferro_core::witness::{
-    verify_stream, FaultPoint, FlushBoundary, Invocation, JournalConfig, JournalError,
-    JournalFaults, JournalMode, OperationId, PrincipalSummary, RecoveryRecipe, ResourceSummary,
-    RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord,
-    WitnessResourceKind, WitnessStage,
+    verify_stream, DisclosureClass, FaultPoint, FlushBoundary, Invocation, JournalConfig,
+    JournalError, JournalFaults, JournalMode, OperationId, PrincipalSummary, RecoveryRecipe,
+    ResourceSummary, RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome,
+    WitnessRecord, WitnessResourceKind, WitnessStage,
 };
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -52,7 +52,14 @@ fn config(path: &std::path::Path) -> JournalConfig {
 }
 
 fn recipe() -> RecoveryRecipe {
-    RecoveryRecipe::delete_owned_resource(WitnessAction::ContainerDelete, [8; 32], 1)
+    RecoveryRecipe::for_original(
+        WitnessAction::ContainerCreate,
+        WitnessResourceKind::Container,
+        WitnessAction::ContainerDelete,
+        [8; 32],
+        1,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -70,6 +77,27 @@ fn lock_is_exclusive_and_tied_to_journal_identity() {
         Err(JournalError::JournalMismatch)
     ));
     WitnessJournal::open(config(root.path())).unwrap();
+}
+
+#[test]
+fn disabled_mode_never_mints_or_appends_durable_intent() {
+    let root = tempdir().unwrap();
+    let journal = WitnessJournal::open(JournalConfig::new(
+        root.path(),
+        [9; 16],
+        JournalMode::Disabled,
+    ))
+    .unwrap();
+    assert!(matches!(
+        journal.append_received(
+            OperationId::from_bytes([111; 16]),
+            1,
+            recipe(),
+            record(WitnessStage::RequestReceived)
+        ),
+        Err(JournalError::Disabled)
+    ));
+    assert!(journal.records().unwrap().is_empty());
 }
 
 #[test]
@@ -259,6 +287,70 @@ fn durable_intent_cannot_cross_journals_or_substitute_binding() {
 }
 
 #[test]
+fn complete_task4_request_binding_is_transition_invariant() {
+    let root = tempdir().unwrap();
+    let journal = WitnessJournal::open(config(root.path())).unwrap();
+    let id = OperationId::from_bytes([81; 16]);
+    let mut received = record(WitnessStage::RequestReceived);
+    received.path_class = Some(DisclosureClass::RuntimeManaged);
+    received.device_class = Some(DisclosureClass::BlockDevice);
+    received.correlation_digest = Some([81; 32]);
+    journal.append_received(id, 1, recipe(), received).unwrap();
+    let mut exact = record(WitnessStage::Decision);
+    exact.path_class = Some(DisclosureClass::RuntimeManaged);
+    exact.device_class = Some(DisclosureClass::BlockDevice);
+    exact.correlation_digest = Some([81; 32]);
+    exact.decision_id = Some([81; 16]);
+    exact.rule = Some(RuleSummary::from_id([1; 16]));
+    exact.decision = Some(true);
+    let mut substitutions = Vec::new();
+    let mut changed = exact.clone();
+    changed.path_class = Some(DisclosureClass::Ephemeral);
+    substitutions.push(changed);
+    let mut changed = exact.clone();
+    changed.device_class = Some(DisclosureClass::CharacterDevice);
+    substitutions.push(changed);
+    let mut changed = exact.clone();
+    changed.correlation_digest = Some([82; 32]);
+    substitutions.push(changed);
+    for changed in substitutions {
+        assert!(matches!(
+            journal.append_decision(id, changed),
+            Err(JournalError::BindingMismatch)
+        ));
+    }
+    let intent = journal.append_decision(id, exact).unwrap();
+    let mut outcome = record(WitnessStage::Outcome);
+    outcome.path_class = Some(DisclosureClass::RuntimeManaged);
+    outcome.device_class = Some(DisclosureClass::BlockDevice);
+    outcome.correlation_digest = Some([81; 32]);
+    outcome.decision_id = Some([81; 16]);
+    outcome.result_digest = Some([1; 32]);
+    outcome.outcome = WitnessOutcome::Succeeded;
+    journal.complete(intent, outcome).unwrap();
+    assert!(
+        verify_stream(
+            journal.records().unwrap().iter().map(Vec::as_slice),
+            &StreamTrust::new([9; 16], 1, [0; 32])
+        )
+        .unwrap()
+        .lifecycle_consistent
+    );
+}
+
+#[test]
+fn recovery_recipe_rejects_cross_resource_inverse() {
+    assert!(RecoveryRecipe::for_original(
+        WitnessAction::ContainerCreate,
+        WitnessResourceKind::Container,
+        WitnessAction::ImageDelete,
+        [8; 32],
+        1,
+    )
+    .is_err());
+}
+
+#[test]
 fn denied_decision_is_terminal_and_never_issues_execution_proof() {
     let root = tempdir().unwrap();
     let journal = WitnessJournal::open(config(root.path())).unwrap();
@@ -327,6 +419,91 @@ fn outcome_unknown_remains_pending_until_linked_recovery() {
 }
 
 #[test]
+fn terminal_flush_ambiguity_reopens_as_complete_or_linked_unknown() {
+    let root = tempdir().unwrap();
+    let faults = JournalFaults::new();
+    let journal = WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+    let id = OperationId::from_bytes([91; 16]);
+    journal
+        .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    let mut decision = record(WitnessStage::Decision);
+    decision.decision_id = Some([91; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    let intent = journal.append_decision(id, decision).unwrap();
+    faults.fail_once(FaultPoint::BeforeFlush(FlushBoundary::Outcome));
+    let mut outcome = record(WitnessStage::Outcome);
+    outcome.event_id = [92; 16];
+    outcome.decision_id = Some([91; 16]);
+    outcome.result_digest = Some([1; 32]);
+    outcome.outcome = WitnessOutcome::Succeeded;
+    assert!(matches!(
+        journal.complete(intent, outcome),
+        Err(JournalError::Indeterminate { .. })
+    ));
+    drop(journal);
+    let journal = WitnessJournal::open(config(root.path())).unwrap();
+    assert_eq!(journal.recover(id).unwrap().operation_id(), id);
+    let mut recovery = record(WitnessStage::Recovery);
+    recovery.event_id = [93; 16];
+    recovery.decision_id = Some([91; 16]);
+    recovery.result_digest = Some([2; 32]);
+    recovery.reason = Some(ferro_core::witness::ReasonCode::RecoveryCompleted);
+    recovery.outcome = WitnessOutcome::Recovered;
+    recovery.recovery_link = Some([92; 16]);
+    journal.complete_recovery(id, recovery).unwrap();
+    assert!(
+        verify_stream(
+            journal.records().unwrap().iter().map(Vec::as_slice),
+            &StreamTrust::new([9; 16], 1, [0; 32])
+        )
+        .unwrap()
+        .lifecycle_consistent
+    );
+}
+
+#[test]
+fn crash_after_cleanup_reservation_reopens_fail_stopped() {
+    let root = tempdir().unwrap();
+    let faults = JournalFaults::new();
+    let journal = WitnessJournal::open_with_faults(config(root.path()), faults.clone()).unwrap();
+    let id = OperationId::from_bytes([121; 16]);
+    journal
+        .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    let mut decision = record(WitnessStage::Decision);
+    decision.decision_id = Some([121; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    let intent = journal.append_decision(id, decision).unwrap();
+    let mut unknown = record(WitnessStage::Outcome);
+    unknown.event_id = [122; 16];
+    unknown.decision_id = Some([121; 16]);
+    unknown.result_digest = Some([1; 32]);
+    unknown.reason = Some(ferro_core::witness::ReasonCode::ExecutionFailed);
+    unknown.outcome = WitnessOutcome::OutcomeUnknown;
+    journal.complete(intent, unknown).unwrap();
+    faults.fail_ambiguous_once(FlushBoundary::Reserve);
+    let mut recovery = record(WitnessStage::Recovery);
+    recovery.event_id = [123; 16];
+    recovery.decision_id = Some([121; 16]);
+    recovery.result_digest = Some([2; 32]);
+    recovery.reason = Some(ferro_core::witness::ReasonCode::RecoveryCompleted);
+    recovery.outcome = WitnessOutcome::Recovered;
+    recovery.recovery_link = Some([122; 16]);
+    assert!(matches!(
+        journal.complete_recovery(id, recovery),
+        Err(JournalError::AutomationStopped)
+    ));
+    drop(journal);
+    assert!(matches!(
+        WitnessJournal::open(config(root.path())),
+        Err(JournalError::AutomationStopped)
+    ));
+}
+
+#[test]
 fn quota_preserves_cleanup_reserve_and_exhaustion_stops_cleanup() {
     let quota_root = tempdir().unwrap();
     let quota = JournalConfig::new(quota_root.path(), [9; 16], JournalMode::Required)
@@ -375,4 +552,37 @@ fn quota_preserves_cleanup_reserve_and_exhaustion_stops_cleanup() {
         Err(JournalError::AutomationStopped)
     ));
     assert_eq!(journal.pending().unwrap().len(), 1);
+}
+
+#[test]
+fn segment_rotation_handoff_preserves_chain_across_reopen() {
+    let root = tempdir().unwrap();
+    let rotating = config(root.path()).segment_bytes(400);
+    let journal = WitnessJournal::open(rotating.clone()).unwrap();
+    let id = OperationId::from_bytes([101; 16]);
+    journal
+        .append_received(id, 1, recipe(), record(WitnessStage::RequestReceived))
+        .unwrap();
+    let mut decision = record(WitnessStage::Decision);
+    decision.decision_id = Some([101; 16]);
+    decision.rule = Some(RuleSummary::from_id([1; 16]));
+    decision.decision = Some(true);
+    let intent = journal.append_decision(id, decision).unwrap();
+    let mut outcome = record(WitnessStage::Outcome);
+    outcome.decision_id = Some([101; 16]);
+    outcome.result_digest = Some([1; 32]);
+    outcome.outcome = WitnessOutcome::Succeeded;
+    journal.complete(intent, outcome).unwrap();
+    assert!(journal.segment_count().unwrap() >= 2);
+    drop(journal);
+    let journal = WitnessJournal::open(rotating).unwrap();
+    assert!(journal.segment_count().unwrap() >= 2);
+    assert!(
+        verify_stream(
+            journal.records().unwrap().iter().map(Vec::as_slice),
+            &StreamTrust::new([9; 16], 1, [0; 32])
+        )
+        .unwrap()
+        .integrity
+    );
 }

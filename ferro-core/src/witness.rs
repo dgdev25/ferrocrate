@@ -27,7 +27,7 @@ pub use journal::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
     JournalMode, WitnessJournal,
 };
-pub use recovery::{OperationId, PendingOperation, RecoveryRecipe};
+pub use recovery::{OperationId, PendingOperation, RecoveryRecipe, RecoveryRecipeError};
 pub use verify::{verify_stream, StreamTrust, VerificationReport};
 
 use std::fmt;

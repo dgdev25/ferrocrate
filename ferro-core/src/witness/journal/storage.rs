@@ -57,6 +57,9 @@ impl WitnessJournal {
     }
 
     pub(super) fn preflight(&self, boundary: FlushBoundary) -> Result<(), JournalError> {
+        if self.mode == super::JournalMode::Disabled {
+            return Err(JournalError::Disabled);
+        }
         if self.faults.take(FaultPoint::BeforeTransaction(boundary))
             || self.faults.take(FaultPoint::Transaction(boundary))
         {
@@ -74,7 +77,6 @@ impl WitnessJournal {
             return Err(JournalError::Indeterminate { operation_id: id });
         }
         if self.faults.take(FaultPoint::DuringFlush(boundary)) {
-            let _ = self.db.flush();
             return Err(JournalError::Indeterminate { operation_id: id });
         }
         if self.db.flush().is_err() {

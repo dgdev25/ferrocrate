@@ -7,7 +7,7 @@ use std::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JournalMode {
-    Optional,
+    Disabled,
     Required,
 }
 
@@ -47,6 +47,11 @@ impl JournalFaults {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(point);
     }
+    /// Inject an ENOSPC-equivalent storage failure at an exact visibility or
+    /// flush boundary without invoking the real database flush.
+    pub fn fail_enospc_once(&self, point: FaultPoint) {
+        self.fail_once(point);
+    }
     pub(super) fn take(&self, point: FaultPoint) -> bool {
         self.0
             .lock()
@@ -62,6 +67,7 @@ pub struct JournalConfig {
     pub(super) mode: JournalMode,
     pub(super) cleanup_reserve_bytes: u64,
     pub(super) max_journal_bytes: u64,
+    pub(super) segment_bytes: u64,
 }
 
 impl JournalConfig {
@@ -72,6 +78,7 @@ impl JournalConfig {
             mode,
             cleanup_reserve_bytes: 64 * 1024,
             max_journal_bytes: 64 * 1024 * 1024,
+            segment_bytes: 8 * 1024 * 1024,
         }
     }
     pub fn cleanup_reserve_bytes(mut self, bytes: u64) -> Self {
@@ -80,6 +87,10 @@ impl JournalConfig {
     }
     pub fn max_journal_bytes(mut self, bytes: u64) -> Self {
         self.max_journal_bytes = bytes;
+        self
+    }
+    pub fn segment_bytes(mut self, bytes: u64) -> Self {
+        self.segment_bytes = bytes.max(1);
         self
     }
 }
@@ -110,6 +121,8 @@ pub enum JournalError {
     QuotaExceeded,
     #[error("journal storage unavailable before record visibility")]
     UnavailableBeforeVisibility,
+    #[error("witness journal is disabled")]
+    Disabled,
     #[error("invalid witness stage for journal transition")]
     InvalidStage,
     #[error("corrupt witness journal metadata")]

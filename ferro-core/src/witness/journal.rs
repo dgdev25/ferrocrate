@@ -37,6 +37,27 @@ const CURRENT_SEGMENT: &[u8] = b"current-segment";
 const ROTATION_DEFERRED: &[u8] = b"rotation-deferred";
 const EPOCH: &[u8] = b"epoch";
 
+#[cfg(test)]
+type CheckpointLockHook = (
+    std::sync::Arc<std::sync::Barrier>,
+    std::sync::Arc<std::sync::Barrier>,
+);
+#[cfg(test)]
+static CHECKPOINT_LOCK_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<CheckpointLockHook>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+fn checkpoint_lock_hook() {
+    let hook = CHECKPOINT_LOCK_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone();
+    if let Some((reached, release)) = hook {
+        reached.wait();
+        release.wait();
+    }
+}
+
 pub struct WitnessJournal {
     root: PathBuf,
     db: sled::Db,
@@ -109,9 +130,6 @@ impl WitnessJournal {
         artifact_digest: [u8; 32],
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
-        if record.epoch != self.current_epoch() {
-            return Err(JournalError::ProofMismatch);
-        }
         if record.stage != WitnessStage::CheckpointPublished
             || record.action != WitnessAction::CheckpointPublish
             || record.outcome != WitnessOutcome::Succeeded
@@ -120,7 +138,12 @@ impl WitnessJournal {
         }
         record.result_digest = Some(artifact_digest);
         super::validation::validate_record(&record)?;
+        #[cfg(test)]
+        checkpoint_lock_hook();
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        if record.epoch != self.current_epoch() {
+            return Err(JournalError::ProofMismatch);
+        }
         if let Some(sequence) = self.events.get(record.event_id)? {
             let bytes = self.records.get(sequence)?.ok_or(JournalError::Corrupt)?;
             let existing = decode_record(&bytes)?;
@@ -637,5 +660,78 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         Ok(next_hash)
+    }
+}
+
+#[cfg(test)]
+mod epoch_lock_tests {
+    use super::*;
+    use crate::witness::{Invocation, PrincipalSummary, ResourceSummary, WitnessResourceKind};
+    use std::sync::{Arc, Barrier};
+
+    fn publication() -> WitnessRecord {
+        WitnessRecord {
+            epoch: 1,
+            sequence: 1,
+            previous_hash: [0; 32],
+            event_id: [1; 16],
+            request_id: [2; 16],
+            runtime_instance_id: [3; 16],
+            boot_id: [4; 16],
+            principal: PrincipalSummary::pseudonymize(&[5; 32], b"coordinator").unwrap(),
+            invocation: Invocation::Manager,
+            action: WitnessAction::CheckpointPublish,
+            resource_kind: WitnessResourceKind::Administrative,
+            resource: ResourceSummary::pseudonymize(&[6; 32], b"checkpoint").unwrap(),
+            resource_generation: 1,
+            policy_version: 0,
+            policy_digest: [0; 32],
+            decision_id: None,
+            rule: None,
+            decision: None,
+            reason: None,
+            request_digest: [7; 32],
+            result_digest: Some([8; 32]),
+            wall_time_ns: 0,
+            monotonic_ns: 0,
+            stage: WitnessStage::CheckpointPublished,
+            outcome: WitnessOutcome::Succeeded,
+            recovery_link: None,
+            path_class: None,
+            device_class: None,
+            correlation_digest: None,
+        }
+    }
+
+    #[test]
+    fn epoch_advance_wins_before_checkpoint_append_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                dir.path(),
+                [91; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let reached = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        *CHECKPOINT_LOCK_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = Some((reached.clone(), release.clone()));
+        let worker_journal = journal.clone();
+        let worker = std::thread::spawn(move || {
+            worker_journal.append_checkpoint_publication([8; 32], publication())
+        });
+        reached.wait();
+        assert_eq!(journal.advance_epoch(1).unwrap(), 2);
+        release.wait();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(JournalError::ProofMismatch)
+        ));
+        *CHECKPOINT_LOCK_HOOK.get().unwrap().lock().unwrap() = None;
+        assert!(journal.records().unwrap().is_empty());
     }
 }

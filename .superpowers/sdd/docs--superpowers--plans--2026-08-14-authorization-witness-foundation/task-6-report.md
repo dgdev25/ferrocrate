@@ -104,3 +104,7 @@ Final correction verification passes 25 checkpoint tests, 26 journal tests, 13 w
 Checkpoint publication no longer overwrites the caller's epoch. The journal rejects a mismatched publication with ProofMismatch before inserting any record. Reset creation and restart reconciliation allow only the single authorized +1 advance, then require the durable current journal epoch to equal the signed checkpoint epoch exactly. An advance race, stale/higher journal epoch, or any other mismatch durably transitions the existing sidecar to `BindingFailed / OperatorRequired` and never appends or clears it.
 
 Regression coverage includes a stale epoch-2 sidecar after the same journal reaches epoch 3, direct rejection of a relabeled publication attempt, and the existing successful epoch-1→2 Bound path.
+
+## Epoch-lock TOCTOU micro-fix
+
+Checkpoint-publication epoch equality is now checked only after acquiring the journal's sole append coordinator mutex, inside the same critical section that reads the head, allocates sequence, and commits the sled transaction. `advance_epoch` uses that identical mutex. A deterministic barrier test pauses an epoch-1 append immediately before lock acquisition, advances durably to epoch 2, then releases the append and proves ProofMismatch with an empty record tree.

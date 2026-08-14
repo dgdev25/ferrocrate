@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::policy::{PolicySnapshot, PolicyStore};
-use super::{Decision, ReasonCode, RequestContext, ResourceState};
+use super::{Decision, MountClass, ReasonCode, RequestContext, ResourceKind, ResourceState};
 
 /// A policy snapshot pinned before request fan-out.
 #[derive(Clone, Debug)]
@@ -42,6 +42,7 @@ impl ImageBinding {
 /// Stable kernel identity for a device node.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceIdentity {
+    class: String,
     major: u32,
     minor: u32,
     inode: u64,
@@ -49,12 +50,17 @@ pub struct DeviceIdentity {
 
 impl DeviceIdentity {
     #[allow(dead_code)] // Used by the runtime canonicalizer introduced in the mediation task.
-    pub(crate) fn new(major: u32, minor: u32, inode: u64) -> Self {
+    pub(crate) fn new(class: impl Into<String>, major: u32, minor: u32, inode: u64) -> Self {
         Self {
+            class: class.into(),
             major,
             minor,
             inode,
         }
+    }
+
+    pub fn class(&self) -> &str {
+        &self.class
     }
 
     pub fn major(&self) -> u32 {
@@ -73,6 +79,7 @@ impl DeviceIdentity {
 /// Identity and constraints read from an already-open mount source handle.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MountHandleDescriptor {
+    class: MountClass,
     mount_id: u64,
     device_id: u64,
     inode: u64,
@@ -81,13 +88,24 @@ pub struct MountHandleDescriptor {
 
 impl MountHandleDescriptor {
     #[allow(dead_code)] // Used by the runtime canonicalizer introduced in the mediation task.
-    pub(crate) fn new(mount_id: u64, device_id: u64, inode: u64, open_flags: u64) -> Self {
+    pub(crate) fn new(
+        class: MountClass,
+        mount_id: u64,
+        device_id: u64,
+        inode: u64,
+        open_flags: u64,
+    ) -> Self {
         Self {
+            class,
             mount_id,
             device_id,
             inode,
             open_flags,
         }
+    }
+
+    pub fn class(&self) -> MountClass {
+        self.class
     }
 
     pub fn mount_id(&self) -> u64 {
@@ -352,18 +370,46 @@ fn validate_canonical_bindings(request: &CanonicalRequest) -> Result<(), Denial>
     {
         return Err(Denial::new(request, DenialCode::ResourceGenerationMismatch));
     }
-    if request.expected.state_precondition != request.context.facts().lifecycle_state()
+    if (request.context.resource().kind() == ResourceKind::Container
+        && request.expected.state_precondition.is_none())
+        || request.expected.state_precondition != request.context.facts().lifecycle_state()
         || request.expected.state_precondition != request.observed.state_precondition
     {
         return Err(Denial::new(request, DenialCode::StatePreconditionMismatch));
     }
-    if request.expected.device_identity != request.observed.device_identity {
+    if request.expected.device_identity != request.observed.device_identity
+        || !device_binding_matches_facts(request)
+    {
         return Err(Denial::new(request, DenialCode::DeviceIdentityMismatch));
     }
-    if request.expected.mount_handles != request.observed.mount_handles {
+    if request.expected.mount_handles != request.observed.mount_handles
+        || !mount_bindings_match_facts(request)
+    {
         return Err(Denial::new(request, DenialCode::MountHandleMismatch));
     }
     Ok(())
+}
+
+fn device_binding_matches_facts(request: &CanonicalRequest) -> bool {
+    match (
+        request.context.facts().device_classes(),
+        request.expected.device_identity.as_ref(),
+    ) {
+        ([], None) => true,
+        ([class], Some(device)) => class == device.class(),
+        _ => false,
+    }
+}
+
+fn mount_bindings_match_facts(request: &CanonicalRequest) -> bool {
+    let mut unmatched = request.context.facts().mounts().to_vec();
+    for handle in &request.expected.mount_handles {
+        let Some(index) = unmatched.iter().position(|class| *class == handle.class()) else {
+            return false;
+        };
+        unmatched.swap_remove(index);
+    }
+    unmatched.is_empty()
 }
 
 fn validate_resource_uuid(request: &CanonicalRequest) -> Result<(), Denial> {

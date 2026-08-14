@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::authorization::policy::PolicyStore;
 use crate::authorization::{
-    Action, AuthorizationMode, PrincipalId, ReasonCode, RequestContext, RequestFacts,
+    Action, AuthorizationMode, MountClass, PrincipalId, ReasonCode, RequestContext, RequestFacts,
     ResolvedPrincipal, Resource, ResourceKind, ResourceState, Role,
 };
 
@@ -46,7 +46,9 @@ impl Fixture {
         );
         let facts = RequestFacts {
             image_digest: Some(IMAGE_DIGEST.to_owned()),
+            mounts: vec![MountClass::Workspace],
             privileged,
+            device_classes: vec!["block".to_owned()],
             lifecycle_state: Some(ResourceState::Stopped),
             ..RequestFacts::default()
         };
@@ -61,15 +63,27 @@ impl Fixture {
             Some(ImageBinding::new(image_reference, IMAGE_DIGEST)),
             12,
             Some(ResourceState::Stopped),
-            Some(DeviceIdentity::new(8, 1, 41)),
-            vec![MountHandleDescriptor::new(33, 2049, 82, 0)],
+            Some(DeviceIdentity::new("block", 8, 1, 41)),
+            vec![MountHandleDescriptor::new(
+                MountClass::Workspace,
+                33,
+                2049,
+                82,
+                0,
+            )],
         );
         let observed = ExecutionBindings::new(
             Some(ImageBinding::new(image_reference, IMAGE_DIGEST)),
             12,
             Some(ResourceState::Stopped),
-            Some(DeviceIdentity::new(8, 1, 41)),
-            vec![MountHandleDescriptor::new(33, 2049, 82, 0)],
+            Some(DeviceIdentity::new("block", 8, 1, 41)),
+            vec![MountHandleDescriptor::new(
+                MountClass::Workspace,
+                33,
+                2049,
+                82,
+                0,
+            )],
         );
         CanonicalRequest::new(context, self.gate.pin(), bindings, observed)
     }
@@ -248,11 +262,115 @@ fn authorization_gate_rejects_a_stale_resource_generation() {
 fn authorization_gate_rejects_a_device_identity_mismatch() {
     let fixture = Fixture::new(AuthorizationMode::Disabled);
     let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
-    request.observed.device_identity = Some(DeviceIdentity::new(8, 1, 42));
+    request.observed.device_identity = Some(DeviceIdentity::new("block", 8, 1, 42));
 
     let denial = fixture.gate.authorize(request).expect_err("device changed");
 
     assert_eq!(denial.code(), DenialCode::DeviceIdentityMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_a_missing_required_lifecycle_state() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    request.context.facts.lifecycle_state = None;
+    request.expected.state_precondition = None;
+    request.observed.state_precondition = None;
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("execution state must be policy-visible");
+
+    assert_eq!(denial.code(), DenialCode::StatePreconditionMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_a_missing_required_device_binding() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    request.expected.device_identity = None;
+    request.observed.device_identity = None;
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("policy-visible device must be bound");
+
+    assert_eq!(denial.code(), DenialCode::DeviceIdentityMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_a_device_class_mismatch() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    request.context.facts.device_classes = vec!["gpu".to_owned()];
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("device identity must match its policy-visible class");
+
+    assert_eq!(denial.code(), DenialCode::DeviceIdentityMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_multiple_classes_for_a_single_device_binding() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    request.context.facts.device_classes = vec!["block".to_owned(), "gpu".to_owned()];
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("every device class needs its own stable identity");
+
+    assert_eq!(denial.code(), DenialCode::DeviceIdentityMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_a_missing_required_mount_binding() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    request.expected.mount_handles.clear();
+    request.observed.mount_handles.clear();
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("policy-visible mount must be bound");
+
+    assert_eq!(denial.code(), DenialCode::MountHandleMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_a_mount_class_mismatch() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    request.context.facts.mounts = vec![MountClass::HostPath];
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("mount handle must match its policy-visible class");
+
+    assert_eq!(denial.code(), DenialCode::MountHandleMismatch);
+}
+
+#[test]
+fn authorization_gate_rejects_an_extra_execution_mount() {
+    let fixture = Fixture::new(AuthorizationMode::Disabled);
+    let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
+    let extra = MountHandleDescriptor::new(MountClass::HostPath, 34, 2049, 83, 0);
+    request.expected.mount_handles.push(extra.clone());
+    request.observed.mount_handles.push(extra);
+
+    let denial = fixture
+        .gate
+        .authorize(request)
+        .expect_err("execution mount must be policy-visible");
+
+    assert_eq!(denial.code(), DenialCode::MountHandleMismatch);
 }
 
 #[test]
@@ -270,7 +388,8 @@ fn authorization_gate_enforces_the_compare_and_swap_state() {
 fn authorization_gate_rejects_an_open_mount_handle_mismatch() {
     let fixture = Fixture::new(AuthorizationMode::Disabled);
     let mut request = fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}"));
-    request.observed.mount_handles[0] = MountHandleDescriptor::new(33, 2049, 99, 0);
+    request.observed.mount_handles[0] =
+        MountHandleDescriptor::new(MountClass::Workspace, 33, 2049, 99, 0);
 
     let denial = fixture.gate.authorize(request).expect_err("handle changed");
 
@@ -292,12 +411,23 @@ fn authorization_gate_proof_binds_every_executor_safe_identity() {
     assert_eq!(canonical.state_precondition(), Some(ResourceState::Stopped));
     assert_eq!(
         canonical.device_identity(),
-        Some(&DeviceIdentity::new(8, 1, 41))
+        Some(&DeviceIdentity::new("block", 8, 1, 41))
+    );
+    assert_eq!(
+        canonical.device_identity().map(DeviceIdentity::class),
+        Some("block")
     );
     assert_eq!(
         canonical.mount_handles(),
-        &[MountHandleDescriptor::new(33, 2049, 82, 0)]
+        &[MountHandleDescriptor::new(
+            MountClass::Workspace,
+            33,
+            2049,
+            82,
+            0
+        )]
     );
+    assert_eq!(canonical.mount_handles()[0].class(), MountClass::Workspace);
 }
 
 fn write_policy(

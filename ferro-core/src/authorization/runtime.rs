@@ -261,6 +261,19 @@ impl RuntimeAuthorization {
             && provenance.journal_id == self.journal.as_ref().map(|journal| journal.journal_id())
     }
 
+    pub(crate) fn provenance_value_matches(
+        &self,
+        provenance: &crate::container_store::CreationProvenance,
+        container_id: &str,
+    ) -> bool {
+        provenance.is_verifiable()
+            && provenance.runtime_instance_id == Some(self.runtime_id)
+            && provenance.boot_id == Some(self.boot_id)
+            && provenance.resource_uuid.as_deref() == Some(canonical_uuid(container_id).as_str())
+            && provenance.resource_generation > 0
+            && provenance.journal_id == self.journal.as_ref().map(|journal| journal.journal_id())
+    }
+
     pub(crate) fn authorize(
         &self,
         action: Action,

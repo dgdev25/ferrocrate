@@ -12,7 +12,7 @@ use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
-    now_unix, ContainerRecord, ContainerStoreError, EbpfFilterOwnershipRecord,
+    now_unix, ContainerRecord, ContainerStoreError, CreationProvenance, EbpfFilterOwnershipRecord,
     EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LifecycleOperation,
     LifecyclePhase, LocalContainerStore, MutationReservation, NetworkOwnershipRecord,
     PortMappingRecord, RestartPolicy,
@@ -115,6 +115,12 @@ struct CreationRollback {
     typed_applied_resources: Vec<AppliedResource>,
     defer_container_removal: bool,
     cleanup_quarantined: bool,
+    creation_provenance: CreationProvenance,
+}
+
+struct CleanupAuthority {
+    operation_id: [u8; 16],
+    generation: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -122,6 +128,8 @@ enum ResourcePlan {
     Rootfs {
         path: PathBuf,
         generation: u64,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
     },
     BindMount {
         target: PathBuf,
@@ -168,6 +176,8 @@ enum ResourcePlan {
     },
     Process {
         generation: u64,
+        #[serde(default)]
+        operation_id: Option<[u8; 16]>,
     },
 }
 
@@ -233,10 +243,16 @@ struct PendingNetworkCleanup {
     resource_plans: Vec<ResourcePlan>,
     #[serde(default)]
     typed_applied_resources: Vec<AppliedResource>,
+    #[serde(default)]
+    creation_provenance: CreationProvenance,
 }
 
 impl CreationRollback {
-    fn new(container_id: &str, cgroup_root: PathBuf, operation_id: Option<[u8; 16]>) -> Self {
+    fn new(
+        container_id: &str,
+        cgroup_root: PathBuf,
+        creation_provenance: CreationProvenance,
+    ) -> Self {
         Self {
             container_id: container_id.to_string(),
             container_dir: None,
@@ -257,13 +273,14 @@ impl CreationRollback {
             cgroup_name: None,
             cgroup_root,
             committed: false,
-            operation_id,
+            operation_id: creation_provenance.creator_operation_id,
             planned_resources: Default::default(),
             applied_resources: Default::default(),
             resource_plans: Vec::new(),
             typed_applied_resources: Vec::new(),
             defer_container_removal: false,
             cleanup_quarantined: false,
+            creation_provenance,
         }
     }
 
@@ -312,6 +329,7 @@ impl CreationRollback {
             typed_applied_resources: pending.typed_applied_resources,
             defer_container_removal: true,
             cleanup_quarantined: false,
+            creation_provenance: pending.creation_provenance,
         })
     }
 
@@ -510,6 +528,7 @@ impl CreationRollback {
             applied_resources: self.applied_resources.clone(),
             resource_plans: self.resource_plans.clone(),
             typed_applied_resources: self.typed_applied_resources.clone(),
+            creation_provenance: self.creation_provenance.clone(),
         }
     }
 
@@ -722,6 +741,16 @@ impl CreationRollback {
         }
 
         self.committed = true; // Prevent double rollback
+    }
+
+    fn rollback_with_authority(&mut self, authority: &CleanupAuthority) {
+        if self.operation_id != Some(authority.operation_id)
+            || self.creation_provenance.resource_generation != authority.generation
+        {
+            self.cleanup_quarantined = true;
+            return;
+        }
+        self.rollback();
     }
 
     /// Returns true when an identity mismatch requires quarantine.
@@ -948,7 +977,7 @@ impl Drop for CreationRollback {
 
 fn recover_pending_network_cleanups(
     runtime_dir: &Path,
-    _store: &LocalContainerStore,
+    store: &LocalContainerStore,
     cgroup_root: &Path,
     authorization: &RuntimeAuthorization,
 ) -> Result<(), RuntimeError> {
@@ -996,13 +1025,22 @@ fn recover_pending_network_cleanups(
                 journal_path.display()
             )));
         }
+        let authority = match validate_cleanup_authority(&pending, store, authorization)? {
+            Some(authority) => authority,
+            None => {
+                return Err(RuntimeError::Network(format!(
+                    "pending cleanup journal {} has stale or mixed authority; quarantined",
+                    journal_path.display()
+                )));
+            }
+        };
         let recovery = authorization.begin_internal_network_recovery(&pending.container_id)?;
         let mut rollback = CreationRollback::from_pending(
             container_dir.clone(),
             cgroup_root.to_path_buf(),
             pending,
         )?;
-        rollback.rollback();
+        rollback.rollback_with_authority(&authority);
         if rollback.cleanup_quarantined {
             authorization.finish_internal_recovery(
                 recovery,
@@ -1027,6 +1065,93 @@ fn recover_pending_network_cleanups(
         }
     }
     Ok(())
+}
+
+fn validate_cleanup_authority(
+    pending: &PendingNetworkCleanup,
+    store: &LocalContainerStore,
+    authorization: &RuntimeAuthorization,
+) -> Result<Option<CleanupAuthority>, RuntimeError> {
+    let Some(operation_id) = pending.operation_id else {
+        return Ok(None);
+    };
+    let generation = pending
+        .cgroup_generation
+        .unwrap_or(pending.creation_provenance.resource_generation);
+    if generation == 0
+        || pending.resource_plans.is_empty()
+        || !pending.resource_plans.iter().all(|plan| {
+            let (plan_generation, plan_operation) = resource_plan_authority(plan);
+            plan_generation == generation && plan_operation == Some(operation_id)
+        })
+    {
+        return Ok(None);
+    }
+    let mut applied_indices = BTreeSet::new();
+    if !pending.typed_applied_resources.iter().all(|applied| {
+        applied.plan_index < pending.resource_plans.len()
+            && applied_indices.insert(applied.plan_index)
+    }) {
+        return Ok(None);
+    }
+    let owned = if let Some(record) = store.get(&pending.container_id)? {
+        authorization.provenance_matches(&record)
+            && (record.pending_mutation.as_ref().is_some_and(|reservation| {
+                reservation.operation_id == operation_id && reservation.generation == generation
+            }) || (record.creation_provenance.creator_operation_id == Some(operation_id)
+                && record.creation_provenance.resource_generation == generation))
+    } else {
+        let operation = store.lifecycle_operation(operation_id)?;
+        operation.as_ref().is_some_and(|operation| {
+            operation.container_id == pending.container_id && operation.generation == generation
+        }) && authorization
+            .provenance_value_matches(&pending.creation_provenance, &pending.container_id)
+            && pending.creation_provenance.creator_operation_id == Some(operation_id)
+            && pending.creation_provenance.resource_generation == generation
+    };
+    Ok(owned.then_some(CleanupAuthority {
+        operation_id,
+        generation,
+    }))
+}
+
+fn resource_plan_authority(plan: &ResourcePlan) -> (u64, Option<[u8; 16]>) {
+    match plan {
+        ResourcePlan::Rootfs {
+            generation,
+            operation_id,
+            ..
+        }
+        | ResourcePlan::BindMount {
+            generation,
+            operation_id,
+            ..
+        }
+        | ResourcePlan::TmpfsMount {
+            generation,
+            operation_id,
+            ..
+        }
+        | ResourcePlan::RootfsReadonly {
+            generation,
+            operation_id,
+            ..
+        }
+        | ResourcePlan::NetworkAllocation {
+            generation,
+            operation_id,
+            ..
+        }
+        | ResourcePlan::Cgroup {
+            generation,
+            operation_id,
+            ..
+        }
+        | ResourcePlan::Process {
+            generation,
+            operation_id,
+        } => (*generation, *operation_id),
+    }
 }
 
 fn internal_cleanup_observation(
@@ -1182,13 +1307,13 @@ impl ContainerRuntime {
             authorization,
             phase_hook,
         };
-        runtime.reconcile_pending_mutations()?;
         recover_pending_network_cleanups(
             runtime_dir,
             &runtime.store,
             &runtime.cgroup_root,
             &runtime.authorization,
         )?;
+        runtime.reconcile_pending_mutations()?;
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
     }
@@ -1830,7 +1955,7 @@ impl ContainerRuntime {
         let mut rollback = CreationRollback::new(
             &container_id,
             self.cgroup_root.clone(),
-            creation_provenance.creator_operation_id,
+            creation_provenance.clone(),
         );
 
         let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
@@ -1849,6 +1974,7 @@ impl ContainerRuntime {
         let rootfs_plan = rollback.plan_typed_resource(ResourcePlan::Rootfs {
             path: rootfs_dir.clone(),
             generation: 1,
+            operation_id: creation_provenance.creator_operation_id,
         })?;
         let network_plan = rollback.plan_typed_resource(ResourcePlan::NetworkAllocation {
             canonical: format!("{network_mode}:{network_backend}"),
@@ -1866,7 +1992,10 @@ impl ContainerRuntime {
                 })
             })
             .transpose()?;
-        let process_plan = rollback.plan_typed_resource(ResourcePlan::Process { generation: 1 })?;
+        let process_plan = rollback.plan_typed_resource(ResourcePlan::Process {
+            generation: 1,
+            operation_id: creation_provenance.creator_operation_id,
+        })?;
         rollback.plan_resource("rootfs", rootfs_dir.display().to_string())?;
         for (index, mount) in mounts.iter().enumerate() {
             rollback.plan_resource(
@@ -8830,6 +8959,7 @@ mod tests {
             applied_resources: Default::default(),
             resource_plans: Vec::new(),
             typed_applied_resources: Vec::new(),
+            creation_provenance: Default::default(),
         };
         std::fs::write(
             container_dir.join("network-cleanup-pending.json"),
@@ -8842,9 +8972,15 @@ mod tests {
 
         let authorization =
             crate::authorization::runtime::RuntimeAuthorization::compatibility_with_id([1; 16]);
-        super::recover_pending_network_cleanups(temp.path(), &store, temp.path(), &authorization)
-            .unwrap();
-        assert!(!container_dir.exists());
+        let error = super::recover_pending_network_cleanups(
+            temp.path(),
+            &store,
+            temp.path(),
+            &authorization,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("quarantined"));
+        assert!(container_dir.exists());
     }
 
     #[test]
@@ -8858,13 +8994,17 @@ mod tests {
         let source = temp.path().join("source");
         std::fs::create_dir_all(&rootfs).unwrap();
         std::fs::create_dir_all(&source).unwrap();
+        let mut provenance = crate::container_store::CreationProvenance::default();
+        provenance.creator_operation_id = Some([8; 16]);
+        provenance.resource_generation = 1;
         let mut rollback =
-            super::CreationRollback::new("mount-ledger", temp.path().into(), Some([8; 16]));
+            super::CreationRollback::new("mount-ledger", temp.path().into(), provenance);
         rollback.track_container_dir(container_dir);
         let root_plan = rollback
             .plan_typed_resource(super::ResourcePlan::Rootfs {
                 path: rootfs.clone(),
                 generation: 1,
+                operation_id: Some([8; 16]),
             })
             .unwrap();
         rollback
@@ -10031,6 +10171,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             "network" => LifecyclePhasePoint::NetworkApplied,
             "cgroup" => LifecyclePhasePoint::CgroupApplied,
             "old-stopped" => LifecyclePhasePoint::RestartOldStopped,
+            "bind-effect" => LifecyclePhasePoint::BindKernelEffect,
+            "tmpfs-effect" => LifecyclePhasePoint::TmpfsKernelEffect,
+            "readonly-effect" => LifecyclePhasePoint::ReadonlyKernelEffect,
+            "network-effect" => LifecyclePhasePoint::NetworkKernelEffect,
+            "cgroup-effect" => LifecyclePhasePoint::CgroupKernelEffect,
             "spawn" => LifecyclePhasePoint::SpawnPrepared,
             "identity" => LifecyclePhasePoint::LaunchIdentityDurable,
             _ => panic!("unknown phase {name}"),

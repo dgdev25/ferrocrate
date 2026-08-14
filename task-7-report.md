@@ -76,6 +76,16 @@ unmarked live object conservatively. Dedicated kernel-effect barriers exist
 immediately after bind, tmpfs, readonly, network, and cgroup syscalls and before
 their applied marker.
 
+Cleanup entry now mints a private `CleanupAuthority` only after validating one
+operation ID and generation across every typed plan and applied index. A live
+candidate must have matching pending state or creation intent and matching
+runtime/journal/boot/resource provenance. With no candidate, the independent
+lifecycle operation plus the retained provenance must match. Mixed IDs,
+duplicate applied indexes, stale generations, legacy ledgers, and cross-runtime
+replays are quarantined before any cleanup effect. Resource-ledger recovery now
+runs before lifecycle reconciliation so the independent tombstone cannot be
+acknowledged before cleanup consumes it.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode

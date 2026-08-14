@@ -450,6 +450,18 @@ impl RuntimeAuthorization {
         Ok(())
     }
 
+    pub(crate) fn complete_unknown(&self, permit: MutationPermit) -> Result<(), MediationError> {
+        if let (Some(journal), Some(intent)) = (&self.journal, permit.intent) {
+            let mut outcome = at_stage(&permit.template, WitnessStage::Outcome, 4);
+            outcome.decision_id = permit.decision_id;
+            outcome.outcome = WitnessOutcome::OutcomeUnknown;
+            outcome.reason = Some(ReasonCode::ExecutionFailed);
+            outcome.result_digest = Some(Sha256::digest(b"post-effect-persistence-unknown").into());
+            journal.complete(intent, outcome)?;
+        }
+        Ok(())
+    }
+
     fn record_template(
         &self,
         request: &CanonicalRequest,

@@ -666,6 +666,8 @@ pub enum RuntimeError {
     Authorization(String),
     #[error("witness journal error: {0}")]
     Witness(#[from] crate::witness::JournalError),
+    #[error("kernel effect completed but lifecycle state persistence failed: {0}")]
+    PostEffectPersistence(ContainerStoreError),
 }
 
 impl From<MediationError> for RuntimeError {
@@ -1708,8 +1710,8 @@ impl ContainerRuntime {
 
     fn pause_authorized(
         &self,
-        _proof: &AuthorizedRequest,
-        _intent: Option<&crate::witness::DurableIntent>,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         id: &str,
     ) -> Result<(), RuntimeError> {
         let record = self
@@ -1720,7 +1722,7 @@ impl ContainerRuntime {
         let group = manager.create_group(&format!("ferrocrate/{id}"))?;
         manager.add_pid(&group, record.pid)?;
         manager.freeze(&group)?;
-        self.store.update_status(id, "paused")?;
+        self.persist_effect_status(proof, intent, id, "running", "paused")?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("pause", Some(id), Some(&record.image), Some("paused"), None),
@@ -1747,8 +1749,8 @@ impl ContainerRuntime {
 
     fn resume_authorized(
         &self,
-        _proof: &AuthorizedRequest,
-        _intent: Option<&crate::witness::DurableIntent>,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         id: &str,
     ) -> Result<(), RuntimeError> {
         let record = self
@@ -1759,7 +1761,7 @@ impl ContainerRuntime {
         let group = manager.create_group(&format!("ferrocrate/{id}"))?;
         manager.add_pid(&group, record.pid)?;
         manager.thaw(&group)?;
-        self.store.update_status(id, "running")?;
+        self.persist_effect_status(proof, intent, id, "paused", "running")?;
         let _ = log_event(
             &self.runtime_dir,
             make_event(
@@ -1792,8 +1794,8 @@ impl ContainerRuntime {
 
     fn stop_authorized(
         &self,
-        _proof: &AuthorizedRequest,
-        _intent: Option<&crate::witness::DurableIntent>,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         id: &str,
         timeout: Duration,
     ) -> Result<(), RuntimeError> {
@@ -1811,7 +1813,7 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         stop_pid(record.pid, timeout)?;
-        self.store.update_status(id, "stopped")?;
+        self.persist_effect_status(proof, intent, id, "running", "stopped")?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("stop", Some(id), Some(&record.image), Some("stopped"), None),
@@ -1838,8 +1840,8 @@ impl ContainerRuntime {
 
     fn kill_authorized(
         &self,
-        _proof: &AuthorizedRequest,
-        _intent: Option<&crate::witness::DurableIntent>,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         id: &str,
     ) -> Result<(), RuntimeError> {
         let record = self
@@ -1847,7 +1849,7 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         kill_pid(record.pid)?;
-        self.store.update_status(id, "killed")?;
+        self.persist_effect_status(proof, intent, id, "running", "killed")?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
@@ -1864,6 +1866,28 @@ impl ContainerRuntime {
             ),
         );
         Ok(())
+    }
+
+    fn persist_effect_status(
+        &self,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        expected_status: &str,
+        next_status: &str,
+    ) -> Result<(), RuntimeError> {
+        let result = if let Some(intent) = intent {
+            self.store.transition_status_for_mutation(
+                id,
+                *intent.operation_id().as_bytes(),
+                proof.canonical().resource_generation(),
+                expected_status,
+                next_status,
+            )
+        } else {
+            self.store.update_status(id, next_status)
+        };
+        result.map_err(RuntimeError::PostEffectPersistence)
     }
 
     pub fn restart(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
@@ -2137,6 +2161,7 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = execute(self, proof, intent);
+        let post_effect_unknown = matches!(result, Err(RuntimeError::PostEffectPersistence(_)));
         let freezer_state = match action {
             Action::ContainerPause | Action::ContainerResume => fs::read_to_string(
                 self.cgroup_root
@@ -2155,14 +2180,21 @@ impl ContainerRuntime {
         self.store.mark_mutation_effect_observed(
             id,
             operation_id,
-            result.is_ok(),
+            result.is_ok() || post_effect_unknown,
             freezer_state,
         )?;
         self.phase_hook.reached(
             runtime_action_name(action),
             LifecyclePhasePoint::EffectObserved,
         )?;
-        if action == Action::ContainerDelete && result.is_ok() {
+        if post_effect_unknown {
+            self.authorization.complete_unknown(permit)?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::TerminalDurable,
+            )?;
+            return result;
+        } else if action == Action::ContainerDelete && result.is_ok() {
             self.store.delete_for_mutation(id, operation_id)?;
             self.authorization.complete(permit, true)?;
             self.phase_hook.reached(

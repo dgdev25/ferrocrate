@@ -524,6 +524,58 @@ impl LocalContainerStore {
         Ok(())
     }
 
+    pub(crate) fn transition_status_for_mutation(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        expected_generation: u64,
+        expected_status: &str,
+        next_status: &str,
+    ) -> Result<(), ContainerStoreError> {
+        let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        tree.transaction(|tree| {
+            let bytes = tree.get(id.as_bytes())?.ok_or_else(|| {
+                sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                )
+            })?;
+            let mut record: ContainerRecord = serde_json::from_slice(&bytes).map_err(|error| {
+                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Decode(
+                    error,
+                ))
+            })?;
+            let reservation = record.pending_mutation.as_ref().ok_or_else(|| {
+                sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                )
+            })?;
+            if reservation.operation_id != operation_id
+                || reservation.generation != expected_generation
+                || reservation.expected_status != expected_status
+                || record.mutation_generation != expected_generation
+                || record.status != expected_status
+            {
+                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                ));
+            }
+            record.status = next_status.to_owned();
+            let encoded = serde_json::to_vec(&record).map_err(|error| {
+                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Encode(
+                    error,
+                ))
+            })?;
+            tree.insert(id.as_bytes(), encoded)?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            sled::transaction::TransactionError::Abort(error) => error,
+            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
+        })?;
+        tree.flush()?;
+        Ok(())
+    }
+
     pub(crate) fn reserve_mutation(
         &self,
         id: &str,
@@ -658,7 +710,12 @@ impl LocalContainerStore {
                             ContainerStoreError::Decode(e),
                         )
                     })?;
-                if operation.container_id != id
+                if record
+                    .pending_mutation
+                    .as_ref()
+                    .map(|pending| pending.operation_id)
+                    != Some(operation_id)
+                    || operation.container_id != id
                     || operation.generation != record.mutation_generation
                 {
                     return Err(sled::transaction::ConflictableTransactionError::Abort(
@@ -1045,6 +1102,33 @@ mod tests {
             .pending_mutation
             .is_some());
         store.finish_mutation("cas-finish", [3; 16]).unwrap();
+    }
+
+    #[test]
+    fn effect_marker_and_status_transition_require_exact_reserved_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("exact-op".into(), "image".into());
+        record.status = "running".into();
+        store.put(&record).unwrap();
+        store
+            .reserve_mutation("exact-op", "running", 1, [7; 16], "container.pause")
+            .unwrap();
+        assert!(matches!(
+            store.transition_status_for_mutation("exact-op", [8; 16], 1, "running", "paused"),
+            Err(ContainerStoreError::MutationConflict)
+        ));
+        assert!(matches!(
+            store.mark_mutation_effect("exact-op", [8; 16], true),
+            Err(ContainerStoreError::MutationConflict)
+        ));
+        store
+            .transition_status_for_mutation("exact-op", [7; 16], 1, "running", "paused")
+            .unwrap();
+        store
+            .mark_mutation_effect("exact-op", [7; 16], true)
+            .unwrap();
     }
 
     #[test]

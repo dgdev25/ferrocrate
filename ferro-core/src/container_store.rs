@@ -7,6 +7,46 @@ use thiserror::Error;
 
 pub const CONTAINER_INDEX_TREE: &str = "container_index";
 
+/// Immutable authority used to prove that deletion-only cleanup still targets
+/// the resource created by the witnessed operation. Legacy records deserialize
+/// to an unverifiable value and must be quarantined instead of cleaned up.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreationProvenance {
+    #[serde(default)]
+    pub runtime_instance_id: Option<[u8; 16]>,
+    #[serde(default)]
+    pub boot_id: Option<[u8; 16]>,
+    #[serde(default)]
+    pub journal_id: Option<[u8; 16]>,
+    #[serde(default)]
+    pub resource_uuid: Option<String>,
+    #[serde(default)]
+    pub resource_generation: u64,
+    #[serde(default)]
+    pub creator_operation_id: Option<[u8; 16]>,
+    #[serde(default)]
+    pub image_digest: Option<String>,
+}
+
+impl CreationProvenance {
+    pub fn is_verifiable(&self) -> bool {
+        self.runtime_instance_id.is_some()
+            && self.boot_id.is_some()
+            && self.journal_id.is_some()
+            && self.resource_uuid.as_deref().is_some_and(is_uuid)
+            && self.resource_generation > 0
+            && self.creator_operation_id.is_some()
+    }
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContainerRecord {
     pub id: String,
@@ -63,6 +103,47 @@ pub struct ContainerRecord {
     pub managed_host_veth: Option<String>,
     #[serde(default)]
     pub ai_runtime: Option<AiRuntimeConfig>,
+    #[serde(default)]
+    pub creation_provenance: CreationProvenance,
+}
+
+impl ContainerRecord {
+    pub(crate) fn authorization_candidate(id: String, image: String) -> Self {
+        Self {
+            id,
+            name: None,
+            pid: 0,
+            image,
+            command: Vec::new(),
+            workdir: None,
+            user: None,
+            env: Vec::new(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            capabilities: Vec::new(),
+            health: None,
+            health_status: "none".into(),
+            health_failures: 0,
+            health_checked_at_unix: None,
+            restart_policy: RestartPolicy::No,
+            last_exit_code: None,
+            created_at_unix: 0,
+            stdout_path: String::new(),
+            stderr_path: String::new(),
+            status: "created".into(),
+            netns: None,
+            network_name: None,
+            ip_address: None,
+            ipv6_address: None,
+            ports: Vec::new(),
+            network_backend: None,
+            network_ownership: None,
+            managed_overlay: None,
+            managed_host_veth: None,
+            ai_runtime: None,
+            creation_provenance: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -351,6 +432,7 @@ mod tests {
             managed_overlay: None,
             managed_host_veth: None,
             ai_runtime: None,
+            creation_provenance: Default::default(),
         };
 
         store.put(&record).expect("store record");
@@ -396,6 +478,7 @@ mod tests {
             managed_overlay: None,
             managed_host_veth: None,
             ai_runtime: None,
+            creation_provenance: Default::default(),
         };
 
         store.put(&record).expect("store record");

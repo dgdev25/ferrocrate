@@ -1,4 +1,11 @@
 #[cfg(target_os = "linux")]
+use crate::ai_runtime::AiRuntimeConfig;
+use crate::authorization::runtime::{MediationError, RuntimeAuthorization};
+use crate::authorization::{
+    gate::{AuthorizationGate, AuthorizedRequest},
+    Action,
+};
+#[cfg(target_os = "linux")]
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
@@ -14,27 +21,23 @@ use crate::image_config::{
 use crate::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
 use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
+use crate::mac_profiles::generate_apparmor_profile;
 #[cfg(target_os = "linux")]
 use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
-use crate::mac_profiles::generate_apparmor_profile;
 use crate::mounts::{
     apply_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts, BindMount, MountError, TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
-use tracing::{info, warn};
 use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
-use crate::ai_runtime::AiRuntimeConfig;
-#[cfg(target_os = "linux")]
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
 };
-pub use ferro_net::NetworkBackend;
+use dashmap::DashMap;
 use ferro_net::bridge;
-use ferro_net::BackendProbe;
 use ferro_net::ebpf::{
     embedded_object_abi, embedded_object_sha256, install_security_monitor, EbpfNetwork,
     EbpfNetworkConfig, PinnedNetworkIdentity, PinnedObjectIdentity, PreparedEbpfNetwork,
@@ -43,22 +46,21 @@ use ferro_net::ebpf::{
 use ferro_net::ebpf_abi::{EndpointKey, EndpointValue, PortKey, PortValue};
 use ferro_net::exec_cmd as net_exec_cmd;
 use ferro_net::netns;
-use ferro_net::portmap::{
-    build_network_plan as build_portmap_plan, NetworkPlan,
-};
-use ferro_net::{WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
-use ferro_net::subnet::network_cidr_v4;
+use ferro_net::portmap::{build_network_plan as build_portmap_plan, NetworkPlan};
 use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
+use ferro_net::subnet::network_cidr_v4;
 use ferro_net::veth;
+use ferro_net::BackendProbe;
+pub use ferro_net::NetworkBackend;
+use ferro_net::{WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use dashmap::DashMap;
 use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Write};
 #[cfg(test)]
 use std::io::Read;
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -67,10 +69,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tracing::{info, warn};
 
 // ============================================================================
 // Atomic Operations Support (Task 4.1)
@@ -166,7 +169,9 @@ impl CreationRollback {
             .as_deref()
             .map(str::parse::<NetworkBackend>)
             .transpose()
-            .map_err(|error| RuntimeError::Network(format!("malformed pending backend: {error}")))?;
+            .map_err(|error| {
+                RuntimeError::Network(format!("malformed pending backend: {error}"))
+            })?;
         Ok(Self {
             container_id: pending.container_id,
             container_dir: Some(container_dir),
@@ -388,14 +393,17 @@ impl CreationRollback {
                 let path = Path::new("/var/run/netns").join(name);
                 match fs::symlink_metadata(path) {
                     Ok(metadata)
-                        if metadata.dev() == expected.device && metadata.ino() == expected.inode =>
+                        if metadata.dev() == expected.device
+                            && metadata.ino() == expected.inode =>
                     {
                         Some(name.as_str())
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                     _ => {
                         identity_cleanup_failure = true;
-                        log::warn!("[rollback] network namespace identity changed; refusing deletion");
+                        log::warn!(
+                            "[rollback] network namespace identity changed; refusing deletion"
+                        );
                         None
                     }
                 }
@@ -502,9 +510,9 @@ impl CreationRollback {
         // Rollback container directory
         if !retain_container_dir {
             if let Some(ref dir) = self.container_dir {
-            if let Err(e) = fs::remove_dir_all(dir) {
-                log::warn!("[rollback] failed to remove container dir: {}", e);
-            }
+                if let Err(e) = fs::remove_dir_all(dir) {
+                    log::warn!("[rollback] failed to remove container dir: {}", e);
+                }
             }
         }
 
@@ -620,6 +628,14 @@ pub enum RuntimeError {
     Kernel(String),
     #[error("external command timed out after {0:?}")]
     Timeout(Duration),
+    #[error("runtime mutation mediation failed: {0}")]
+    Authorization(String),
+}
+
+impl From<MediationError> for RuntimeError {
+    fn from(error: MediationError) -> Self {
+        Self::Authorization(error.to_string())
+    }
 }
 
 // CQ-02: Extract shared command parsing helper to fix duplication
@@ -635,6 +651,8 @@ pub struct ContainerRuntime {
     health_cancel: DashMap<String, Arc<AtomicBool>>,
     /// Cancellation tokens for resource monitor threads (Task 5.1)
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
+    authorization: RuntimeAuthorization,
+    mutation_lock: Mutex<()>,
 }
 
 impl ContainerRuntime {
@@ -651,8 +669,22 @@ impl ContainerRuntime {
             cgroup_root,
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
+            authorization: RuntimeAuthorization::compatibility(),
+            mutation_lock: Mutex::new(()),
         };
         runtime.reconcile_persisted_state()?;
+        Ok(runtime)
+    }
+
+    /// Configure policy evaluation and optional durable witnessing. Supplying
+    /// no journal keeps policy mediation enabled without persistence.
+    pub fn new_with_authorization(
+        runtime_dir: &Path,
+        gate: Arc<AuthorizationGate>,
+        journal: Option<Arc<crate::witness::WitnessJournal>>,
+    ) -> Result<Self, RuntimeError> {
+        let mut runtime = Self::new(runtime_dir)?;
+        runtime.authorization = RuntimeAuthorization::new(gate, journal);
         Ok(runtime)
     }
 
@@ -757,16 +789,14 @@ impl ContainerRuntime {
         Ok(())
     }
 
-    fn reconcile_shared_ebpf_group(
-        &self,
-        records: &[ContainerRecord],
-    ) -> Result<(), RuntimeError> {
+    fn reconcile_shared_ebpf_group(&self, records: &[ContainerRecord]) -> Result<(), RuntimeError> {
         let first = records.first().ok_or_else(|| {
             RuntimeError::Network("cannot reconcile an empty eBPF network".to_string())
         })?;
-        let ownership = first.network_ownership.as_ref().ok_or_else(|| {
-            RuntimeError::Network("shared eBPF ownership is missing".to_string())
-        })?;
+        let ownership = first
+            .network_ownership
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Network("shared eBPF ownership is missing".to_string()))?;
         let config = ebpf_config_from_ownership(ownership)?;
         verify_recovery_host_contract(&config)?;
         verify_shared_ebpf_metadata(ownership, &config)?;
@@ -785,14 +815,18 @@ impl ContainerRuntime {
             NetworkRecoveryAction::ReloadShared => {
                 let interface = config.interface.clone();
                 let before = shared_tc_filter_snapshot(&interface)?;
-                let mut network = prepare_ebpf_classifiers(config)?.attach()
+                let mut network = prepare_ebpf_classifiers(config)?
+                    .attach()
                     .map_err(|error| RuntimeError::Network(error.to_string()))?;
                 for record in records {
                     install_record_on_attached_network(&mut network, record)?;
                 }
                 let mut filters = shared_tc_filter_snapshot(&interface)?;
                 filters.retain(|filter| !before.contains(filter));
-                let network_id = ownership.network_id.as_deref().expect("validated network id");
+                let network_id = ownership
+                    .network_id
+                    .as_deref()
+                    .expect("validated network id");
                 let pins = capture_ebpf_pins(&Path::new(FERRO_NETWORK_ROOT).join(network_id))?;
                 if filters.len() != 4 || pins.is_empty() {
                     return Err(RuntimeError::Network(
@@ -889,6 +923,92 @@ impl ContainerRuntime {
         network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| RuntimeError::Authorization("mutation lock poisoned".into()))?;
+        let container_id = generate_container_id();
+        let pinned_image = store.resolve_reference(image)?.map_or_else(
+            || image.to_owned(),
+            |record| {
+                format!(
+                    "{}@{}",
+                    record
+                        .reference
+                        .split('@')
+                        .next()
+                        .unwrap_or(&record.reference),
+                    record.digest
+                )
+            },
+        );
+        let candidate =
+            ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
+        let permit = self
+            .authorization
+            .authorize(Action::ContainerRun, &candidate)?;
+        let creation_provenance = permit.creation_provenance();
+        let (proof, intent) = permit.execution_authority();
+        let result = self.run_with_store_authorized(
+            proof,
+            intent,
+            creation_provenance,
+            container_id,
+            store,
+            image,
+            cmd,
+            env,
+            labels,
+            annotations,
+            health,
+            restart_policy,
+            capabilities,
+            limits,
+            mounts,
+            tmpfs_mounts,
+            readonly_rootfs,
+            no_new_privs,
+            workdir,
+            user,
+            name,
+            port_mappings,
+            network_mode,
+            network_backend,
+            ai_config,
+        );
+        self.authorization.complete(permit, result.is_ok())?;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_store_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        creation_provenance: crate::container_store::CreationProvenance,
+        container_id: String,
+        store: &LocalImageStore,
+        image: &str,
+        cmd: &[String],
+        env: &[String],
+        labels: &HashMap<String, String>,
+        annotations: &HashMap<String, String>,
+        health: Option<HealthConfig>,
+        restart_policy: RestartPolicy,
+        capabilities: &[caps::Capability],
+        limits: Option<&ResourceLimits>,
+        mounts: &[BindMount],
+        tmpfs_mounts: &[TmpfsMount],
+        readonly_rootfs: bool,
+        no_new_privs: bool,
+        workdir: Option<&str>,
+        user: Option<&str>,
+        name: Option<&str>,
+        port_mappings: &[crate::container_store::PortMappingRecord],
+        network_mode: &str,
+        network_backend: NetworkBackend,
+        ai_config: Option<&AiRuntimeConfig>,
+    ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         ensure_kernel_min_version()?;
         verify_image_signature(image).map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
@@ -930,8 +1050,6 @@ impl ContainerRuntime {
         let resolved_user = user
             .map(|s| s.to_string())
             .or_else(|| config_json.as_deref().and_then(user_from_config));
-
-        let container_id = generate_container_id();
 
         // Create rollback guard for atomic operations (Task 4.1)
         let mut rollback = CreationRollback::new(&container_id, self.cgroup_root.clone());
@@ -1103,6 +1221,7 @@ impl ContainerRuntime {
             managed_overlay: network_setup.managed_overlay.clone(),
             managed_host_veth: network_setup.managed_host_veth.clone(),
             ai_runtime: ai_config.cloned(),
+            creation_provenance,
         };
 
         rollback.persist_network()?;
@@ -1170,6 +1289,24 @@ impl ContainerRuntime {
         id: &str,
         cmd: &[String],
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| RuntimeError::Authorization("mutation lock poisoned".into()))?;
+        let permit = self.authorize_existing(Action::ContainerExec, id)?;
+        let (proof, intent) = permit.execution_authority();
+        let result = self.exec_authorized(proof, intent, id, cmd);
+        self.authorization.complete(permit, result.is_ok())?;
+        result
+    }
+
+    fn exec_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        cmd: &[String],
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let record = self
             .store
             .get(id)?
@@ -1233,6 +1370,17 @@ impl ContainerRuntime {
     }
 
     pub fn pause(&self, id: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerPause, id, |runtime, proof, intent| {
+            runtime.pause_authorized(proof, intent, id)
+        })
+    }
+
+    fn pause_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+    ) -> Result<(), RuntimeError> {
         let record = self
             .store
             .get(id)?
@@ -1261,6 +1409,17 @@ impl ContainerRuntime {
     }
 
     pub fn resume(&self, id: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerResume, id, |runtime, proof, intent| {
+            runtime.resume_authorized(proof, intent, id)
+        })
+    }
+
+    fn resume_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+    ) -> Result<(), RuntimeError> {
         let record = self
             .store
             .get(id)?
@@ -1295,6 +1454,18 @@ impl ContainerRuntime {
     }
 
     pub fn stop(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerStop, id, |runtime, proof, intent| {
+            runtime.stop_authorized(proof, intent, id, timeout)
+        })
+    }
+
+    fn stop_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        timeout: Duration,
+    ) -> Result<(), RuntimeError> {
         // Signal health check thread to stop
         if let Some((_, cancel)) = self.health_cancel.remove(id) {
             cancel.store(true, Ordering::Relaxed);
@@ -1329,6 +1500,17 @@ impl ContainerRuntime {
     }
 
     pub fn kill(&self, id: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerKill, id, |runtime, proof, intent| {
+            runtime.kill_authorized(proof, intent, id)
+        })
+    }
+
+    fn kill_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+    ) -> Result<(), RuntimeError> {
         let record = self
             .store
             .get(id)?
@@ -1354,6 +1536,18 @@ impl ContainerRuntime {
     }
 
     pub fn restart(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerRestart, id, |runtime, proof, intent| {
+            runtime.restart_authorized(proof, intent, id, timeout)
+        })
+    }
+
+    fn restart_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        timeout: Duration,
+    ) -> Result<(), RuntimeError> {
         let mut record = self
             .store
             .get(id)?
@@ -1460,6 +1654,17 @@ impl ContainerRuntime {
     }
 
     pub fn remove(&self, id: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerDelete, id, |runtime, proof, intent| {
+            runtime.remove_authorized(proof, intent, id)
+        })
+    }
+
+    fn remove_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+    ) -> Result<(), RuntimeError> {
         // Clean up health check cancellation token if present
         if let Some((_, cancel)) = self.health_cancel.remove(id) {
             cancel.store(true, Ordering::Relaxed);
@@ -1473,6 +1678,14 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if self.authorization.requires_provenance()
+            && !self.authorization.provenance_matches(&record)
+        {
+            self.store.update_status(id, "quarantined")?;
+            return Err(RuntimeError::InvalidState(format!(
+                "container {id} has unverifiable creation provenance and was quarantined"
+            )));
+        }
         if record.status == "running" {
             return Err(RuntimeError::InvalidState(format!(
                 "container {id} is still running"
@@ -1513,6 +1726,48 @@ impl ContainerRuntime {
             ),
         );
         Ok(())
+    }
+
+    fn authorize_existing(
+        &self,
+        action: Action,
+        id: &str,
+    ) -> Result<crate::authorization::runtime::MutationPermit, RuntimeError> {
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let permit = self.authorization.authorize(action, &record)?;
+        let current = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if let Err(error) = self.authorization.revalidate(&permit, &current) {
+            self.authorization.complete(permit, false)?;
+            return Err(error.into());
+        }
+        Ok(permit)
+    }
+
+    fn mediate_existing<T>(
+        &self,
+        action: Action,
+        id: &str,
+        execute: impl FnOnce(
+            &Self,
+            &AuthorizedRequest,
+            Option<&crate::witness::DurableIntent>,
+        ) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| RuntimeError::Authorization("mutation lock poisoned".into()))?;
+        let permit = self.authorize_existing(action, id)?;
+        let (proof, intent) = permit.execution_authority();
+        let result = execute(self, proof, intent);
+        self.authorization.complete(permit, result.is_ok())?;
+        result
     }
 }
 fn generate_container_id() -> String {
@@ -1741,7 +1996,10 @@ fn build_command(
             }
             if let Some(user_spec) = setup_user.as_deref() {
                 apply_runtime_identity(user_spec).map_err(|err| {
-                    io::Error::new(err.kind(), format!("pre_exec set identity {user_spec}: {err}"))
+                    io::Error::new(
+                        err.kind(),
+                        format!("pre_exec set identity {user_spec}: {err}"),
+                    )
                 })?;
             }
             if no_new_privs {
@@ -1777,14 +2035,9 @@ fn build_command(
                     let invalid_arg = err_text.contains("Invalid argument")
                         || err_text.contains("invalid argument");
                     if !seccomp_permissive && !invalid_arg {
-                        return Err(std::io::Error::other(
-                            err.to_string(),
-                        ));
+                        return Err(std::io::Error::other(err.to_string()));
                     }
-                    warn!(
-                        "seccomp apply failed, continuing without seccomp: {}",
-                        err
-                    );
+                    warn!("seccomp apply failed, continuing without seccomp: {}", err);
                 }
             }
             Ok(())
@@ -1954,7 +2207,9 @@ fn supervise_child(
             uptime_secs,
         };
         let delay_secs = match adaptive_policy.decide(&adaptive_signal) {
-            ferro_mind::ai::restart::RestartDecision::RestartAfterDelay { delay_secs } => delay_secs,
+            ferro_mind::ai::restart::RestartDecision::RestartAfterDelay { delay_secs } => {
+                delay_secs
+            }
             ferro_mind::ai::restart::RestartDecision::DoNotRestart => {
                 // Adaptive policy says don't restart, but honor the existing policy too
                 1 // Fall back to minimum delay; should_restart check above already handles the quit case
@@ -2208,7 +2463,11 @@ fn classify_legacy_network_record(
 }
 
 impl NetworkSetup {
-    fn isolated(netns_name: Option<String>, container_ip: Option<String>, container_ipv6: Option<String>) -> Self {
+    fn isolated(
+        netns_name: Option<String>,
+        container_ip: Option<String>,
+        container_ipv6: Option<String>,
+    ) -> Self {
         Self {
             netns_name,
             container_ip,
@@ -2302,10 +2561,7 @@ fn setup_network(
     let bridge_config = bridge_config()?;
     let network_id = bridge_network_id(&bridge_config.name, &bridge_config.cidr);
     let mut ebpf_preparation = if active_backend == NetworkBackend::Ebpf {
-        Some(prepare_shared_ebpf_network(
-            &network_id,
-            existing_records,
-        )?)
+        Some(prepare_shared_ebpf_network(&network_id, existing_records)?)
     } else {
         None
     };
@@ -2314,7 +2570,9 @@ fn setup_network(
         cidr: bridge_config.cidr.clone(),
         ipv6_cidr: bridge_config.ipv6_cidr.clone(),
     };
-    let bridge_existed = Path::new("/sys/class/net").join(&bridge_config.name).exists();
+    let bridge_existed = Path::new("/sys/class/net")
+        .join(&bridge_config.name)
+        .exists();
     match bridge::create_bridge(&bridge_exec_config) {
         Ok(()) => {
             if !bridge_existed {
@@ -2370,7 +2628,10 @@ fn setup_network(
         &bridge_config.name,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    run_cmd(&netns::build_ip_link_set_netns_cmd(&cont_veth, &netns_name)?)?;
+    run_cmd(&netns::build_ip_link_set_netns_cmd(
+        &cont_veth,
+        &netns_name,
+    )?)?;
     // Rename the moved interface to eth0 inside the netns (while still down).
     run_cmd(&ip_netns_exec(
         &netns_name,
@@ -2530,13 +2791,26 @@ fn setup_managed_network(
     rollback: &mut CreationRollback,
 ) -> Result<NetworkSetup, RuntimeError> {
     if !nix::unistd::Uid::effective().is_root() {
-        return Err(RuntimeError::Network("managed overlay requires root".to_string()));
+        return Err(RuntimeError::Network(
+            "managed overlay requires root".to_string(),
+        ));
     }
-    let socket = std::env::var("FERROCRATE_AGENT_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
-    let request = ManagedOverlayRequest::AttachContainer { overlay_id: overlay_id.to_string(), container_id: container_id.to_string(), now_unix: crate::container_store::now_unix() as i64 };
-    let response = ManagedOverlayClient::new(socket).request(&request).map_err(|error| RuntimeError::Network(format!("managed overlay agent unavailable: {error}")))?;
+    let socket = std::env::var("FERROCRATE_AGENT_SOCKET")
+        .unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
+    let request = ManagedOverlayRequest::AttachContainer {
+        overlay_id: overlay_id.to_string(),
+        container_id: container_id.to_string(),
+        now_unix: crate::container_store::now_unix() as i64,
+    };
+    let response = ManagedOverlayClient::new(socket)
+        .request(&request)
+        .map_err(|error| {
+            RuntimeError::Network(format!("managed overlay agent unavailable: {error}"))
+        })?;
     let ManagedOverlayResponse::Attached(attachment) = response else {
-        return Err(RuntimeError::Network("managed overlay agent rejected attachment".to_string()));
+        return Err(RuntimeError::Network(
+            "managed overlay agent rejected attachment".to_string(),
+        ));
     };
     let netns_name = attachment.netns.clone();
     run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
@@ -2545,23 +2819,60 @@ fn setup_managed_network(
     let host_veth = format!("veth{}", short_id(container_id, 8));
     let host_veth = host_veth[..host_veth.len().min(15)].to_string();
     let cont_veth = format!("vc{}", short_id(container_id, 8));
-    let config = veth::VethConfig { pair: veth::VethPair { host: host_veth.clone(), container: cont_veth.clone() }, mtu: Some(attachment.mtu.into()), host_addr: None, container_addr: None };
+    let config = veth::VethConfig {
+        pair: veth::VethPair {
+            host: host_veth.clone(),
+            container: cont_veth.clone(),
+        },
+        mtu: Some(attachment.mtu.into()),
+        host_addr: None,
+        container_addr: None,
+    };
     run_cmd(&veth::build_ip_link_add_veth_cmd(&config)?)?;
     rollback.track_veth_created(host_veth.clone())?;
     let host_ifindex = interface_ifindex(&host_veth)?;
     rollback.identify_veth(host_ifindex)?;
     rollback.host_veth = Some((host_veth.clone(), Some(host_ifindex)));
     rollback.netns_name = Some(netns_name.clone());
-    run_cmd(&bridge::build_ip_link_set_master_cmd(&host_veth, &attachment.bridge)?)?;
+    run_cmd(&bridge::build_ip_link_set_master_cmd(
+        &host_veth,
+        &attachment.bridge,
+    )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    run_cmd(&netns::build_ip_link_set_netns_cmd(&cont_veth, &netns_name)?)?;
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", &cont_veth, "name", "eth0"]))?;
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "lo", "up"]))?;
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "addr", "add", &format!("{}/{}", attachment.ipv4, attachment.prefix), "dev", "eth0"]))?;
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "link", "set", "eth0", "up"]))?;
-    run_cmd(&ip_netns_exec(&netns_name, &["ip", "route", "add", "default", "via", &attachment.gateway]))?;
+    run_cmd(&netns::build_ip_link_set_netns_cmd(
+        &cont_veth,
+        &netns_name,
+    )?)?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "link", "set", &cont_veth, "name", "eth0"],
+    ))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "link", "set", "lo", "up"],
+    ))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &[
+            "ip",
+            "addr",
+            "add",
+            &format!("{}/{}", attachment.ipv4, attachment.prefix),
+            "dev",
+            "eth0",
+        ],
+    ))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "link", "set", "eth0", "up"],
+    ))?;
+    run_cmd(&ip_netns_exec(
+        &netns_name,
+        &["ip", "route", "add", "default", "via", &attachment.gateway],
+    ))?;
     rollback.track_network_context(attachment.ipv4.clone(), &[])?;
-    let mut setup = NetworkSetup::isolated(Some(netns_name), Some(attachment.ipv4), attachment.ipv6);
+    let mut setup =
+        NetworkSetup::isolated(Some(netns_name), Some(attachment.ipv4), attachment.ipv6);
     setup.managed_overlay = Some(overlay_id.to_string());
     setup.managed_host_veth = Some(host_veth);
     Ok(setup)
@@ -2583,8 +2894,15 @@ fn build_network_plan(
             protocol: mapping.protocol.clone(),
         })
         .collect::<Vec<_>>();
-    build_portmap_plan(backend, owner_id, &mappings, container_ip, source_cidr, bridge)
-        .map_err(|error| RuntimeError::Network(error.to_string()))
+    build_portmap_plan(
+        backend,
+        owner_id,
+        &mappings,
+        container_ip,
+        source_cidr,
+        bridge,
+    )
+    .map_err(|error| RuntimeError::Network(error.to_string()))
 }
 
 trait FirewallCommandRunner {
@@ -2625,9 +2943,9 @@ fn cleanup_firewall_plan_with<R: FirewallCommandRunner>(
     expected_state: &str,
     runner: &mut R,
 ) -> Result<(), RuntimeError> {
-    let firewall_id = plan.firewall_id().ok_or_else(|| {
-        RuntimeError::Network("firewall plan has no ownership id".to_string())
-    })?;
+    let firewall_id = plan
+        .firewall_id()
+        .ok_or_else(|| RuntimeError::Network("firewall plan has no ownership id".to_string()))?;
     let Some(mut live_state) = runner.capture(backend, firewall_id)? else {
         return Ok(());
     };
@@ -2692,9 +3010,9 @@ fn apply_and_capture_network_plan_with<R: FirewallCommandRunner, S: FirewallRoll
     acquired_rollback: &mut S,
     runner: &mut R,
 ) -> Result<String, RuntimeError> {
-    let firewall_id = plan.firewall_id().ok_or_else(|| {
-        RuntimeError::Network("firewall plan has no ownership id".to_string())
-    })?;
+    let firewall_id = plan
+        .firewall_id()
+        .ok_or_else(|| RuntimeError::Network("firewall plan has no ownership id".to_string()))?;
     acquired_rollback.clear();
     let mut previous = runner.capture(backend, firewall_id)?;
     for (index, command) in plan.commands().iter().enumerate() {
@@ -2799,7 +3117,9 @@ fn prepare_shared_ebpf_network(
             let ownership = matching
                 .first()
                 .and_then(|record| record.network_ownership.clone())
-                .ok_or_else(|| RuntimeError::Network("shared eBPF ownership is missing".to_string()))?;
+                .ok_or_else(|| {
+                    RuntimeError::Network("shared eBPF ownership is missing".to_string())
+                })?;
             verify_shared_ebpf_metadata(&ownership, &config)?;
             for record in &matching {
                 let candidate = record.network_ownership.as_ref().ok_or_else(|| {
@@ -2843,8 +3163,8 @@ fn prepare_ebpf_classifiers(
     config: EbpfNetworkConfig,
 ) -> Result<PreparedEbpfNetwork, RuntimeError> {
     let loopback_ifindex = config.loopback_ifindex;
-    let mut prepared = EbpfNetwork::prepare(config)
-        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    let mut prepared =
+        EbpfNetwork::prepare(config).map_err(|error| RuntimeError::Network(error.to_string()))?;
     prepared
         .prepare_interface("lo", loopback_ifindex)
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
@@ -2868,9 +3188,10 @@ fn verify_shared_ebpf_metadata(
         || ownership.snat_port_start != Some(config.snat_port_start)
         || ownership.snat_port_end != Some(config.snat_port_end)
         || ownership.object_sha256.as_deref() != Some(expected_hash.as_str())
-        || ownership.object_abi != Some(embedded_object_abi().map_err(|error| {
-            RuntimeError::Network(format!("embedded eBPF ABI validation failed: {error}"))
-        })?)
+        || ownership.object_abi
+            != Some(embedded_object_abi().map_err(|error| {
+                RuntimeError::Network(format!("embedded eBPF ABI validation failed: {error}"))
+            })?)
     {
         return Err(RuntimeError::Network(
             "persisted shared eBPF metadata is malformed or foreign".to_string(),
@@ -2905,10 +3226,7 @@ fn same_shared_ebpf_ownership(
         && left.object_abi == right.object_abi
 }
 
-fn same_filter_slot(
-    left: &EbpfFilterOwnershipRecord,
-    right: &EbpfFilterOwnershipRecord,
-) -> bool {
+fn same_filter_slot(left: &EbpfFilterOwnershipRecord, right: &EbpfFilterOwnershipRecord) -> bool {
     left.interface == right.interface
         && left.interface_ifindex == right.interface_ifindex
         && left.direction == right.direction
@@ -2922,9 +3240,12 @@ fn observe_owned_ebpf_state(
     if ownership.ebpf_pins.is_empty() || ownership.ebpf_filters.is_empty() {
         return Ok(ObservedNetworkState::PartialOrReplaced);
     }
-    let root = PathBuf::from(ownership.ebpf_pin_path.as_deref().ok_or_else(|| {
-        RuntimeError::Network("shared eBPF pin root is missing".to_string())
-    })?);
+    let root = PathBuf::from(
+        ownership
+            .ebpf_pin_path
+            .as_deref()
+            .ok_or_else(|| RuntimeError::Network("shared eBPF pin root is missing".to_string()))?,
+    );
     let mut present = 0usize;
     let mut missing = 0usize;
     for pin in &ownership.ebpf_pins {
@@ -3052,7 +3373,9 @@ fn setup_ebpf_backend(
         )?;
         rollback.adopt_backend(NetworkBackend::Ebpf, ownership.clone(), Some(network))?;
         let network = rollback.ebpf_network.as_mut().ok_or_else(|| {
-            RuntimeError::Network("attached eBPF network was not transactionally adopted".to_string())
+            RuntimeError::Network(
+                "attached eBPF network was not transactionally adopted".to_string(),
+            )
         })?;
         for record in &preparation.recovery_records {
             install_record_on_attached_network(network, record)?;
@@ -3113,16 +3436,19 @@ fn install_record_on_attached_network(
     let address = record
         .ip_address
         .as_deref()
-        .ok_or_else(|| RuntimeError::Network("recovering endpoint has no IPv4 address".to_string()))?
+        .ok_or_else(|| {
+            RuntimeError::Network("recovering endpoint has no IPv4 address".to_string())
+        })?
         .parse::<Ipv4Addr>()
         .map_err(|_| RuntimeError::Network("recovering endpoint has invalid IPv4".to_string()))?
         .octets();
     let ownership = record.network_ownership.as_ref().ok_or_else(|| {
         RuntimeError::Network("recovering endpoint has no ownership metadata".to_string())
     })?;
-    let netns_name = record.netns.as_deref().ok_or_else(|| {
-        RuntimeError::Network("recovering endpoint has no namespace".to_string())
-    })?;
+    let netns_name = record
+        .netns
+        .as_deref()
+        .ok_or_else(|| RuntimeError::Network("recovering endpoint has no namespace".to_string()))?;
     network
         .install_endpoint(
             EndpointKey { address },
@@ -3223,7 +3549,6 @@ fn kernel_path_identity(path: &Path) -> Result<KernelObjectIdentityRecord, Runti
     })
 }
 
-
 #[derive(Debug, Clone)]
 struct EbpfExternalRoute {
     interface: String,
@@ -3263,8 +3588,7 @@ fn ebpf_external_route() -> Result<EbpfExternalRoute, RuntimeError> {
     } else {
         let gateway = field_after("via").ok_or_else(|| {
             RuntimeError::Network(
-                "eBPF default route has no next hop; set FERROCRATE_EBPF_NEXT_HOP_MAC"
-                    .to_string(),
+                "eBPF default route has no next hop; set FERROCRATE_EBPF_NEXT_HOP_MAC".to_string(),
             )
         })?;
         let neighbor = run_cmd_capture(&[
@@ -3339,9 +3663,9 @@ fn ebpf_snat_range() -> Result<(u16, u16), RuntimeError> {
     let (start, end) = value.split_once('-').ok_or_else(|| {
         RuntimeError::Network("FERROCRATE_EBPF_SNAT_PORT_RANGE must be START-END".to_string())
     })?;
-    let start = start.parse::<u16>().map_err(|_| {
-        RuntimeError::Network("invalid eBPF SNAT range start".to_string())
-    })?;
+    let start = start
+        .parse::<u16>()
+        .map_err(|_| RuntimeError::Network("invalid eBPF SNAT range start".to_string()))?;
     let end = end
         .parse::<u16>()
         .map_err(|_| RuntimeError::Network("invalid eBPF SNAT range end".to_string()))?;
@@ -3410,7 +3734,9 @@ fn tc_filter_snapshot(
             .and_then(serde_json::Value::as_u64)
             .map(u32::try_from)
             .transpose()
-            .map_err(|_| RuntimeError::Network("owned tc program id is out of range".to_string()))?;
+            .map_err(|_| {
+                RuntimeError::Network("owned tc program id is out of range".to_string())
+            })?;
         let program_tag = options
             .get("tag")
             .and_then(serde_json::Value::as_str)
@@ -3448,9 +3774,9 @@ fn capture_ebpf_pins(root: &Path) -> Result<Vec<EbpfPinOwnershipRecord>, Runtime
                 path.display()
             )));
         }
-        let relative = path.strip_prefix(root).map_err(|_| {
-            RuntimeError::Network("eBPF pin escaped ownership root".to_string())
-        })?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| RuntimeError::Network("eBPF pin escaped ownership root".to_string()))?;
         records.push(EbpfPinOwnershipRecord {
             relative_path: relative.display().to_string(),
             device: metadata.dev(),
@@ -3578,12 +3904,14 @@ fn ebpf_config_from_ownership(
             .ok_or_else(|| RuntimeError::Network("eBPF object hash is missing".to_string()))?,
     )
     .map_err(|_| RuntimeError::Network("invalid persisted eBPF object hash".to_string()))?;
-    let expected_object_sha256: [u8; 32] = object_hash
-        .try_into()
-        .map_err(|_| RuntimeError::Network("invalid persisted eBPF object hash length".to_string()))?;
+    let expected_object_sha256: [u8; 32] = object_hash.try_into().map_err(|_| {
+        RuntimeError::Network("invalid persisted eBPF object hash length".to_string())
+    })?;
     if expected_object_sha256 != embedded_object_sha256()
         || ownership.object_abi
-            != Some(embedded_object_abi().map_err(|error| RuntimeError::Network(error.to_string()))?)
+            != Some(
+                embedded_object_abi().map_err(|error| RuntimeError::Network(error.to_string()))?,
+            )
     {
         return Err(RuntimeError::Network(
             "persisted eBPF object identity is incompatible with this runtime".to_string(),
@@ -3612,8 +3940,7 @@ fn verify_recovery_host_contract(config: &EbpfNetworkConfig) -> Result<(), Runti
         || snat != (config.snat_port_start, config.snat_port_end)
     {
         return Err(RuntimeError::Network(
-            "persisted eBPF host route or SNAT reservation no longer matches the host"
-                .to_string(),
+            "persisted eBPF host route or SNAT reservation no longer matches the host".to_string(),
         ));
     }
     Ok(())
@@ -3635,7 +3962,9 @@ fn verify_container_kernel_ownership(
             ));
         }
     } else if require_present {
-        return Err(RuntimeError::Network("owned host veth is missing".to_string()));
+        return Err(RuntimeError::Network(
+            "owned host veth is missing".to_string(),
+        ));
     }
 
     let expected_namespace = ownership.namespace_identity.ok_or_else(|| {
@@ -3667,7 +3996,9 @@ fn verify_container_kernel_ownership(
     if let (Some(bridge), Some(expected)) = (&ownership.bridge, ownership.bridge_ifindex) {
         let path = Path::new("/sys/class/net").join(bridge);
         if path.exists() && interface_ifindex(bridge)? != expected {
-            return Err(RuntimeError::Network("owned bridge was replaced".to_string()));
+            return Err(RuntimeError::Network(
+                "owned bridge was replaced".to_string(),
+            ));
         }
         if require_present && !path.exists() {
             return Err(RuntimeError::Network("owned bridge is missing".to_string()));
@@ -3753,10 +4084,7 @@ fn normalize_owned_firewall_state(state: &str) -> String {
         .join("\n")
 }
 
-fn verify_resumable_firewall_state(
-    expected: &str,
-    live: &str,
-) -> Result<(), RuntimeError> {
+fn verify_resumable_firewall_state(expected: &str, live: &str) -> Result<(), RuntimeError> {
     let expected = expected.lines().collect::<BTreeSet<_>>();
     for line in live.lines() {
         if !expected.contains(line) {
@@ -3791,8 +4119,7 @@ fn capture_firewall_owned_state(
                 .output()?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                if stderr.contains("No such file or directory")
-                    || stderr.contains("does not exist")
+                if stderr.contains("No such file or directory") || stderr.contains("does not exist")
                 {
                     return Ok(None);
                 }
@@ -3852,9 +4179,8 @@ fn verify_firewall_ownership(
     }
     let firewall_id = ownership.firewall_id.as_deref().unwrap_or_default();
     let marker = ownership.firewall_marker.as_deref().unwrap_or_default();
-    let output = capture_firewall_owned_state(backend, firewall_id)?.ok_or_else(|| {
-        RuntimeError::Network("owned firewall object is missing".to_string())
-    })?;
+    let output = capture_firewall_owned_state(backend, firewall_id)?
+        .ok_or_else(|| RuntimeError::Network("owned firewall object is missing".to_string()))?;
     if !output.contains(marker)
         || ownership.firewall_expected_state.as_deref() != Some(output.as_str())
     {
@@ -3934,9 +4260,12 @@ fn cleanup_proven_legacy_rules(
         commands.pop();
     }
     for mut command in commands.into_iter().rev() {
-        let action = command.iter().position(|part| part == "-A").ok_or_else(|| {
-            RuntimeError::Network("malformed proven legacy firewall command".to_string())
-        })?;
+        let action = command
+            .iter()
+            .position(|part| part == "-A")
+            .ok_or_else(|| {
+                RuntimeError::Network("malformed proven legacy firewall command".to_string())
+            })?;
         command[action] = "-D".to_string();
         run_cmd_allow_missing(&command)?;
     }
@@ -3948,12 +4277,35 @@ fn cleanup_network(
     all_records: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
     if let Some(overlay_id) = record.managed_overlay.as_deref() {
-        let socket = std::env::var("FERROCRATE_AGENT_SOCKET").unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
-        let request = ManagedOverlayRequest::DetachContainer { container_id: record.id.clone(), now_unix: crate::container_store::now_unix() as i64 };
-        let response = ManagedOverlayClient::new(socket).request(&request).map_err(|error| RuntimeError::Network(format!("managed overlay detach unavailable for {overlay_id}: {error}")))?;
-        if !matches!(response, ManagedOverlayResponse::Detached { .. }) { return Err(RuntimeError::Network("managed overlay agent rejected detach".to_string())); }
-        if let Some(host_veth) = record.managed_host_veth.as_deref() { run_cmd_allow_missing(&["ip".into(), "link".into(), "delete".into(), host_veth.into()])?; }
-        if let Some(netns_name) = record.netns.as_deref() { run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?; }
+        let socket = std::env::var("FERROCRATE_AGENT_SOCKET")
+            .unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
+        let request = ManagedOverlayRequest::DetachContainer {
+            container_id: record.id.clone(),
+            now_unix: crate::container_store::now_unix() as i64,
+        };
+        let response = ManagedOverlayClient::new(socket)
+            .request(&request)
+            .map_err(|error| {
+                RuntimeError::Network(format!(
+                    "managed overlay detach unavailable for {overlay_id}: {error}"
+                ))
+            })?;
+        if !matches!(response, ManagedOverlayResponse::Detached { .. }) {
+            return Err(RuntimeError::Network(
+                "managed overlay agent rejected detach".to_string(),
+            ));
+        }
+        if let Some(host_veth) = record.managed_host_veth.as_deref() {
+            run_cmd_allow_missing(&[
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                host_veth.into(),
+            ])?;
+        }
+        if let Some(netns_name) = record.netns.as_deref() {
+            run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+        }
         return Ok(());
     }
     if record.network_backend.is_none() && record.network_ownership.is_none() {
@@ -4031,10 +4383,8 @@ fn cleanup_network_resources(
             match backend {
                 NetworkBackend::Ebpf => {
                     if Path::new(ownership.ebpf_pin_path.as_deref().unwrap_or_default()).exists() {
-                        let verified = verify_ebpf_record_mutation_ownership(
-                            ownership,
-                            remove_shared_ebpf,
-                        )?;
+                        let verified =
+                            verify_ebpf_record_mutation_ownership(ownership, remove_shared_ebpf)?;
                         cleanup_ebpf_container_records(
                             container_ip,
                             port_mappings,
@@ -4074,7 +4424,10 @@ fn cleanup_network_resources(
                     cleanup_firewall_plan_with(
                         backend,
                         &plan,
-                        ownership.firewall_expected_state.as_deref().unwrap_or_default(),
+                        ownership
+                            .firewall_expected_state
+                            .as_deref()
+                            .unwrap_or_default(),
                         &mut runner,
                     )?;
                 }
@@ -4120,7 +4473,7 @@ fn cleanup_ebpf_container_records(
                 protocol: protocol_number(&mapping.protocol)?,
                 host_port: mapping.host_port,
             })
-        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
     }
     verify_ebpf_classifier_ownership(ownership)?;
     verified
@@ -4135,9 +4488,12 @@ fn verify_ebpf_record_mutation_ownership(
     let network_id = ownership.network_id.as_deref().ok_or_else(|| {
         RuntimeError::Network("eBPF ownership has no bridge network identity".to_string())
     })?;
-    let root = PathBuf::from(ownership.ebpf_pin_path.as_deref().ok_or_else(|| {
-        RuntimeError::Network("eBPF ownership has no pin path".to_string())
-    })?);
+    let root = PathBuf::from(
+        ownership
+            .ebpf_pin_path
+            .as_deref()
+            .ok_or_else(|| RuntimeError::Network("eBPF ownership has no pin path".to_string()))?,
+    );
     let current_pins = capture_ebpf_pins(&root)?;
     if current_pins.len() != ownership.ebpf_pins.len()
         || current_pins
@@ -4342,9 +4698,12 @@ fn cleanup_owned_ebpf(ownership: &NetworkOwnershipRecord) -> Result<(), RuntimeE
 fn verify_owned_ebpf_pins_before_cleanup(
     ownership: &NetworkOwnershipRecord,
 ) -> Result<(), RuntimeError> {
-    let root = PathBuf::from(ownership.ebpf_pin_path.as_deref().ok_or_else(|| {
-        RuntimeError::Network("eBPF ownership has no pin path".to_string())
-    })?);
+    let root = PathBuf::from(
+        ownership
+            .ebpf_pin_path
+            .as_deref()
+            .ok_or_else(|| RuntimeError::Network("eBPF ownership has no pin path".to_string()))?,
+    );
     if !root.exists() {
         return Ok(());
     }
@@ -4371,9 +4730,12 @@ fn verify_owned_ebpf_pins_before_cleanup(
 }
 
 fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), RuntimeError> {
-    let root = PathBuf::from(ownership.ebpf_pin_path.as_deref().ok_or_else(|| {
-        RuntimeError::Network("eBPF ownership has no pin path".to_string())
-    })?);
+    let root = PathBuf::from(
+        ownership
+            .ebpf_pin_path
+            .as_deref()
+            .ok_or_else(|| RuntimeError::Network("eBPF ownership has no pin path".to_string()))?,
+    );
     let mut pins = ownership.ebpf_pins.clone();
     pins.sort_by(|left, right| {
         Path::new(&right.relative_path)
@@ -4493,9 +4855,8 @@ fn resolve_seccomp_profile(
     ai_config: Option<&AiRuntimeConfig>,
 ) -> Result<Option<SeccompProfile>, RuntimeError> {
     if let Some(ai) = ai_config {
-        if let Some(profile) =
-            crate::ai_runtime::seccomp_profile_for_authority(&ai.authority)
-                .map_err(|err| RuntimeError::InvalidCommand(format!("ai_runtime seccomp: {err}")))?
+        if let Some(profile) = crate::ai_runtime::seccomp_profile_for_authority(&ai.authority)
+            .map_err(|err| RuntimeError::InvalidCommand(format!("ai_runtime seccomp: {err}")))?
         {
             return Ok(Some(profile));
         }
@@ -4510,11 +4871,7 @@ fn load_seccomp_profile() -> Result<Option<SeccompProfile>, RuntimeError> {
     if let Ok(raw_path) = std::env::var("FERROCRATE_SECCOMP_PROFILE") {
         let path = PathBuf::from(raw_path.trim());
         let metadata = fs::metadata(&path).map_err(|err| {
-            RuntimeError::InvalidCommand(format!(
-                "seccomp profile {}: {}",
-                path.display(),
-                err
-            ))
+            RuntimeError::InvalidCommand(format!("seccomp profile {}: {}", path.display(), err))
         })?;
         const MAX_SECCOMP_PROFILE_BYTES: u64 = 1024 * 1024;
         if metadata.len() > MAX_SECCOMP_PROFILE_BYTES {
@@ -4525,11 +4882,7 @@ fn load_seccomp_profile() -> Result<Option<SeccompProfile>, RuntimeError> {
             )));
         }
         let raw = fs::read_to_string(&path).map_err(|err| {
-            RuntimeError::InvalidCommand(format!(
-                "seccomp profile {}: {}",
-                path.display(),
-                err
-            ))
+            RuntimeError::InvalidCommand(format!("seccomp profile {}: {}", path.display(), err))
         })?;
         let profile = parse_seccomp_profile(&raw)
             .map_err(|err| RuntimeError::InvalidCommand(format!("seccomp profile: {err}")))?;
@@ -5285,9 +5638,13 @@ fn setup_wireguard(
         .parse()
         .map_err(|_| RuntimeError::Network("invalid WireGuard IPv4 assignment".to_string()))?];
     if let Some(address) = &ipv6 {
-        addresses.push(format!("{address}/{}", cfg.ipv6_prefix.unwrap_or_default())
-            .parse()
-            .map_err(|_| RuntimeError::Network("invalid WireGuard IPv6 assignment".to_string()))?);
+        addresses.push(
+            format!("{address}/{}", cfg.ipv6_prefix.unwrap_or_default())
+                .parse()
+                .map_err(|_| {
+                    RuntimeError::Network("invalid WireGuard IPv6 assignment".to_string())
+                })?,
+        );
     }
     let peers = match peer {
         Some(peer) => {
@@ -5301,7 +5658,9 @@ fn setup_wireguard(
             vec![WireGuardPeer::new(
                 container_id.to_string(),
                 peer.public_key,
-                peer.endpoint.parse().map_err(|_| RuntimeError::Network("invalid WireGuard peer endpoint".to_string()))?,
+                peer.endpoint.parse().map_err(|_| {
+                    RuntimeError::Network("invalid WireGuard peer endpoint".to_string())
+                })?,
                 allowed_ips,
             )]
         }
@@ -6213,6 +6572,7 @@ mod tests {
             managed_overlay: None,
             managed_host_veth: None,
             ai_runtime: None,
+            creation_provenance: Default::default(),
         };
         store.put(&record).expect("seed stale record");
         drop(store);
@@ -6261,6 +6621,7 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
+            creation_provenance: Default::default(),
             managed_overlay: None,
             managed_host_veth: None,
         };
@@ -6459,7 +6820,10 @@ mod tests {
         .expect("eBPF plan");
 
         assert!(plan.commands().iter().all(|command| {
-            !matches!(command.first().map(String::as_str), Some("iptables" | "nft"))
+            !matches!(
+                command.first().map(String::as_str),
+                Some("iptables" | "nft")
+            )
         }));
     }
 
@@ -6562,6 +6926,7 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
+            creation_provenance: Default::default(),
             managed_overlay: None,
             managed_host_veth: None,
         }
@@ -6650,10 +7015,9 @@ mod tests {
             serde_json::to_vec(&pending).unwrap(),
         )
         .unwrap();
-        let store = crate::container_store::LocalContainerStore::open(
-            temp.path().join("containers.db"),
-        )
-        .unwrap();
+        let store =
+            crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
+                .unwrap();
 
         super::recover_pending_network_cleanups(temp.path(), &store, temp.path()).unwrap();
         assert!(!container_dir.exists());
@@ -6689,7 +7053,10 @@ mod tests {
                 Ok(_) => panic!("{status} malformed network unexpectedly reconciled"),
                 Err(error) => error,
             };
-            assert!(error.to_string().contains("ownership"), "status {status}: {error}");
+            assert!(
+                error.to_string().contains("ownership"),
+                "status {status}: {error}"
+            );
         }
     }
 
@@ -6722,7 +7089,9 @@ mod tests {
                 let attempt = self.setup_attempts;
                 self.setup_attempts += 1;
                 if self.fail_setup_at == Some(attempt) {
-                    return Err(super::RuntimeError::Network("injected setup failure".to_string()));
+                    return Err(super::RuntimeError::Network(
+                        "injected setup failure".to_string(),
+                    ));
                 }
             }
             match action {
@@ -6779,7 +7148,11 @@ mod tests {
             let state = self
                 .live
                 .iter()
-                .filter(|command| command.iter().any(|argument| argument.contains(firewall_id)))
+                .filter(|command| {
+                    command
+                        .iter()
+                        .any(|argument| argument.contains(firewall_id))
+                })
                 .map(|command| command.join(" "))
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -6837,7 +7210,10 @@ mod tests {
         assert!(error.to_string().contains("foreign chain"));
         assert!(acquired.is_empty());
         assert_eq!(runner.live, vec![foreign]);
-        assert!(runner.calls.iter().all(|command| command[3] != "-X" && command[3] != "-D"));
+        assert!(runner
+            .calls
+            .iter()
+            .all(|command| command[3] != "-X" && command[3] != "-D"));
     }
 
     #[test]
@@ -6894,13 +7270,8 @@ mod tests {
 
         runner.fail_cleanup_at = None;
         runner.cleanup_attempts = 0;
-        super::cleanup_firewall_plan_with(
-            NetworkBackend::Iptables,
-            &plan,
-            &expected,
-            &mut runner,
-        )
-        .unwrap();
+        super::cleanup_firewall_plan_with(NetworkBackend::Iptables, &plan, &expected, &mut runner)
+            .unwrap();
         assert!(runner.live.is_empty());
     }
 
@@ -6935,7 +7306,10 @@ mod tests {
         let config = super::ebpf_config_from_ownership(&ownership).unwrap();
         assert_eq!(config.network_id, "bridge-fixture");
         assert_eq!(config.external_ifindex, 17);
-        assert_eq!(config.snat_port_start..=config.snat_port_end, 50_000..=50_031);
+        assert_eq!(
+            config.snat_port_start..=config.snat_port_end,
+            50_000..=50_031
+        );
 
         let mut malformed = ownership.clone();
         malformed.next_hop_mac = None;
@@ -7048,9 +7422,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn network_backend_transaction_rolls_back_every_partial_boundary() {
-        use super::NetworkMutationKind::{
-            BackendRecords, Bridge, Namespace, Shaping, Veth,
-        };
+        use super::NetworkMutationKind::{BackendRecords, Bridge, Namespace, Shaping, Veth};
         let mutations = [Bridge, Namespace, Veth, BackendRecords, Shaping];
 
         for completed in 1..=mutations.len() {
@@ -7132,11 +7504,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             }
         }
 
-        let err = super::resolve_network_backend(
-            ferro_net::NetworkBackend::Ebpf,
-            &UnavailableProbe,
-        )
-        .expect_err("eBPF must not fall back");
+        let err =
+            super::resolve_network_backend(ferro_net::NetworkBackend::Ebpf, &UnavailableProbe)
+                .expect_err("eBPF must not fall back");
         assert!(err.to_string().contains("eBPF backend unavailable"));
     }
 
@@ -7250,6 +7620,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
+            creation_provenance: Default::default(),
             managed_overlay: None,
             managed_host_veth: None,
         };
@@ -7337,8 +7708,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
         let profile_path = temp.path().join("seccomp.json");
-        std::fs::write(&profile_path, crate::seccomp::default_seccomp_profile_json())
-            .expect("write profile");
+        std::fs::write(
+            &profile_path,
+            crate::seccomp::default_seccomp_profile_json(),
+        )
+        .expect("write profile");
         unsafe {
             std::env::set_var("FERROCRATE_SECCOMP_PROFILE", profile_path.as_os_str());
             std::env::remove_var("FERROCRATE_SECCOMP");

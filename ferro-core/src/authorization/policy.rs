@@ -80,6 +80,22 @@ pub enum PolicyError {
 }
 
 impl PolicyStore {
+    pub(crate) fn compatibility_disabled() -> Self {
+        let document = PolicyDocument {
+            schema_version: POLICY_SCHEMA_VERSION,
+            generation: 1,
+            mode: super::AuthorizationMode::Disabled,
+        };
+        let source = b"schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n";
+        Self {
+            active: RwLock::new(PolicySnapshot {
+                generation: 1,
+                digest: Sha256::digest(source).into(),
+                document: Arc::new(document),
+            }),
+        }
+    }
+
     /// Load and validate the initial policy snapshot.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
         let snapshot = load_snapshot(path.as_ref())?;

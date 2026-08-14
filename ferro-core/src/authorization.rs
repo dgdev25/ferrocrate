@@ -7,6 +7,7 @@ pub mod inventory;
 pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod principal;
+pub(crate) mod runtime;
 
 #[cfg(target_os = "linux")]
 pub use principal::{

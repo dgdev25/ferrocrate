@@ -42,7 +42,15 @@ impl RecoveryRecipe {
         let valid = matches!(
             (original_action, resource_kind, action),
             (
-                WitnessAction::ContainerCreate | WitnessAction::ContainerRun,
+                WitnessAction::ContainerCreate
+                    | WitnessAction::ContainerRun
+                    | WitnessAction::ContainerExec
+                    | WitnessAction::ContainerPause
+                    | WitnessAction::ContainerResume
+                    | WitnessAction::ContainerStop
+                    | WitnessAction::ContainerKill
+                    | WitnessAction::ContainerRestart
+                    | WitnessAction::ContainerDelete,
                 WitnessResourceKind::Container,
                 WitnessAction::ContainerDelete
             ) | (
@@ -138,6 +146,13 @@ fn action_from(value: u8) -> Option<WitnessAction> {
     match value {
         1 => Some(WitnessAction::ContainerCreate),
         2 => Some(WitnessAction::ContainerRun),
+        3 => Some(WitnessAction::ContainerExec),
+        4 => Some(WitnessAction::ContainerPause),
+        5 => Some(WitnessAction::ContainerResume),
+        6 => Some(WitnessAction::ContainerStop),
+        7 => Some(WitnessAction::ContainerKill),
+        8 => Some(WitnessAction::ContainerRestart),
+        9 => Some(WitnessAction::ContainerDelete),
         10 => Some(WitnessAction::ImagePull),
         12 => Some(WitnessAction::VolumeCreate),
         14 => Some(WitnessAction::VolumeMount),

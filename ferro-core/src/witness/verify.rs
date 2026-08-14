@@ -10,6 +10,7 @@ const MAX_OPEN_REQUESTS: usize = 4096;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamTrust {
     expected_journal_id: [u8; 16],
+    expected_epoch: u64,
     expected_first_sequence: u64,
     expected_predecessor_hash: [u8; 32],
 }
@@ -20,11 +21,13 @@ impl StreamTrust {
     /// first sequence and predecessor hash.
     pub fn new(
         expected_journal_id: [u8; 16],
+        expected_epoch: u64,
         expected_first_sequence: u64,
         expected_predecessor_hash: [u8; 32],
     ) -> Self {
         Self {
             expected_journal_id,
+            expected_epoch,
             expected_first_sequence,
             expected_predecessor_hash,
         }
@@ -37,7 +40,8 @@ pub struct VerificationReport {
     pub lifecycle_consistent: bool,
     pub completeness_through_checkpoint: Option<bool>,
     pub unknown_tail_freshness: bool,
-    pub freshness: super::checkpoint::Freshness,
+    pub freshness: super::Freshness,
+    pub checkpoint_age: Option<super::CheckpointAge>,
     pub records: u64,
     pub terminal_denied: u64,
     pub terminal_outcomes: u64,
@@ -109,7 +113,8 @@ where
         lifecycle_consistent: true,
         completeness_through_checkpoint: None,
         unknown_tail_freshness: false,
-        freshness: super::checkpoint::Freshness::UnknownTail,
+        freshness: super::Freshness::UnknownTail,
+        checkpoint_age: None,
         records: 0,
         terminal_denied: 0,
         terminal_outcomes: 0,
@@ -123,6 +128,9 @@ where
             return Err(WitnessError::WrongJournal);
         }
         let record = decoded.record();
+        if record.epoch != trust.expected_epoch {
+            return Err(WitnessError::WrongEpoch);
+        }
         if record.sequence != expected_sequence || !event_ids.insert(record.event_id) {
             return Err(WitnessError::SequenceGap);
         }

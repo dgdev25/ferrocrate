@@ -1,6 +1,6 @@
 use super::{
-    encode_record, hash_record, OperationId, RecoveryRecipe, WitnessAction, WitnessOutcome,
-    WitnessRecord, WitnessStage,
+    decode_record, encode_record, hash_record, OperationId, RecoveryRecipe, WitnessAction,
+    WitnessOutcome, WitnessRecord, WitnessStage,
 };
 use sled::transaction::{ConflictableTransactionError, Transactional};
 mod inspect;
@@ -14,7 +14,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::PathBuf,
-    sync::{atomic::AtomicBool, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Mutex,
+    },
 };
 use storage::{lock_journal, path_entry_exists, transaction_error};
 pub use types::{
@@ -45,7 +48,7 @@ pub struct WitnessJournal {
     segments: sled::Tree,
     sealed_segments: sled::Tree,
     journal_id: [u8; 16],
-    epoch: u64,
+    epoch: AtomicU64,
     max_bytes: u64,
     reserve_total: u64,
     segment_bytes: u64,
@@ -65,6 +68,17 @@ pub struct JournalHead {
 }
 
 impl WitnessJournal {
+    pub(super) fn advance_epoch(&self, expected: u64) -> Result<u64, JournalError> {
+        let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        if self.epoch.load(Ordering::Acquire) != expected {
+            return Err(JournalError::ProofMismatch);
+        }
+        let next = expected.checked_add(1).ok_or(JournalError::Corrupt)?;
+        self.meta.insert(EPOCH, &next.to_be_bytes())?;
+        self.db.flush()?;
+        self.epoch.store(next, Ordering::Release);
+        Ok(next)
+    }
     /// Flush all journal trees and capture the head while holding the sole
     /// append coordinator. Checkpoint signers must use this snapshot rather
     /// than separately reading sequence and hash metadata.
@@ -74,7 +88,7 @@ impl WitnessJournal {
         let (sequence, hash) = self.head()?;
         Ok(JournalHead {
             journal_id: self.journal_id,
-            epoch: self.epoch,
+            epoch: self.epoch.load(Ordering::Acquire),
             sequence,
             hash,
         })
@@ -85,6 +99,7 @@ impl WitnessJournal {
         artifact_digest: [u8; 32],
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
+        record.epoch = self.epoch.load(Ordering::Acquire);
         if record.stage != WitnessStage::CheckpointPublished
             || record.action != WitnessAction::CheckpointPublish
             || record.outcome != WitnessOutcome::Succeeded
@@ -94,9 +109,20 @@ impl WitnessJournal {
         record.result_digest = Some(artifact_digest);
         super::validation::validate_record(&record)?;
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
+        if let Some(sequence) = self.events.get(record.event_id)? {
+            let bytes = self.records.get(sequence)?.ok_or(JournalError::Corrupt)?;
+            let existing = decode_record(&bytes)?;
+            if existing.record().epoch == record.epoch
+                && existing.record().stage == WitnessStage::CheckpointPublished
+                && existing.record().result_digest == Some(artifact_digest)
+            {
+                return Ok(());
+            }
+            return Err(JournalError::DuplicateEvent);
+        }
         self.preflight(FlushBoundary::Outcome)?;
         let (sequence, previous) = self.head()?;
-        record.sequence = sequence + 1;
+        record.sequence = sequence.checked_add(1).ok_or(JournalError::Corrupt)?;
         record.previous_hash = previous;
         let bytes = encode_record(self.journal_id, &record)?;
         self.ensure_user_capacity(bytes.as_ref().len() as u64)?;
@@ -145,7 +171,7 @@ impl WitnessJournal {
             sealed_segments: db.open_tree("witness-sealed-segments-v1")?,
             db,
             journal_id: config.journal_id,
-            epoch: 1,
+            epoch: AtomicU64::new(1),
             max_bytes: config.max_journal_bytes,
             reserve_total: config.cleanup_reserve_bytes,
             segment_bytes: config.segment_bytes,
@@ -180,9 +206,16 @@ impl WitnessJournal {
                 return Err(JournalError::AutomationStopped);
             }
             let epoch = self.meta.get(EPOCH)?.ok_or(JournalError::Corrupt)?;
-            if epoch.as_ref() != self.epoch.to_be_bytes() {
+            let epoch = u64::from_be_bytes(
+                epoch
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| JournalError::Corrupt)?,
+            );
+            if epoch == 0 {
                 return Err(JournalError::Corrupt);
             }
+            self.epoch.store(epoch, Ordering::Release);
             let stored_reserve = self
                 .meta
                 .get(RESERVE)?
@@ -263,6 +296,7 @@ impl WitnessJournal {
         recipe: RecoveryRecipe,
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
+        record.epoch = self.epoch.load(Ordering::Acquire);
         if record.stage != WitnessStage::RequestReceived {
             return Err(JournalError::InvalidStage);
         }
@@ -328,6 +362,7 @@ impl WitnessJournal {
         id: OperationId,
         mut record: WitnessRecord,
     ) -> Result<DurableIntent, JournalError> {
+        record.epoch = self.epoch.load(Ordering::Acquire);
         if record.stage != WitnessStage::Decision {
             return Err(JournalError::InvalidStage);
         }
@@ -353,7 +388,7 @@ impl WitnessJournal {
         self.post_ack_rotation();
         Ok(DurableIntent {
             journal_id: self.journal_id,
-            epoch: self.epoch,
+            epoch: self.epoch.load(Ordering::Acquire),
             operation_id: id,
             execution_generation: generation,
             pending_generation: state.pending_generation,
@@ -368,6 +403,9 @@ impl WitnessJournal {
         mut decision: WitnessRecord,
         mut denied: WitnessRecord,
     ) -> Result<(), JournalError> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        decision.epoch = epoch;
+        denied.epoch = epoch;
         if decision.stage != WitnessStage::Decision
             || decision.decision != Some(false)
             || denied.stage != WitnessStage::Denied
@@ -444,13 +482,16 @@ impl WitnessJournal {
         intent: DurableIntent,
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
+        record.epoch = self.epoch.load(Ordering::Acquire);
         if record.stage != WitnessStage::Outcome {
             return Err(JournalError::InvalidStage);
         }
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
         self.preflight(FlushBoundary::Outcome)?;
         let id = intent.operation_id;
-        if intent.journal_id != self.journal_id || intent.epoch != self.epoch {
+        if intent.journal_id != self.journal_id
+            || intent.epoch != self.epoch.load(Ordering::Acquire)
+        {
             return Err(JournalError::ProofMismatch);
         }
         let state_bytes = self.operations.get(id.0)?.ok_or(JournalError::NotPending)?;

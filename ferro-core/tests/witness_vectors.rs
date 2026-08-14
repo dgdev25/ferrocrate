@@ -1,7 +1,7 @@
 use ferro_core::witness::{
     decode_record, encode_record, hash_record, verify_stream, DisclosureClass, Invocation,
     PrincipalSummary, ReasonCode, RecordBytes, ResourceSummary, RuleSummary, StreamTrust,
-    WitnessAction, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
+    WitnessAction, WitnessError, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
     FORMAT_VERSION,
 };
 
@@ -9,6 +9,7 @@ const JOURNAL: [u8; 16] = [6; 16];
 
 fn record(sequence: u64, previous_hash: [u8; 32], stage: WitnessStage) -> WitnessRecord {
     WitnessRecord {
+        epoch: 1,
         sequence,
         previous_hash,
         event_id: [sequence as u8; 16],
@@ -80,7 +81,7 @@ fn encoded_chain(mut records: Vec<WitnessRecord>) -> Vec<RecordBytes> {
 }
 
 fn genesis_trust() -> StreamTrust {
-    StreamTrust::new(JOURNAL, 1, [0; 32])
+    StreamTrust::new(JOURNAL, 1, 1, [0; 32])
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -93,10 +94,11 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
     assert_eq!(bytes.as_ref()[0], FORMAT_VERSION);
     assert_eq!(&bytes.as_ref()[2..18], &JOURNAL);
     assert_eq!(&bytes.as_ref()[18..26], &1_u64.to_be_bytes());
+    assert_eq!(&bytes.as_ref()[26..34], &1_u64.to_be_bytes());
     assert_eq!(
         hex(bytes.as_ref()),
         concat!(
-            "0101060606060606060606060606060606060000000000000001000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101",
+            "02010606060606060606060606060606060600000000000000010000000000000001000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101",
             "070707070707070707070707070707070808080808080808080808080808080809090909090909090909090909090909ff51c4845ca485ee1e9642a76dbbc48e376aaf16a330df6af513404b9805f1dd",
             "0101016f2850d3d4282c13868c8f7d227dacb2774977d426fffbe3fd1912c32e1809a20000000000000003000000000000000c0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
             "000000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0017f06e5c4d8c8000000000000000000a01000001010000"
@@ -109,9 +111,27 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
     assert_eq!(
         hash_record(&bytes),
         [
-            15, 155, 91, 27, 64, 165, 185, 60, 157, 224, 61, 144, 44, 124, 130, 34, 183, 47, 201,
-            74, 170, 168, 81, 44, 30, 99, 202, 216, 226, 210, 63, 134
+            218, 106, 170, 229, 94, 120, 57, 71, 97, 224, 191, 20, 222, 100, 239, 69, 157, 227, 9,
+            67, 166, 11, 139, 166, 74, 14, 108, 160, 103, 214, 117, 195
         ]
+    );
+}
+
+#[test]
+fn epoch_is_hash_bound_and_old_evidence_cannot_be_relabeled() {
+    let epoch_one =
+        encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
+    let mut relabeled = record(1, [0; 32], WitnessStage::RequestReceived);
+    relabeled.epoch = 2;
+    let epoch_two = encode_record(JOURNAL, &relabeled).unwrap();
+    assert_ne!(hash_record(&epoch_one), hash_record(&epoch_two));
+    assert_eq!(decode_record(epoch_two.as_ref()).unwrap().epoch(), 2);
+    assert_eq!(
+        verify_stream(
+            [epoch_two.as_ref()],
+            &StreamTrust::new(JOURNAL, 1, 1, [0; 32])
+        ),
+        Err(WitnessError::WrongEpoch)
     );
 }
 
@@ -119,7 +139,7 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
 fn decoded_summary_bytes_remain_opaque_and_non_encodable() {
     let bytes = encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
     let mut replaced = bytes.as_ref().to_vec();
-    replaced[122..154].fill(0xa5);
+    replaced[130..162].fill(0xa5);
     let decoded = decode_record(&replaced).unwrap();
     assert_eq!(decoded.sequence(), 1);
     assert_eq!(decoded.stage(), WitnessStage::RequestReceived);
@@ -129,7 +149,7 @@ fn decoded_summary_bytes_remain_opaque_and_non_encodable() {
 #[test]
 fn decoder_rejects_unknown_enum_discriminants_and_noncanonical_bytes() {
     let bytes = encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
-    for offset in [1, 154, 155, 156, 290, 291, 294] {
+    for offset in [1, 162, 163, 164, 298, 299, 302] {
         // hash algorithm, invocation, action, resource kind, stage, outcome,
         // and the present path disclosure class.
         let mut unknown = bytes.as_ref().to_vec();
@@ -139,7 +159,7 @@ fn decoder_rejects_unknown_enum_discriminants_and_noncanonical_bytes() {
 
     let decision = encode_record(JOURNAL, &decision(1, false)).unwrap();
     let mut unknown_reason = decision.as_ref().to_vec();
-    unknown_reason[273] = 99;
+    unknown_reason[281] = 99;
     assert!(decode_record(&unknown_reason).is_err());
     let mut trailing = bytes.as_ref().to_vec();
     trailing.push(0);
@@ -165,7 +185,7 @@ fn verifier_rejects_truncated_prefixes_and_wrong_predecessors() {
     assert!(verify_stream(chain[1..].iter().map(AsRef::as_ref), &genesis_trust()).is_err());
     assert!(verify_stream(
         chain.iter().map(AsRef::as_ref),
-        &StreamTrust::new(JOURNAL, 1, [99; 32])
+        &StreamTrust::new(JOURNAL, 1, 1, [99; 32])
     )
     .is_err());
 }
@@ -237,7 +257,7 @@ fn verifier_enforces_required_and_forbidden_stage_fields() {
     let received =
         encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
     let mut invalid_decision = received.as_ref().to_vec();
-    invalid_decision[290] = WitnessStage::Decision as u8;
+    invalid_decision[298] = WitnessStage::Decision as u8;
     assert!(decode_record(&invalid_decision).is_err());
 }
 

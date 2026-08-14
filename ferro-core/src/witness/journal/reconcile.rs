@@ -16,6 +16,7 @@ impl WitnessJournal {
         id: OperationId,
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
+        record.epoch = self.epoch.load(Ordering::Acquire);
         if record.stage != WitnessStage::Outcome
             || record.outcome != crate::witness::WitnessOutcome::OutcomeUnknown
         {
@@ -73,6 +74,7 @@ impl WitnessJournal {
         id: OperationId,
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
+        record.epoch = self.epoch.load(Ordering::Acquire);
         if self.automation_stopped.load(Ordering::Acquire) {
             return Err(JournalError::AutomationStopped);
         }

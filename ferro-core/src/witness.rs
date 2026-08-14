@@ -3,8 +3,8 @@
 //! This is the stored format. JSON and telemetry are views and must not be
 //! re-serialized to establish integrity.
 //!
-//! Version 1 field order is: format `u8`, hash algorithm `u8`, journal ID
-//! `[u8;16]`, sequence `u64`, previous hash `[u8;32]`, four 16-byte event,
+//! Version 2 field order is: format `u8`, hash algorithm `u8`, journal ID
+//! `[u8;16]`, epoch `u64`, globally monotonic sequence `u64`, previous hash `[u8;32]`, four 16-byte event,
 //! request, runtime, and boot IDs, principal digest `[u8;32]`, invocation,
 //! action and resource-kind `u8`s, resource digest `[u8;32]`, generation
 //! `u64`, policy version `u64`, policy digest, optional decision ID, optional
@@ -27,10 +27,9 @@ mod validation;
 mod verify;
 
 pub use checkpoint::{
-    Checkpoint, CheckpointError, CheckpointKind, CheckpointVerifier, FlushedHead, Freshness,
-    TrustBundle,
+    Checkpoint, CheckpointError, CheckpointKind, CheckpointVerifier, FlushedHead, TrustBundle,
 };
-pub use checkpoint_coordinator::CheckpointCoordinator;
+pub use checkpoint_coordinator::{CheckpointCoordinator, PublicationOutcome};
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
 pub use journal::JournalHead;
 pub use journal::{
@@ -43,9 +42,20 @@ pub use verify::{verify_stream, StreamTrust, VerificationReport};
 
 use std::fmt;
 
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Freshness {
+    Current,
+    Stale,
+    UnknownTail,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointAge {
+    Current { seconds: u64 },
+    Stale { seconds: u64 },
+}
 pub const HASH_ALGORITHM_SHA256: u8 = 1;
-pub const HASH_DOMAIN: &[u8] = b"FERROCRATE-WITNESS-V1";
+pub const HASH_DOMAIN: &[u8] = b"FERROCRATE-WITNESS-V2";
 pub const PSEUDONYM_DOMAIN: &[u8] = b"FERROCRATE-PSEUDONYM-V1";
 pub const MAX_RECORD_BYTES: usize = 8 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,6 +223,7 @@ impl From<ReasonCode> for u8 {
 /// contents, credentials and secret material have no representation here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WitnessRecord {
+    pub epoch: u64,
     pub sequence: u64,
     pub previous_hash: [u8; 32],
     pub event_id: [u8; 16],
@@ -293,6 +304,9 @@ impl DecodedRecord {
     pub fn sequence(&self) -> u64 {
         self.record.sequence
     }
+    pub fn epoch(&self) -> u64 {
+        self.record.epoch
+    }
 
     pub fn stage(&self) -> WitnessStage {
         self.record.stage
@@ -325,6 +339,7 @@ impl fmt::Debug for DecodedRecord {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct ParsedRecord {
+    pub epoch: u64,
     pub sequence: u64,
     pub previous_hash: [u8; 32],
     pub event_id: [u8; 16],
@@ -369,6 +384,8 @@ pub enum WitnessError {
     NonCanonicalEncoding,
     #[error("witness stream belongs to a different journal")]
     WrongJournal,
+    #[error("witness stream belongs to a different epoch")]
+    WrongEpoch,
     #[error("witness sequence is not contiguous")]
     SequenceGap,
     #[error("witness hash linkage is invalid")]

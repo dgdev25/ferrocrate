@@ -1,11 +1,12 @@
 use super::{
-    checkpoint::MAX_CHECKPOINT_BYTES, Checkpoint, CheckpointError, CheckpointKind, WitnessJournal,
-    WitnessRecord,
+    checkpoint::MAX_CHECKPOINT_BYTES, Checkpoint, CheckpointError, WitnessJournal, WitnessRecord,
 };
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
+#[cfg(not(target_os = "linux"))]
+use std::fs::OpenOptions;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
     time::Duration,
@@ -17,6 +18,12 @@ pub struct CheckpointCoordinator {
     grace: Duration,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationOutcome {
+    Bound(Checkpoint),
+    PendingBinding(Checkpoint),
+}
+
 impl CheckpointCoordinator {
     pub fn new(path: impl AsRef<Path>, max_age: Duration, grace: Duration) -> Self {
         Self {
@@ -25,20 +32,68 @@ impl CheckpointCoordinator {
             grace,
         }
     }
-    pub fn capture_and_publish(
+    pub fn capture_publish_bind<F>(
         &self,
         journal: &WitnessJournal,
         now_secs: u64,
         key: &SigningKey,
-    ) -> Result<Checkpoint, CheckpointError> {
-        let cp = Checkpoint::sign(
-            journal.flushed_head()?.into(),
-            now_secs,
-            key,
-            CheckpointKind::Periodic,
-        )?;
+        predecessor: Option<&Checkpoint>,
+        record: F,
+    ) -> Result<PublicationOutcome, CheckpointError>
+    where
+        F: FnOnce(&Checkpoint) -> WitnessRecord,
+    {
+        let head = journal.flushed_head()?.into();
+        let cp = match predecessor {
+            Some(previous) => Checkpoint::sign_after(head, now_secs, previous, key)?,
+            None => Checkpoint::sign(head, now_secs, key, super::CheckpointKind::Periodic)?,
+        };
         self.publish(&cp)?;
-        Ok(cp)
+        let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
+        Ok(
+            match journal.append_checkpoint_publication(digest, record(&cp)) {
+                Ok(()) => PublicationOutcome::Bound(cp),
+                Err(_) => PublicationOutcome::PendingBinding(cp),
+            },
+        )
+    }
+    pub fn capture_reset_publish_bind<F>(
+        &self,
+        journal: &WitnessJournal,
+        now_secs: u64,
+        new_key: &SigningKey,
+        predecessor: &Checkpoint,
+        record: F,
+    ) -> Result<PublicationOutcome, CheckpointError>
+    where
+        F: FnOnce(&Checkpoint) -> WitnessRecord,
+    {
+        let current = journal.flushed_head()?;
+        if current.epoch != predecessor.head.epoch {
+            return Err(CheckpointError::Rollback);
+        }
+        let next_epoch = current
+            .epoch
+            .checked_add(1)
+            .ok_or(CheckpointError::Rollback)?;
+        let head = super::FlushedHead::new(
+            current.journal_id,
+            next_epoch,
+            current.sequence,
+            current.hash,
+        );
+        let cp = Checkpoint::trust_reset_after(head, now_secs, predecessor, new_key)?;
+        self.publish(&cp)?;
+        if journal.advance_epoch(current.epoch).is_err() {
+            return Ok(PublicationOutcome::PendingBinding(cp));
+        }
+        let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
+        Ok(
+            match journal.append_checkpoint_publication(digest, record(&cp)) {
+                Ok(()) => PublicationOutcome::Bound(cp),
+                Err(_) => PublicationOutcome::PendingBinding(cp),
+            },
+        )
     }
     pub fn publish(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         let bytes = checkpoint.encode();
@@ -46,28 +101,41 @@ impl CheckpointCoordinator {
             return Err(CheckpointError::InvalidArtifact);
         }
         let parent = self.path.parent().ok_or(CheckpointError::InvalidArtifact)?;
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-            File::open(parent.parent().unwrap_or(parent))?.sync_all()?;
+        validate_publication_dir(parent)?;
+        #[cfg(target_os = "linux")]
+        return publish_at(
+            parent,
+            self.path
+                .file_name()
+                .ok_or(CheckpointError::InvalidArtifact)?,
+            &bytes,
+        );
+        #[cfg(not(target_os = "linux"))]
+        {
+            let tmp = parent.join(format!(".checkpoint-{}.tmp", rand::random::<u64>()));
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            if let Err(error) = fs::rename(&tmp, &self.path) {
+                let _ = fs::remove_file(&tmp);
+                return Err(error.into());
+            }
+            File::open(parent)?.sync_all()?;
+            Ok(())
         }
-        let tmp = parent.join(format!(".checkpoint-{}.tmp", rand::random::<u64>()));
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        if let Err(error) = fs::rename(&tmp, &self.path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(error.into());
-        }
-        File::open(parent)?.sync_all()?;
-        Ok(())
     }
-    pub fn publish_and_bind(
+    pub fn reconcile_binding(
         &self,
         journal: &WitnessJournal,
         checkpoint: &Checkpoint,
         record: WitnessRecord,
     ) -> Result<(), CheckpointError> {
-        self.publish(checkpoint)?;
+        let current = journal.flushed_head()?;
+        if checkpoint.kind == super::CheckpointKind::TrustReset
+            && current.epoch.checked_add(1) == Some(checkpoint.head.epoch)
+        {
+            journal.advance_epoch(current.epoch)?;
+        }
         let digest: [u8; 32] = Sha256::digest(checkpoint.encode()).into();
         journal.append_checkpoint_publication(digest, record)?;
         Ok(())
@@ -80,4 +148,62 @@ impl CheckpointCoordinator {
     pub const fn allows_reserved_cleanup(&self) -> bool {
         true
     }
+}
+
+#[cfg(target_os = "linux")]
+fn publish_at(
+    parent: &Path,
+    target: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<(), CheckpointError> {
+    use nix::{
+        fcntl::{open, openat, openat2, renameat, OFlag, OpenHow, ResolveFlag},
+        sys::stat::Mode,
+        unistd::{unlinkat, UnlinkatFlags},
+    };
+    let relative = parent
+        .strip_prefix("/")
+        .map_err(|_| CheckpointError::InvalidArtifact)?;
+    let anchor = open(
+        "/",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let how = OpenHow::new()
+        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+        .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+    let dir = openat2(&anchor, relative, how).map_err(std::io::Error::from)?;
+    let tmp = format!(".checkpoint-{}.tmp", rand::random::<u64>());
+    let fd = openat(
+        &dir,
+        tmp.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(std::io::Error::from)?;
+    let mut file = File::from(fd);
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    if let Err(error) = renameat(&dir, tmp.as_str(), &dir, target) {
+        let _ = unlinkat(&dir, tmp.as_str(), UnlinkatFlags::NoRemoveDir);
+        return Err(std::io::Error::from(error).into());
+    }
+    File::from(dir).sync_all()?;
+    Ok(())
+}
+
+fn validate_publication_dir(path: &Path) -> Result<(), CheckpointError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(CheckpointError::InvalidArtifact);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
+            return Err(CheckpointError::InvalidArtifact);
+        }
+    }
+    Ok(())
 }

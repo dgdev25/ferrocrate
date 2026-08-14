@@ -61,6 +61,9 @@ impl KeyStore {
             {
                 use std::os::unix::fs::DirBuilderExt;
                 fs::DirBuilder::new().mode(0o700).create(&self.root)?;
+                if let Some(parent) = self.root.parent() {
+                    File::open(parent)?.sync_all()?;
+                }
             }
             #[cfg(not(unix))]
             fs::create_dir(&self.root)?;
@@ -116,16 +119,23 @@ impl KeyStore {
 #[cfg(unix)]
 fn secure_root(root: &Path) -> Result<OwnedFd, KeyStoreError> {
     use nix::{
-        fcntl::{open, OFlag},
+        fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag},
         sys::stat::Mode,
     };
     use std::os::unix::fs::MetadataExt;
-    let fd = open(
-        root,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+    let relative = root
+        .strip_prefix("/")
+        .map_err(|_| KeyStoreError::InsecureFile)?;
+    let anchor = open(
+        "/",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
         Mode::empty(),
     )
     .map_err(std::io::Error::from)?;
+    let how = OpenHow::new()
+        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+        .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+    let fd = openat2(&anchor, relative, how).map_err(std::io::Error::from)?;
     let metadata = File::from(fd.try_clone()?).metadata()?;
     if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
         return Err(KeyStoreError::InsecureFile);

@@ -1,9 +1,9 @@
 use ed25519_dalek::SigningKey;
 use ferro_core::witness::{
-    decode_record, encode_record, Checkpoint, CheckpointKind, CheckpointVerifier, FlushedHead,
-    Invocation, JournalConfig, JournalMode, KeyStore, PrincipalSummary, ResourceSummary,
-    TrustBundle, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord, WitnessResourceKind,
-    WitnessStage,
+    decode_record, encode_record, Checkpoint, CheckpointKind, CheckpointVerifier, FaultPoint,
+    FlushBoundary, FlushedHead, Invocation, JournalConfig, JournalFaults, JournalMode, KeyStore,
+    PrincipalSummary, ResourceSummary, TrustBundle, WitnessAction, WitnessJournal, WitnessOutcome,
+    WitnessRecord, WitnessResourceKind, WitnessStage,
 };
 use sha2::{Digest, Sha256};
 use std::{fs, time::Duration};
@@ -15,6 +15,7 @@ fn publication_record_at(
 ) -> WitnessRecord {
     let digest: [u8; 32] = Sha256::digest(checkpoint.encode()).into();
     WitnessRecord {
+        epoch: checkpoint.head.epoch,
         sequence,
         previous_hash,
         event_id: [sequence as u8; 16],
@@ -157,23 +158,34 @@ fn coordinator_signs_only_the_durably_flushed_journal_head() {
     ))
     .unwrap();
     let key = SigningKey::from_bytes(&[11; 32]);
+    fs::create_dir(dir.path().join("published")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            dir.path().join("published"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
     let path = dir.path().join("published/checkpoint.bin");
     let coordinator = ferro_core::witness::CheckpointCoordinator::new(
         &path,
         Duration::from_secs(60),
         Duration::from_secs(10),
     );
-    let checkpoint = coordinator
-        .capture_and_publish(&journal, 100, &key)
+    let outcome = coordinator
+        .capture_publish_bind(&journal, 100, &key, None, publication_record)
         .unwrap();
+    let checkpoint = match outcome {
+        ferro_core::witness::PublicationOutcome::Bound(cp) => cp,
+        _ => panic!("binding must be durable"),
+    };
     assert_eq!(checkpoint.head, FlushedHead::new([12; 16], 1, 0, [0; 32]));
     assert_eq!(
         Checkpoint::decode(&fs::read(path).unwrap()).unwrap(),
         checkpoint
     );
-    coordinator
-        .publish_and_bind(&journal, &checkpoint, publication_record(&checkpoint))
-        .unwrap();
     let evidence = journal.records().unwrap();
     let trust = TrustBundle::new([12; 16], key.verifying_key());
     assert!(CheckpointVerifier::new(trust)
@@ -373,6 +385,160 @@ fn verifier_rejects_unlinked_epoch_jump() {
         .is_err());
 }
 
+#[test]
+fn periodic_lineage_spans_three_heads_and_rotation() {
+    let old = SigningKey::from_bytes(&[31; 32]);
+    let new = SigningKey::from_bytes(&[32; 32]);
+    let first = Checkpoint::sign(
+        FlushedHead::new([14; 16], 1, 0, [0; 32]),
+        1,
+        &old,
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    let second = Checkpoint::sign_after(
+        FlushedHead::new([14; 16], 1, 1, publication_hash(&first)),
+        2,
+        &first,
+        &old,
+    )
+    .unwrap();
+    let rotation = Checkpoint::rotate_after(
+        FlushedHead::new([14; 16], 1, 2, publication_hash(&second)),
+        3,
+        &second,
+        &old,
+        &new,
+    )
+    .unwrap();
+    let fourth = Checkpoint::sign_after(
+        FlushedHead::new([14; 16], 1, 3, publication_hash(&rotation)),
+        4,
+        &rotation,
+        &new,
+    )
+    .unwrap();
+    let mut evidence = publication_evidence(&first);
+    evidence.extend(publication_evidence(&second));
+    evidence.extend(publication_evidence(&rotation));
+    evidence.extend(publication_evidence(&fourth));
+    let trust = TrustBundle::new([14; 16], old.verifying_key()).with_minimum(fourth.clone());
+    let report = CheckpointVerifier::new(trust)
+        .verify(
+            &evidence,
+            &[first, second, rotation, fourth],
+            4,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(
+        report.freshness,
+        ferro_core::witness::Freshness::UnknownTail
+    );
+    assert_eq!(
+        report.checkpoint_age,
+        Some(ferro_core::witness::CheckpointAge::Current { seconds: 0 })
+    );
+}
+
+#[test]
+fn crash_after_artifact_rename_returns_pending_and_reconciles_idempotently() {
+    let dir = tempfile::tempdir().unwrap();
+    let faults = JournalFaults::new();
+    faults.fail_once(FaultPoint::DuringFlush(FlushBoundary::Outcome));
+    let journal = WitnessJournal::open_with_faults(
+        JournalConfig::new(dir.path().join("journal"), [15; 16], JournalMode::Required),
+        faults,
+    )
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        published.join("head.chk"),
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let key = SigningKey::from_bytes(&[33; 32]);
+    let outcome = coordinator
+        .capture_publish_bind(&journal, 1, &key, None, publication_record)
+        .unwrap();
+    let checkpoint = match outcome {
+        ferro_core::witness::PublicationOutcome::PendingBinding(cp) => cp,
+        _ => panic!("flush ambiguity must be pending"),
+    };
+    coordinator
+        .reconcile_binding(&journal, &checkpoint, publication_record(&checkpoint))
+        .unwrap();
+    coordinator
+        .reconcile_binding(&journal, &checkpoint, publication_record(&checkpoint))
+        .unwrap();
+    assert_eq!(journal.records().unwrap().len(), 1);
+}
+
+#[test]
+fn authenticated_reset_advances_epoch_without_reusing_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = WitnessJournal::open(JournalConfig::new(
+        dir.path().join("journal"),
+        [16; 16],
+        JournalMode::Required,
+    ))
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        published.join("head.chk"),
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let old = SigningKey::from_bytes(&[34; 32]);
+    let new = SigningKey::from_bytes(&[35; 32]);
+    let first = match coordinator
+        .capture_publish_bind(&journal, 1, &old, None, publication_record)
+        .unwrap()
+    {
+        ferro_core::witness::PublicationOutcome::Bound(cp) => cp,
+        _ => panic!("initial bind"),
+    };
+    let reset = match coordinator
+        .capture_reset_publish_bind(&journal, 2, &new, &first, publication_record)
+        .unwrap()
+    {
+        ferro_core::witness::PublicationOutcome::Bound(cp) => cp,
+        _ => panic!("reset bind"),
+    };
+    let records = journal.records().unwrap();
+    assert_eq!(
+        (
+            decode_record(&records[0]).unwrap().epoch(),
+            decode_record(&records[0]).unwrap().sequence()
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            decode_record(&records[1]).unwrap().epoch(),
+            decode_record(&records[1]).unwrap().sequence()
+        ),
+        (2, 2)
+    );
+    let trust =
+        TrustBundle::new([16; 16], old.verifying_key()).allow_epoch_reset(2, new.verifying_key());
+    assert!(CheckpointVerifier::new(trust)
+        .verify(&records, &[first, reset], 2, Duration::from_secs(5))
+        .is_ok());
+}
+
 #[cfg(unix)]
 #[test]
 fn key_store_rejects_public_root_and_hardlinked_key() {
@@ -386,4 +552,82 @@ fn key_store_rejects_public_root_and_hardlinked_key() {
     store.create("active").unwrap();
     fs::hard_link(root.join("active.key"), dir.path().join("copy")).unwrap();
     assert!(store.load("active").is_err());
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+    assert!(KeyStore::new(alias.join("keys")).load("active").is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn publication_rejects_symlink_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let cp = Checkpoint::sign(
+        FlushedHead::new([19; 16], 1, 0, [0; 32]),
+        1,
+        &SigningKey::from_bytes(&[39; 32]),
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        alias.join("head.chk"),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    assert!(coordinator.publish(&cp).is_err());
+}
+
+#[test]
+fn verifier_bounds_checkpoint_state() {
+    let key = SigningKey::from_bytes(&[40; 32]);
+    let cp = Checkpoint::sign(
+        FlushedHead::new([20; 16], 1, 0, [0; 32]),
+        1,
+        &key,
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    let excessive = vec![cp.clone(); 4097];
+    let verifier = CheckpointVerifier::new(TrustBundle::new([20; 16], key.verifying_key()));
+    assert!(verifier
+        .verify_iter(
+            publication_evidence(&cp).iter().map(Vec::as_slice),
+            &excessive,
+            1,
+            Duration::from_secs(1)
+        )
+        .is_err());
+}
+
+#[test]
+fn stale_checkpoint_does_not_claim_known_tail() {
+    let key = SigningKey::from_bytes(&[41; 32]);
+    let cp = Checkpoint::sign(
+        FlushedHead::new([21; 16], 1, 0, [0; 32]),
+        1,
+        &key,
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    let report = CheckpointVerifier::new(TrustBundle::new([21; 16], key.verifying_key()))
+        .verify(
+            &publication_evidence(&cp),
+            &[cp],
+            20,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(
+        report.freshness,
+        ferro_core::witness::Freshness::UnknownTail
+    );
+    assert_eq!(
+        report.checkpoint_age,
+        Some(ferro_core::witness::CheckpointAge::Stale { seconds: 19 })
+    );
 }

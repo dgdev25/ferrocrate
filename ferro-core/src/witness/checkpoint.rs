@@ -1,10 +1,10 @@
-use super::{JournalError, JournalHead, KeyId, VerificationReport};
+use super::{CheckpointAge, Freshness, JournalError, JournalHead, KeyId, VerificationReport};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::Duration};
 
-const DOMAIN: &[u8] = b"FERROCRATE-CHECKPOINT-V1";
-const MAGIC: &[u8; 8] = b"FCHKPT01";
+const DOMAIN: &[u8] = b"FERROCRATE-CHECKPOINT-V2";
+const MAGIC: &[u8; 8] = b"FCHKPT02";
 pub(super) const MAX_CHECKPOINT_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +88,20 @@ impl Checkpoint {
             None,
         ))
     }
+    pub fn sign_after(
+        head: FlushedHead,
+        created_at_secs: u64,
+        predecessor: &Self,
+        key: &SigningKey,
+    ) -> Result<Self, CheckpointError> {
+        if head.epoch != predecessor.head.epoch || head.sequence < predecessor.head.sequence {
+            return Err(CheckpointError::Rollback);
+        }
+        let mut cp = Self::sign(head, created_at_secs, key, CheckpointKind::Periodic)?;
+        cp.previous_checkpoint_digest = Sha256::digest(predecessor.encode()).into();
+        cp.signature = key.sign(&cp.payload()).to_bytes();
+        Ok(cp)
+    }
     pub fn rotate(
         head: FlushedHead,
         created_at_secs: u64,
@@ -161,7 +175,7 @@ impl Checkpoint {
         let mut cp = Self {
             head,
             first_sequence: 1,
-            schema_version: 1,
+            schema_version: 2,
             hash_algorithm: 1,
             created_at_secs: time,
             kind,
@@ -178,7 +192,7 @@ impl Checkpoint {
     fn payload(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(130);
         out.extend_from_slice(DOMAIN);
-        out.push(1);
+        out.push(2);
         out.push(self.kind as u8);
         out.push(self.schema_version);
         out.push(self.hash_algorithm);
@@ -222,7 +236,7 @@ impl Checkpoint {
             return Err(CheckpointError::InvalidArtifact);
         }
         let mut cursor = 12;
-        if take(bytes, &mut cursor, DOMAIN.len())? != DOMAIN || take_u8(bytes, &mut cursor)? != 1 {
+        if take(bytes, &mut cursor, DOMAIN.len())? != DOMAIN || take_u8(bytes, &mut cursor)? != 2 {
             return Err(CheckpointError::InvalidArtifact);
         }
         let kind = match take_u8(bytes, &mut cursor)? {
@@ -233,7 +247,7 @@ impl Checkpoint {
         };
         let schema_version = take_u8(bytes, &mut cursor)?;
         let hash_algorithm = take_u8(bytes, &mut cursor)?;
-        if schema_version != 1 || hash_algorithm != 1 {
+        if schema_version != 2 || hash_algorithm != 1 {
             return Err(CheckpointError::InvalidArtifact);
         }
         let journal_id = take_array::<16>(bytes, &mut cursor)?;
@@ -331,13 +345,6 @@ impl TrustBundle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Freshness {
-    Current,
-    Stale,
-    UnknownTail,
-}
-
 pub struct CheckpointVerifier {
     trust: TrustBundle,
 }
@@ -352,7 +359,31 @@ impl CheckpointVerifier {
         now_secs: u64,
         max_age: Duration,
     ) -> Result<VerificationReport, CheckpointError> {
+        self.verify_iter(
+            evidence.iter().map(Vec::as_slice),
+            checkpoints,
+            now_secs,
+            max_age,
+        )
+    }
+
+    pub fn verify_iter<'a, I>(
+        &self,
+        evidence: I,
+        checkpoints: &[Checkpoint],
+        now_secs: u64,
+        max_age: Duration,
+    ) -> Result<VerificationReport, CheckpointError>
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        const MAX_CHECKPOINTS: usize = 4096;
+        if checkpoints.is_empty() || checkpoints.len() > MAX_CHECKPOINTS {
+            return Err(CheckpointError::InvalidArtifact);
+        }
+        let evidence: Vec<&[u8]> = evidence.into_iter().collect();
         let mut trusted = self.trust.initial;
+        let evidence_index = super::checkpoint_evidence::index(&evidence)?;
         let mut trusted_keys = HashMap::from([(KeyId::from_public_key(&trusted), trusted)]);
         let mut last: Option<&Checkpoint> = None;
         let mut discontinuities = 0;
@@ -360,7 +391,7 @@ impl CheckpointVerifier {
             if cp.head.journal_id != self.trust.journal_id {
                 return Err(CheckpointError::Untrusted);
             }
-            if !super::checkpoint_evidence::is_bound(evidence, cp) {
+            if !super::checkpoint_evidence::is_bound(&evidence_index, cp) {
                 return Err(CheckpointError::Rollback);
             }
             if let Some(prev) = last {
@@ -422,7 +453,7 @@ impl CheckpointVerifier {
                 .is_some_and(|key| verify_signature(minimum, key).is_ok());
             if minimum.head.journal_id != self.trust.journal_id
                 || !minimum_signature_valid
-                || !super::checkpoint_evidence::contains_head(evidence, minimum)
+                || !super::checkpoint_evidence::contains_head(&evidence, minimum)
             {
                 return false;
             }
@@ -441,14 +472,16 @@ impl CheckpointVerifier {
         if last.created_at_secs > now_secs {
             return Err(CheckpointError::InvalidArtifact);
         }
-        let mut report = super::checkpoint_evidence::verify(evidence, last)?;
+        let mut report = super::checkpoint_evidence::verify(&evidence, last)?;
         report.completeness_through_checkpoint = complete.or(Some(true));
-        report.unknown_tail_freshness = now_secs - last.created_at_secs <= max_age.as_secs();
-        report.freshness = if report.unknown_tail_freshness {
-            Freshness::Current
+        let age = now_secs - last.created_at_secs;
+        report.unknown_tail_freshness = true;
+        report.freshness = Freshness::UnknownTail;
+        report.checkpoint_age = Some(if age <= max_age.as_secs() {
+            CheckpointAge::Current { seconds: age }
         } else {
-            Freshness::Stale
-        };
+            CheckpointAge::Stale { seconds: age }
+        });
         report.discontinuities = discontinuities;
         Ok(report)
     }

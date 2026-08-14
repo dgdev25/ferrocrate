@@ -178,7 +178,8 @@ impl OperationState {
 
 fn request_binding_digest(record: &WitnessRecord) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"FERROCRATE-REQUEST-BINDING-V1");
+    hash.update(b"FERROCRATE-REQUEST-BINDING-V2");
+    hash.update(record.epoch.to_be_bytes());
     hash.update(record.runtime_instance_id);
     hash.update(record.boot_id);
     hash.update(record.principal.digest());

@@ -17,6 +17,7 @@ fn record(stage: WitnessStage) -> WitnessRecord {
         WitnessStage::CheckpointPublished => 8,
     };
     WitnessRecord {
+        epoch: 1,
         sequence: 0,
         previous_hash: [0; 32],
         event_id: [event; 16],
@@ -220,7 +221,7 @@ fn outcome_and_pending_removal_are_atomic_and_recovery_is_not_replay() {
     assert!(
         verify_stream(
             journal.records().unwrap().iter().map(Vec::as_slice),
-            &StreamTrust::new([9; 16], 1, [0; 32])
+            &StreamTrust::new([9; 16], 1, 1, [0; 32])
         )
         .unwrap()
         .lifecycle_consistent
@@ -356,7 +357,7 @@ fn complete_task4_request_binding_is_transition_invariant() {
     assert!(
         verify_stream(
             journal.records().unwrap().iter().map(Vec::as_slice),
-            &StreamTrust::new([9; 16], 1, [0; 32])
+            &StreamTrust::new([9; 16], 1, 1, [0; 32])
         )
         .unwrap()
         .lifecycle_consistent
@@ -401,7 +402,7 @@ fn denied_decision_is_terminal_and_never_issues_execution_proof() {
     assert!(
         verify_stream(
             journal.records().unwrap().iter().map(Vec::as_slice),
-            &StreamTrust::new([9; 16], 1, [0; 32])
+            &StreamTrust::new([9; 16], 1, 1, [0; 32])
         )
         .unwrap()
         .lifecycle_consistent
@@ -481,7 +482,7 @@ fn terminal_flush_ambiguity_reopens_as_complete_or_linked_unknown() {
     assert!(
         verify_stream(
             journal.records().unwrap().iter().map(Vec::as_slice),
-            &StreamTrust::new([9; 16], 1, [0; 32])
+            &StreamTrust::new([9; 16], 1, 1, [0; 32])
         )
         .unwrap()
         .lifecycle_consistent
@@ -679,7 +680,7 @@ fn segment_rotation_handoff_preserves_chain_across_reopen() {
     assert!(
         verify_stream(
             journal.records().unwrap().iter().map(Vec::as_slice),
-            &StreamTrust::new([9; 16], 1, [0; 32])
+            &StreamTrust::new([9; 16], 1, 1, [0; 32])
         )
         .unwrap()
         .integrity

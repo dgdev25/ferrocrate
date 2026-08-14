@@ -15,6 +15,7 @@ pub fn encode_record(
     put_u8(&mut out, FORMAT_VERSION);
     put_u8(&mut out, HASH_ALGORITHM_SHA256);
     out.extend_from_slice(&journal_id);
+    put_u64(&mut out, record.epoch);
     put_u64(&mut out, record.sequence);
     out.extend_from_slice(&record.previous_hash);
     out.extend_from_slice(&record.event_id);
@@ -67,6 +68,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<DecodedRecord, WitnessError> {
     }
     let journal_id = decoder.fixed()?;
     let record = ParsedRecord {
+        epoch: decoder.u64()?,
         sequence: decoder.u64()?,
         previous_hash: decoder.fixed()?,
         event_id: decoder.fixed()?,

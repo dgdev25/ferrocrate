@@ -929,7 +929,7 @@ impl ContainerRuntime {
                     .delete_for_mutation(&record.id, reservation.operation_id)?;
             } else {
                 self.store
-                    .put_for_mutation(&record, reservation.operation_id)?;
+                    .put_for_mutation(record, reservation.operation_id)?;
             }
             let evidence = crate::witness::RecoveryEvidence::verified(
                 &pending,

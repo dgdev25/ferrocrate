@@ -334,35 +334,32 @@ impl LocalContainerStore {
     pub fn put(&self, record: &ContainerRecord) -> Result<(), ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
         let encoded = serde_json::to_vec(record)?;
-        (&tree)
-            .transaction(|tree| {
-                if record.pending_mutation.is_some() {
+        tree.transaction(|tree| {
+            if record.pending_mutation.is_some() {
+                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                ));
+            }
+            if let Some(existing) = tree.get(record.id.as_bytes())? {
+                let existing: ContainerRecord =
+                    serde_json::from_slice(&existing).map_err(|error| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(error),
+                        )
+                    })?;
+                if existing.pending_mutation.is_some() {
                     return Err(sled::transaction::ConflictableTransactionError::Abort(
                         ContainerStoreError::MutationConflict,
                     ));
                 }
-                if let Some(existing) = tree.get(record.id.as_bytes())? {
-                    let existing: ContainerRecord =
-                        serde_json::from_slice(&existing).map_err(|error| {
-                            sled::transaction::ConflictableTransactionError::Abort(
-                                ContainerStoreError::Decode(error),
-                            )
-                        })?;
-                    if existing.pending_mutation.is_some() {
-                        return Err(sled::transaction::ConflictableTransactionError::Abort(
-                            ContainerStoreError::MutationConflict,
-                        ));
-                    }
-                }
-                tree.insert(record.id.as_bytes(), encoded.as_slice())?;
-                Ok(())
-            })
-            .map_err(|error| match error {
-                sled::transaction::TransactionError::Abort(error) => error,
-                sled::transaction::TransactionError::Storage(error) => {
-                    ContainerStoreError::Open(error)
-                }
-            })?;
+            }
+            tree.insert(record.id.as_bytes(), encoded.as_slice())?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            sled::transaction::TransactionError::Abort(error) => error,
+            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
+        })?;
         tree.flush()?;
         Ok(())
     }
@@ -374,42 +371,38 @@ impl LocalContainerStore {
     ) -> Result<(), ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
         let encoded = serde_json::to_vec(record)?;
-        (&tree)
-            .transaction(|tree| {
-                let current = tree.get(record.id.as_bytes())?.ok_or_else(|| {
-                    sled::transaction::ConflictableTransactionError::Abort(
-                        ContainerStoreError::MutationConflict,
-                    )
-                })?;
-                let current: ContainerRecord =
-                    serde_json::from_slice(&current).map_err(|error| {
-                        sled::transaction::ConflictableTransactionError::Abort(
-                            ContainerStoreError::Decode(error),
-                        )
-                    })?;
-                let reservation = current.pending_mutation.as_ref().ok_or_else(|| {
-                    sled::transaction::ConflictableTransactionError::Abort(
-                        ContainerStoreError::MutationConflict,
-                    )
-                })?;
-                if reservation.operation_id != operation_id
-                    || reservation.generation != current.mutation_generation
-                    || record.pending_mutation.as_ref() != Some(reservation)
-                    || record.mutation_generation != current.mutation_generation
-                {
-                    return Err(sled::transaction::ConflictableTransactionError::Abort(
-                        ContainerStoreError::MutationConflict,
-                    ));
-                }
-                tree.insert(record.id.as_bytes(), encoded.as_slice())?;
-                Ok(())
-            })
-            .map_err(|error| match error {
-                sled::transaction::TransactionError::Abort(error) => error,
-                sled::transaction::TransactionError::Storage(error) => {
-                    ContainerStoreError::Open(error)
-                }
+        tree.transaction(|tree| {
+            let current = tree.get(record.id.as_bytes())?.ok_or_else(|| {
+                sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                )
             })?;
+            let current: ContainerRecord = serde_json::from_slice(&current).map_err(|error| {
+                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Decode(
+                    error,
+                ))
+            })?;
+            let reservation = current.pending_mutation.as_ref().ok_or_else(|| {
+                sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                )
+            })?;
+            if reservation.operation_id != operation_id
+                || reservation.generation != current.mutation_generation
+                || record.pending_mutation.as_ref() != Some(reservation)
+                || record.mutation_generation != current.mutation_generation
+            {
+                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                ));
+            }
+            tree.insert(record.id.as_bytes(), encoded.as_slice())?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            sled::transaction::TransactionError::Abort(error) => error,
+            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
+        })?;
         tree.flush()?;
         Ok(())
     }
@@ -435,7 +428,7 @@ impl LocalContainerStore {
         (&containers, &operations)
             .transaction(|(containers, operations)| {
                 if containers.get(record.id.as_bytes())?.is_some()
-                    || operations.get(&reservation.operation_id)?.is_some()
+                    || operations.get(reservation.operation_id)?.is_some()
                 {
                     return Err(sled::transaction::ConflictableTransactionError::Abort(
                         ContainerStoreError::MutationConflict,
@@ -654,7 +647,7 @@ impl LocalContainerStore {
                             ContainerStoreError::Decode(e),
                         )
                     })?;
-                let operation_bytes = operations.get(&operation_id)?.ok_or_else(|| {
+                let operation_bytes = operations.get(operation_id)?.ok_or_else(|| {
                     sled::transaction::ConflictableTransactionError::Abort(
                         ContainerStoreError::MutationConflict,
                     )
@@ -731,7 +724,7 @@ impl LocalContainerStore {
                         ContainerStoreError::MutationConflict,
                     ));
                 }
-                let operation_bytes = operations.get(&operation_id)?.ok_or_else(|| {
+                let operation_bytes = operations.get(operation_id)?.ok_or_else(|| {
                     sled::transaction::ConflictableTransactionError::Abort(
                         ContainerStoreError::MutationConflict,
                     )
@@ -871,8 +864,8 @@ fn process_start_time(pid: u32) -> Option<u64> {
         return None;
     }
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields = stat.rsplit_once(')')?.1.split_whitespace();
-    fields.skip(19).next()?.parse().ok()
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    fields.nth(19)?.parse().ok()
 }
 
 /// Get current Unix timestamp in seconds.

@@ -27,6 +27,7 @@ pub enum FaultPoint {
     DuringFlush(FlushBoundary),
     AfterFlush(FlushBoundary),
     RotationSeal,
+    CheckpointBindingRejected,
 }
 
 #[derive(Clone, Default)]

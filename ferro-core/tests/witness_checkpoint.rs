@@ -800,6 +800,93 @@ fn prepared_sidecar_republishes_a_missing_artifact_after_restart() {
 }
 
 #[test]
+fn disabled_journal_is_rejected_before_existing_artifact_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = WitnessJournal::open(JournalConfig::new(
+        dir.path().join("journal"),
+        [73; 16],
+        JournalMode::Disabled,
+    ))
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let artifact = published.join("head.chk");
+    fs::write(&artifact, b"previous-bound-artifact").unwrap();
+    let before = fs::read(&artifact).unwrap();
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        &artifact,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let key = SigningKey::from_bytes(&[73; 32]);
+    assert!(matches!(
+        coordinator.capture_publish_bind(&journal, 1, &key, None, publication_record),
+        Err(ferro_core::witness::CheckpointError::Journal(
+            ferro_core::witness::JournalError::Disabled
+        ))
+    ));
+    assert_eq!(fs::read(&artifact).unwrap(), before);
+    assert!(coordinator.pending_binding().unwrap().is_none());
+}
+
+#[test]
+fn definite_post_publication_failure_is_terminal_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let faults = JournalFaults::new();
+    faults.fail_once(FaultPoint::CheckpointBindingRejected);
+    let journal = WitnessJournal::open_with_faults(
+        JournalConfig::new(dir.path().join("journal"), [74; 16], JournalMode::Required),
+        faults,
+    )
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let artifact = published.join("head.chk");
+    let coordinator = ferro_core::witness::CheckpointCoordinator::new(
+        &artifact,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let key = SigningKey::from_bytes(&[74; 32]);
+    assert!(coordinator
+        .capture_publish_bind(&journal, 1, &key, None, publication_record)
+        .is_err());
+    drop(coordinator);
+    let restarted = ferro_core::witness::CheckpointCoordinator::new(
+        &artifact,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let terminal = restarted.pending_binding().unwrap().unwrap();
+    assert_eq!(
+        terminal.state(),
+        ferro_core::witness::PendingState::BindingFailed
+    );
+    assert_eq!(
+        terminal.recoverability(),
+        ferro_core::witness::Recoverability::OperatorRequired
+    );
+    assert!(matches!(
+        restarted.reconcile_pending(&journal),
+        Err(ferro_core::witness::CheckpointError::BindingFailed)
+    ));
+    assert!(matches!(
+        restarted.capture_publish_bind(&journal, 2, &key, None, publication_record),
+        Err(ferro_core::witness::CheckpointError::PendingExists)
+    ));
+}
+
+#[test]
 fn pending_binding_rejects_tampering_and_a_cross_journal_reconcile() {
     let dir = tempfile::tempdir().unwrap();
     let faults = JournalFaults::new();

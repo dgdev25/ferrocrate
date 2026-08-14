@@ -40,11 +40,13 @@ pub enum PendingState {
     Prepared,
     Published,
     Bound,
+    BindingFailed,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Recoverability {
     Retryable,
     Indeterminate,
+    OperatorRequired,
 }
 impl PendingBinding {
     pub fn checkpoint(&self) -> &Checkpoint {
@@ -78,6 +80,7 @@ impl CheckpointCoordinator {
         F: FnOnce(&Checkpoint) -> WitnessRecord,
     {
         self.preflight()?;
+        journal.checkpoint_preflight()?;
         let head = journal.flushed_head()?.into();
         let cp = match predecessor {
             Some(previous) => Checkpoint::sign_after(head, now_secs, previous, key)?,
@@ -105,7 +108,9 @@ impl CheckpointCoordinator {
                 }
                 Err(error) => {
                     if nonretryable(&error) {
-                        self.clear_pending()?;
+                        pending.state = PendingState::BindingFailed;
+                        pending.recoverability = Recoverability::OperatorRequired;
+                        self.persist_pending_replace(&pending)?;
                     }
                     return Err(error.into());
                 }
@@ -124,6 +129,7 @@ impl CheckpointCoordinator {
         F: FnOnce(&Checkpoint) -> WitnessRecord,
     {
         self.preflight()?;
+        journal.checkpoint_preflight()?;
         let current = journal.flushed_head()?;
         if current.epoch != predecessor.head.epoch {
             return Err(CheckpointError::Rollback);
@@ -162,7 +168,9 @@ impl CheckpointCoordinator {
                 }
                 Err(error) => {
                     if nonretryable(&error) {
-                        self.clear_pending()?;
+                        pending.state = PendingState::BindingFailed;
+                        pending.recoverability = Recoverability::OperatorRequired;
+                        self.persist_pending_replace(&pending)?;
                     }
                     return Err(error.into());
                 }
@@ -182,6 +190,7 @@ impl CheckpointCoordinator {
         F: FnOnce(&Checkpoint) -> WitnessRecord,
     {
         self.preflight()?;
+        journal.checkpoint_preflight()?;
         let head = journal.flushed_head()?.into();
         let cp = Checkpoint::rotate_after(head, now_secs, predecessor, old_key, new_key)?;
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
@@ -206,7 +215,9 @@ impl CheckpointCoordinator {
                 }
                 Err(error) => {
                     if nonretryable(&error) {
-                        self.clear_pending()?;
+                        pending.state = PendingState::BindingFailed;
+                        pending.recoverability = Recoverability::OperatorRequired;
+                        self.persist_pending_replace(&pending)?;
                     }
                     return Err(error.into());
                 }
@@ -291,6 +302,9 @@ impl CheckpointCoordinator {
         let mut pending = self
             .pending_binding()?
             .ok_or(CheckpointError::InvalidArtifact)?;
+        if pending.state == PendingState::BindingFailed {
+            return Err(CheckpointError::BindingFailed);
+        }
         if pending.state == PendingState::Prepared {
             self.publish(&pending.checkpoint)?;
             pending.state = PendingState::Published;
@@ -397,10 +411,12 @@ fn encode_pending(pending: &PendingBinding) -> Vec<u8> {
         PendingState::Prepared => 1,
         PendingState::Published => 2,
         PendingState::Bound => 3,
+        PendingState::BindingFailed => 4,
     });
     out.push(match pending.recoverability {
         Recoverability::Retryable => 1,
         Recoverability::Indeterminate => 2,
+        Recoverability::OperatorRequired => 3,
     });
     out.extend_from_slice(&(checkpoint.len() as u32).to_be_bytes());
     out.extend_from_slice(&(pending.record_bytes.len() as u32).to_be_bytes());
@@ -421,11 +437,13 @@ fn decode_pending(bytes: &[u8]) -> Result<PendingBinding, CheckpointError> {
         1 => PendingState::Prepared,
         2 => PendingState::Published,
         3 => PendingState::Bound,
+        4 => PendingState::BindingFailed,
         _ => return Err(CheckpointError::InvalidArtifact),
     };
     let recoverability = match bytes[9] {
         1 => Recoverability::Retryable,
         2 => Recoverability::Indeterminate,
+        3 => Recoverability::OperatorRequired,
         _ => return Err(CheckpointError::InvalidArtifact),
     };
     let cp_len = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;

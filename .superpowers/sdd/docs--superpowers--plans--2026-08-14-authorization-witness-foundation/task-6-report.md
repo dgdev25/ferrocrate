@@ -90,3 +90,11 @@ Checkpoint publication now durably transitions `Prepared → Published → Bound
 Linux sidecar create/read/replace/unlink operations are descriptor-relative beneath an `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` directory handle. Reads require O_NOFOLLOW, effective-UID ownership, regular type, mode 0600, link count one, and a hard byte bound. The checksum detects corruption only; trust continues to come from pinned checkpoint keys and journal identity. Recoverability is encoded separately from state; indeterminate append results remain recoverable, while definite nonretryable journal validation/configuration failures clear the sidecar and surface their exact error.
 
 Bounded verification now supports an explicit independently trusted chunk boundary containing journal ID, epoch, first sequence, predecessor record hash, signed checkpoint artifact, and verifying key. Chunk checkpoints sign their actual first sequence. Genesis remains epoch 1, sequence 1, zero predecessor. Duplicate uniqueness is exact within each bounded chunk; continuity across chunks is supplied by the independently pinned predecessor hash and signed checkpoint commitment.
+
+## Exceptional final trust correction
+
+Every publication workflow now checks deterministic journal availability before preparing or replacing any artifact. A known Disabled journal therefore leaves an existing bound artifact untouched and creates no pending sidecar.
+
+Definite nonretryable failures discovered after publication no longer erase their explanation. The coordinator durably transitions the sidecar to `BindingFailed` with `OperatorRequired` recoverability, preserves the unbound artifact, surfaces the terminal status after restart, blocks all new publications, and refuses ordinary reconciliation. This fail-closed state requires explicit operator quarantine handling rather than an automatic retry loop. The independently pinned chunk-boundary constructor also documents that all boundary tuple fields, signed artifact, and key must arrive out of band and never be learned from journal evidence.
+
+Final correction verification passes 25 checkpoint tests, 26 journal tests, 13 witness-vector tests, and the ferro-core build.

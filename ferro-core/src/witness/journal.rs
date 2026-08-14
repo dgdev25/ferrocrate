@@ -68,6 +68,13 @@ pub struct JournalHead {
 }
 
 impl WitnessJournal {
+    pub(super) fn checkpoint_preflight(&self) -> Result<(), JournalError> {
+        if self.mode == JournalMode::Disabled {
+            Err(JournalError::Disabled)
+        } else {
+            Ok(())
+        }
+    }
     pub(super) fn advance_epoch(&self, expected: u64) -> Result<u64, JournalError> {
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
         if self.epoch.load(Ordering::Acquire) != expected {
@@ -121,6 +128,9 @@ impl WitnessJournal {
             return Err(JournalError::DuplicateEvent);
         }
         self.preflight(FlushBoundary::Outcome)?;
+        if self.faults.take(FaultPoint::CheckpointBindingRejected) {
+            return Err(JournalError::BindingMismatch);
+        }
         let (sequence, previous) = self.head()?;
         record.sequence = sequence.checked_add(1).ok_or(JournalError::Corrupt)?;
         record.previous_hash = previous;

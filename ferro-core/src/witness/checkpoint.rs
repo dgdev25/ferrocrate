@@ -53,6 +53,8 @@ pub struct Checkpoint {
 pub enum CheckpointError {
     #[error("a checkpoint publication is already pending recovery")]
     PendingExists,
+    #[error("checkpoint binding is terminally failed and requires operator quarantine")]
+    BindingFailed,
     #[error("checkpoint does not descend from explicit trust")]
     Untrusted,
     #[error("checkpoint regresses or conflicts with a pinned head")]
@@ -355,6 +357,9 @@ impl TrustBundle {
             resets: HashMap::new(),
         }
     }
+    /// Starts bounded verification from an independently retained boundary.
+    /// The caller must pin all tuple fields and the signed checkpoint/key out
+    /// of band; the journal stream is never a source of root trust.
     pub fn from_boundary(
         journal_id: [u8; 16],
         epoch: u64,

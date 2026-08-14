@@ -104,11 +104,8 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
     );
     let decoded = decode_record(bytes.as_ref()).unwrap();
     assert_eq!(decoded.journal_id(), &JOURNAL);
-    assert_eq!(
-        decoded.record(),
-        &record(1, [0; 32], WitnessStage::RequestReceived)
-    );
-    assert_eq!(decoded.bytes().as_ref(), bytes.as_ref());
+    assert_eq!(decoded.sequence(), 1);
+    assert_eq!(decoded.stage(), WitnessStage::RequestReceived);
     assert_eq!(
         hash_record(&bytes),
         [
@@ -116,6 +113,17 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
             74, 170, 168, 81, 44, 30, 99, 202, 216, 226, 210, 63, 134
         ]
     );
+}
+
+#[test]
+fn decoded_summary_bytes_remain_opaque_and_non_encodable() {
+    let bytes = encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
+    let mut replaced = bytes.as_ref().to_vec();
+    replaced[122..154].fill(0xa5);
+    let decoded = decode_record(&replaced).unwrap();
+    assert_eq!(decoded.sequence(), 1);
+    assert_eq!(decoded.stage(), WitnessStage::RequestReceived);
+    assert!(!format!("{decoded:?}").contains("165, 165, 165"));
 }
 
 #[test]

@@ -1,61 +1,106 @@
-use super::{ReasonCode, WitnessError, WitnessOutcome, WitnessRecord, WitnessStage};
+use super::{ParsedRecord, ReasonCode, WitnessError, WitnessOutcome, WitnessRecord, WitnessStage};
+
+pub(super) trait SemanticFields {
+    fn stage(&self) -> WitnessStage;
+    fn outcome(&self) -> WitnessOutcome;
+    fn has_decision_id(&self) -> bool;
+    fn has_rule(&self) -> bool;
+    fn decision(&self) -> Option<bool>;
+    fn reason(&self) -> Option<ReasonCode>;
+    fn has_result_digest(&self) -> bool;
+    fn has_recovery_link(&self) -> bool;
+}
+
+macro_rules! semantic_fields {
+    ($type:ty) => {
+        impl SemanticFields for $type {
+            fn stage(&self) -> WitnessStage {
+                self.stage
+            }
+            fn outcome(&self) -> WitnessOutcome {
+                self.outcome
+            }
+            fn has_decision_id(&self) -> bool {
+                self.decision_id.is_some()
+            }
+            fn has_rule(&self) -> bool {
+                self.rule.is_some()
+            }
+            fn decision(&self) -> Option<bool> {
+                self.decision
+            }
+            fn reason(&self) -> Option<ReasonCode> {
+                self.reason
+            }
+            fn has_result_digest(&self) -> bool {
+                self.result_digest.is_some()
+            }
+            fn has_recovery_link(&self) -> bool {
+                self.recovery_link.is_some()
+            }
+        }
+    };
+}
+
+semantic_fields!(WitnessRecord);
+semantic_fields!(ParsedRecord);
 
 /// The single semantic schema used before persistence and after decoding.
-pub(super) fn validate_record(record: &WitnessRecord) -> Result<(), WitnessError> {
-    let common_absent = record.decision_id.is_none()
-        && record.rule.is_none()
-        && record.decision.is_none()
-        && record.reason.is_none()
-        && record.result_digest.is_none()
-        && record.recovery_link.is_none();
-    let valid = match record.stage {
-        WitnessStage::RequestReceived => common_absent && record.outcome == WitnessOutcome::None,
+pub(super) fn validate_record(record: &impl SemanticFields) -> Result<(), WitnessError> {
+    let common_absent = !record.has_decision_id()
+        && !record.has_rule()
+        && record.decision().is_none()
+        && record.reason().is_none()
+        && !record.has_result_digest()
+        && !record.has_recovery_link();
+    let valid = match record.stage() {
+        WitnessStage::RequestReceived => common_absent && record.outcome() == WitnessOutcome::None,
         WitnessStage::Decision => {
-            record.decision_id.is_some()
-                && record.rule.is_some()
-                && record.result_digest.is_none()
-                && record.recovery_link.is_none()
-                && record.outcome == WitnessOutcome::None
-                && match record.decision {
-                    Some(true) => record.reason.is_none(),
-                    Some(false) => record.reason == Some(ReasonCode::PolicyDenied),
+            record.has_decision_id()
+                && record.has_rule()
+                && !record.has_result_digest()
+                && !record.has_recovery_link()
+                && record.outcome() == WitnessOutcome::None
+                && match record.decision() {
+                    Some(true) => record.reason().is_none(),
+                    Some(false) => record.reason() == Some(ReasonCode::PolicyDenied),
                     None => false,
                 }
         }
         WitnessStage::Denied => {
-            record.decision_id.is_some()
-                && record.rule.is_none()
-                && record.decision.is_none()
-                && record.reason == Some(ReasonCode::PolicyDenied)
-                && record.result_digest.is_none()
-                && record.recovery_link.is_none()
-                && record.outcome == WitnessOutcome::Denied
+            record.has_decision_id()
+                && !record.has_rule()
+                && record.decision().is_none()
+                && record.reason() == Some(ReasonCode::PolicyDenied)
+                && !record.has_result_digest()
+                && !record.has_recovery_link()
+                && record.outcome() == WitnessOutcome::Denied
         }
         WitnessStage::Outcome => {
-            record.decision_id.is_some()
-                && record.rule.is_none()
-                && record.decision.is_none()
-                && record.result_digest.is_some()
-                && record.recovery_link.is_none()
-                && match record.outcome {
-                    WitnessOutcome::Succeeded => record.reason.is_none(),
+            record.has_decision_id()
+                && !record.has_rule()
+                && record.decision().is_none()
+                && record.has_result_digest()
+                && !record.has_recovery_link()
+                && match record.outcome() {
+                    WitnessOutcome::Succeeded => record.reason().is_none(),
                     WitnessOutcome::Failed | WitnessOutcome::OutcomeUnknown => {
-                        record.reason == Some(ReasonCode::ExecutionFailed)
+                        record.reason() == Some(ReasonCode::ExecutionFailed)
                     }
                     _ => false,
                 }
         }
         WitnessStage::Recovery => {
-            record.decision_id.is_some()
-                && record.rule.is_none()
-                && record.decision.is_none()
-                && record.result_digest.is_some()
-                && record.recovery_link.is_some()
-                && match record.outcome {
+            record.has_decision_id()
+                && !record.has_rule()
+                && record.decision().is_none()
+                && record.has_result_digest()
+                && record.has_recovery_link()
+                && match record.outcome() {
                     WitnessOutcome::Recovered => {
-                        record.reason == Some(ReasonCode::RecoveryCompleted)
+                        record.reason() == Some(ReasonCode::RecoveryCompleted)
                     }
-                    WitnessOutcome::Quarantined => record.reason == Some(ReasonCode::Quarantined),
+                    WitnessOutcome::Quarantined => record.reason() == Some(ReasonCode::Quarantined),
                     _ => false,
                 }
         }

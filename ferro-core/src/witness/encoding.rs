@@ -1,10 +1,9 @@
 use sha2::{Digest, Sha256};
 
 use super::{
-    DecodedRecord, DisclosureClass, Invocation, PrincipalSummary, ReasonCode, RecordBytes,
-    ResourceSummary, RuleSummary, WitnessAction, WitnessError, WitnessOutcome, WitnessRecord,
-    WitnessResourceKind, WitnessStage, FORMAT_VERSION, HASH_ALGORITHM_SHA256, HASH_DOMAIN,
-    MAX_RECORD_BYTES, PSEUDONYM_DOMAIN,
+    DecodedRecord, DisclosureClass, Invocation, ParsedRecord, ReasonCode, RecordBytes, RuleSummary,
+    WitnessAction, WitnessError, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
+    FORMAT_VERSION, HASH_ALGORITHM_SHA256, HASH_DOMAIN, MAX_RECORD_BYTES, PSEUDONYM_DOMAIN,
 };
 
 pub fn encode_record(
@@ -67,18 +66,18 @@ pub fn decode_record(bytes: &[u8]) -> Result<DecodedRecord, WitnessError> {
         });
     }
     let journal_id = decoder.fixed()?;
-    let record = WitnessRecord {
+    let record = ParsedRecord {
         sequence: decoder.u64()?,
         previous_hash: decoder.fixed()?,
         event_id: decoder.fixed()?,
         request_id: decoder.fixed()?,
         runtime_instance_id: decoder.fixed()?,
         boot_id: decoder.fixed()?,
-        principal: PrincipalSummary::from_digest(decoder.fixed()?),
+        principal_digest: decoder.fixed()?,
         invocation: invocation(decoder.u8()?)?,
         action: action(decoder.u8()?)?,
         resource_kind: resource_kind(decoder.u8()?)?,
-        resource: ResourceSummary::from_digest(decoder.fixed()?),
+        resource_digest: decoder.fixed()?,
         resource_generation: decoder.u64()?,
         policy_version: decoder.u64()?,
         policy_digest: decoder.fixed()?,
@@ -100,10 +99,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<DecodedRecord, WitnessError> {
     if !decoder.finished() {
         return Err(WitnessError::NonCanonicalEncoding);
     }
-    let canonical = encode_record(journal_id, &record)?;
-    if canonical.as_ref() != bytes {
-        return Err(WitnessError::NonCanonicalEncoding);
-    }
+    super::validation::validate_record(&record)?;
     Ok(DecodedRecord {
         journal_id,
         record,

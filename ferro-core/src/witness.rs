@@ -130,9 +130,6 @@ impl PrincipalSummary {
     pub fn pseudonymize(key: &[u8], principal: &[u8]) -> Result<Self, WitnessError> {
         pseudonymize(b"witness/principal", key, principal).map(Self)
     }
-    pub(super) const fn from_digest(digest: [u8; 32]) -> Self {
-        Self(digest)
-    }
     const fn digest(self) -> [u8; 32] {
         self.0
     }
@@ -152,9 +149,6 @@ impl ResourceSummary {
     /// ```
     pub fn pseudonymize(key: &[u8], resource: &[u8]) -> Result<Self, WitnessError> {
         pseudonymize(b"witness/resource", key, resource).map(Self)
-    }
-    pub(super) const fn from_digest(digest: [u8; 32]) -> Self {
-        Self(digest)
     }
     const fn digest(self) -> [u8; 32] {
         self.0
@@ -250,10 +244,24 @@ impl fmt::Debug for RecordBytes {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Opaque view of untrusted, canonically parsed record bytes.
+///
+/// Decoded content cannot be recovered as an encodable record:
+/// ```compile_fail
+/// use ferro_core::witness::{decode_record, WitnessRecord};
+/// let decoded = decode_record(&[]).unwrap();
+/// let _: WitnessRecord = decoded.into();
+/// ```
+/// Nor can callers access the verifier's private parsed representation:
+/// ```compile_fail
+/// use ferro_core::witness::decode_record;
+/// let decoded = decode_record(&[]).unwrap();
+/// let _ = decoded.record();
+/// ```
+#[derive(Eq, PartialEq)]
 pub struct DecodedRecord {
     journal_id: [u8; 16],
-    record: WitnessRecord,
+    record: ParsedRecord,
     bytes: RecordBytes,
 }
 
@@ -262,13 +270,65 @@ impl DecodedRecord {
         &self.journal_id
     }
 
-    pub fn record(&self) -> &WitnessRecord {
+    pub fn sequence(&self) -> u64 {
+        self.record.sequence
+    }
+
+    pub fn stage(&self) -> WitnessStage {
+        self.record.stage
+    }
+
+    pub(super) fn record(&self) -> &ParsedRecord {
         &self.record
     }
 
-    pub fn bytes(&self) -> &RecordBytes {
+    pub(super) fn bytes(&self) -> &RecordBytes {
         &self.bytes
     }
+}
+
+impl fmt::Debug for DecodedRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecodedRecord")
+            .field("journal_id", &self.journal_id)
+            .field("sequence", &self.record.sequence)
+            .field("stage", &self.record.stage)
+            .field("length", &self.bytes.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct ParsedRecord {
+    pub sequence: u64,
+    pub previous_hash: [u8; 32],
+    pub event_id: [u8; 16],
+    pub request_id: [u8; 16],
+    pub runtime_instance_id: [u8; 16],
+    pub boot_id: [u8; 16],
+    pub principal_digest: [u8; 32],
+    pub invocation: Invocation,
+    pub action: WitnessAction,
+    pub resource_kind: WitnessResourceKind,
+    pub resource_digest: [u8; 32],
+    pub resource_generation: u64,
+    pub policy_version: u64,
+    pub policy_digest: [u8; 32],
+    pub decision_id: Option<[u8; 16]>,
+    pub rule: Option<RuleSummary>,
+    pub decision: Option<bool>,
+    pub reason: Option<ReasonCode>,
+    pub request_digest: [u8; 32],
+    pub result_digest: Option<[u8; 32]>,
+    pub wall_time_ns: i64,
+    pub monotonic_ns: u64,
+    pub stage: WitnessStage,
+    pub outcome: WitnessOutcome,
+    pub recovery_link: Option<[u8; 16]>,
+    pub path_class: Option<DisclosureClass>,
+    pub device_class: Option<DisclosureClass>,
+    pub correlation_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]

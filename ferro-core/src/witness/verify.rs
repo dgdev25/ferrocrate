@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    decode_record, hash_record, DisclosureClass, Invocation, PrincipalSummary, ResourceSummary,
-    WitnessAction, WitnessError, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
+    decode_record, hash_record, DisclosureClass, Invocation, ParsedRecord, WitnessAction,
+    WitnessError, WitnessOutcome, WitnessResourceKind, WitnessStage,
 };
 
 const MAX_OPEN_REQUESTS: usize = 4096;
@@ -47,11 +47,11 @@ pub struct VerificationReport {
 struct RequestBinding {
     runtime_instance_id: [u8; 16],
     boot_id: [u8; 16],
-    principal: PrincipalSummary,
+    principal_digest: [u8; 32],
     invocation: Invocation,
     action: WitnessAction,
     resource_kind: WitnessResourceKind,
-    resource: ResourceSummary,
+    resource_digest: [u8; 32],
     resource_generation: u64,
     policy_version: u64,
     policy_digest: [u8; 32],
@@ -61,16 +61,16 @@ struct RequestBinding {
     correlation_digest: Option<[u8; 32]>,
 }
 
-impl From<&WitnessRecord> for RequestBinding {
-    fn from(record: &WitnessRecord) -> Self {
+impl From<&ParsedRecord> for RequestBinding {
+    fn from(record: &ParsedRecord) -> Self {
         Self {
             runtime_instance_id: record.runtime_instance_id,
             boot_id: record.boot_id,
-            principal: record.principal,
+            principal_digest: record.principal_digest,
             invocation: record.invocation,
             action: record.action,
             resource_kind: record.resource_kind,
-            resource: record.resource,
+            resource_digest: record.resource_digest,
             resource_generation: record.resource_generation,
             policy_version: record.policy_version,
             policy_digest: record.policy_digest,
@@ -143,12 +143,12 @@ where
     Ok(report)
 }
 
-fn same_binding(record: &WitnessRecord, binding: &RequestBinding) -> bool {
+fn same_binding(record: &ParsedRecord, binding: &RequestBinding) -> bool {
     &RequestBinding::from(record) == binding
 }
 
 fn transition(
-    record: &WitnessRecord,
+    record: &ParsedRecord,
     states: &mut HashMap<[u8; 16], Lifecycle>,
     request_ids: &mut HashSet<[u8; 16]>,
     report: &mut VerificationReport,

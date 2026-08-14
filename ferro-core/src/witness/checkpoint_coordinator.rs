@@ -152,7 +152,16 @@ impl CheckpointCoordinator {
         self.publish(&cp)?;
         pending.state = PendingState::Published;
         self.persist_pending_replace(&pending)?;
-        journal.advance_epoch(current.epoch)?;
+        if let Err(error) = journal.advance_epoch(current.epoch) {
+            if matches!(error, JournalError::ProofMismatch) {
+                self.persist_failed(&mut pending)?;
+            }
+            return Err(error.into());
+        }
+        if journal.current_epoch() != cp.head.epoch {
+            self.persist_failed(&mut pending)?;
+            return Err(JournalError::ProofMismatch.into());
+        }
         Ok(
             match journal.append_checkpoint_publication(digest, prepared.clone()) {
                 Ok(()) => {
@@ -259,6 +268,9 @@ impl CheckpointCoordinator {
         pending: &PendingBinding,
         record: WitnessRecord,
     ) -> Result<(), CheckpointError> {
+        if pending.state == PendingState::BindingFailed {
+            return Err(CheckpointError::BindingFailed);
+        }
         let current = journal.flushed_head()?;
         let checkpoint = &pending.checkpoint;
         if current.journal_id != checkpoint.head.journal_id {
@@ -267,7 +279,18 @@ impl CheckpointCoordinator {
         if checkpoint.kind == super::CheckpointKind::TrustReset
             && current.epoch.checked_add(1) == Some(checkpoint.head.epoch)
         {
-            journal.advance_epoch(current.epoch)?;
+            if let Err(error) = journal.advance_epoch(current.epoch) {
+                if matches!(error, JournalError::ProofMismatch) {
+                    let mut failed = pending.clone();
+                    self.persist_failed(&mut failed)?;
+                }
+                return Err(error.into());
+            }
+        }
+        if journal.current_epoch() != checkpoint.head.epoch {
+            let mut failed = pending.clone();
+            self.persist_failed(&mut failed)?;
+            return Err(JournalError::ProofMismatch.into());
         }
         let digest: [u8; 32] = Sha256::digest(checkpoint.encode()).into();
         let prepared = prepare_binding(checkpoint, record, digest)?;
@@ -325,6 +348,11 @@ impl CheckpointCoordinator {
     }
     fn persist_pending_replace(&self, pending: &PendingBinding) -> Result<(), CheckpointError> {
         secure_write(&self.pending_path(), &encode_pending(pending), true)
+    }
+    fn persist_failed(&self, pending: &mut PendingBinding) -> Result<(), CheckpointError> {
+        pending.state = PendingState::BindingFailed;
+        pending.recoverability = Recoverability::OperatorRequired;
+        self.persist_pending_replace(pending)
     }
     fn preflight(&self) -> Result<(), CheckpointError> {
         if self.pending_binding()?.is_some() {

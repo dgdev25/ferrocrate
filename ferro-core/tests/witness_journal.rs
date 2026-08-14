@@ -69,6 +69,22 @@ fn rejects_v1_storage_instead_of_silently_opening_an_unreadable_journal() {
     ));
 }
 
+#[test]
+fn checkpoint_publication_never_relabels_a_mismatched_epoch() {
+    let dir = tempdir().unwrap();
+    let journal = WitnessJournal::open(config(dir.path())).unwrap();
+    let mut publication = record(WitnessStage::CheckpointPublished);
+    publication.epoch = 2;
+    publication.action = WitnessAction::CheckpointPublish;
+    publication.outcome = WitnessOutcome::Succeeded;
+    publication.result_digest = Some([8; 32]);
+    assert!(matches!(
+        journal.append_checkpoint_publication([8; 32], publication),
+        Err(JournalError::ProofMismatch)
+    ));
+    assert!(journal.records().unwrap().is_empty());
+}
+
 fn recipe() -> RecoveryRecipe {
     RecoveryRecipe::for_original(
         WitnessAction::ContainerCreate,

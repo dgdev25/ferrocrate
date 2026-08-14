@@ -98,3 +98,9 @@ Every publication workflow now checks deterministic journal availability before 
 Definite nonretryable failures discovered after publication no longer erase their explanation. The coordinator durably transitions the sidecar to `BindingFailed` with `OperatorRequired` recoverability, preserves the unbound artifact, surfaces the terminal status after restart, blocks all new publications, and refuses ordinary reconciliation. This fail-closed state requires explicit operator quarantine handling rather than an automatic retry loop. The independently pinned chunk-boundary constructor also documents that all boundary tuple fields, signed artifact, and key must arrive out of band and never be learned from journal evidence.
 
 Final correction verification passes 25 checkpoint tests, 26 journal tests, 13 witness-vector tests, and the ferro-core build.
+
+## Reset-lineage micro-fix
+
+Checkpoint publication no longer overwrites the caller's epoch. The journal rejects a mismatched publication with ProofMismatch before inserting any record. Reset creation and restart reconciliation allow only the single authorized +1 advance, then require the durable current journal epoch to equal the signed checkpoint epoch exactly. An advance race, stale/higher journal epoch, or any other mismatch durably transitions the existing sidecar to `BindingFailed / OperatorRequired` and never appends or clears it.
+
+Regression coverage includes a stale epoch-2 sidecar after the same journal reaches epoch 3, direct rejection of a relabeled publication attempt, and the existing successful epoch-1→2 Bound path.

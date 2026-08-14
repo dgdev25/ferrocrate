@@ -887,6 +887,71 @@ fn definite_post_publication_failure_is_terminal_across_restart() {
 }
 
 #[test]
+fn stale_reset_sidecar_fails_terminally_when_journal_advanced_past_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let faults = JournalFaults::new();
+    let journal = WitnessJournal::open_with_faults(
+        JournalConfig::new(dir.path().join("journal"), [75; 16], JournalMode::Required),
+        faults.clone(),
+    )
+    .unwrap();
+    let published = dir.path().join("published");
+    fs::create_dir(&published).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let first_coord = ferro_core::witness::CheckpointCoordinator::new(
+        published.join("one.chk"),
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let old = SigningKey::from_bytes(&[75; 32]);
+    let next = SigningKey::from_bytes(&[76; 32]);
+    let third = SigningKey::from_bytes(&[77; 32]);
+    let first = match first_coord
+        .capture_publish_bind(&journal, 1, &old, None, publication_record)
+        .unwrap()
+    {
+        ferro_core::witness::PublicationOutcome::Bound(cp) => cp,
+        _ => panic!(),
+    };
+    faults.fail_once(FaultPoint::DuringFlush(FlushBoundary::Outcome));
+    let stale = match first_coord
+        .capture_reset_publish_bind(&journal, 2, &next, &first, publication_record)
+        .unwrap()
+    {
+        ferro_core::witness::PublicationOutcome::PendingBinding(p) => p,
+        _ => panic!(),
+    };
+    let second_coord = ferro_core::witness::CheckpointCoordinator::new(
+        published.join("two.chk"),
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    let reset2 = match second_coord
+        .capture_reset_publish_bind(&journal, 3, &third, stale.checkpoint(), publication_record)
+        .unwrap()
+    {
+        ferro_core::witness::PublicationOutcome::Bound(cp) => cp,
+        _ => panic!(),
+    };
+    assert_eq!(reset2.head.epoch, 3);
+    assert!(first_coord.reconcile_pending(&journal).is_err());
+    drop(first_coord);
+    let reopened = ferro_core::witness::CheckpointCoordinator::new(
+        published.join("one.chk"),
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    );
+    assert_eq!(
+        reopened.pending_binding().unwrap().unwrap().state(),
+        ferro_core::witness::PendingState::BindingFailed
+    );
+}
+
+#[test]
 fn pending_binding_rejects_tampering_and_a_cross_journal_reconcile() {
     let dir = tempfile::tempdir().unwrap();
     let faults = JournalFaults::new();

@@ -68,6 +68,9 @@ pub struct JournalHead {
 }
 
 impl WitnessJournal {
+    pub(super) fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
     pub(super) fn checkpoint_preflight(&self) -> Result<(), JournalError> {
         if self.mode == JournalMode::Disabled {
             Err(JournalError::Disabled)
@@ -106,7 +109,9 @@ impl WitnessJournal {
         artifact_digest: [u8; 32],
         mut record: WitnessRecord,
     ) -> Result<(), JournalError> {
-        record.epoch = self.epoch.load(Ordering::Acquire);
+        if record.epoch != self.current_epoch() {
+            return Err(JournalError::ProofMismatch);
+        }
         if record.stage != WitnessStage::CheckpointPublished
             || record.action != WitnessAction::CheckpointPublish
             || record.outcome != WitnessOutcome::Succeeded

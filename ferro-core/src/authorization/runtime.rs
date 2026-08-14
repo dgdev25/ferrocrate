@@ -12,9 +12,9 @@ use super::{Action, RequestContext, RequestFacts, Resource, ResourceState};
 use crate::container_store::ContainerRecord;
 use crate::container_store::CreationProvenance;
 use crate::witness::{
-    DurableIntent, Invocation, OperationId, PrincipalSummary, ReasonCode, RecoveryRecipe,
-    ResourceSummary, RuleSummary, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord,
-    WitnessResourceKind, WitnessStage,
+    DurableIntent, Invocation, ObservationDigest, ObservationHandle, OperationId, PrincipalSummary,
+    ReasonCode, RecoveryRecipe, RecoveryTruthStrategy, ResourceSummary, RuleSummary, WitnessAction,
+    WitnessJournal, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +61,10 @@ impl MutationPermit {
             creator_operation_id: Some(*self.operation.as_bytes()),
             image_digest: self.proof.canonical().image_digest().map(str::to_owned),
         }
+    }
+
+    pub(crate) fn operation_id(&self) -> [u8; 16] {
+        *self.operation.as_bytes()
     }
 }
 
@@ -123,7 +127,7 @@ impl RuntimeAuthorization {
     ) -> Result<MutationPermit, MediationError> {
         let resource_uuid = canonical_uuid(&record.id);
         let state = lifecycle_state(&record.status).ok_or(MediationError::Stale)?;
-        let generation = record.creation_provenance.resource_generation.max(1);
+        let generation = record.mutation_generation.max(1);
         let image = pinned_image(&record.image).or_else(|| {
             record
                 .creation_provenance
@@ -162,12 +166,24 @@ impl RuntimeAuthorization {
         let template = self.record_template(&request, operation, action)?;
 
         if let Some(journal) = &self.journal {
-            let recipe = RecoveryRecipe::for_original(
-                witness_action(action),
+            let witness_action = witness_action(action);
+            let mut observation = Sha256::new();
+            observation.update(b"ferrocrate/recovery-observation/v1");
+            observation.update([witness_action as u8]);
+            observation.update(record.id.as_bytes());
+            observation.update(record.status.as_bytes());
+            observation.update(record.pid.to_be_bytes());
+            observation.update(generation.to_be_bytes());
+            let recipe = RecoveryRecipe::for_original_with_observation(
+                witness_action,
                 WitnessResourceKind::Container,
                 WitnessAction::ContainerDelete,
                 template.request_digest,
                 generation,
+                RecoveryTruthStrategy::for_container_action(witness_action)
+                    .ok_or(MediationError::Identity)?,
+                ObservationDigest::from_bytes(observation.finalize().into()),
+                ObservationHandle::from_bytes(*operation.as_bytes()),
             )
             .map_err(|_| MediationError::Identity)?;
             journal.append_received(
@@ -226,8 +242,7 @@ impl RuntimeAuthorization {
         record: &ContainerRecord,
     ) -> Result<(), MediationError> {
         if permit.proof.canonical().resource_id() != canonical_uuid(&record.id)
-            || permit.proof.canonical().resource_generation()
-                != record.creation_provenance.resource_generation.max(1)
+            || permit.proof.canonical().resource_generation() != record.mutation_generation.max(1)
             || permit.proof.canonical().state_precondition() != lifecycle_state(&record.status)
         {
             return Err(MediationError::Stale);

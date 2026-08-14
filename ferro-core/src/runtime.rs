@@ -69,7 +69,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -652,7 +652,6 @@ pub struct ContainerRuntime {
     /// Cancellation tokens for resource monitor threads (Task 5.1)
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
     authorization: RuntimeAuthorization,
-    mutation_lock: Mutex<()>,
 }
 
 impl ContainerRuntime {
@@ -682,7 +681,6 @@ impl ContainerRuntime {
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization,
-            mutation_lock: Mutex::new(()),
         };
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
@@ -938,10 +936,6 @@ impl ContainerRuntime {
         network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
-        let _mutation_guard = self
-            .mutation_lock
-            .lock()
-            .map_err(|_| RuntimeError::Authorization("mutation lock poisoned".into()))?;
         let container_id = generate_container_id();
         let pinned_image = store.resolve_reference(image)?.map_or_else(
             || image.to_owned(),
@@ -1242,6 +1236,8 @@ impl ContainerRuntime {
             managed_host_veth: network_setup.managed_host_veth.clone(),
             ai_runtime: ai_config.cloned(),
             creation_provenance,
+            mutation_generation: 1,
+            pending_mutation: None,
         };
 
         rollback.persist_network()?;
@@ -1309,14 +1305,14 @@ impl ContainerRuntime {
         id: &str,
         cmd: &[String],
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let _mutation_guard = self
-            .mutation_lock
-            .lock()
-            .map_err(|_| RuntimeError::Authorization("mutation lock poisoned".into()))?;
         let permit = self.authorize_existing(Action::ContainerExec, id)?;
+        let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd);
-        self.authorization.complete(permit, result.is_ok())?;
+        let finish = self.store.finish_mutation(id, operation_id);
+        let completion = self.authorization.complete(permit, result.is_ok());
+        finish?;
+        completion?;
         result
     }
 
@@ -1766,6 +1762,15 @@ impl ContainerRuntime {
             self.authorization.complete(permit, false)?;
             return Err(error.into());
         }
+        if let Err(error) = self.store.reserve_mutation(
+            id,
+            &current.status,
+            current.mutation_generation.max(1),
+            permit.operation_id(),
+        ) {
+            self.authorization.complete(permit, false)?;
+            return Err(error.into());
+        }
         Ok(permit)
     }
 
@@ -1779,14 +1784,14 @@ impl ContainerRuntime {
             Option<&crate::witness::DurableIntent>,
         ) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
-        let _mutation_guard = self
-            .mutation_lock
-            .lock()
-            .map_err(|_| RuntimeError::Authorization("mutation lock poisoned".into()))?;
         let permit = self.authorize_existing(action, id)?;
+        let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = execute(self, proof, intent);
-        self.authorization.complete(permit, result.is_ok())?;
+        let finish = self.store.finish_mutation(id, operation_id);
+        let completion = self.authorization.complete(permit, result.is_ok());
+        finish?;
+        completion?;
         result
     }
 }
@@ -6623,6 +6628,8 @@ mod tests {
             managed_host_veth: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
+            mutation_generation: 1,
+            pending_mutation: None,
         };
         store.put(&record).expect("seed stale record");
         drop(store);
@@ -6672,6 +6679,8 @@ mod tests {
             network_ownership: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
+            mutation_generation: 1,
+            pending_mutation: None,
             managed_overlay: None,
             managed_host_veth: None,
         };
@@ -6977,6 +6986,8 @@ mod tests {
             network_ownership: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
+            mutation_generation: 1,
+            pending_mutation: None,
             managed_overlay: None,
             managed_host_veth: None,
         }
@@ -7671,6 +7682,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             network_ownership: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
+            mutation_generation: 1,
+            pending_mutation: None,
             managed_overlay: None,
             managed_host_veth: None,
         };

@@ -25,6 +25,14 @@ fn authorization_gate_inventory_has_stable_unique_surface_ids() {
     assert_eq!(
         actual,
         vec![
+            "mutation.runtime.run",
+            "mutation.runtime.exec",
+            "mutation.runtime.pause",
+            "mutation.runtime.resume",
+            "mutation.runtime.stop",
+            "mutation.runtime.kill",
+            "mutation.runtime.restart",
+            "mutation.runtime.remove",
             "mutation.cli",
             "mutation.docker",
             "mutation.compose",

@@ -12,6 +12,54 @@ pub struct MutationInventoryEntry {
 /// Closed inventory consumed by complete-mediation architecture tests.
 pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
     entry(
+        "mutation.runtime.run",
+        "ContainerRuntime::run_with_store_authorized",
+        "ContainerRuntime::run_with_store",
+        "runtime_authorization_run",
+    ),
+    entry(
+        "mutation.runtime.exec",
+        "ContainerRuntime::exec_authorized",
+        "ContainerRuntime::exec",
+        "runtime_authorization_exec",
+    ),
+    entry(
+        "mutation.runtime.pause",
+        "ContainerRuntime::pause_authorized",
+        "ContainerRuntime::pause",
+        "runtime_authorization_pause",
+    ),
+    entry(
+        "mutation.runtime.resume",
+        "ContainerRuntime::resume_authorized",
+        "ContainerRuntime::resume",
+        "runtime_authorization_resume",
+    ),
+    entry(
+        "mutation.runtime.stop",
+        "ContainerRuntime::stop_authorized",
+        "ContainerRuntime::stop",
+        "runtime_authorization_stop",
+    ),
+    entry(
+        "mutation.runtime.kill",
+        "ContainerRuntime::kill_authorized",
+        "ContainerRuntime::kill",
+        "runtime_authorization_kill",
+    ),
+    entry(
+        "mutation.runtime.restart",
+        "ContainerRuntime::restart_authorized",
+        "ContainerRuntime::restart",
+        "runtime_authorization_restart",
+    ),
+    entry(
+        "mutation.runtime.remove",
+        "ContainerRuntime::remove_authorized",
+        "ContainerRuntime::remove",
+        "runtime_authorization_remove",
+    ),
+    entry(
         "mutation.cli",
         "CLI commands",
         "AuthorizationGate::authorize",

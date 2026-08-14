@@ -35,7 +35,8 @@ Verification on 2026-08-14:
 - `runtime_authorization`: 9 passed.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
-- `ferro-core --lib`: 261 passed, 1 ignored.
+- `ferro-core --lib`: 261 passed, 1 ignored in the full run; the subsequently
+  added internal network recovery binding test also passes.
 - Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.
 - Strict workspace dependency clippy remains blocked by pre-existing warnings

@@ -98,6 +98,8 @@ impl JournalConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
+    #[error("witness journal storage schema is unsupported; migrate or start a new epoch")]
+    UnsupportedVersion,
     #[error("witness journal is owned by another append coordinator")]
     Locked,
     #[error("configured journal identity does not match durable storage")]

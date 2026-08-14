@@ -104,6 +104,14 @@ fn key_store_creates_owner_only_key_and_stable_id() {
 }
 
 #[test]
+fn key_store_requires_a_preprovisioned_private_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("keys");
+    assert!(KeyStore::new(&missing).create("active").is_err());
+    assert!(!missing.exists());
+}
+
+#[test]
 fn key_store_refuses_symlink_and_checkpoint_frame_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("keys");
@@ -196,23 +204,29 @@ fn coordinator_signs_only_the_durably_flushed_journal_head() {
 #[test]
 fn failed_checkpoint_replacement_never_exposes_partial_bytes() {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let journal = WitnessJournal::open(JournalConfig::new(
+        dir.path().join("journal"),
+        [1; 16],
+        JournalMode::Required,
+    ))
+    .unwrap();
     let target = dir.path().join("occupied");
     fs::create_dir(&target).unwrap();
     fs::write(target.join("sentinel"), b"intact").unwrap();
     let key = SigningKey::from_bytes(&[13; 32]);
-    let checkpoint = Checkpoint::sign(
-        FlushedHead::new([1; 16], 1, 1, [2; 32]),
-        1,
-        &key,
-        CheckpointKind::Periodic,
-    )
-    .unwrap();
     let coordinator = ferro_core::witness::CheckpointCoordinator::new(
         &target,
         Duration::from_secs(1),
         Duration::from_secs(1),
     );
-    assert!(coordinator.publish(&checkpoint).is_err());
+    assert!(coordinator
+        .capture_publish_bind(&journal, 1, &key, None, publication_record)
+        .is_err());
     assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"intact");
 }
 
@@ -233,7 +247,10 @@ fn verifier_requires_explicit_root_and_detects_truncation() {
     assert!(report.integrity);
     assert!(report.lifecycle_consistent);
     assert_eq!(report.completeness_through_checkpoint, Some(true));
-    assert!(report.unknown_tail_freshness);
+    assert_eq!(
+        report.tail_freshness,
+        ferro_core::witness::Freshness::UnknownTail
+    );
 
     let older = Checkpoint::sign(
         FlushedHead::new([1; 16], 1, 1, [3; 32]),
@@ -432,7 +449,7 @@ fn periodic_lineage_spans_three_heads_and_rotation() {
         )
         .unwrap();
     assert_eq!(
-        report.freshness,
+        report.tail_freshness,
         ferro_core::witness::Freshness::UnknownTail
     );
     assert_eq!(
@@ -467,15 +484,15 @@ fn crash_after_artifact_rename_returns_pending_and_reconciles_idempotently() {
     let outcome = coordinator
         .capture_publish_bind(&journal, 1, &key, None, publication_record)
         .unwrap();
-    let checkpoint = match outcome {
-        ferro_core::witness::PublicationOutcome::PendingBinding(cp) => cp,
+    let pending = match outcome {
+        ferro_core::witness::PublicationOutcome::PendingBinding(pending) => pending,
         _ => panic!("flush ambiguity must be pending"),
     };
     coordinator
-        .reconcile_binding(&journal, &checkpoint, publication_record(&checkpoint))
+        .reconcile_binding(&journal, &pending, publication_record(pending.checkpoint()))
         .unwrap();
     coordinator
-        .reconcile_binding(&journal, &checkpoint, publication_record(&checkpoint))
+        .reconcile_binding(&journal, &pending, publication_record(pending.checkpoint()))
         .unwrap();
     assert_eq!(journal.records().unwrap().len(), 1);
 }
@@ -567,19 +584,21 @@ fn publication_rejects_symlink_ancestor() {
     fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
     let alias = dir.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
-    let cp = Checkpoint::sign(
-        FlushedHead::new([19; 16], 1, 0, [0; 32]),
-        1,
-        &SigningKey::from_bytes(&[39; 32]),
-        CheckpointKind::Periodic,
-    )
+    let journal = WitnessJournal::open(JournalConfig::new(
+        dir.path().join("journal"),
+        [19; 16],
+        JournalMode::Required,
+    ))
     .unwrap();
+    let key = SigningKey::from_bytes(&[39; 32]);
     let coordinator = ferro_core::witness::CheckpointCoordinator::new(
         alias.join("head.chk"),
         Duration::from_secs(1),
         Duration::from_secs(1),
     );
-    assert!(coordinator.publish(&cp).is_err());
+    assert!(coordinator
+        .capture_publish_bind(&journal, 1, &key, None, publication_record)
+        .is_err());
 }
 
 #[test]
@@ -623,7 +642,7 @@ fn stale_checkpoint_does_not_claim_known_tail() {
         )
         .unwrap();
     assert_eq!(
-        report.freshness,
+        report.tail_freshness,
         ferro_core::witness::Freshness::UnknownTail
     );
     assert_eq!(

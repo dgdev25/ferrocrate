@@ -39,8 +39,7 @@ pub struct VerificationReport {
     pub integrity: bool,
     pub lifecycle_consistent: bool,
     pub completeness_through_checkpoint: Option<bool>,
-    pub unknown_tail_freshness: bool,
-    pub freshness: super::Freshness,
+    pub tail_freshness: super::Freshness,
     pub checkpoint_age: Option<super::CheckpointAge>,
     pub records: u64,
     pub terminal_denied: u64,
@@ -103,56 +102,102 @@ pub fn verify_stream<'a, I>(
 where
     I: IntoIterator<Item = &'a [u8]>,
 {
-    let mut expected_sequence = trust.expected_first_sequence;
-    let mut previous_hash = trust.expected_predecessor_hash;
-    let mut lifecycles = HashMap::<[u8; 16], Lifecycle>::new();
-    let mut event_ids = HashSet::<[u8; 16]>::new();
-    let mut request_ids = HashSet::<[u8; 16]>::new();
-    let mut report = VerificationReport {
-        integrity: true,
-        lifecycle_consistent: true,
-        completeness_through_checkpoint: None,
-        unknown_tail_freshness: false,
-        freshness: super::Freshness::UnknownTail,
-        checkpoint_age: None,
-        records: 0,
-        terminal_denied: 0,
-        terminal_outcomes: 0,
-        terminal_recoveries: 0,
-        discontinuities: 0,
-    };
-
+    let mut verifier = StreamVerifier::new(trust.clone());
     for bytes in records {
+        verifier.push(bytes)?;
+    }
+    verifier.finish()
+}
+
+pub(super) struct StreamVerifier {
+    trust: StreamTrust,
+    expected_sequence: u64,
+    previous_hash: [u8; 32],
+    lifecycles: HashMap<[u8; 16], Lifecycle>,
+    event_ids: HashSet<[u8; 16]>,
+    request_ids: HashSet<[u8; 16]>,
+    report: VerificationReport,
+}
+
+impl StreamVerifier {
+    pub(super) fn new(trust: StreamTrust) -> Self {
+        Self {
+            expected_sequence: trust.expected_first_sequence,
+            previous_hash: trust.expected_predecessor_hash,
+            trust,
+            lifecycles: HashMap::new(),
+            event_ids: HashSet::new(),
+            request_ids: HashSet::new(),
+            report: VerificationReport {
+                integrity: true,
+                lifecycle_consistent: true,
+                completeness_through_checkpoint: None,
+                tail_freshness: super::Freshness::UnknownTail,
+                checkpoint_age: None,
+                records: 0,
+                terminal_denied: 0,
+                terminal_outcomes: 0,
+                terminal_recoveries: 0,
+                discontinuities: 0,
+            },
+        }
+    }
+
+    pub(super) fn advance_epoch(&mut self, epoch: u64) -> Result<(), WitnessError> {
+        if !self.lifecycles.is_empty()
+            || epoch
+                != self
+                    .trust
+                    .expected_epoch
+                    .checked_add(1)
+                    .ok_or(WitnessError::WrongEpoch)?
+        {
+            return Err(WitnessError::WrongEpoch);
+        }
+        self.trust.expected_epoch = epoch;
+        self.report.discontinuities += 1;
+        Ok(())
+    }
+
+    pub(super) fn push(&mut self, bytes: &[u8]) -> Result<(), WitnessError> {
         let decoded = decode_record(bytes)?;
-        if decoded.journal_id() != &trust.expected_journal_id {
+        if decoded.journal_id() != &self.trust.expected_journal_id {
             return Err(WitnessError::WrongJournal);
         }
         let record = decoded.record();
-        if record.epoch != trust.expected_epoch {
+        if record.epoch != self.trust.expected_epoch {
             return Err(WitnessError::WrongEpoch);
         }
-        if record.sequence != expected_sequence || !event_ids.insert(record.event_id) {
+        if record.sequence != self.expected_sequence || !self.event_ids.insert(record.event_id) {
             return Err(WitnessError::SequenceGap);
         }
-        if record.previous_hash != previous_hash {
+        if record.previous_hash != self.previous_hash {
             return Err(WitnessError::BrokenLink);
         }
         super::validation::validate_record(record)?;
-        transition(record, &mut lifecycles, &mut request_ids, &mut report)?;
-        if lifecycles.len() > MAX_OPEN_REQUESTS {
+        transition(
+            record,
+            &mut self.lifecycles,
+            &mut self.request_ids,
+            &mut self.report,
+        )?;
+        if self.lifecycles.len() > MAX_OPEN_REQUESTS {
             return Err(WitnessError::TooManyOpenRequests);
         }
-        previous_hash = hash_record(decoded.bytes());
-        expected_sequence = expected_sequence
+        self.previous_hash = hash_record(decoded.bytes());
+        self.expected_sequence = self
+            .expected_sequence
             .checked_add(1)
             .ok_or(WitnessError::SequenceGap)?;
-        report.records += 1;
+        self.report.records += 1;
+        Ok(())
     }
-
-    if !lifecycles.is_empty() {
-        return Err(WitnessError::InvalidLifecycle);
+    pub(super) fn finish(self) -> Result<VerificationReport, WitnessError> {
+        if !self.lifecycles.is_empty() {
+            return Err(WitnessError::InvalidLifecycle);
+        }
+        Ok(self.report)
     }
-    Ok(report)
 }
 
 fn same_binding(record: &ParsedRecord, binding: &RequestBinding) -> bool {

@@ -381,18 +381,13 @@ impl CheckpointVerifier {
         if checkpoints.is_empty() || checkpoints.len() > MAX_CHECKPOINTS {
             return Err(CheckpointError::InvalidArtifact);
         }
-        let evidence: Vec<&[u8]> = evidence.into_iter().collect();
         let mut trusted = self.trust.initial;
-        let evidence_index = super::checkpoint_evidence::index(&evidence)?;
         let mut trusted_keys = HashMap::from([(KeyId::from_public_key(&trusted), trusted)]);
         let mut last: Option<&Checkpoint> = None;
         let mut discontinuities = 0;
         for cp in checkpoints {
             if cp.head.journal_id != self.trust.journal_id {
                 return Err(CheckpointError::Untrusted);
-            }
-            if !super::checkpoint_evidence::is_bound(&evidence_index, cp) {
-                return Err(CheckpointError::Rollback);
             }
             if let Some(prev) = last {
                 let expected_predecessor: [u8; 32] = Sha256::digest(prev.encode()).into();
@@ -453,7 +448,7 @@ impl CheckpointVerifier {
                 .is_some_and(|key| verify_signature(minimum, key).is_ok());
             if minimum.head.journal_id != self.trust.journal_id
                 || !minimum_signature_valid
-                || !super::checkpoint_evidence::contains_head(&evidence, minimum)
+                || !checkpoints.iter().any(|checkpoint| checkpoint == minimum)
             {
                 return false;
             }
@@ -472,17 +467,22 @@ impl CheckpointVerifier {
         if last.created_at_secs > now_secs {
             return Err(CheckpointError::InvalidArtifact);
         }
-        let mut report = super::checkpoint_evidence::verify(&evidence, last)?;
+        let mut report = super::checkpoint_evidence::verify_streaming(
+            evidence,
+            self.trust.journal_id,
+            checkpoints,
+        )?;
         report.completeness_through_checkpoint = complete.or(Some(true));
         let age = now_secs - last.created_at_secs;
-        report.unknown_tail_freshness = true;
-        report.freshness = Freshness::UnknownTail;
+        report.tail_freshness = Freshness::UnknownTail;
         report.checkpoint_age = Some(if age <= max_age.as_secs() {
             CheckpointAge::Current { seconds: age }
         } else {
             CheckpointAge::Stale { seconds: age }
         });
-        report.discontinuities = discontinuities;
+        if report.discontinuities != discontinuities {
+            return Err(CheckpointError::Rollback);
+        }
         Ok(report)
     }
 }

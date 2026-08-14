@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -56,18 +56,6 @@ impl KeyStore {
 
     pub fn create(&self, name: &str) -> Result<KeyMaterial, KeyStoreError> {
         validate_name(name)?;
-        if !self.root.exists() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                fs::DirBuilder::new().mode(0o700).create(&self.root)?;
-                if let Some(parent) = self.root.parent() {
-                    File::open(parent)?.sync_all()?;
-                }
-            }
-            #[cfg(not(unix))]
-            fs::create_dir(&self.root)?;
-        }
         let root = secure_root(&self.root)?;
         let filename = format!("{name}.key");
         let temporary = format!(".{name}.{}.tmp", rand::random::<u64>());

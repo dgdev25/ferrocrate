@@ -21,7 +21,20 @@ pub struct CheckpointCoordinator {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicationOutcome {
     Bound(Checkpoint),
-    PendingBinding(Checkpoint),
+    PendingBinding(PendingBinding),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingBinding {
+    checkpoint: Checkpoint,
+    event_id: [u8; 16],
+    expected_epoch: u64,
+    expected_sequence: u64,
+}
+impl PendingBinding {
+    pub fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
+    }
 }
 
 impl CheckpointCoordinator {
@@ -50,10 +63,11 @@ impl CheckpointCoordinator {
         };
         self.publish(&cp)?;
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
+        let prepared = prepare_binding(&cp, record(&cp), digest)?;
         Ok(
-            match journal.append_checkpoint_publication(digest, record(&cp)) {
+            match journal.append_checkpoint_publication(digest, prepared.clone()) {
                 Ok(()) => PublicationOutcome::Bound(cp),
-                Err(_) => PublicationOutcome::PendingBinding(cp),
+                Err(_) => PublicationOutcome::PendingBinding(pending(cp, &prepared)?),
             },
         )
     }
@@ -85,17 +99,44 @@ impl CheckpointCoordinator {
         let cp = Checkpoint::trust_reset_after(head, now_secs, predecessor, new_key)?;
         self.publish(&cp)?;
         if journal.advance_epoch(current.epoch).is_err() {
-            return Ok(PublicationOutcome::PendingBinding(cp));
+            let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
+            let prepared = prepare_binding(&cp, record(&cp), digest)?;
+            return Ok(PublicationOutcome::PendingBinding(pending(cp, &prepared)?));
         }
         let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
+        let prepared = prepare_binding(&cp, record(&cp), digest)?;
         Ok(
-            match journal.append_checkpoint_publication(digest, record(&cp)) {
+            match journal.append_checkpoint_publication(digest, prepared.clone()) {
                 Ok(()) => PublicationOutcome::Bound(cp),
-                Err(_) => PublicationOutcome::PendingBinding(cp),
+                Err(_) => PublicationOutcome::PendingBinding(pending(cp, &prepared)?),
             },
         )
     }
-    pub fn publish(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+    pub fn capture_rotate_publish_bind<F>(
+        &self,
+        journal: &WitnessJournal,
+        now_secs: u64,
+        old_key: &SigningKey,
+        new_key: &SigningKey,
+        predecessor: &Checkpoint,
+        record: F,
+    ) -> Result<PublicationOutcome, CheckpointError>
+    where
+        F: FnOnce(&Checkpoint) -> WitnessRecord,
+    {
+        let head = journal.flushed_head()?.into();
+        let cp = Checkpoint::rotate_after(head, now_secs, predecessor, old_key, new_key)?;
+        self.publish(&cp)?;
+        let digest: [u8; 32] = Sha256::digest(cp.encode()).into();
+        let prepared = prepare_binding(&cp, record(&cp), digest)?;
+        Ok(
+            match journal.append_checkpoint_publication(digest, prepared.clone()) {
+                Ok(()) => PublicationOutcome::Bound(cp),
+                Err(_) => PublicationOutcome::PendingBinding(pending(cp, &prepared)?),
+            },
+        )
+    }
+    pub(crate) fn publish(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         let bytes = checkpoint.encode();
         if bytes.len() > MAX_CHECKPOINT_BYTES {
             return Err(CheckpointError::InvalidArtifact);
@@ -127,17 +168,25 @@ impl CheckpointCoordinator {
     pub fn reconcile_binding(
         &self,
         journal: &WitnessJournal,
-        checkpoint: &Checkpoint,
+        pending: &PendingBinding,
         record: WitnessRecord,
     ) -> Result<(), CheckpointError> {
         let current = journal.flushed_head()?;
+        let checkpoint = &pending.checkpoint;
         if checkpoint.kind == super::CheckpointKind::TrustReset
             && current.epoch.checked_add(1) == Some(checkpoint.head.epoch)
         {
             journal.advance_epoch(current.epoch)?;
         }
         let digest: [u8; 32] = Sha256::digest(checkpoint.encode()).into();
-        journal.append_checkpoint_publication(digest, record)?;
+        let prepared = prepare_binding(checkpoint, record, digest)?;
+        if prepared.event_id != pending.event_id
+            || prepared.epoch != pending.expected_epoch
+            || prepared.sequence != pending.expected_sequence
+        {
+            return Err(CheckpointError::Rollback);
+        }
+        journal.append_checkpoint_publication(digest, prepared)?;
         Ok(())
     }
     pub fn allows_user_mutation(&self, newest_checkpoint_secs: u64, now_secs: u64) -> bool {
@@ -148,6 +197,43 @@ impl CheckpointCoordinator {
     pub const fn allows_reserved_cleanup(&self) -> bool {
         true
     }
+}
+
+fn prepare_binding(
+    checkpoint: &Checkpoint,
+    mut record: WitnessRecord,
+    digest: [u8; 32],
+) -> Result<WitnessRecord, CheckpointError> {
+    let sequence = checkpoint
+        .head
+        .sequence
+        .checked_add(1)
+        .ok_or(CheckpointError::Rollback)?;
+    let identity: [u8; 32] = Sha256::digest(
+        [
+            b"FERROCRATE-CHECKPOINT-BINDING-V2".as_slice(),
+            digest.as_slice(),
+        ]
+        .concat(),
+    )
+    .into();
+    record.event_id.copy_from_slice(&identity[..16]);
+    record.request_id.copy_from_slice(&identity[16..]);
+    record.epoch = checkpoint.head.epoch;
+    record.sequence = sequence;
+    record.previous_hash = checkpoint.head.hash;
+    Ok(record)
+}
+fn pending(
+    checkpoint: Checkpoint,
+    record: &WitnessRecord,
+) -> Result<PendingBinding, CheckpointError> {
+    Ok(PendingBinding {
+        checkpoint,
+        event_id: record.event_id,
+        expected_epoch: record.epoch,
+        expected_sequence: record.sequence,
+    })
 }
 
 #[cfg(target_os = "linux")]

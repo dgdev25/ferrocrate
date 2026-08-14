@@ -53,6 +53,22 @@ fn config(path: &std::path::Path) -> JournalConfig {
     JournalConfig::new(path, [9; 16], JournalMode::Required).cleanup_reserve_bytes(4096)
 }
 
+#[test]
+fn rejects_v1_storage_instead_of_silently_opening_an_unreadable_journal() {
+    let dir = tempdir().unwrap();
+    let db = sled::open(dir.path().join("witness.sled")).unwrap();
+    db.open_tree("witness-meta-v1")
+        .unwrap()
+        .insert(b"schema", b"v1")
+        .unwrap();
+    db.flush().unwrap();
+    drop(db);
+    assert!(matches!(
+        WitnessJournal::open(config(dir.path())),
+        Err(JournalError::UnsupportedVersion)
+    ));
+}
+
 fn recipe() -> RecoveryRecipe {
     RecoveryRecipe::for_original(
         WitnessAction::ContainerCreate,

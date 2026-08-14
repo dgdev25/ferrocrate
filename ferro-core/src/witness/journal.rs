@@ -160,15 +160,31 @@ impl WitnessJournal {
         fs::create_dir_all(&config.root)?;
         let lock = lock_journal(&config.root, config.journal_id)?;
         let db = sled::open(config.root.join("witness.sled"))?;
+        const V1_TREES: [&[u8]; 7] = [
+            b"witness-records-v1",
+            b"witness-operations-v1",
+            b"witness-events-v1",
+            b"witness-pending-v1",
+            b"witness-meta-v1",
+            b"witness-segments-v1",
+            b"witness-sealed-segments-v1",
+        ];
+        if db
+            .tree_names()
+            .iter()
+            .any(|name| V1_TREES.contains(&name.as_ref()))
+        {
+            return Err(JournalError::UnsupportedVersion);
+        }
         let journal = Self {
             root: config.root.clone(),
-            records: db.open_tree("witness-records-v1")?,
-            operations: db.open_tree("witness-operations-v1")?,
-            events: db.open_tree("witness-events-v1")?,
-            pending: db.open_tree("witness-pending-v1")?,
-            meta: db.open_tree("witness-meta-v1")?,
-            segments: db.open_tree("witness-segments-v1")?,
-            sealed_segments: db.open_tree("witness-sealed-segments-v1")?,
+            records: db.open_tree("witness-records-v2")?,
+            operations: db.open_tree("witness-operations-v2")?,
+            events: db.open_tree("witness-events-v2")?,
+            pending: db.open_tree("witness-pending-v2")?,
+            meta: db.open_tree("witness-meta-v2")?,
+            segments: db.open_tree("witness-segments-v2")?,
+            sealed_segments: db.open_tree("witness-sealed-segments-v2")?,
             db,
             journal_id: config.journal_id,
             epoch: AtomicU64::new(1),

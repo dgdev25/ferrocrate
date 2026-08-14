@@ -11,6 +11,13 @@ pub enum JournalMode {
     Required,
 }
 
+/// Closed result of inspecting external state during startup reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryClassification {
+    Recovered,
+    Quarantined,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FlushBoundary {
     Reserve,

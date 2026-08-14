@@ -22,7 +22,7 @@ use std::{
 use storage::{lock_journal, path_entry_exists, transaction_error};
 pub use types::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
-    JournalMode,
+    JournalMode, RecoveryClassification,
 };
 
 const HEAD_SEQUENCE: &[u8] = b"head-sequence";

@@ -1,9 +1,9 @@
 use ferro_core::witness::{
     verify_stream, DisclosureClass, DurableIntent, FaultPoint, FlushBoundary, Invocation,
     JournalConfig, JournalError, JournalFaults, JournalMode, ObservationDigest, ObservationHandle,
-    OperationId, PrincipalSummary, RecoveryRecipe, RecoveryTruthStrategy, ResourceSummary,
-    RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord,
-    WitnessResourceKind, WitnessStage,
+    OperationId, PrincipalSummary, RecoveryClassification, RecoveryRecipe, RecoveryTruthStrategy,
+    ResourceSummary, RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome,
+    WitnessRecord, WitnessResourceKind, WitnessStage,
 };
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -48,6 +48,74 @@ fn record(stage: WitnessStage) -> WitnessRecord {
         device_class: None,
         correlation_digest: None,
     }
+}
+
+#[test]
+fn restart_reconciles_allowed_observation_through_unknown_and_recovery() {
+    let root = tempdir().unwrap();
+    let id = OperationId::from_bytes([91; 16]);
+    {
+        let journal = WitnessJournal::open(config(root.path())).unwrap();
+        allow(&journal, id, 91);
+    }
+
+    let journal = WitnessJournal::open(config(root.path())).unwrap();
+    journal
+        .reconcile_observed(
+            id,
+            ObservationDigest::from_bytes([8; 32]),
+            RecoveryClassification::Recovered,
+        )
+        .unwrap();
+    let records = journal.records().unwrap();
+    let decoded: Vec<_> = records
+        .iter()
+        .map(|bytes| ferro_core::witness::decode_record(bytes).unwrap())
+        .collect();
+    let unknown = &decoded[2];
+    let recovery = &decoded[3];
+    assert_eq!(unknown.stage(), WitnessStage::Outcome);
+    assert_eq!(recovery.stage(), WitnessStage::Recovery);
+    assert!(
+        verify_stream(
+            records.iter().map(Vec::as_slice),
+            &StreamTrust::new([9; 16], 1, 1, [0; 32])
+        )
+        .unwrap()
+        .lifecycle_consistent
+    );
+    assert!(journal.pending().unwrap().is_empty());
+}
+
+#[test]
+fn restart_reconciles_existing_unknown_without_appending_another_unknown() {
+    let root = tempdir().unwrap();
+    let id = OperationId::from_bytes([92; 16]);
+    {
+        let journal = WitnessJournal::open(config(root.path())).unwrap();
+        let intent = allow(&journal, id, 92);
+        journal
+            .complete(intent, outcome(92, WitnessOutcome::OutcomeUnknown))
+            .unwrap();
+    }
+
+    let journal = WitnessJournal::open(config(root.path())).unwrap();
+    journal
+        .reconcile_observed(
+            id,
+            ObservationDigest::from_bytes([8; 32]),
+            RecoveryClassification::Quarantined,
+        )
+        .unwrap();
+    let records = journal.records().unwrap();
+    let decoded: Vec<_> = records
+        .iter()
+        .map(|bytes| ferro_core::witness::decode_record(bytes).unwrap())
+        .collect();
+    assert_eq!(decoded.len(), 4);
+    assert_eq!(decoded[2].stage(), WitnessStage::Outcome);
+    assert_eq!(decoded[3].stage(), WitnessStage::Recovery);
+    assert!(journal.pending().unwrap().is_empty());
 }
 
 fn config(path: &std::path::Path) -> JournalConfig {

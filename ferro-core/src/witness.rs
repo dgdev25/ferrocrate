@@ -36,7 +36,7 @@ pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
 pub use journal::JournalHead;
 pub use journal::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
-    JournalMode, WitnessJournal,
+    JournalMode, RecoveryClassification, WitnessJournal,
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
 pub use recovery::{

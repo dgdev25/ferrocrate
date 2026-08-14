@@ -29,7 +29,8 @@ use crate::mac_profiles::generate_apparmor_profile;
 use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
 use crate::mounts::{
     apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts,
-    normalize_mount_target, open_mount_source_beneath, BindMount, MountError, TmpfsMount,
+    normalize_mount_target, open_existing_mount_target_beneath, open_mount_source_beneath,
+    BindMount, MountError, TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
@@ -110,6 +111,47 @@ struct CreationRollback {
     operation_id: Option<[u8; 16]>,
     planned_resources: BTreeMap<String, String>,
     applied_resources: BTreeMap<String, Option<KernelObjectIdentityRecord>>,
+    resource_plans: Vec<ResourcePlan>,
+    typed_applied_resources: Vec<AppliedResource>,
+    defer_container_removal: bool,
+    cleanup_quarantined: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+enum ResourcePlan {
+    Rootfs { path: PathBuf, generation: u64 },
+    BindMount { target: PathBuf, generation: u64 },
+    TmpfsMount { target: PathBuf, generation: u64 },
+    RootfsReadonly { target: PathBuf, generation: u64 },
+    NetworkAllocation { canonical: String, generation: u64 },
+    Cgroup { name: String, generation: u64 },
+    Process { generation: u64 },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+enum ResourceIdentity {
+    Path {
+        device: u64,
+        inode: u64,
+        mount_id: Option<u64>,
+    },
+    Network {
+        identity: Option<KernelObjectIdentityRecord>,
+    },
+    Cgroup {
+        device: u64,
+        inode: u64,
+    },
+    Process {
+        pid: u32,
+        start_time: u64,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct AppliedResource {
+    plan_index: usize,
+    identity: ResourceIdentity,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -144,6 +186,10 @@ struct PendingNetworkCleanup {
     planned_resources: BTreeMap<String, String>,
     #[serde(default)]
     applied_resources: BTreeMap<String, Option<KernelObjectIdentityRecord>>,
+    #[serde(default)]
+    resource_plans: Vec<ResourcePlan>,
+    #[serde(default)]
+    typed_applied_resources: Vec<AppliedResource>,
 }
 
 impl CreationRollback {
@@ -171,6 +217,10 @@ impl CreationRollback {
             operation_id,
             planned_resources: Default::default(),
             applied_resources: Default::default(),
+            resource_plans: Vec::new(),
+            typed_applied_resources: Vec::new(),
+            defer_container_removal: false,
+            cleanup_quarantined: false,
         }
     }
 
@@ -215,6 +265,10 @@ impl CreationRollback {
             operation_id: pending.operation_id,
             planned_resources: pending.planned_resources,
             applied_resources: pending.applied_resources,
+            resource_plans: pending.resource_plans,
+            typed_applied_resources: pending.typed_applied_resources,
+            defer_container_removal: true,
+            cleanup_quarantined: false,
         })
     }
 
@@ -224,6 +278,34 @@ impl CreationRollback {
 
     fn plan_resource(&mut self, kind: &str, canonical: String) -> Result<(), RuntimeError> {
         self.planned_resources.insert(kind.to_string(), canonical);
+        self.persist_cleanup_journal()
+    }
+
+    fn plan_typed_resource(&mut self, plan: ResourcePlan) -> Result<usize, RuntimeError> {
+        self.resource_plans.push(plan);
+        self.persist_cleanup_journal()?;
+        Ok(self.resource_plans.len() - 1)
+    }
+
+    fn mark_typed_resource(
+        &mut self,
+        plan_index: usize,
+        identity: ResourceIdentity,
+    ) -> Result<(), RuntimeError> {
+        if plan_index >= self.resource_plans.len()
+            || self
+                .typed_applied_resources
+                .iter()
+                .any(|applied| applied.plan_index == plan_index)
+        {
+            return Err(RuntimeError::InvalidState(
+                "invalid or duplicate applied resource identity".to_string(),
+            ));
+        }
+        self.typed_applied_resources.push(AppliedResource {
+            plan_index,
+            identity,
+        });
         self.persist_cleanup_journal()
     }
 
@@ -383,6 +465,8 @@ impl CreationRollback {
             cgroup_generation: self.operation_id.map(|_| 1),
             planned_resources: self.planned_resources.clone(),
             applied_resources: self.applied_resources.clone(),
+            resource_plans: self.resource_plans.clone(),
+            typed_applied_resources: self.typed_applied_resources.clone(),
         }
     }
 
@@ -443,6 +527,7 @@ impl CreationRollback {
 
     /// Explicitly roll back all tracked resources.
     fn rollback(&mut self) {
+        let typed_cleanup_failure = self.cleanup_typed_resources();
         // Rollback cgroup - use configured cgroup_root, not hardcoded path
         if let Some(ref cgroup_name) = self.cgroup_name {
             let cgroup_path = self.cgroup_root.join(cgroup_name);
@@ -491,7 +576,7 @@ impl CreationRollback {
             (Some(name), _) => Some(name.as_str()),
             _ => None,
         };
-        let mut retain_container_dir = identity_cleanup_failure;
+        let mut retain_container_dir = identity_cleanup_failure || typed_cleanup_failure;
         while let Some(command) = self.pending_firewall_cleanup.pop() {
             if let Err(error) = run_cmd_allow_missing(&command) {
                 retain_container_dir = true;
@@ -581,9 +666,13 @@ impl CreationRollback {
         }
 
         // Rollback container directory
-        if !retain_container_dir {
+        self.cleanup_quarantined = retain_container_dir;
+        if !retain_container_dir && !self.defer_container_removal {
             if let Some(ref dir) = self.container_dir {
-                if let Err(e) = fs::remove_dir_all(dir) {
+                if has_live_mount_beneath(dir) {
+                    log::warn!("[rollback] refusing remove_dir_all across a live mount");
+                    let _ = self.persist_cleanup_journal();
+                } else if let Err(e) = fs::remove_dir_all(dir) {
                     log::warn!("[rollback] failed to remove container dir: {}", e);
                 }
             }
@@ -591,6 +680,130 @@ impl CreationRollback {
 
         self.committed = true; // Prevent double rollback
     }
+
+    /// Returns true when an identity mismatch requires quarantine.
+    fn cleanup_typed_resources(&mut self) -> bool {
+        let rootfs = self.resource_plans.iter().find_map(|plan| match plan {
+            ResourcePlan::Rootfs { path, .. } => Some(path.clone()),
+            _ => None,
+        });
+        let mut quarantine = false;
+        for applied in resource_cleanup_order(&self.typed_applied_resources) {
+            let Some(plan) = self.resource_plans.get(applied.plan_index) else {
+                quarantine = true;
+                continue;
+            };
+            match (plan, &applied.identity) {
+                (
+                    ResourcePlan::BindMount { target, .. }
+                    | ResourcePlan::TmpfsMount { target, .. }
+                    | ResourcePlan::RootfsReadonly { target, .. },
+                    ResourceIdentity::Path {
+                        device,
+                        inode,
+                        mount_id,
+                    },
+                ) => {
+                    let Some(rootfs) = rootfs.as_deref() else {
+                        quarantine = true;
+                        continue;
+                    };
+                    let absolute = if matches!(plan, ResourcePlan::RootfsReadonly { .. }) {
+                        rootfs.to_path_buf()
+                    } else {
+                        rootfs.join(target)
+                    };
+                    let observed_mount = mount_id_for_path(&absolute).ok().flatten();
+                    if observed_mount.is_none() {
+                        continue;
+                    }
+                    let Ok(metadata) = fs::metadata(&absolute) else {
+                        quarantine = true;
+                        continue;
+                    };
+                    if metadata.dev() != *device
+                        || metadata.ino() != *inode
+                        || observed_mount != *mount_id
+                    {
+                        quarantine = true;
+                        continue;
+                    }
+                    let target_handle = if matches!(plan, ResourcePlan::RootfsReadonly { .. }) {
+                        OpenOptions::new()
+                            .read(true)
+                            .custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC)
+                            .open(rootfs)
+                            .map_err(MountError::from)
+                    } else {
+                        open_existing_mount_target_beneath(rootfs, target)
+                    };
+                    match target_handle {
+                        Ok(handle) => {
+                            let proc_fd =
+                                PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+                            if let Err(error) =
+                                nix::mount::umount2(&proc_fd, nix::mount::MntFlags::MNT_DETACH)
+                            {
+                                quarantine = true;
+                                log::warn!("[rollback] owned mount detach failed: {error}");
+                            }
+                        }
+                        Err(error) => {
+                            quarantine = true;
+                            log::warn!("[rollback] mount target reopen failed: {error}");
+                        }
+                    }
+                }
+                (ResourcePlan::Cgroup { name, .. }, ResourceIdentity::Cgroup { device, inode }) => {
+                    let path = self.cgroup_root.join(name);
+                    match fs::metadata(&path) {
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Ok(metadata) if metadata.dev() == *device && metadata.ino() == *inode => {
+                            if let Err(error) = fs::remove_dir(&path) {
+                                quarantine = true;
+                                log::warn!("[rollback] owned cgroup removal failed: {error}");
+                            } else {
+                                self.cgroup_name = None;
+                            }
+                        }
+                        _ => quarantine = true,
+                    }
+                }
+                (ResourcePlan::Process { .. }, ResourceIdentity::Process { pid, start_time }) => {
+                    if process_start_time_for_pid(*pid) == Some(*start_time) {
+                        if let Err(error) = kill_pid(*pid) {
+                            quarantine = true;
+                            log::warn!("[rollback] exact process kill failed: {error}");
+                        }
+                    }
+                }
+                (ResourcePlan::NetworkAllocation { .. }, ResourceIdentity::Network { .. })
+                | (ResourcePlan::Rootfs { .. }, ResourceIdentity::Path { .. }) => {}
+                _ => quarantine = true,
+            }
+        }
+        quarantine
+    }
+}
+
+fn resource_cleanup_order(resources: &[AppliedResource]) -> impl Iterator<Item = &AppliedResource> {
+    resources.iter().rev()
+}
+
+fn has_live_mount_beneath(directory: &Path) -> bool {
+    let Ok(directory) = fs::canonicalize(directory) else {
+        return false;
+    };
+    fs::read_to_string("/proc/self/mountinfo")
+        .ok()
+        .is_some_and(|mountinfo| {
+            mountinfo.lines().any(|line| {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                fields
+                    .get(4)
+                    .is_some_and(|mountpoint| Path::new(mountpoint).starts_with(&directory))
+            })
+        })
 }
 
 impl Drop for CreationRollback {
@@ -662,7 +875,7 @@ fn recover_pending_network_cleanups(
             pending,
         )?;
         rollback.rollback();
-        if journal_path.exists() {
+        if rollback.cleanup_quarantined {
             authorization.finish_internal_recovery(
                 recovery,
                 internal_cleanup_observation(&entry.file_name().to_string_lossy(), false),
@@ -679,6 +892,11 @@ fn recover_pending_network_cleanups(
             internal_cleanup_observation(&entry.file_name().to_string_lossy(), true),
             true,
         )?;
+        fs::remove_file(&journal_path)?;
+        fs::File::open(&container_dir)?.sync_all()?;
+        if !has_live_mount_beneath(&container_dir) {
+            fs::remove_dir_all(&container_dir)?;
+        }
     }
     Ok(())
 }
@@ -771,6 +989,7 @@ pub enum LifecyclePhasePoint {
     ReservationDurable,
     NetworkApplied,
     CgroupApplied,
+    RestartOldStopped,
     SpawnPrepared,
     LaunchIdentityDurable,
     KernelEffectApplied,
@@ -1494,6 +1713,50 @@ impl ContainerRuntime {
         let layer_paths = resolve_layer_paths_with_store(&self.runtime_dir, image, store)
             .map_err(|err| RuntimeError::ImageMissing(format!("{image}: {err}")))?;
         let rootfs_dir = container_dir.join("rootfs");
+        let rootfs_plan = rollback.plan_typed_resource(ResourcePlan::Rootfs {
+            path: rootfs_dir.clone(),
+            generation: 1,
+        })?;
+        let bind_plans = mounts
+            .iter()
+            .map(|mount| {
+                rollback.plan_typed_resource(ResourcePlan::BindMount {
+                    target: mount.target.clone(),
+                    generation: 1,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let tmpfs_plans = tmpfs_mounts
+            .iter()
+            .map(|mount| {
+                rollback.plan_typed_resource(ResourcePlan::TmpfsMount {
+                    target: mount.target.clone(),
+                    generation: 1,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let readonly_plan = readonly_rootfs
+            .then(|| {
+                rollback.plan_typed_resource(ResourcePlan::RootfsReadonly {
+                    target: PathBuf::from("."),
+                    generation: 1,
+                })
+            })
+            .transpose()?;
+        let network_plan = rollback.plan_typed_resource(ResourcePlan::NetworkAllocation {
+            canonical: format!("{network_mode}:{network_backend}"),
+            generation: 1,
+        })?;
+        let cgroup_plan = limits
+            .is_some()
+            .then(|| {
+                rollback.plan_typed_resource(ResourcePlan::Cgroup {
+                    name: format!("ferrocrate/{container_id}"),
+                    generation: 1,
+                })
+            })
+            .transpose()?;
+        let process_plan = rollback.plan_typed_resource(ResourcePlan::Process { generation: 1 })?;
         rollback.plan_resource("rootfs", rootfs_dir.display().to_string())?;
         for (index, mount) in mounts.iter().enumerate() {
             rollback.plan_resource(
@@ -1516,18 +1779,31 @@ impl ContainerRuntime {
             fs::create_dir_all(&rootfs_dir)?;
         }
         rollback.mark_resource_applied("rootfs", kernel_path_identity(&rootfs_dir).ok())?;
+        rollback.mark_typed_resource(rootfs_plan, path_resource_identity(&rootfs_dir)?)?;
 
-        if !mounts.is_empty() {
-            apply_authorized_bind_mounts(&rootfs_dir, mounts)?;
-            for index in 0..mounts.len() {
+        for (index, mount) in mounts.iter().enumerate() {
+            apply_authorized_bind_mounts(&rootfs_dir, std::slice::from_ref(mount))?;
+            {
                 rollback.mark_resource_applied(&format!("mount:{index}"), None)?;
+                rollback.mark_typed_resource(
+                    bind_plans[index],
+                    path_resource_identity(&rootfs_dir.join(&mount.target))?,
+                )?;
             }
         }
-        if !tmpfs_mounts.is_empty() {
-            apply_tmpfs_mounts(&rootfs_dir, tmpfs_mounts)?;
+        for (index, mount) in tmpfs_mounts.iter().enumerate() {
+            apply_tmpfs_mounts(&rootfs_dir, std::slice::from_ref(mount))?;
+            rollback.mark_typed_resource(
+                tmpfs_plans[index],
+                path_resource_identity(&rootfs_dir.join(&mount.target))?,
+            )?;
         }
         if readonly_rootfs {
             apply_readonly_rootfs(&rootfs_dir)?;
+            rollback.mark_typed_resource(
+                readonly_plan.expect("readonly plan exists"),
+                path_resource_identity(&rootfs_dir)?,
+            )?;
         }
 
         validate_port_mapping_conflicts(&self.store, port_mappings)?;
@@ -1550,6 +1826,15 @@ impl ContainerRuntime {
                 .ownership
                 .as_ref()
                 .and_then(|o| o.namespace_identity),
+        )?;
+        rollback.mark_typed_resource(
+            network_plan,
+            ResourceIdentity::Network {
+                identity: network_setup
+                    .ownership
+                    .as_ref()
+                    .and_then(|ownership| ownership.namespace_identity),
+            },
         )?;
         self.phase_hook
             .reached("run", LifecyclePhasePoint::NetworkApplied)?;
@@ -1585,6 +1870,15 @@ impl ContainerRuntime {
             // Kill any partially spawned process on error
             rollback.rollback();
         })?;
+        rollback.mark_typed_resource(
+            process_plan,
+            ResourceIdentity::Process {
+                pid: child_id,
+                start_time: process_start_time_for_pid(child_id).ok_or_else(|| {
+                    RuntimeError::InvalidState("spawned process has no stable starttime".into())
+                })?,
+            },
+        )?;
         self.phase_hook
             .reached("run", LifecyclePhasePoint::SpawnPrepared)?;
 
@@ -1609,6 +1903,14 @@ impl ContainerRuntime {
             let cgroup_name = format!("ferrocrate/{container_id}");
             let group = manager.create_group(&cgroup_name)?;
             rollback.track_cgroup(cgroup_name)?;
+            let cgroup_metadata = fs::metadata(&group)?;
+            rollback.mark_typed_resource(
+                cgroup_plan.expect("cgroup plan exists"),
+                ResourceIdentity::Cgroup {
+                    device: cgroup_metadata.dev(),
+                    inode: cgroup_metadata.ino(),
+                },
+            )?;
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::CgroupApplied)?;
             if let Err(e) = manager.apply_limits(&group, limits) {
@@ -2073,10 +2375,10 @@ impl ContainerRuntime {
         self.reconcile_record_network(&record, &records, &mut BTreeSet::new())?;
         self.phase_hook
             .reached("restart", LifecyclePhasePoint::NetworkApplied)?;
-        self.phase_hook
-            .reached("restart", LifecyclePhasePoint::CgroupApplied)?;
 
         stop_pid(record.pid, timeout)?;
+        self.phase_hook
+            .reached("restart", LifecyclePhasePoint::RestartOldStopped)?;
 
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
@@ -4609,6 +4911,26 @@ fn kernel_path_identity(path: &Path) -> Result<KernelObjectIdentityRecord, Runti
         device: metadata.dev(),
         inode: metadata.ino(),
     })
+}
+
+fn path_resource_identity(path: &Path) -> Result<ResourceIdentity, RuntimeError> {
+    let metadata = fs::metadata(path)?;
+    Ok(ResourceIdentity::Path {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mount_id: mount_id_for_path(path)?,
+    })
+}
+
+fn mount_id_for_path(path: &Path) -> Result<Option<u64>, RuntimeError> {
+    let canonical = fs::canonicalize(path)?;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(mountinfo.lines().find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        (fields.len() > 4 && Path::new(fields[4]) == canonical)
+            .then(|| fields[0].parse::<u64>().ok())
+            .flatten()
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -7327,6 +7649,7 @@ mod tests {
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
+    use crate::witness::{decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
@@ -8257,6 +8580,8 @@ mod tests {
             cgroup_generation: None,
             planned_resources: Default::default(),
             applied_resources: Default::default(),
+            resource_plans: Vec::new(),
+            typed_applied_resources: Vec::new(),
         };
         std::fs::write(
             container_dir.join("network-cleanup-pending.json"),
@@ -8272,6 +8597,90 @@ mod tests {
         super::recover_pending_network_cleanups(temp.path(), &store, temp.path(), &authorization)
             .unwrap();
         assert!(!container_dir.exists());
+    }
+
+    #[test]
+    fn typed_mount_ledger_detaches_owned_mounts_in_reverse_order() {
+        if !nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let container_dir = temp.path().join("container");
+        let rootfs = container_dir.join("rootfs");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let mut rollback =
+            super::CreationRollback::new("mount-ledger", temp.path().into(), Some([8; 16]));
+        rollback.track_container_dir(container_dir);
+        let root_plan = rollback
+            .plan_typed_resource(super::ResourcePlan::Rootfs {
+                path: rootfs.clone(),
+                generation: 1,
+            })
+            .unwrap();
+        rollback
+            .mark_typed_resource(root_plan, super::path_resource_identity(&rootfs).unwrap())
+            .unwrap();
+        let bind = crate::mounts::BindMount {
+            source,
+            target: "bind".into(),
+            read_only: false,
+        };
+        let bind_plan = rollback
+            .plan_typed_resource(super::ResourcePlan::BindMount {
+                target: bind.target.clone(),
+                generation: 1,
+            })
+            .unwrap();
+        if let Err(error) =
+            crate::mounts::apply_authorized_bind_mounts(&rootfs, std::slice::from_ref(&bind))
+        {
+            eprintln!("SKIP: mount namespace unavailable: {error}");
+            return;
+        }
+        rollback
+            .mark_typed_resource(
+                bind_plan,
+                super::path_resource_identity(&rootfs.join("bind")).unwrap(),
+            )
+            .unwrap();
+        let tmpfs = crate::mounts::TmpfsMount {
+            target: "tmp".into(),
+            size: Some("1m".into()),
+        };
+        let tmpfs_plan = rollback
+            .plan_typed_resource(super::ResourcePlan::TmpfsMount {
+                target: tmpfs.target.clone(),
+                generation: 1,
+            })
+            .unwrap();
+        crate::mounts::apply_tmpfs_mounts(&rootfs, std::slice::from_ref(&tmpfs)).unwrap();
+        rollback
+            .mark_typed_resource(
+                tmpfs_plan,
+                super::path_resource_identity(&rootfs.join("tmp")).unwrap(),
+            )
+            .unwrap();
+        rollback.rollback();
+        assert!(!super::has_live_mount_beneath(&rootfs));
+        assert!(!rollback.cleanup_quarantined);
+    }
+
+    #[test]
+    fn deterministic_resource_adapter_enforces_reverse_applied_order() {
+        let resources = (0..4)
+            .map(|plan_index| super::AppliedResource {
+                plan_index,
+                identity: super::ResourceIdentity::Network { identity: None },
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            super::resource_cleanup_order(&resources)
+                .map(|resource| resource.plan_index)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1, 0]
+        );
     }
 
     #[test]
@@ -9313,6 +9722,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         match name {
             "network" => LifecyclePhasePoint::NetworkApplied,
             "cgroup" => LifecyclePhasePoint::CgroupApplied,
+            "old-stopped" => LifecyclePhasePoint::RestartOldStopped,
             "spawn" => LifecyclePhasePoint::SpawnPrepared,
             "identity" => LifecyclePhasePoint::LaunchIdentityDurable,
             _ => panic!("unknown phase {name}"),
@@ -9326,6 +9736,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         };
         let root = std::path::PathBuf::from(root);
         let action = std::env::var("FERRO_PUBLIC_BARRIER_ACTION").unwrap();
+        let marker = std::env::var("FERRO_PUBLIC_BARRIER_MARKER").unwrap();
         let phase = phase_from_name(&std::env::var("FERRO_PUBLIC_BARRIER_PHASE").unwrap());
         let ready = std::path::PathBuf::from(std::env::var("FERRO_PUBLIC_BARRIER_READY").unwrap());
         let cgroup = root.join("cgroup");
@@ -9347,7 +9758,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
             &root,
             gate,
-            None,
+            Some(std::sync::Arc::new(
+                WitnessJournal::open(JournalConfig::new(
+                    root.join("witness"),
+                    [93; 16],
+                    JournalMode::Required,
+                ))
+                .unwrap(),
+            )),
             std::sync::Arc::new(ProcessBarrier {
                 action: action.clone(),
                 phase,
@@ -9363,7 +9781,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             };
             let _ = runtime.run(
                 "alpine:latest",
-                &["true".into()],
+                &["sh".into(), "-c".into(), format!("touch {marker}")],
                 &[],
                 &HashMap::new(),
                 &HashMap::new(),
@@ -9397,7 +9815,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             );
             record.pid = old.id();
             record.status = "running".into();
-            record.command = vec!["true".into()];
+            record.command = vec!["sh".into(), "-c".into(), format!("touch {marker}")];
             record.stdout_path = container_dir.join("stdout").display().to_string();
             record.stderr_path = container_dir.join("stderr").display().to_string();
             runtime.store.put(&record).unwrap();
@@ -9410,7 +9828,12 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn public_run_and_restart_survive_real_sigkill_at_resource_and_launch_barriers() {
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
         for action in ["run", "restart"] {
-            for phase in ["network", "cgroup", "spawn", "identity"] {
+            let phases: &[&str] = if action == "run" {
+                &["network", "cgroup", "spawn", "identity"]
+            } else {
+                &["network", "old-stopped", "spawn", "identity"]
+            };
+            for phase in phases {
                 let root = tempfile::tempdir().unwrap();
                 let ready = root.path().join("ready");
                 let marker = root.path().join("workload-marker");
@@ -9422,6 +9845,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                     .env("FERRO_PUBLIC_BARRIER_ACTION", action)
                     .env("FERRO_PUBLIC_BARRIER_PHASE", phase)
                     .env("FERRO_PUBLIC_BARRIER_READY", &ready)
+                    .env("FERRO_PUBLIC_BARRIER_MARKER", &marker)
                     .spawn()
                     .unwrap();
                 for _ in 0..1000 {
@@ -9437,11 +9861,28 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 )
                 .unwrap();
                 let _ = daemon.wait();
-                let reopened = ContainerRuntime::new(root.path()).unwrap();
+                let policy = root.path().join("policy.toml");
+                let gate = std::sync::Arc::new(AuthorizationGate::new(std::sync::Arc::new(
+                    PolicyStore::load(&policy).unwrap(),
+                )));
+                let journal = std::sync::Arc::new(
+                    WitnessJournal::open(JournalConfig::new(
+                        root.path().join("witness"),
+                        [93; 16],
+                        JournalMode::Required,
+                    ))
+                    .unwrap(),
+                );
+                let reopened = ContainerRuntime::new_with_authorization(
+                    root.path(),
+                    gate,
+                    Some(journal.clone()),
+                )
+                .unwrap();
                 assert!(!marker.exists(), "{action} {phase} replayed workload");
                 for record in reopened.list().unwrap() {
                     assert!(record.pending_mutation.is_none(), "{action} {phase}");
-                    if action == "run" || matches!(phase, "spawn" | "identity") {
+                    if action == "run" || matches!(*phase, "old-stopped" | "spawn" | "identity") {
                         assert!(
                             !super::process_exists(record.pid),
                             "{action} {phase} orphan"
@@ -9450,6 +9891,20 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                         let _ = super::kill_pid(record.pid);
                     }
                 }
+                let decoded = journal
+                    .records()
+                    .unwrap()
+                    .iter()
+                    .map(|bytes| decode_record(bytes).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    decoded
+                        .iter()
+                        .filter(|record| record.stage() == WitnessStage::Recovery)
+                        .count(),
+                    if action == "run" { 2 } else { 1 },
+                    "{action} {phase} recovery uniqueness"
+                );
             }
         }
     }

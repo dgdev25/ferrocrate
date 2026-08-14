@@ -58,6 +58,21 @@ struct OpenHow {
 }
 
 pub(crate) fn open_mount_target_beneath(rootfs: &Path, target: &Path) -> Result<File, MountError> {
+    open_mount_target_beneath_inner(rootfs, target, true)
+}
+
+pub(crate) fn open_existing_mount_target_beneath(
+    rootfs: &Path,
+    target: &Path,
+) -> Result<File, MountError> {
+    open_mount_target_beneath_inner(rootfs, target, false)
+}
+
+fn open_mount_target_beneath_inner(
+    rootfs: &Path,
+    target: &Path,
+    create: bool,
+) -> Result<File, MountError> {
     let target = normalize_mount_target(target)?;
     let mut options = OpenOptions::new();
     options
@@ -82,7 +97,10 @@ pub(crate) fn open_mount_target_beneath(rootfs: &Path, target: &Path) -> Result<
                 std::mem::size_of::<OpenHow>(),
             ) as i32
         };
-        if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::ENOENT) {
+        if create
+            && fd < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::ENOENT)
+        {
             let created =
                 unsafe { nix::libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) };
             if created < 0

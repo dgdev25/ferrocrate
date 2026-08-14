@@ -55,6 +55,17 @@ unverifiable resources for operator repair. A real public-API subprocess matrix
 SIGKILLs run and restart at network, cgroup, stopped-spawn, and durable-identity
 barriers, then opens a fresh runtime and checks for replay and orphaned effects.
 
+Resource recovery now uses closed `ResourcePlan` and `AppliedResource` variants
+for bind mounts, tmpfs mounts, readonly-rootfs transitions, network allocations,
+cgroups, and supervised processes. Applied path identities bind mount ID,
+device, inode, and ownership generation. Recovery walks applied resources in
+reverse order, reopens mount targets beneath the retained rootfs without
+creating components, verifies the live identity, and uses deletion-only detached
+unmounts. Exact PID/starttime and cgroup identities are verified before cleanup;
+mismatches quarantine the ledger. `remove_dir_all` is forbidden while mountinfo
+shows any live mount below the container directory, and the ledger is removed
+only after the linked recovery witness is durable.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode
@@ -62,7 +73,7 @@ Verification on 2026-08-15:
   persistence-failure/reopen cases, plus the 3x5 crash/reopen matrix.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
-- `ferro-core --lib`: 272 passed, 1 ignored. Entitlement tests now serialize
+- `ferro-core --lib`: 274 passed, 1 ignored. Entitlement tests now serialize
   their process-global environment and the repeated full run is stable.
 - Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.

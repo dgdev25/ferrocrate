@@ -125,7 +125,7 @@ where
         if record.previous_hash != previous_hash {
             return Err(WitnessError::BrokenLink);
         }
-        verify_fields(record)?;
+        super::validation::validate_record(record)?;
         transition(record, &mut lifecycles, &mut request_ids, &mut report)?;
         if lifecycles.len() > MAX_OPEN_REQUESTS {
             return Err(WitnessError::TooManyOpenRequests);
@@ -141,83 +141,6 @@ where
         return Err(WitnessError::InvalidLifecycle);
     }
     Ok(report)
-}
-
-fn verify_fields(record: &WitnessRecord) -> Result<(), WitnessError> {
-    let common_absent = record.decision_id.is_none()
-        && record.rule.is_none()
-        && record.decision.is_none()
-        && record.reason.is_none()
-        && record.result_digest.is_none()
-        && record.recovery_link.is_none();
-    let valid = match record.stage {
-        WitnessStage::RequestReceived => common_absent && record.outcome == WitnessOutcome::None,
-        WitnessStage::Decision => {
-            record.decision_id.is_some()
-                && record.rule.is_some()
-                && record.decision.is_some()
-                && record.result_digest.is_none()
-                && record.recovery_link.is_none()
-                && record.outcome == WitnessOutcome::None
-                && match record.decision {
-                    Some(true) => record.reason.is_none(),
-                    Some(false) => record.reason == Some(super::ReasonCode::PolicyDenied),
-                    None => false,
-                }
-        }
-        WitnessStage::Denied => {
-            record.decision_id.is_some()
-                && record.rule.is_none()
-                && record.decision.is_none()
-                && record.reason.is_some()
-                && record.result_digest.is_none()
-                && record.recovery_link.is_none()
-                && record.outcome == WitnessOutcome::Denied
-                && record.reason == Some(super::ReasonCode::PolicyDenied)
-        }
-        WitnessStage::Outcome => {
-            record.decision_id.is_some()
-                && record.rule.is_none()
-                && record.decision.is_none()
-                && record.result_digest.is_some()
-                && record.recovery_link.is_none()
-                && matches!(
-                    record.outcome,
-                    WitnessOutcome::Succeeded
-                        | WitnessOutcome::Failed
-                        | WitnessOutcome::OutcomeUnknown
-                )
-                && match record.outcome {
-                    WitnessOutcome::Succeeded => record.reason.is_none(),
-                    WitnessOutcome::Failed | WitnessOutcome::OutcomeUnknown => {
-                        record.reason == Some(super::ReasonCode::ExecutionFailed)
-                    }
-                    _ => false,
-                }
-        }
-        WitnessStage::Recovery => {
-            record.decision_id.is_some()
-                && record.rule.is_none()
-                && record.decision.is_none()
-                && record.reason.is_some()
-                && record.result_digest.is_some()
-                && record.recovery_link.is_some()
-                && match record.outcome {
-                    WitnessOutcome::Recovered => {
-                        record.reason == Some(super::ReasonCode::RecoveryCompleted)
-                    }
-                    WitnessOutcome::Quarantined => {
-                        record.reason == Some(super::ReasonCode::Quarantined)
-                    }
-                    _ => false,
-                }
-        }
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(WitnessError::InvalidLifecycle)
-    }
 }
 
 fn same_binding(record: &WitnessRecord, binding: &RequestBinding) -> bool {

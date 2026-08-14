@@ -11,6 +11,7 @@ pub fn encode_record(
     journal_id: [u8; 16],
     record: &WitnessRecord,
 ) -> Result<RecordBytes, WitnessError> {
+    super::validation::validate_record(record)?;
     let mut out = Vec::with_capacity(512);
     put_u8(&mut out, FORMAT_VERSION);
     put_u8(&mut out, HASH_ALGORITHM_SHA256);

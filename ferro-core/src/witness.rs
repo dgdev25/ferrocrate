@@ -17,6 +17,7 @@
 //! whose canonical byte is 0 (absent), 1 (false), or 2 (true).
 
 mod encoding;
+mod validation;
 mod verify;
 
 pub use encoding::{decode_record, encode_record, hash_record, pseudonymize};
@@ -119,7 +120,17 @@ pub enum WitnessResourceKind {
 pub struct PrincipalSummary([u8; 32]);
 
 impl PrincipalSummary {
-    pub const fn from_digest(digest: [u8; 32]) -> Self {
+    /// Derive a principal pseudonym under the fixed principal purpose.
+    ///
+    /// Raw digest injection is intentionally unavailable:
+    /// ```compile_fail
+    /// use ferro_core::witness::PrincipalSummary;
+    /// let _ = PrincipalSummary::from_digest([0; 32]);
+    /// ```
+    pub fn pseudonymize(key: &[u8], principal: &[u8]) -> Result<Self, WitnessError> {
+        pseudonymize(b"witness/principal", key, principal).map(Self)
+    }
+    pub(super) const fn from_digest(digest: [u8; 32]) -> Self {
         Self(digest)
     }
     const fn digest(self) -> [u8; 32] {
@@ -132,7 +143,17 @@ impl PrincipalSummary {
 pub struct ResourceSummary([u8; 32]);
 
 impl ResourceSummary {
-    pub const fn from_digest(digest: [u8; 32]) -> Self {
+    /// Derive a resource pseudonym under the fixed resource purpose.
+    ///
+    /// Raw digest injection is intentionally unavailable:
+    /// ```compile_fail
+    /// use ferro_core::witness::ResourceSummary;
+    /// let _ = ResourceSummary::from_digest([0; 32]);
+    /// ```
+    pub fn pseudonymize(key: &[u8], resource: &[u8]) -> Result<Self, WitnessError> {
+        pseudonymize(b"witness/resource", key, resource).map(Self)
+    }
+    pub(super) const fn from_digest(digest: [u8; 32]) -> Self {
         Self(digest)
     }
     const fn digest(self) -> [u8; 32] {

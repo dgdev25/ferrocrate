@@ -15,11 +15,11 @@ fn record(sequence: u64, previous_hash: [u8; 32], stage: WitnessStage) -> Witnes
         request_id: [7; 16],
         runtime_instance_id: [8; 16],
         boot_id: [9; 16],
-        principal: PrincipalSummary::from_digest([21; 32]),
+        principal: PrincipalSummary::pseudonymize(&[21; 32], b"uid:1000").unwrap(),
         invocation: Invocation::Cli,
         action: WitnessAction::ContainerCreate,
         resource_kind: WitnessResourceKind::Container,
-        resource: ResourceSummary::from_digest([22; 32]),
+        resource: ResourceSummary::pseudonymize(&[22; 32], b"container:018f").unwrap(),
         resource_generation: 3,
         policy_version: 12,
         policy_digest: [10; 32],
@@ -97,8 +97,8 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
         hex(bytes.as_ref()),
         concat!(
             "0101060606060606060606060606060606060000000000000001000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101",
-            "0707070707070707070707070707070708080808080808080808080808080808090909090909090909090909090909091515151515151515151515151515151515151515151515151515151515151515",
-            "01010116161616161616161616161616161616161616161616161616161616161616160000000000000003000000000000000c0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+            "070707070707070707070707070707070808080808080808080808080808080809090909090909090909090909090909ff51c4845ca485ee1e9642a76dbbc48e376aaf16a330df6af513404b9805f1dd",
+            "0101016f2850d3d4282c13868c8f7d227dacb2774977d426fffbe3fd1912c32e1809a20000000000000003000000000000000c0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
             "000000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0017f06e5c4d8c8000000000000000000a01000001010000"
         )
     );
@@ -112,8 +112,8 @@ fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
     assert_eq!(
         hash_record(&bytes),
         [
-            25, 169, 226, 211, 24, 43, 199, 231, 247, 130, 132, 89, 29, 132, 197, 45, 118, 122, 95,
-            20, 135, 211, 97, 36, 255, 158, 85, 211, 91, 144, 212, 10
+            15, 155, 91, 27, 64, 165, 185, 60, 157, 224, 61, 144, 44, 124, 130, 34, 183, 47, 201,
+            74, 170, 168, 81, 44, 30, 99, 202, 216, 226, 210, 63, 134
         ]
     );
 }
@@ -186,7 +186,7 @@ fn denied_and_allowed_lifecycles_are_accepted() {
 #[test]
 fn verifier_rejects_changed_immutable_request_correlation() {
     let mut changed = decision(2, true);
-    changed.principal = PrincipalSummary::from_digest([99; 32]);
+    changed.principal = PrincipalSummary::pseudonymize(&[99; 32], b"uid:1000").unwrap();
     let chain = encoded_chain(vec![
         record(1, [0; 32], WitnessStage::RequestReceived),
         changed,
@@ -208,48 +208,49 @@ fn verifier_rejects_changed_immutable_request_correlation() {
 fn verifier_enforces_required_and_forbidden_stage_fields() {
     let mut missing_id = decision(2, true);
     missing_id.decision_id = None;
-    let chain = encoded_chain(vec![
-        record(1, [0; 32], WitnessStage::RequestReceived),
-        missing_id,
-    ]);
-    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+    assert!(encode_record(JOURNAL, &missing_id).is_err());
 
     let mut denied_without_reason = decision(2, false);
     denied_without_reason.reason = None;
-    let chain = encoded_chain(vec![
-        record(1, [0; 32], WitnessStage::RequestReceived),
-        denied_without_reason,
-        terminal_denied(3),
-    ]);
-    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+    assert!(encode_record(JOURNAL, &denied_without_reason).is_err());
 
     let mut denied_with_wrong_reason = decision(2, false);
     denied_with_wrong_reason.reason = Some(ReasonCode::ExecutionFailed);
-    let chain = encoded_chain(vec![
-        record(1, [0; 32], WitnessStage::RequestReceived),
-        denied_with_wrong_reason,
-        terminal_denied(3),
-    ]);
-    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+    assert!(encode_record(JOURNAL, &denied_with_wrong_reason).is_err());
 
     let mut polluted_received = record(1, [0; 32], WitnessStage::RequestReceived);
     polluted_received.result_digest = Some([1; 32]);
-    assert!(verify_stream(
-        encoded_chain(vec![polluted_received])
-            .iter()
-            .map(AsRef::as_ref),
-        &genesis_trust()
-    )
-    .is_err());
+    assert!(encode_record(JOURNAL, &polluted_received).is_err());
 
     let mut polluted_outcome = terminal_outcome(3, WitnessOutcome::Succeeded);
     polluted_outcome.rule = Some(RuleSummary::from_id([4; 16]));
-    let chain = encoded_chain(vec![
-        record(1, [0; 32], WitnessStage::RequestReceived),
-        decision(2, true),
-        polluted_outcome,
-    ]);
-    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+    assert!(encode_record(JOURNAL, &polluted_outcome).is_err());
+
+    let received =
+        encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
+    let mut invalid_decision = received.as_ref().to_vec();
+    invalid_decision[290] = WitnessStage::Decision as u8;
+    assert!(decode_record(&invalid_decision).is_err());
+}
+
+#[test]
+fn principal_and_resource_pseudonyms_are_keyed_and_purpose_separated() {
+    let key = [42; 32];
+    let canary = b"/srv/private/SECRET_CANARY";
+    let principal = PrincipalSummary::pseudonymize(&key, canary).unwrap();
+    let resource = ResourceSummary::pseudonymize(&key, canary).unwrap();
+    assert_ne!(format!("{principal:?}"), format!("{resource:?}"));
+
+    let mut value = record(1, [0; 32], WitnessStage::RequestReceived);
+    value.principal = principal;
+    value.resource = resource;
+    let bytes = encode_record(JOURNAL, &value).unwrap();
+    assert!(!bytes
+        .as_ref()
+        .windows(canary.len())
+        .any(|window| window == canary));
+    assert!(PrincipalSummary::pseudonymize(&[1; 16], canary).is_err());
+    assert!(ResourceSummary::pseudonymize(&[1; 16], canary).is_err());
 }
 
 #[test]

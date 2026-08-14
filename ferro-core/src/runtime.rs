@@ -928,7 +928,8 @@ impl ContainerRuntime {
                 self.store
                     .delete_for_mutation(&record.id, reservation.operation_id)?;
             } else {
-                self.store.put(&record)?;
+                self.store
+                    .put_for_mutation(&record, reservation.operation_id)?;
             }
             let evidence = crate::witness::RecoveryEvidence::verified(
                 &pending,
@@ -1543,7 +1544,12 @@ impl ContainerRuntime {
         };
 
         rollback.persist_network()?;
-        self.store.put(&record)?;
+        if let Some(reservation) = record.pending_mutation.as_ref() {
+            self.store
+                .put_for_mutation(&record, reservation.operation_id)?;
+        } else {
+            self.store.put(&record)?;
+        }
 
         // Commit the creation - all resources are now tracked in the store
         rollback.commit();
@@ -1916,7 +1922,12 @@ impl ContainerRuntime {
 
         record.pid = child_id;
         record.status = "running".to_string();
-        self.store.put(&record)?;
+        if let Some(reservation) = record.pending_mutation.as_ref() {
+            self.store
+                .put_for_mutation(&record, reservation.operation_id)?;
+        } else {
+            self.store.put(&record)?;
+        }
         let _ = log_event(
             &self.runtime_dir,
             make_event(

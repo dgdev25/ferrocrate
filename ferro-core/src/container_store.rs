@@ -26,6 +26,8 @@ pub(crate) struct LifecycleOperation {
     pub process_start_time_after: Option<u64>,
     #[serde(default)]
     pub state_after: Option<String>,
+    #[serde(default)]
+    pub freezer_state_after: Option<bool>,
     pub ownership_digest: [u8; 32],
     #[serde(default)]
     pub execution_generation_after: Option<u64>,
@@ -550,6 +552,16 @@ impl LocalContainerStore {
         operation_id: [u8; 16],
         succeeded: bool,
     ) -> Result<(), ContainerStoreError> {
+        self.mark_mutation_effect_observed(id, operation_id, succeeded, None)
+    }
+
+    pub(crate) fn mark_mutation_effect_observed(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        succeeded: bool,
+        freezer_state: Option<bool>,
+    ) -> Result<(), ContainerStoreError> {
         let containers = self.db.open_tree(CONTAINER_INDEX_TREE)?;
         let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
         (&containers, &operations)
@@ -587,6 +599,7 @@ impl LocalContainerStore {
                 operation.pid_after = Some(record.pid);
                 operation.process_start_time_after = process_start_time(record.pid);
                 operation.state_after = Some(record.status);
+                operation.freezer_state_after = freezer_state;
                 operation.execution_generation_after =
                     Some(if operation.action == "container.restart" && succeeded {
                         record.mutation_generation.saturating_add(1)
@@ -761,6 +774,7 @@ fn lifecycle_operation(
         pid_after: None,
         process_start_time_after: None,
         state_after: None,
+        freezer_state_after: None,
         ownership_digest: digest.finalize().into(),
         execution_generation_after: None,
         result_digest: None,

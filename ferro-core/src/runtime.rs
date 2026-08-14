@@ -2059,8 +2059,27 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = execute(self, proof, intent);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        let freezer_state = match action {
+            Action::ContainerPause | Action::ContainerResume => fs::read_to_string(
+                self.cgroup_root
+                    .join("ferrocrate")
+                    .join(id)
+                    .join("cgroup.freeze"),
+            )
+            .ok()
+            .and_then(|value| match value.trim() {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            }),
+            _ => None,
+        };
+        self.store.mark_mutation_effect_observed(
+            id,
+            operation_id,
+            result.is_ok(),
+            freezer_state,
+        )?;
         self.phase_hook.reached(
             runtime_action_name(action),
             LifecyclePhasePoint::EffectObserved,
@@ -2239,10 +2258,12 @@ fn recovery_truth_matches(
         "container.pause" => {
             record.status == "paused"
                 && operation.and_then(|op| op.state_after.as_deref()) == Some("paused")
+                && operation.and_then(|op| op.freezer_state_after) == Some(true)
         }
         "container.resume" => {
             record.status == "running"
                 && operation.and_then(|op| op.state_after.as_deref()) == Some("running")
+                && operation.and_then(|op| op.freezer_state_after) == Some(false)
                 && process_exists(record.pid)
         }
         "container.stop" | "container.kill" => operation.is_some_and(|operation| {

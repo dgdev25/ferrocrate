@@ -20,6 +20,7 @@
 //! ```
 
 pub mod ai_runtime;
+pub mod authorization;
 pub mod cgroups;
 #[cfg(target_os = "linux")]
 pub mod container_exec;

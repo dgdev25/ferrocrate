@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 flate2 = "1.0"
-nix = { workspace = true }
+nix = { workspace = true, features = ["socket"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { workspace = true }

@@ -3,6 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 pub mod policy;
+#[cfg(target_os = "linux")]
+pub mod principal;
+
+#[cfg(target_os = "linux")]
+pub use principal::{
+    DelegatedPrincipal, DelegationPolicy, EffectivePrincipal, IdMapEntry, InvocationChannel,
+    LinuxProcessIdentity, PrincipalResolutionError, PrincipalResolver, TransportPrincipal,
+};
 
 #[cfg(test)]
 mod tests;
@@ -129,6 +137,10 @@ impl ResolvedPrincipal {
 
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    pub fn is_host_administrator(&self) -> bool {
+        self.role == Role::Administrator
     }
 }
 

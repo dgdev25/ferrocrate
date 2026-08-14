@@ -44,6 +44,17 @@ the stopped child. Real subprocess tests SIGKILL the daemon on both sides of
 identity persistence for run and restart and prove that no workload marker can
 execute early or survive as an unowned replacement.
 
+The parent-death lease is reinstalled after all UID/GID/capability transitions
+and the captured parent is checked again immediately before the launch stop.
+The independent run resource journal now records the operation ID plus planned
+and applied rootfs, mount, network, cgroup-generation, and process identities.
+Writes use no-follow create, file fsync, atomic rename, and parent-directory
+fsync. Startup consumes an incomplete resource journal even when a candidate
+container record exists; it performs ownership-proven rollback and retains
+unverifiable resources for operator repair. A real public-API subprocess matrix
+SIGKILLs run and restart at network, cgroup, stopped-spawn, and durable-identity
+barriers, then opens a fresh runtime and checks for replay and orphaned effects.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode
@@ -51,7 +62,7 @@ Verification on 2026-08-15:
   persistence-failure/reopen cases, plus the 3x5 crash/reopen matrix.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
-- `ferro-core --lib`: 269 passed, 1 ignored. Entitlement tests now serialize
+- `ferro-core --lib`: 272 passed, 1 ignored. Entitlement tests now serialize
   their process-global environment and the repeated full run is stable.
 - Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.

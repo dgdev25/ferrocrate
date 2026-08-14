@@ -63,9 +63,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::fs::OpenOptions;
-#[cfg(test)]
-use std::io::Read;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -109,6 +107,9 @@ struct CreationRollback {
     cgroup_name: Option<String>,
     cgroup_root: PathBuf,
     committed: bool,
+    operation_id: Option<[u8; 16]>,
+    planned_resources: BTreeMap<String, String>,
+    applied_resources: BTreeMap<String, Option<KernelObjectIdentityRecord>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -133,10 +134,20 @@ struct PendingNetworkCleanup {
     bridge_created: Option<(String, Option<u32>)>,
     ip_forward: Option<GlobalValueOwnership>,
     pending_firewall_cleanup: Vec<Vec<String>>,
+    #[serde(default)]
+    operation_id: Option<[u8; 16]>,
+    #[serde(default)]
+    cgroup_name: Option<String>,
+    #[serde(default)]
+    cgroup_generation: Option<u64>,
+    #[serde(default)]
+    planned_resources: BTreeMap<String, String>,
+    #[serde(default)]
+    applied_resources: BTreeMap<String, Option<KernelObjectIdentityRecord>>,
 }
 
 impl CreationRollback {
-    fn new(container_id: &str, cgroup_root: PathBuf) -> Self {
+    fn new(container_id: &str, cgroup_root: PathBuf, operation_id: Option<[u8; 16]>) -> Self {
         Self {
             container_id: container_id.to_string(),
             container_dir: None,
@@ -157,6 +168,9 @@ impl CreationRollback {
             cgroup_name: None,
             cgroup_root,
             committed: false,
+            operation_id,
+            planned_resources: Default::default(),
+            applied_resources: Default::default(),
         }
     }
 
@@ -165,7 +179,7 @@ impl CreationRollback {
         cgroup_root: PathBuf,
         pending: PendingNetworkCleanup,
     ) -> Result<Self, RuntimeError> {
-        if pending.schema_version != 1 || pending.container_id.is_empty() {
+        if !matches!(pending.schema_version, 1 | 2) || pending.container_id.is_empty() {
             return Err(RuntimeError::Network(
                 "malformed pending network cleanup journal".to_string(),
             ));
@@ -195,14 +209,36 @@ impl CreationRollback {
             ip_forward: pending.ip_forward,
             pending_firewall_cleanup: pending.pending_firewall_cleanup,
             journal: NetworkMutationJournal::default(),
-            cgroup_name: None,
+            cgroup_name: pending.cgroup_name,
             cgroup_root,
             committed: false,
+            operation_id: pending.operation_id,
+            planned_resources: pending.planned_resources,
+            applied_resources: pending.applied_resources,
         })
     }
 
     fn track_container_dir(&mut self, dir: PathBuf) {
         self.container_dir = Some(dir);
+    }
+
+    fn plan_resource(&mut self, kind: &str, canonical: String) -> Result<(), RuntimeError> {
+        self.planned_resources.insert(kind.to_string(), canonical);
+        self.persist_cleanup_journal()
+    }
+
+    fn mark_resource_applied(
+        &mut self,
+        kind: &str,
+        identity: Option<KernelObjectIdentityRecord>,
+    ) -> Result<(), RuntimeError> {
+        if !self.planned_resources.contains_key(kind) {
+            return Err(RuntimeError::InvalidState(format!(
+                "resource {kind} applied without durable plan"
+            )));
+        }
+        self.applied_resources.insert(kind.to_string(), identity);
+        self.persist_cleanup_journal()
     }
 
     fn track_network(
@@ -253,8 +289,9 @@ impl CreationRollback {
         self.persist_cleanup_journal()
     }
 
-    fn track_cgroup(&mut self, name: String) {
+    fn track_cgroup(&mut self, name: String) -> Result<(), RuntimeError> {
         self.cgroup_name = Some(name);
+        self.mark_resource_applied("cgroup", None)
     }
 
     fn track_bridge_created(&mut self, name: String) -> Result<(), RuntimeError> {
@@ -327,7 +364,7 @@ impl CreationRollback {
 
     fn pending_cleanup(&self) -> PendingNetworkCleanup {
         PendingNetworkCleanup {
-            schema_version: 1,
+            schema_version: 2,
             container_id: self.container_id.clone(),
             netns_name: self.netns_name.clone(),
             namespace_identity: self.namespace_identity,
@@ -341,6 +378,11 @@ impl CreationRollback {
             bridge_created: self.bridge_created.clone(),
             ip_forward: self.ip_forward.clone(),
             pending_firewall_cleanup: self.pending_firewall_cleanup.clone(),
+            operation_id: self.operation_id,
+            cgroup_name: self.cgroup_name.clone(),
+            cgroup_generation: self.operation_id.map(|_| 1),
+            planned_resources: self.planned_resources.clone(),
+            applied_resources: self.applied_resources.clone(),
         }
     }
 
@@ -354,11 +396,31 @@ impl CreationRollback {
         let Some(path) = self.cleanup_journal_path() else {
             return Ok(());
         };
-        let temporary = path.with_extension("json.tmp");
+        let parent = path
+            .parent()
+            .ok_or_else(|| RuntimeError::Network("cleanup journal has no parent".to_string()))?;
+        if fs::symlink_metadata(parent)?.file_type().is_symlink() {
+            return Err(RuntimeError::Network(
+                "cleanup journal parent may not be a symlink".to_string(),
+            ));
+        }
+        let parent = parent.to_path_buf();
+        let temporary = parent.join(format!(
+            ".network-cleanup-{:016x}.tmp",
+            rand::random::<u64>()
+        ));
         let bytes = serde_json::to_vec_pretty(&self.pending_cleanup())
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
-        fs::write(&temporary, bytes)?;
-        fs::rename(temporary, path)?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(&parent)?.sync_all()?;
         Ok(())
     }
 
@@ -368,6 +430,11 @@ impl CreationRollback {
             if let Err(error) = fs::remove_file(path) {
                 if error.kind() != io::ErrorKind::NotFound {
                     log::warn!("[network] failed to remove transferred cleanup journal: {error}");
+                }
+            }
+            if let Some(parent) = self.container_dir.as_deref() {
+                if let Err(error) = fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+                    log::warn!("[network] failed to sync cleanup journal removal: {error}");
                 }
             }
         }
@@ -540,7 +607,7 @@ impl Drop for CreationRollback {
 
 fn recover_pending_network_cleanups(
     runtime_dir: &Path,
-    store: &LocalContainerStore,
+    _store: &LocalContainerStore,
     cgroup_root: &Path,
     authorization: &RuntimeAuthorization,
 ) -> Result<(), RuntimeError> {
@@ -557,8 +624,22 @@ fn recover_pending_network_cleanups(
         }
         let container_dir = entry.path();
         let journal_path = container_dir.join("network-cleanup-pending.json");
-        let bytes = match fs::read(&journal_path) {
-            Ok(bytes) => bytes,
+        let bytes = match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&journal_path)
+        {
+            Ok(mut file) => {
+                if !file.metadata()?.is_file() {
+                    return Err(RuntimeError::Network(format!(
+                        "pending cleanup journal {} is not regular",
+                        journal_path.display()
+                    )));
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                bytes
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
@@ -575,15 +656,6 @@ fn recover_pending_network_cleanups(
             )));
         }
         let recovery = authorization.begin_internal_network_recovery(&pending.container_id)?;
-        if store.get(&pending.container_id)?.is_some() {
-            fs::remove_file(&journal_path)?;
-            authorization.finish_internal_recovery(
-                recovery,
-                internal_cleanup_observation(&pending.container_id, true),
-                true,
-            )?;
-            continue;
-        }
         let mut rollback = CreationRollback::from_pending(
             container_dir.clone(),
             cgroup_root.to_path_buf(),
@@ -697,6 +769,10 @@ pub struct ContainerRuntime {
 pub enum LifecyclePhasePoint {
     DecisionDurable,
     ReservationDurable,
+    NetworkApplied,
+    CgroupApplied,
+    SpawnPrepared,
+    LaunchIdentityDurable,
     KernelEffectApplied,
     EffectObserved,
     TerminalDurable,
@@ -1399,7 +1475,11 @@ impl ContainerRuntime {
             .or_else(|| config_json.as_deref().and_then(user_from_config));
 
         // Create rollback guard for atomic operations (Task 4.1)
-        let mut rollback = CreationRollback::new(&container_id, self.cgroup_root.clone());
+        let mut rollback = CreationRollback::new(
+            &container_id,
+            self.cgroup_root.clone(),
+            creation_provenance.creator_operation_id,
+        );
 
         let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
         let exec_cmd = apply_selinux_if_enabled(&exec_cmd)?;
@@ -1414,6 +1494,17 @@ impl ContainerRuntime {
         let layer_paths = resolve_layer_paths_with_store(&self.runtime_dir, image, store)
             .map_err(|err| RuntimeError::ImageMissing(format!("{image}: {err}")))?;
         let rootfs_dir = container_dir.join("rootfs");
+        rollback.plan_resource("rootfs", rootfs_dir.display().to_string())?;
+        for (index, mount) in mounts.iter().enumerate() {
+            rollback.plan_resource(
+                &format!("mount:{index}"),
+                format!("{}:{}", mount.source.display(), mount.target.display()),
+            )?;
+        }
+        rollback.plan_resource("network", format!("{network_mode}:{network_backend}"))?;
+        if limits.is_some() {
+            rollback.plan_resource("cgroup", format!("ferrocrate/{container_id}:1"))?;
+        }
         if !layer_paths.is_empty() {
             let cas_root = self
                 .runtime_dir
@@ -1424,9 +1515,13 @@ impl ContainerRuntime {
         } else {
             fs::create_dir_all(&rootfs_dir)?;
         }
+        rollback.mark_resource_applied("rootfs", kernel_path_identity(&rootfs_dir).ok())?;
 
         if !mounts.is_empty() {
             apply_authorized_bind_mounts(&rootfs_dir, mounts)?;
+            for index in 0..mounts.len() {
+                rollback.mark_resource_applied(&format!("mount:{index}"), None)?;
+            }
         }
         if !tmpfs_mounts.is_empty() {
             apply_tmpfs_mounts(&rootfs_dir, tmpfs_mounts)?;
@@ -1449,6 +1544,15 @@ impl ContainerRuntime {
         )?;
         // Track network resources for rollback
         rollback.track_network(&mut network_setup, port_mappings)?;
+        rollback.mark_resource_applied(
+            "network",
+            network_setup
+                .ownership
+                .as_ref()
+                .and_then(|o| o.namespace_identity),
+        )?;
+        self.phase_hook
+            .reached("run", LifecyclePhasePoint::NetworkApplied)?;
         let netns_name = network_setup.netns_name.clone();
         let container_ip = network_setup.container_ip.clone();
         let container_ipv6 = network_setup.container_ipv6.clone();
@@ -1481,6 +1585,8 @@ impl ContainerRuntime {
             // Kill any partially spawned process on error
             rollback.rollback();
         })?;
+        self.phase_hook
+            .reached("run", LifecyclePhasePoint::SpawnPrepared)?;
 
         if use_slirp {
             if let Err(e) = start_slirp4netns(child_id) {
@@ -1502,7 +1608,9 @@ impl ContainerRuntime {
             let manager = CgroupV2Manager::new(&self.cgroup_root);
             let cgroup_name = format!("ferrocrate/{container_id}");
             let group = manager.create_group(&cgroup_name)?;
-            rollback.track_cgroup(cgroup_name);
+            rollback.track_cgroup(cgroup_name)?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::CgroupApplied)?;
             if let Err(e) = manager.apply_limits(&group, limits) {
                 let _ = kill_pid(child_id);
                 rollback.rollback();
@@ -1592,6 +1700,8 @@ impl ContainerRuntime {
             rollback.rollback();
             return Err(error.into());
         }
+        self.phase_hook
+            .reached("run", LifecyclePhasePoint::LaunchIdentityDurable)?;
         release_prepared_child(child_id)?;
 
         // Commit the creation - all resources are now tracked in the store
@@ -1961,6 +2071,10 @@ impl ContainerRuntime {
 
         let records = self.store.list()?;
         self.reconcile_record_network(&record, &records, &mut BTreeSet::new())?;
+        self.phase_hook
+            .reached("restart", LifecyclePhasePoint::NetworkApplied)?;
+        self.phase_hook
+            .reached("restart", LifecyclePhasePoint::CgroupApplied)?;
 
         stop_pid(record.pid, timeout)?;
 
@@ -1989,6 +2103,8 @@ impl ContainerRuntime {
             false,
             seccomp_profile.as_ref(),
         )?;
+        self.phase_hook
+            .reached("restart", LifecyclePhasePoint::SpawnPrepared)?;
         if security_ebpf_monitor_enabled() {
             setup_security_ebpf_monitor(&record.id)?;
         }
@@ -2005,6 +2121,8 @@ impl ContainerRuntime {
             let _ = kill_pid(child_id);
             return Err(error.into());
         }
+        self.phase_hook
+            .reached("restart", LifecyclePhasePoint::LaunchIdentityDurable)?;
         release_prepared_child(child_id)?;
         let _ = log_event(
             &self.runtime_dir,
@@ -2935,6 +3053,17 @@ fn build_command(
                     }
                     warn!("seccomp apply failed, continuing without seccomp: {}", err);
                 }
+            }
+            // Credential and capability transitions can clear a parent-death
+            // signal. Reinstall the lease at the last possible point before the
+            // launcher execs and stops, then close the parent-race window again.
+            if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if nix::libc::getppid() != launch_parent_pid {
+                return Err(io::Error::other(
+                    "launcher parent died during credential transition",
+                ));
             }
             Ok(())
         });
@@ -7186,7 +7315,10 @@ fn run_resource_monitor(
 
 #[cfg(test)]
 mod tests {
-    use super::{ContainerRuntime, NetworkBackend};
+    use super::{
+        ContainerRuntime, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend, RuntimeError,
+    };
+    use crate::authorization::{gate::AuthorizationGate, policy::PolicyStore};
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{
         now_unix, ContainerRecord, LocalContainerStore, MutationReservation, PortMappingRecord,
@@ -7196,10 +7328,29 @@ mod tests {
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
     use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
     static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
     static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ProcessBarrier {
+        action: String,
+        phase: LifecyclePhasePoint,
+        ready: std::path::PathBuf,
+    }
+
+    impl LifecyclePhaseHook for ProcessBarrier {
+        fn reached(&self, action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
+            if action == self.action && phase == self.phase {
+                std::fs::write(&self.ready, b"ready")?;
+                loop {
+                    std::thread::park();
+                }
+            }
+            Ok(())
+        }
+    }
 
     /// Helper to acquire lock, recovering from poison (for test isolation)
     fn acquire_lock(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
@@ -8101,6 +8252,11 @@ mod tests {
             bridge_created: None,
             ip_forward: None,
             pending_firewall_cleanup: Vec::new(),
+            operation_id: None,
+            cgroup_name: None,
+            cgroup_generation: None,
+            planned_resources: Default::default(),
+            applied_resources: Default::default(),
         };
         std::fs::write(
             container_dir.join("network-cleanup-pending.json"),
@@ -9005,6 +9161,15 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .trim()
             .parse()
             .unwrap();
+        if action.ends_with("-user") {
+            let status = std::fs::read_to_string(format!("/proc/{workload_pid}/status")).unwrap();
+            assert!(
+                status
+                    .lines()
+                    .any(|line| line == "Uid:\t65534\t65534\t65534\t65534"),
+                "launcher did not cross the requested non-root credential transition"
+            );
+        }
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(daemon.id() as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -9078,6 +9243,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     }
 
     #[test]
+    fn non_root_user_transition_reinstalls_parent_death_lease() {
+        if !nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        assert_sigkill_before_release_leaves_no_workload("run-user");
+    }
+
+    #[test]
     fn run_sigkill_after_identity_persist_retains_recovery_identity() {
         assert_sigkill_after_identity_persist_is_recoverable("run");
     }
@@ -9094,6 +9267,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         };
         let marker = std::env::var("FERRO_LAUNCH_HELPER_MARKER").unwrap();
         let root = tempfile::tempdir().unwrap();
+        let action = std::env::var("FERRO_LAUNCH_HELPER_ACTION").unwrap();
         let command = super::build_command(
             &["/usr/bin/touch".into(), marker],
             &[],
@@ -9101,7 +9275,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
             &[],
             None,
-            None,
+            action.ends_with("-user").then_some("65534:65534"),
             None,
             false,
             None,
@@ -9122,10 +9296,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 operation_id: [71; 16],
                 generation: 1,
                 expected_status: "created".into(),
-                action: format!(
-                    "container.{}",
-                    std::env::var("FERRO_LAUNCH_HELPER_ACTION").unwrap()
-                ),
+                action: format!("container.{action}"),
             });
             store.put_reserved_creation(&record).unwrap();
             record.pid = pid;
@@ -9135,6 +9306,151 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         std::fs::write(pid_file, pid.to_string()).unwrap();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+
+    fn phase_from_name(name: &str) -> LifecyclePhasePoint {
+        match name {
+            "network" => LifecyclePhasePoint::NetworkApplied,
+            "cgroup" => LifecyclePhasePoint::CgroupApplied,
+            "spawn" => LifecyclePhasePoint::SpawnPrepared,
+            "identity" => LifecyclePhasePoint::LaunchIdentityDurable,
+            _ => panic!("unknown phase {name}"),
+        }
+    }
+
+    #[test]
+    fn public_lifecycle_sigkill_barrier_helper() {
+        let Ok(root) = std::env::var("FERRO_PUBLIC_BARRIER_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let action = std::env::var("FERRO_PUBLIC_BARRIER_ACTION").unwrap();
+        let phase = phase_from_name(&std::env::var("FERRO_PUBLIC_BARRIER_PHASE").unwrap());
+        let ready = std::path::PathBuf::from(std::env::var("FERRO_PUBLIC_BARRIER_READY").unwrap());
+        let cgroup = root.join("cgroup");
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::write(cgroup.join("cgroup.controllers"), "cpu memory pids").unwrap();
+        std::fs::write(cgroup.join("cgroup.subtree_control"), "").unwrap();
+        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &cgroup) };
+        let policy = root.join("policy.toml");
+        std::fs::write(
+            &policy,
+            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        seed_image_store(&root, "alpine:latest");
+        let gate = std::sync::Arc::new(AuthorizationGate::new(std::sync::Arc::new(
+            PolicyStore::load(&policy).unwrap(),
+        )));
+        let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
+            &root,
+            gate,
+            None,
+            std::sync::Arc::new(ProcessBarrier {
+                action: action.clone(),
+                phase,
+                ready,
+            }),
+        )
+        .unwrap();
+        if action == "run" {
+            let limits = ResourceLimits {
+                memory_max: Some(1024),
+                cpu_max: None,
+                pids_max: Some(8),
+            };
+            let _ = runtime.run(
+                "alpine:latest",
+                &["true".into()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                Some(&limits),
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "none",
+                NetworkBackend::Iptables,
+                None,
+            );
+        } else {
+            let mut old = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .unwrap();
+            let container_id = "00112233445566778899aabbccddeeff";
+            let container_dir = root.join("containers").join(container_id);
+            std::fs::create_dir_all(container_dir.join("rootfs")).unwrap();
+            let mut record = ContainerRecord::authorization_candidate(
+                container_id.into(),
+                "alpine:latest".into(),
+            );
+            record.pid = old.id();
+            record.status = "running".into();
+            record.command = vec!["true".into()];
+            record.stdout_path = container_dir.join("stdout").display().to_string();
+            record.stderr_path = container_dir.join("stderr").display().to_string();
+            runtime.store.put(&record).unwrap();
+            let _ = runtime.restart(container_id, std::time::Duration::from_millis(10));
+            let _ = old.kill();
+        }
+    }
+
+    #[test]
+    fn public_run_and_restart_survive_real_sigkill_at_resource_and_launch_barriers() {
+        let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        for action in ["run", "restart"] {
+            for phase in ["network", "cgroup", "spawn", "identity"] {
+                let root = tempfile::tempdir().unwrap();
+                let ready = root.path().join("ready");
+                let marker = root.path().join("workload-marker");
+                let mut daemon = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg("runtime::tests::public_lifecycle_sigkill_barrier_helper")
+                    .arg("--nocapture")
+                    .env("FERRO_PUBLIC_BARRIER_ROOT", root.path())
+                    .env("FERRO_PUBLIC_BARRIER_ACTION", action)
+                    .env("FERRO_PUBLIC_BARRIER_PHASE", phase)
+                    .env("FERRO_PUBLIC_BARRIER_READY", &ready)
+                    .spawn()
+                    .unwrap();
+                for _ in 0..1000 {
+                    if ready.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                assert!(ready.exists(), "{action} did not reach {phase}");
+                nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(daemon.id() as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                )
+                .unwrap();
+                let _ = daemon.wait();
+                let reopened = ContainerRuntime::new(root.path()).unwrap();
+                assert!(!marker.exists(), "{action} {phase} replayed workload");
+                for record in reopened.list().unwrap() {
+                    assert!(record.pending_mutation.is_none(), "{action} {phase}");
+                    if action == "run" || matches!(phase, "spawn" | "identity") {
+                        assert!(
+                            !super::process_exists(record.pid),
+                            "{action} {phase} orphan"
+                        );
+                    } else {
+                        let _ = super::kill_pid(record.pid);
+                    }
+                }
+            }
         }
     }
 }

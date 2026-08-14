@@ -912,7 +912,19 @@ impl ContainerRuntime {
                         .join(&record.id)
                         .join("rootfs")
                         .exists());
+            let run_live_effects = reservation.action == "container.run"
+                && self.authorization.provenance_matches(record)
+                && record.status == "running"
+                && process_exists(record.pid)
+                && process_start_time_for_pid(record.pid).is_some()
+                && self
+                    .runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("rootfs")
+                    .exists();
             let run_not_applied = reservation.action == "container.run"
+                && !run_live_effects
                 && durable_operation.as_ref().is_some_and(|operation| {
                     operation.phase == LifecyclePhase::Reserved
                         || operation.effect_succeeded == Some(false)
@@ -941,6 +953,11 @@ impl ContainerRuntime {
             journal.reconcile_observed(evidence)?;
             if recovered_delete {
                 self.store.acknowledge_mutation(reservation.operation_id)?;
+            } else if run_live_effects
+                && classification == crate::witness::RecoveryClassification::Quarantined
+            {
+                // An effect may exist without a committed effect marker. Keep
+                // the reservation as an operator-visible quarantine boundary.
             } else {
                 self.store
                     .finish_mutation(&record.id, reservation.operation_id)?;
@@ -960,8 +977,24 @@ impl ContainerRuntime {
             if operation.phase == LifecyclePhase::StoreDeleted {
                 self.store.acknowledge_mutation(operation.operation_id)?;
             } else if operation.action == "container.run"
+                && self
+                    .store
+                    .get(&operation.container_id)?
+                    .is_some_and(|record| {
+                        record.status == "quarantined" && process_exists(record.pid)
+                    })
+            {
+                continue;
+            } else if operation.action == "container.run"
                 && operation.effect_succeeded == Some(false)
-                && self.store.get(&operation.container_id)?.is_some()
+                && self
+                    .store
+                    .get(&operation.container_id)?
+                    .is_some_and(|record| {
+                        record.status != "running"
+                            || !process_exists(record.pid)
+                            || !self.authorization.provenance_matches(&record)
+                    })
             {
                 self.store
                     .delete_for_mutation(&operation.container_id, operation.operation_id)?;
@@ -986,7 +1019,7 @@ impl ContainerRuntime {
             recoveries.push((
                 record.id.clone(),
                 self.authorization
-                    .begin_internal_container_recovery(&record.id)?,
+                    .begin_internal_network_recovery(&record.id)?,
             ));
         }
         let mut reconciled_networks = BTreeSet::new();

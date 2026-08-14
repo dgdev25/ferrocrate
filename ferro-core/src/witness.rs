@@ -39,9 +39,10 @@ pub use journal::{
     JournalMode, RecoveryClassification, WitnessJournal,
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
+pub(crate) use recovery::RecoveryEvidence;
 pub use recovery::{
-    ObservationDigest, ObservationHandle, OperationId, PendingOperation, RecoveryEvidence,
-    RecoveryRecipe, RecoveryRecipeError, RecoveryTruthStrategy, RECOVERY_RECIPE_SCHEMA_VERSION,
+    ObservationDigest, ObservationHandle, OperationId, PendingOperation, RecoveryRecipe,
+    RecoveryRecipeError, RecoveryTruthStrategy, RECOVERY_RECIPE_SCHEMA_VERSION,
 };
 pub use verify::{verify_stream, StreamTrust, VerificationReport};
 

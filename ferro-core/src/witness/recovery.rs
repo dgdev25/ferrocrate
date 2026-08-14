@@ -314,6 +314,11 @@ fn resource_kind_from(value: u8) -> Option<WitnessResourceKind> {
 
 /// Durable pending state exposed to startup reconciliation. It is an inspection
 /// recipe, not authority to replay the original mutation.
+///
+/// ```compile_fail
+/// use ferro_core::witness::{RecoveryEvidence, PendingOperation};
+/// fn forge(_: PendingOperation) -> RecoveryEvidence { unreachable!() }
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingOperation {
     pub(super) operation_id: OperationId,
@@ -325,7 +330,7 @@ pub struct PendingOperation {
 /// runtime recovery code in this crate can construct this value; callers
 /// cannot choose a recovery classification at the journal boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecoveryEvidence {
+pub(crate) struct RecoveryEvidence {
     pub(super) operation_id: OperationId,
     pub(super) execution_generation: u64,
     pub(super) original_action: WitnessAction,
@@ -366,19 +371,5 @@ impl PendingOperation {
     }
     pub const fn recipe(&self) -> &RecoveryRecipe {
         &self.recipe
-    }
-
-    /// Bind a verifier's live container-absence observation to this recipe.
-    /// This is intentionally strategy-specific: it cannot be used to relabel
-    /// exec, process-state, restart, or delete recovery.
-    pub fn observe_container_absent(
-        &self,
-        digest: ObservationDigest,
-        absent: bool,
-    ) -> Result<RecoveryEvidence, RecoveryRecipeError> {
-        if self.recipe.truth_strategy != RecoveryTruthStrategy::ContainerAbsent {
-            return Err(RecoveryRecipeError::InvalidTruthStrategy);
-        }
-        Ok(RecoveryEvidence::verified(self, digest, absent))
     }
 }

@@ -15,7 +15,10 @@ use std::sync::atomic::Ordering;
 impl WitnessJournal {
     /// Classify a pending mutation from a disclosure-safe observation without
     /// ever replaying the original external action.
-    pub fn reconcile_observed(&self, evidence: RecoveryEvidence) -> Result<(), JournalError> {
+    pub(crate) fn reconcile_observed(
+        &self,
+        evidence: RecoveryEvidence,
+    ) -> Result<(), JournalError> {
         let id = evidence.operation_id;
         let observation = evidence.observation_digest;
         let pending = self.pending.get(id.0)?.ok_or(JournalError::NotPending)?;

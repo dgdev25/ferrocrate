@@ -56,6 +56,7 @@ pub mod registry;
 pub mod runtime_config;
 pub mod rvf_image;
 pub mod volume_store;
+pub mod witness;
 
 #[cfg(target_os = "linux")]
 pub mod capabilities;

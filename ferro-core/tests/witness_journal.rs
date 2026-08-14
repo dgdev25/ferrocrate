@@ -1,9 +1,9 @@
 use ferro_core::witness::{
     verify_stream, DisclosureClass, DurableIntent, FaultPoint, FlushBoundary, Invocation,
     JournalConfig, JournalError, JournalFaults, JournalMode, ObservationDigest, ObservationHandle,
-    OperationId, PrincipalSummary, RecoveryClassification, RecoveryRecipe, RecoveryTruthStrategy,
-    ResourceSummary, RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome,
-    WitnessRecord, WitnessResourceKind, WitnessStage,
+    OperationId, PrincipalSummary, RecoveryRecipe, RecoveryTruthStrategy, ResourceSummary,
+    RuleSummary, StreamTrust, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord,
+    WitnessResourceKind, WitnessStage,
 };
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -60,13 +60,12 @@ fn restart_reconciles_allowed_observation_through_unknown_and_recovery() {
     }
 
     let journal = WitnessJournal::open(config(root.path())).unwrap();
-    journal
-        .reconcile_observed(
-            id,
-            ObservationDigest::from_bytes([77; 32]),
-            RecoveryClassification::Recovered,
-        )
+    let evidence = journal
+        .recover(id)
+        .unwrap()
+        .observe_container_absent(ObservationDigest::from_bytes([77; 32]), true)
         .unwrap();
+    journal.reconcile_observed(evidence).unwrap();
     let records = journal.records().unwrap();
     let decoded: Vec<_> = records
         .iter()
@@ -100,13 +99,12 @@ fn restart_reconciles_existing_unknown_without_appending_another_unknown() {
     }
 
     let journal = WitnessJournal::open(config(root.path())).unwrap();
-    journal
-        .reconcile_observed(
-            id,
-            ObservationDigest::from_bytes([8; 32]),
-            RecoveryClassification::Quarantined,
-        )
+    let evidence = journal
+        .recover(id)
+        .unwrap()
+        .observe_container_absent(ObservationDigest::from_bytes([8; 32]), false)
         .unwrap();
+    journal.reconcile_observed(evidence).unwrap();
     let records = journal.records().unwrap();
     let decoded: Vec<_> = records
         .iter()
@@ -197,6 +195,10 @@ fn recovery_recipe_persists_action_specific_truth_without_disclosing_observation
     );
     assert_eq!(recipe.observation_digest().as_bytes(), &[9; 32]);
     assert_eq!(recipe.observation_handle().as_bytes(), &[10; 16]);
+    assert!(matches!(
+        pending[0].observe_container_absent(ObservationDigest::from_bytes([11; 32]), true),
+        Err(ferro_core::witness::RecoveryRecipeError::InvalidTruthStrategy)
+    ));
     assert!(matches!(
         RecoveryRecipe::for_original_with_observation(
             WitnessAction::ContainerExec,

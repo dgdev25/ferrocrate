@@ -321,6 +321,42 @@ pub struct PendingOperation {
     pub(super) recipe: RecoveryRecipe,
 }
 
+/// Opaque result of a strategy-specific live-state verifier.  Only trusted
+/// runtime recovery code in this crate can construct this value; callers
+/// cannot choose a recovery classification at the journal boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryEvidence {
+    pub(super) operation_id: OperationId,
+    pub(super) execution_generation: u64,
+    pub(super) original_action: WitnessAction,
+    pub(super) resource_kind: WitnessResourceKind,
+    pub(super) resource_generation: u64,
+    pub(super) truth_strategy: RecoveryTruthStrategy,
+    pub(super) observation_handle: ObservationHandle,
+    pub(super) observation_digest: ObservationDigest,
+    pub(super) recovered: bool,
+}
+
+impl RecoveryEvidence {
+    pub(crate) fn verified(
+        pending: &PendingOperation,
+        observation_digest: ObservationDigest,
+        recovered: bool,
+    ) -> Self {
+        Self {
+            operation_id: pending.operation_id,
+            execution_generation: pending.execution_generation,
+            original_action: pending.recipe.original_action,
+            resource_kind: pending.recipe.resource_kind,
+            resource_generation: pending.recipe.resource_generation,
+            truth_strategy: pending.recipe.truth_strategy,
+            observation_handle: pending.recipe.observation_handle,
+            observation_digest,
+            recovered,
+        }
+    }
+}
+
 impl PendingOperation {
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id
@@ -330,5 +366,19 @@ impl PendingOperation {
     }
     pub const fn recipe(&self) -> &RecoveryRecipe {
         &self.recipe
+    }
+
+    /// Bind a verifier's live container-absence observation to this recipe.
+    /// This is intentionally strategy-specific: it cannot be used to relabel
+    /// exec, process-state, restart, or delete recovery.
+    pub fn observe_container_absent(
+        &self,
+        digest: ObservationDigest,
+        absent: bool,
+    ) -> Result<RecoveryEvidence, RecoveryRecipeError> {
+        if self.recipe.truth_strategy != RecoveryTruthStrategy::ContainerAbsent {
+            return Err(RecoveryRecipeError::InvalidTruthStrategy);
+        }
+        Ok(RecoveryEvidence::verified(self, digest, absent))
     }
 }

@@ -5,9 +5,8 @@ use super::{
 };
 use crate::witness::{encode_record, hash_record, OperationId, WitnessRecord, WitnessStage};
 use crate::witness::{
-    DisclosureClass, Invocation, ObservationDigest, PrincipalSummary, ReasonCode,
-    RecoveryClassification, RecoveryRecipe, ResourceSummary, WitnessAction, WitnessOutcome,
-    WitnessResourceKind,
+    DisclosureClass, Invocation, ObservationDigest, PrincipalSummary, ReasonCode, RecoveryEvidence,
+    RecoveryRecipe, ResourceSummary, WitnessAction, WitnessOutcome, WitnessResourceKind,
 };
 use sha2::{Digest, Sha256};
 use sled::transaction::{ConflictableTransactionError, Transactional};
@@ -16,14 +15,21 @@ use std::sync::atomic::Ordering;
 impl WitnessJournal {
     /// Classify a pending mutation from a disclosure-safe observation without
     /// ever replaying the original external action.
-    pub fn reconcile_observed(
-        &self,
-        id: OperationId,
-        observation: ObservationDigest,
-        classification: RecoveryClassification,
-    ) -> Result<(), JournalError> {
+    pub fn reconcile_observed(&self, evidence: RecoveryEvidence) -> Result<(), JournalError> {
+        let id = evidence.operation_id;
+        let observation = evidence.observation_digest;
         let pending = self.pending.get(id.0)?.ok_or(JournalError::NotPending)?;
-        let (_, _recipe) = RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
+        let (execution_generation, recipe) =
+            RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
+        if execution_generation != evidence.execution_generation
+            || recipe.original_action() != evidence.original_action
+            || recipe.resource_kind() != evidence.resource_kind
+            || recipe.resource_generation() != evidence.resource_generation
+            || recipe.truth_strategy() != evidence.truth_strategy
+            || recipe.observation_handle() != &evidence.observation_handle
+        {
+            return Err(JournalError::BindingMismatch);
+        }
         let state_bytes = self.operations.get(id.0)?.ok_or(JournalError::NotPending)?;
         let state = OperationState::decode(&state_bytes).ok_or(JournalError::Corrupt)?;
         let unknown_event_id = match state.state {
@@ -41,9 +47,10 @@ impl WitnessJournal {
             _ => return Err(JournalError::BindingMismatch),
         };
 
-        let label: &[u8] = match classification {
-            RecoveryClassification::Recovered => b"recovered",
-            RecoveryClassification::Quarantined => b"quarantined",
+        let label: &[u8] = if evidence.recovered {
+            b"recovered"
+        } else {
+            b"quarantined"
         };
         let mut recovery = record_from_state(
             &state,
@@ -52,15 +59,12 @@ impl WitnessJournal {
         )?;
         recovery.result_digest = Some(*observation.as_bytes());
         recovery.recovery_link = Some(unknown_event_id);
-        match classification {
-            RecoveryClassification::Recovered => {
-                recovery.reason = Some(ReasonCode::RecoveryCompleted);
-                recovery.outcome = WitnessOutcome::Recovered;
-            }
-            RecoveryClassification::Quarantined => {
-                recovery.reason = Some(ReasonCode::Quarantined);
-                recovery.outcome = WitnessOutcome::Quarantined;
-            }
+        if evidence.recovered {
+            recovery.reason = Some(ReasonCode::RecoveryCompleted);
+            recovery.outcome = WitnessOutcome::Recovered;
+        } else {
+            recovery.reason = Some(ReasonCode::Quarantined);
+            recovery.outcome = WitnessOutcome::Quarantined;
         }
         self.complete_recovery(id, recovery)
     }

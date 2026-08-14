@@ -40,8 +40,8 @@ pub use journal::{
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
 pub use recovery::{
-    ObservationDigest, ObservationHandle, OperationId, PendingOperation, RecoveryRecipe,
-    RecoveryRecipeError, RecoveryTruthStrategy, RECOVERY_RECIPE_SCHEMA_VERSION,
+    ObservationDigest, ObservationHandle, OperationId, PendingOperation, RecoveryEvidence,
+    RecoveryRecipe, RecoveryRecipeError, RecoveryTruthStrategy, RECOVERY_RECIPE_SCHEMA_VERSION,
 };
 pub use verify::{verify_stream, StreamTrust, VerificationReport};
 

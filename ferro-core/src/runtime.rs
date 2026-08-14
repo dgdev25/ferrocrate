@@ -877,18 +877,15 @@ impl ContainerRuntime {
                     entry.action == "container.delete"
                         && entry.phase == LifecyclePhase::StoreDeleted
                 });
-                journal.reconcile_observed(
-                    operation,
+                let evidence = crate::witness::RecoveryEvidence::verified(
+                    &pending,
                     recovery_observation_tombstone(
                         tombstone.as_ref(),
                         pending.recipe().original_action(),
                     ),
-                    if recovered_delete {
-                        crate::witness::RecoveryClassification::Recovered
-                    } else {
-                        crate::witness::RecoveryClassification::Quarantined
-                    },
-                )?;
+                    recovered_delete,
+                );
+                journal.reconcile_observed(evidence)?;
                 if tombstone.is_some() {
                     self.store.acknowledge_mutation(*operation.as_bytes())?;
                 }
@@ -933,11 +930,12 @@ impl ContainerRuntime {
             } else {
                 self.store.put(&record)?;
             }
-            journal.reconcile_observed(
-                operation,
+            let evidence = crate::witness::RecoveryEvidence::verified(
+                &pending,
                 recovery_observation(Some(record), pending.recipe().original_action()),
-                classification,
-            )?;
+                classification == crate::witness::RecoveryClassification::Recovered,
+            );
+            journal.reconcile_observed(evidence)?;
             if recovered_delete {
                 self.store.acknowledge_mutation(reservation.operation_id)?;
             } else {
@@ -974,14 +972,36 @@ impl ContainerRuntime {
     }
 
     fn reconcile_network_state(&self, records: &[ContainerRecord]) -> Result<(), RuntimeError> {
+        // Acquire every durable internal-recovery intent before observing code
+        // is allowed to reload classifiers or rewrite ownership metadata.  A
+        // required journal failure therefore leaves the network untouched.
+        let mut recoveries = Vec::new();
+        for record in records.iter().filter(|record| {
+            matches!(record.status.as_str(), "running" | "paused")
+                && record.network_name.as_deref() == Some("bridge")
+        }) {
+            recoveries.push((
+                record.id.clone(),
+                self.authorization
+                    .begin_internal_container_recovery(&record.id)?,
+            ));
+        }
         let mut reconciled_networks = BTreeSet::new();
-        for record in records
+        let result = records
             .iter()
             .filter(|record| matches!(record.status.as_str(), "running" | "paused"))
-        {
-            self.reconcile_record_network(record, records, &mut reconciled_networks)?;
+            .try_for_each(|record| {
+                self.reconcile_record_network(record, records, &mut reconciled_networks)
+            });
+        let recovered = result.is_ok();
+        for (container_id, operation) in recoveries {
+            self.authorization.finish_internal_recovery(
+                operation,
+                internal_cleanup_observation(&container_id, recovered),
+                recovered,
+            )?;
         }
-        Ok(())
+        result
     }
 
     fn reconcile_record_network(

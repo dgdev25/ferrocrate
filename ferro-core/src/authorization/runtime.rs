@@ -204,15 +204,12 @@ impl RuntimeAuthorization {
         recovered: bool,
     ) -> Result<(), MediationError> {
         if let (Some(journal), Some(operation)) = (&self.journal, operation) {
-            journal.reconcile_observed(
-                operation,
+            let pending = journal.recover(operation)?;
+            journal.reconcile_observed(crate::witness::RecoveryEvidence::verified(
+                &pending,
                 observation,
-                if recovered {
-                    crate::witness::RecoveryClassification::Recovered
-                } else {
-                    crate::witness::RecoveryClassification::Quarantined
-                },
-            )?;
+                recovered,
+            ))?;
         }
         Ok(())
     }

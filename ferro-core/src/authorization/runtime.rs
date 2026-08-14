@@ -45,6 +45,7 @@ pub(crate) struct RunMountFact {
     pub device_id: u64,
     pub inode: u64,
     pub open_flags: u64,
+    pub target_digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -180,12 +181,13 @@ impl RuntimeAuthorization {
             .mounts
             .iter()
             .map(|mount| {
-                MountHandleDescriptor::new(
+                MountHandleDescriptor::new_with_target(
                     mount.class,
                     mount.mount_id,
                     mount.device_id,
                     mount.inode,
                     mount.open_flags,
+                    mount.target_digest,
                 )
             })
             .collect::<Vec<_>>();

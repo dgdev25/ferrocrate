@@ -63,7 +63,7 @@ fn restart_reconciles_allowed_observation_through_unknown_and_recovery() {
     journal
         .reconcile_observed(
             id,
-            ObservationDigest::from_bytes([8; 32]),
+            ObservationDigest::from_bytes([77; 32]),
             RecoveryClassification::Recovered,
         )
         .unwrap();

@@ -14,7 +14,7 @@ use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
     now_unix, ContainerRecord, ContainerStoreError, EbpfFilterOwnershipRecord,
     EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LocalContainerStore,
-    NetworkOwnershipRecord, PortMappingRecord, RestartPolicy,
+    MutationReservation, NetworkOwnershipRecord, PortMappingRecord, RestartPolicy,
 };
 use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
@@ -27,8 +27,8 @@ use crate::mac_profiles::generate_apparmor_profile;
 #[cfg(target_os = "linux")]
 use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
 use crate::mounts::{
-    apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts, BindMount, MountError,
-    TmpfsMount,
+    apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts,
+    normalize_mount_target, BindMount, MountError, TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, stop_pid, ProcessLifecycleError};
@@ -767,31 +767,48 @@ impl ContainerRuntime {
     }
 
     fn reconcile_pending_mutations(&self) -> Result<(), RuntimeError> {
-        let records = self.store.list()?;
-        for mut record in records {
-            let Some(reservation) = record.pending_mutation.clone() else {
-                continue;
-            };
-            let Some(journal) = self.authorization.journal() else {
+        let mut records = self.store.list()?;
+        let Some(journal) = self.authorization.journal() else {
+            for record in records {
+                let Some(reservation) = record.pending_mutation else {
+                    continue;
+                };
                 self.store
                     .finish_mutation(&record.id, reservation.operation_id)?;
+            }
+            return Ok(());
+        };
+
+        // The journal decision is durable before the store reservation. Enumerate
+        // journal pending state first so a crash in that interval is discoverable.
+        for pending in journal.pending()? {
+            let operation = pending.operation_id();
+            let matched = records.iter_mut().find(|record| {
+                record
+                    .pending_mutation
+                    .as_ref()
+                    .is_some_and(|reservation| reservation.operation_id == *operation.as_bytes())
+            });
+            let Some(record) = matched else {
+                journal.reconcile_observed(
+                    operation,
+                    recovery_observation(None, pending.recipe().original_action()),
+                    crate::witness::RecoveryClassification::Quarantined,
+                )?;
                 continue;
             };
-            let operation = crate::witness::OperationId::from_bytes(reservation.operation_id);
-            let pending = match journal.recover(operation) {
-                Ok(pending) => pending,
-                Err(_) => {
-                    record.status = "quarantined".into();
-                    self.store.put(&record)?;
-                    continue;
-                }
-            };
+            let reservation = record
+                .pending_mutation
+                .clone()
+                .expect("matched reservation");
             let action_matches = runtime_witness_action_name(pending.recipe().original_action())
                 == reservation.action;
             let generation_matches =
                 pending.recipe().resource_generation() == reservation.generation;
-            let classification = if action_matches && generation_matches {
-                self.classify_pending_store_state(&mut record, &reservation.action);
+            let truth_matches = action_matches
+                && generation_matches
+                && recovery_truth_matches(record, &reservation.action);
+            let classification = if truth_matches {
                 crate::witness::RecoveryClassification::Recovered
             } else {
                 record.status = "quarantined".into();
@@ -800,7 +817,7 @@ impl ContainerRuntime {
             self.store.put(&record)?;
             journal.reconcile_observed(
                 operation,
-                *pending.recipe().observation_digest(),
+                recovery_observation(Some(record), pending.recipe().original_action()),
                 classification,
             )?;
             self.store
@@ -812,16 +829,6 @@ impl ContainerRuntime {
             }
         }
         Ok(())
-    }
-
-    fn classify_pending_store_state(&self, record: &mut ContainerRecord, action: &str) {
-        match action {
-            "container.stop" if !process_exists(record.pid) => record.status = "stopped".into(),
-            "container.kill" if !process_exists(record.pid) => record.status = "killed".into(),
-            "container.restart" if process_exists(record.pid) => record.status = "running".into(),
-            "container.delete" => record.status = "removed-pending".into(),
-            _ => {}
-        }
     }
 
     fn reconcile_network_state(&self, records: &[ContainerRecord]) -> Result<(), RuntimeError> {
@@ -1045,6 +1052,20 @@ impl ContainerRuntime {
             .authorization
             .authorize_run(&candidate, &normalized.facts)?;
         let creation_provenance = permit.creation_provenance();
+        let operation_id = permit.operation_id();
+        let witnessed = self.authorization.requires_provenance();
+        if witnessed {
+            candidate.creation_provenance = creation_provenance.clone();
+            candidate.pending_mutation = Some(MutationReservation {
+                operation_id,
+                generation: candidate.mutation_generation,
+                expected_status: candidate.status.clone(),
+                action: "container.run".into(),
+            });
+            // Durable create provenance and reservation precede every external
+            // creation side effect, closing the decision-to-store crash window.
+            self.store.put(&candidate)?;
+        }
         let (proof, intent) = permit.execution_authority();
         let authorized_image = proof
             .canonical()
@@ -1055,8 +1076,8 @@ impl ContainerRuntime {
         let result = self.run_with_store_authorized(
             proof,
             intent,
-            creation_provenance,
-            container_id,
+            creation_provenance.clone(),
+            container_id.clone(),
             store,
             &authorized_image,
             cmd,
@@ -1080,6 +1101,9 @@ impl ContainerRuntime {
             ai_config,
         );
         self.authorization.complete(permit, result.is_ok())?;
+        if witnessed {
+            self.store.finish_mutation(&container_id, operation_id)?;
+        }
         result
     }
 
@@ -1324,9 +1348,16 @@ impl ContainerRuntime {
             managed_overlay: network_setup.managed_overlay.clone(),
             managed_host_veth: network_setup.managed_host_veth.clone(),
             ai_runtime: ai_config.cloned(),
-            creation_provenance,
+            creation_provenance: creation_provenance.clone(),
             mutation_generation: 1,
-            pending_mutation: None,
+            pending_mutation: creation_provenance.journal_id.map(|_| MutationReservation {
+                operation_id: creation_provenance
+                    .creator_operation_id
+                    .expect("witnessed creation has operation identity"),
+                generation: 1,
+                expected_status: "created".into(),
+                action: "container.run".into(),
+            }),
         };
 
         rollback.persist_network()?;
@@ -1398,10 +1429,8 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd);
-        let finish = self.store.finish_mutation(id, operation_id);
-        let completion = self.authorization.complete(permit, result.is_ok());
-        finish?;
-        completion?;
+        self.authorization.complete(permit, result.is_ok())?;
+        self.store.finish_mutation(id, operation_id)?;
         result
     }
 
@@ -1878,10 +1907,8 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = execute(self, proof, intent);
-        let finish = self.store.finish_mutation(id, operation_id);
-        let completion = self.authorization.complete(permit, result.is_ok());
-        finish?;
-        completion?;
+        self.authorization.complete(permit, result.is_ok())?;
+        self.store.finish_mutation(id, operation_id)?;
         if action == Action::ContainerDelete && result.is_ok() {
             self.store.remove(id)?;
         }
@@ -1929,6 +1956,7 @@ fn normalize_run_request(
         let metadata = handle.metadata()?;
         let fd = handle.as_raw_fd();
         let mount_id = fd_mount_id(fd)?;
+        let target = normalize_mount_target(&mount.target)?;
         mount_facts.push(RunMountFact {
             class: if mount.read_only {
                 crate::authorization::MountClass::ReadOnly
@@ -1939,15 +1967,24 @@ fn normalize_run_request(
             device_id: metadata.dev(),
             inode: metadata.ino(),
             open_flags: u64::from(mount.read_only),
+            target_digest: mount_target_digest(&target),
         });
         normalized_mounts.push(BindMount {
             source: PathBuf::from(format!("/proc/self/fd/{fd}")),
-            target: mount.target.clone(),
+            target,
             read_only: mount.read_only,
         });
         handles.push(handle);
     }
-    let normalized_tmpfs = tmpfs_mounts.to_vec();
+    let normalized_tmpfs = tmpfs_mounts
+        .iter()
+        .map(|mount| {
+            Ok(TmpfsMount {
+                target: normalize_mount_target(&mount.target)?,
+                size: mount.size.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, MountError>>()?;
     for (index, mount) in normalized_tmpfs.iter().enumerate() {
         let mut digest = sha2::Sha256::new();
         digest.update(b"ferrocrate/tmpfs-binding/v1");
@@ -1962,6 +1999,7 @@ fn normalize_run_request(
             device_id: 0,
             inode: u64::from_be_bytes(digest[..8].try_into().expect("digest width")),
             open_flags: 0,
+            target_digest: mount_target_digest(&mount.target),
         });
     }
     let mut network_ids = vec![
@@ -2002,6 +2040,48 @@ fn fd_mount_id(fd: i32) -> Result<u64, RuntimeError> {
         })
 }
 
+fn mount_target_digest(target: &Path) -> [u8; 32] {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ferrocrate/mount-target/v1");
+    digest.update(target.as_os_str().as_bytes());
+    digest.finalize().into()
+}
+
+fn recovery_truth_matches(record: &ContainerRecord, action: &str) -> bool {
+    match action {
+        // Exec needs a durable per-execution result marker. Container presence
+        // alone cannot prove that an unknown command completed.
+        "container.exec" => false,
+        "container.pause" => record.status == "paused",
+        "container.resume" => record.status == "running" && process_exists(record.pid),
+        "container.stop" => record.status == "stopped" && !process_exists(record.pid),
+        "container.kill" => record.status == "killed" && !process_exists(record.pid),
+        "container.restart" => record.status == "running" && process_exists(record.pid),
+        "container.delete" => record.status == "removed-pending",
+        "container.run" => record.creation_provenance.is_verifiable(),
+        _ => false,
+    }
+}
+
+fn recovery_observation(
+    record: Option<&ContainerRecord>,
+    action: crate::witness::WitnessAction,
+) -> crate::witness::ObservationDigest {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ferrocrate/live-recovery-observation/v1");
+    digest.update([action as u8]);
+    if let Some(record) = record {
+        digest.update(record.id.as_bytes());
+        digest.update(record.status.as_bytes());
+        digest.update(record.pid.to_be_bytes());
+        digest.update(record.mutation_generation.to_be_bytes());
+        digest.update([u8::from(process_exists(record.pid))]);
+    } else {
+        digest.update(b"reservation-absent");
+    }
+    crate::witness::ObservationDigest::from_bytes(digest.finalize().into())
+}
+
 fn validate_normalized_run(
     proof: &AuthorizedRequest,
     normalized: &NormalizedRunRequest,
@@ -2029,6 +2109,7 @@ fn validate_normalized_run(
             || expected.device_id() != observed.device_id
             || expected.inode() != observed.inode
             || expected.open_flags() != observed.open_flags
+            || expected.target_digest() != &observed.target_digest
         {
             return Err(RuntimeError::Authorization(
                 "authorized mount identity became stale".into(),
@@ -6157,33 +6238,68 @@ fn update_pid_status(
     pid: u32,
     status: &str,
 ) -> Result<(), ContainerStoreError> {
+    use sled::transaction::{ConflictableTransactionError, TransactionError};
     let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
-    if let Some(bytes) = tree.get(id.as_bytes())? {
-        let mut record = serde_json::from_slice::<ContainerRecord>(&bytes)
-            .map_err(ContainerStoreError::Decode)?;
+    tree.transaction(|tree| {
+        let Some(bytes) = tree.get(id.as_bytes())? else {
+            return Ok(());
+        };
+        let mut record = serde_json::from_slice::<ContainerRecord>(&bytes).map_err(|error| {
+            ConflictableTransactionError::Abort(ContainerStoreError::Decode(error))
+        })?;
+        if record.pending_mutation.is_some() {
+            return Err(ConflictableTransactionError::Abort(
+                ContainerStoreError::MutationConflict,
+            ));
+        }
         record.pid = pid;
         record.status = status.to_string();
-        let encoded = serde_json::to_vec(&record)?;
+        let encoded = serde_json::to_vec(&record).map_err(|error| {
+            ConflictableTransactionError::Abort(ContainerStoreError::Encode(error))
+        })?;
         tree.insert(id.as_bytes(), encoded)?;
-        tree.flush()?;
-    }
+        Ok(())
+    })
+    .map_err(|error| match error {
+        TransactionError::Abort(error) => error,
+        TransactionError::Storage(error) => ContainerStoreError::Open(error),
+    })?;
+    tree.flush()?;
     Ok(())
 }
 
 fn update_exit(db: &sled::Db, id: &str, exit_code: i32) -> Result<String, ContainerStoreError> {
+    use sled::transaction::{ConflictableTransactionError, TransactionError};
     let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
-    let Some(bytes) = tree.get(id.as_bytes())? else {
-        return Ok("exited".to_string());
-    };
-    let mut record =
-        serde_json::from_slice::<ContainerRecord>(&bytes).map_err(ContainerStoreError::Decode)?;
-    record.last_exit_code = Some(exit_code);
-    if record.status != "stopped" && record.status != "killed" {
-        record.status = "exited".to_string();
-    }
-    let status = record.status.clone();
-    let encoded = serde_json::to_vec(&record)?;
-    tree.insert(id.as_bytes(), encoded)?;
+    let status = tree
+        .transaction(|tree| {
+            let Some(bytes) = tree.get(id.as_bytes())? else {
+                return Ok("exited".to_string());
+            };
+            let mut record =
+                serde_json::from_slice::<ContainerRecord>(&bytes).map_err(|error| {
+                    ConflictableTransactionError::Abort(ContainerStoreError::Decode(error))
+                })?;
+            if record.pending_mutation.is_some() {
+                return Err(ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                ));
+            }
+            record.last_exit_code = Some(exit_code);
+            if record.status != "stopped" && record.status != "killed" {
+                record.status = "exited".to_string();
+            }
+            let status = record.status.clone();
+            let encoded = serde_json::to_vec(&record).map_err(|error| {
+                ConflictableTransactionError::Abort(ContainerStoreError::Encode(error))
+            })?;
+            tree.insert(id.as_bytes(), encoded)?;
+            Ok(status)
+        })
+        .map_err(|error| match error {
+            TransactionError::Abort(error) => error,
+            TransactionError::Storage(error) => ContainerStoreError::Open(error),
+        })?;
     tree.flush()?;
     Ok(status)
 }
@@ -7121,11 +7237,11 @@ mod tests {
             &[caps::Capability::CAP_NET_BIND_SERVICE],
             &[crate::mounts::BindMount {
                 source,
-                target: "/data".into(),
+                target: "data".into(),
                 read_only: true,
             }],
             &[crate::mounts::TmpfsMount {
-                target: "/tmp".into(),
+                target: "tmp".into(),
                 size: Some("64m".into()),
             }],
             true,
@@ -7137,6 +7253,11 @@ mod tests {
         .unwrap();
         assert!(request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
         assert_eq!(request.facts.mounts.len(), 2);
+        assert_ne!(request.facts.mounts[0].target_digest, [0; 32]);
+        assert_ne!(
+            request.facts.mounts[0].target_digest,
+            request.facts.mounts[1].target_digest
+        );
         assert!(request.facts.readonly_rootfs);
         assert!(request.facts.no_new_privileges);
         assert!(request
@@ -7145,6 +7266,30 @@ mod tests {
             .iter()
             .any(|id| id == "mode:bridge"));
         assert_eq!(request.facts.capabilities, ["CAP_NET_BIND_SERVICE"]);
+    }
+
+    #[test]
+    fn normalized_run_request_rejects_unsafe_mount_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for target in ["/escape", "../escape", "safe/../escape", "safe/\nsecret"] {
+            let result = super::normalize_run_request(
+                &[],
+                &[crate::mounts::BindMount {
+                    source: source.clone(),
+                    target: target.into(),
+                    read_only: false,
+                }],
+                &[],
+                false,
+                false,
+                "none",
+                ferro_net::NetworkBackend::Iptables,
+                &[],
+            );
+            assert!(result.is_err(), "accepted target {target:?}");
+        }
     }
 
     #[test]

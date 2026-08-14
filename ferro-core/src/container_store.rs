@@ -432,20 +432,44 @@ impl LocalContainerStore {
         id: &str,
         operation_id: [u8; 16],
     ) -> Result<(), ContainerStoreError> {
-        let Some(mut record) = self.get(id)? else {
-            return Ok(());
-        };
-        if record
-            .pending_mutation
-            .as_ref()
-            .map(|value| value.operation_id)
-            != Some(operation_id)
-        {
-            return Err(ContainerStoreError::MutationConflict);
-        }
-        record.pending_mutation = None;
-        record.mutation_generation = record.mutation_generation.saturating_add(1);
-        self.put(&record)
+        let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        tree.transaction(|tree| {
+            let Some(bytes) = tree.get(id.as_bytes())? else {
+                return Ok(());
+            };
+            let mut record: ContainerRecord = serde_json::from_slice(&bytes).map_err(|error| {
+                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Decode(
+                    error,
+                ))
+            })?;
+            let reservation = record.pending_mutation.as_ref().ok_or_else(|| {
+                sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                )
+            })?;
+            if reservation.operation_id != operation_id
+                || reservation.generation != record.mutation_generation
+            {
+                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                    ContainerStoreError::MutationConflict,
+                ));
+            }
+            record.pending_mutation = None;
+            record.mutation_generation = record.mutation_generation.saturating_add(1);
+            let encoded = serde_json::to_vec(&record).map_err(|error| {
+                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Encode(
+                    error,
+                ))
+            })?;
+            tree.insert(id.as_bytes(), encoded)?;
+            Ok(())
+        })
+        .map_err(|error| match error {
+            sled::transaction::TransactionError::Abort(error) => error,
+            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
+        })?;
+        tree.flush()?;
+        Ok(())
     }
 
     pub fn clone_db(&self) -> sled::Db {
@@ -603,5 +627,31 @@ mod tests {
         let updated = store.get("cas").unwrap().unwrap();
         assert_eq!(updated.mutation_generation, 2);
         assert!(updated.pending_mutation.is_none());
+    }
+
+    #[test]
+    fn finish_mutation_rejects_generation_changed_after_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("cas-finish".into(), "image".into());
+        record.status = "running".into();
+        store.put(&record).unwrap();
+        store
+            .reserve_mutation("cas-finish", "running", 1, [3; 16], "container.stop")
+            .unwrap();
+        let mut raced = store.get("cas-finish").unwrap().unwrap();
+        raced.mutation_generation = 9;
+        store.put(&raced).unwrap();
+        assert!(matches!(
+            store.finish_mutation("cas-finish", [3; 16]),
+            Err(ContainerStoreError::MutationConflict)
+        ));
+        assert!(store
+            .get("cas-finish")
+            .unwrap()
+            .unwrap()
+            .pending_mutation
+            .is_some());
     }
 }

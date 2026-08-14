@@ -84,6 +84,7 @@ pub struct MountHandleDescriptor {
     device_id: u64,
     inode: u64,
     open_flags: u64,
+    target_digest: [u8; 32],
 }
 
 impl MountHandleDescriptor {
@@ -101,6 +102,25 @@ impl MountHandleDescriptor {
             device_id,
             inode,
             open_flags,
+            target_digest: [0; 32],
+        }
+    }
+
+    pub(crate) fn new_with_target(
+        class: MountClass,
+        mount_id: u64,
+        device_id: u64,
+        inode: u64,
+        open_flags: u64,
+        target_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            class,
+            mount_id,
+            device_id,
+            inode,
+            open_flags,
+            target_digest,
         }
     }
 
@@ -122,6 +142,10 @@ impl MountHandleDescriptor {
 
     pub fn open_flags(&self) -> u64 {
         self.open_flags
+    }
+
+    pub fn target_digest(&self) -> &[u8; 32] {
+        &self.target_digest
     }
 }
 

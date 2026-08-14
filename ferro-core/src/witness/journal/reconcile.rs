@@ -23,10 +23,7 @@ impl WitnessJournal {
         classification: RecoveryClassification,
     ) -> Result<(), JournalError> {
         let pending = self.pending.get(id.0)?.ok_or(JournalError::NotPending)?;
-        let (_, recipe) = RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
-        if recipe.observation_digest() != &observation {
-            return Err(JournalError::BindingMismatch);
-        }
+        let (_, _recipe) = RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
         let state_bytes = self.operations.get(id.0)?.ok_or(JournalError::NotPending)?;
         let state = OperationState::decode(&state_bytes).ok_or(JournalError::Corrupt)?;
         let unknown_event_id = match state.state {

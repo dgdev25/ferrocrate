@@ -32,13 +32,13 @@ retaining compatibility execution.
 
 Verification on 2026-08-14:
 
-- `runtime_authorization`: 19 passed, including separately named required-mode
-  evidence for run/exec/pause/resume/stop/kill and four post-effect
+- `runtime_authorization`: 21 passed, including separately named required-mode
+  evidence for all eight lifecycle actions and four post-effect
   persistence-failure/reopen cases.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
-- `ferro-core --lib`: 261 passed, 1 ignored; one entitlement signature test
-  failed transiently in the final run and passed immediately when rerun alone.
+- `ferro-core --lib`: 262 passed, 1 ignored. Entitlement tests now serialize
+  their process-global environment and the repeated full run is stable.
 - Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.
 - Strict workspace dependency clippy remains blocked by pre-existing warnings

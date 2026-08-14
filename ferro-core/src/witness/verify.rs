@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    decode_record, hash_record, WitnessError, WitnessOutcome, WitnessRecord, WitnessStage,
+    decode_record, hash_record, DisclosureClass, Invocation, PrincipalSummary, ResourceSummary,
+    WitnessAction, WitnessError, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
 };
 
 const MAX_OPEN_REQUESTS: usize = 4096;
@@ -9,12 +10,23 @@ const MAX_OPEN_REQUESTS: usize = 4096;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamTrust {
     expected_journal_id: [u8; 16],
+    expected_first_sequence: u64,
+    expected_predecessor_hash: [u8; 32],
 }
 
 impl StreamTrust {
-    pub fn new(expected_journal_id: [u8; 16]) -> Self {
+    /// Pins the exact prefix boundary. Genesis is `(journal_id, 1, [0; 32])`;
+    /// verification of a later segment requires its independently retained
+    /// first sequence and predecessor hash.
+    pub fn new(
+        expected_journal_id: [u8; 16],
+        expected_first_sequence: u64,
+        expected_predecessor_hash: [u8; 32],
+    ) -> Self {
         Self {
             expected_journal_id,
+            expected_first_sequence,
+            expected_predecessor_hash,
         }
     }
 }
@@ -31,12 +43,51 @@ pub struct VerificationReport {
     pub terminal_recoveries: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequestBinding {
+    runtime_instance_id: [u8; 16],
+    boot_id: [u8; 16],
+    principal: PrincipalSummary,
+    invocation: Invocation,
+    action: WitnessAction,
+    resource_kind: WitnessResourceKind,
+    resource: ResourceSummary,
+    resource_generation: u64,
+    policy_version: u64,
+    policy_digest: [u8; 32],
+    request_digest: [u8; 32],
+    path_class: Option<DisclosureClass>,
+    device_class: Option<DisclosureClass>,
+    correlation_digest: Option<[u8; 32]>,
+}
+
+impl From<&WitnessRecord> for RequestBinding {
+    fn from(record: &WitnessRecord) -> Self {
+        Self {
+            runtime_instance_id: record.runtime_instance_id,
+            boot_id: record.boot_id,
+            principal: record.principal,
+            invocation: record.invocation,
+            action: record.action,
+            resource_kind: record.resource_kind,
+            resource: record.resource,
+            resource_generation: record.resource_generation,
+            policy_version: record.policy_version,
+            policy_digest: record.policy_digest,
+            request_digest: record.request_digest,
+            path_class: record.path_class,
+            device_class: record.device_class,
+            correlation_digest: record.correlation_digest,
+        }
+    }
+}
+
+#[derive(Clone)]
 enum Lifecycle {
-    Received,
-    Allowed,
-    DeniedDecision,
-    Unknown([u8; 16]),
+    Received(RequestBinding),
+    Allowed(RequestBinding, [u8; 16]),
+    DeniedDecision(RequestBinding, [u8; 16]),
+    Unknown(RequestBinding, [u8; 16], [u8; 16]),
 }
 
 pub fn verify_stream<'a, I>(
@@ -46,8 +97,8 @@ pub fn verify_stream<'a, I>(
 where
     I: IntoIterator<Item = &'a [u8]>,
 {
-    let mut expected_sequence = None;
-    let mut previous_hash = [0_u8; 32];
+    let mut expected_sequence = trust.expected_first_sequence;
+    let mut previous_hash = trust.expected_predecessor_hash;
     let mut lifecycles = HashMap::<[u8; 16], Lifecycle>::new();
     let mut event_ids = HashSet::<[u8; 16]>::new();
     let mut request_ids = HashSet::<[u8; 16]>::new();
@@ -68,8 +119,7 @@ where
             return Err(WitnessError::WrongJournal);
         }
         let record = decoded.record();
-        let sequence = expected_sequence.unwrap_or(record.sequence);
-        if record.sequence != sequence || !event_ids.insert(record.event_id) {
+        if record.sequence != expected_sequence || !event_ids.insert(record.event_id) {
             return Err(WitnessError::SequenceGap);
         }
         if record.previous_hash != previous_hash {
@@ -80,8 +130,10 @@ where
         if lifecycles.len() > MAX_OPEN_REQUESTS {
             return Err(WitnessError::TooManyOpenRequests);
         }
-        previous_hash = hash_record(trust.expected_journal_id, decoded.bytes().as_ref());
-        expected_sequence = Some(sequence.checked_add(1).ok_or(WitnessError::SequenceGap)?);
+        previous_hash = hash_record(decoded.bytes());
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(WitnessError::SequenceGap)?;
         report.records += 1;
     }
 
@@ -92,32 +144,73 @@ where
 }
 
 fn verify_fields(record: &WitnessRecord) -> Result<(), WitnessError> {
+    let common_absent = record.decision_id.is_none()
+        && record.rule.is_none()
+        && record.decision.is_none()
+        && record.reason.is_none()
+        && record.result_digest.is_none()
+        && record.recovery_link.is_none();
     let valid = match record.stage {
-        WitnessStage::RequestReceived => {
-            record.decision.is_none() && record.outcome == WitnessOutcome::None
-        }
+        WitnessStage::RequestReceived => common_absent && record.outcome == WitnessOutcome::None,
         WitnessStage::Decision => {
-            record.decision.is_some() && record.outcome == WitnessOutcome::None
+            record.decision_id.is_some()
+                && record.rule.is_some()
+                && record.decision.is_some()
+                && record.result_digest.is_none()
+                && record.recovery_link.is_none()
+                && record.outcome == WitnessOutcome::None
+                && match record.decision {
+                    Some(true) => record.reason.is_none(),
+                    Some(false) => record.reason == Some(super::ReasonCode::PolicyDenied),
+                    None => false,
+                }
         }
         WitnessStage::Denied => {
-            record.decision.is_none() && record.outcome == WitnessOutcome::Denied
+            record.decision_id.is_some()
+                && record.rule.is_none()
+                && record.decision.is_none()
+                && record.reason.is_some()
+                && record.result_digest.is_none()
+                && record.recovery_link.is_none()
+                && record.outcome == WitnessOutcome::Denied
+                && record.reason == Some(super::ReasonCode::PolicyDenied)
         }
         WitnessStage::Outcome => {
-            record.decision.is_none()
+            record.decision_id.is_some()
+                && record.rule.is_none()
+                && record.decision.is_none()
+                && record.result_digest.is_some()
+                && record.recovery_link.is_none()
                 && matches!(
                     record.outcome,
                     WitnessOutcome::Succeeded
                         | WitnessOutcome::Failed
                         | WitnessOutcome::OutcomeUnknown
                 )
+                && match record.outcome {
+                    WitnessOutcome::Succeeded => record.reason.is_none(),
+                    WitnessOutcome::Failed | WitnessOutcome::OutcomeUnknown => {
+                        record.reason == Some(super::ReasonCode::ExecutionFailed)
+                    }
+                    _ => false,
+                }
         }
         WitnessStage::Recovery => {
-            record.decision.is_none()
-                && matches!(
-                    record.outcome,
-                    WitnessOutcome::Recovered | WitnessOutcome::Quarantined
-                )
+            record.decision_id.is_some()
+                && record.rule.is_none()
+                && record.decision.is_none()
+                && record.reason.is_some()
+                && record.result_digest.is_some()
                 && record.recovery_link.is_some()
+                && match record.outcome {
+                    WitnessOutcome::Recovered => {
+                        record.reason == Some(super::ReasonCode::RecoveryCompleted)
+                    }
+                    WitnessOutcome::Quarantined => {
+                        record.reason == Some(super::ReasonCode::Quarantined)
+                    }
+                    _ => false,
+                }
         }
     };
     if valid {
@@ -125,6 +218,10 @@ fn verify_fields(record: &WitnessRecord) -> Result<(), WitnessError> {
     } else {
         Err(WitnessError::InvalidLifecycle)
     }
+}
+
+fn same_binding(record: &WitnessRecord, binding: &RequestBinding) -> bool {
+    &RequestBinding::from(record) == binding
 }
 
 fn transition(
@@ -137,39 +234,54 @@ fn transition(
         WitnessStage::RequestReceived => {
             if !request_ids.insert(record.request_id)
                 || states
-                    .insert(record.request_id, Lifecycle::Received)
+                    .insert(record.request_id, Lifecycle::Received(record.into()))
                     .is_some()
             {
                 return Err(WitnessError::InvalidLifecycle);
             }
         }
-        WitnessStage::Decision => match states.get_mut(&record.request_id) {
-            Some(state @ Lifecycle::Received) => {
-                *state = if record.decision == Some(true) {
-                    Lifecycle::Allowed
+        WitnessStage::Decision => match states.remove(&record.request_id) {
+            Some(Lifecycle::Received(binding)) if same_binding(record, &binding) => {
+                let decision_id = record.decision_id.ok_or(WitnessError::InvalidLifecycle)?;
+                let next = if record.decision == Some(true) {
+                    Lifecycle::Allowed(binding, decision_id)
                 } else {
-                    Lifecycle::DeniedDecision
+                    Lifecycle::DeniedDecision(binding, decision_id)
                 };
+                states.insert(record.request_id, next);
             }
             _ => return Err(WitnessError::InvalidLifecycle),
         },
         WitnessStage::Denied => match states.remove(&record.request_id) {
-            Some(Lifecycle::DeniedDecision) => report.terminal_denied += 1,
+            Some(Lifecycle::DeniedDecision(binding, decision_id))
+                if same_binding(record, &binding) && record.decision_id == Some(decision_id) =>
+            {
+                report.terminal_denied += 1;
+            }
             _ => return Err(WitnessError::InvalidLifecycle),
         },
-        WitnessStage::Outcome => match states.get(&record.request_id).copied() {
-            Some(Lifecycle::Allowed) if record.outcome == WitnessOutcome::OutcomeUnknown => {
-                states.insert(record.request_id, Lifecycle::Unknown(record.event_id));
-            }
-            Some(Lifecycle::Allowed) => {
-                states.remove(&record.request_id);
-                report.terminal_outcomes += 1;
+        WitnessStage::Outcome => match states.remove(&record.request_id) {
+            Some(Lifecycle::Allowed(binding, decision_id))
+                if same_binding(record, &binding) && record.decision_id == Some(decision_id) =>
+            {
+                if record.outcome == WitnessOutcome::OutcomeUnknown {
+                    states.insert(
+                        record.request_id,
+                        Lifecycle::Unknown(binding, decision_id, record.event_id),
+                    );
+                } else {
+                    report.terminal_outcomes += 1;
+                }
             }
             _ => return Err(WitnessError::InvalidLifecycle),
         },
         WitnessStage::Recovery => match states.remove(&record.request_id) {
-            Some(Lifecycle::Unknown(event_id)) if record.recovery_link == Some(event_id) => {
-                report.terminal_recoveries += 1;
+            Some(Lifecycle::Unknown(binding, decision_id, event_id))
+                if same_binding(record, &binding)
+                    && record.decision_id == Some(decision_id)
+                    && record.recovery_link == Some(event_id) =>
+            {
+                report.terminal_recoveries += 1
             }
             _ => return Err(WitnessError::InvalidLifecycle),
         },

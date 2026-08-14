@@ -1,7 +1,11 @@
 use ferro_core::witness::{
     decode_record, encode_record, hash_record, verify_stream, DisclosureClass, Invocation,
-    RecordBytes, StreamTrust, WitnessOutcome, WitnessRecord, WitnessStage, FORMAT_VERSION,
+    PrincipalSummary, ReasonCode, RecordBytes, ResourceSummary, RuleSummary, StreamTrust,
+    WitnessAction, WitnessOutcome, WitnessRecord, WitnessResourceKind, WitnessStage,
+    FORMAT_VERSION,
 };
+
+const JOURNAL: [u8; 16] = [6; 16];
 
 fn record(sequence: u64, previous_hash: [u8; 32], stage: WitnessStage) -> WitnessRecord {
     WitnessRecord {
@@ -11,16 +15,16 @@ fn record(sequence: u64, previous_hash: [u8; 32], stage: WitnessStage) -> Witnes
         request_id: [7; 16],
         runtime_instance_id: [8; 16],
         boot_id: [9; 16],
-        principal: "uid:1000@userns:4026531837".into(),
+        principal: PrincipalSummary::from_digest([21; 32]),
         invocation: Invocation::Cli,
-        action: "container.create".into(),
-        resource_kind: 1,
-        resource_id: "container:018f".into(),
+        action: WitnessAction::ContainerCreate,
+        resource_kind: WitnessResourceKind::Container,
+        resource: ResourceSummary::from_digest([22; 32]),
         resource_generation: 3,
         policy_version: 12,
         policy_digest: [10; 32],
-        decision_id: Some([11; 16]),
-        rule: Some("developer-create".into()),
+        decision_id: None,
+        rule: None,
         decision: None,
         reason: None,
         request_digest: [12; 32],
@@ -36,194 +40,234 @@ fn record(sequence: u64, previous_hash: [u8; 32], stage: WitnessStage) -> Witnes
     }
 }
 
+fn decision(sequence: u64, allowed: bool) -> WitnessRecord {
+    let mut value = record(sequence, [0; 32], WitnessStage::Decision);
+    value.decision_id = Some([11; 16]);
+    value.rule = Some(RuleSummary::from_id([13; 16]));
+    value.decision = Some(allowed);
+    value.reason = (!allowed).then_some(ReasonCode::PolicyDenied);
+    value
+}
+
+fn terminal_denied(sequence: u64) -> WitnessRecord {
+    let mut value = record(sequence, [0; 32], WitnessStage::Denied);
+    value.decision_id = Some([11; 16]);
+    value.reason = Some(ReasonCode::PolicyDenied);
+    value.outcome = WitnessOutcome::Denied;
+    value
+}
+
+fn terminal_outcome(sequence: u64, outcome: WitnessOutcome) -> WitnessRecord {
+    let mut value = record(sequence, [0; 32], WitnessStage::Outcome);
+    value.decision_id = Some([11; 16]);
+    value.result_digest = Some([14; 32]);
+    value.reason = (outcome != WitnessOutcome::Succeeded).then_some(ReasonCode::ExecutionFailed);
+    value.outcome = outcome;
+    value
+}
+
 fn encoded_chain(mut records: Vec<WitnessRecord>) -> Vec<RecordBytes> {
-    let journal = [6; 16];
     let mut previous = [0; 32];
     for record in &mut records {
         record.previous_hash = previous;
-        let bytes = encode_record(journal, record).unwrap();
-        previous = hash_record(journal, bytes.as_ref());
+        let bytes = encode_record(JOURNAL, record).unwrap();
+        previous = hash_record(&bytes);
     }
     records
         .iter()
-        .map(|record| encode_record(journal, record).unwrap())
+        .map(|record| encode_record(JOURNAL, record).unwrap())
         .collect()
+}
+
+fn genesis_trust() -> StreamTrust {
+    StreamTrust::new(JOURNAL, 1, [0; 32])
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
 fn golden_scalar_vector_is_stable_and_round_trips_exact_bytes() {
-    let bytes = encode_record([6; 16], &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
+    let bytes = encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
     assert_eq!(bytes.as_ref()[0], FORMAT_VERSION);
-    assert_eq!(&bytes.as_ref()[2..18], &[6; 16]);
+    assert_eq!(&bytes.as_ref()[2..18], &JOURNAL);
     assert_eq!(&bytes.as_ref()[18..26], &1_u64.to_be_bytes());
-    assert_eq!(&bytes.as_ref()[122..124], &26_u16.to_be_bytes());
+    assert_eq!(
+        hex(bytes.as_ref()),
+        concat!(
+            "0101060606060606060606060606060606060000000000000001000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101",
+            "0707070707070707070707070707070708080808080808080808080808080808090909090909090909090909090909091515151515151515151515151515151515151515151515151515151515151515",
+            "01010116161616161616161616161616161616161616161616161616161616161616160000000000000003000000000000000c0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+            "000000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0017f06e5c4d8c8000000000000000000a01000001010000"
+        )
+    );
     let decoded = decode_record(bytes.as_ref()).unwrap();
-    assert_eq!(decoded.journal_id(), &[6; 16]);
+    assert_eq!(decoded.journal_id(), &JOURNAL);
     assert_eq!(
         decoded.record(),
         &record(1, [0; 32], WitnessStage::RequestReceived)
     );
     assert_eq!(decoded.bytes().as_ref(), bytes.as_ref());
     assert_eq!(
-        hash_record([6; 16], bytes.as_ref()),
+        hash_record(&bytes),
         [
-            47, 158, 240, 63, 128, 56, 133, 198, 195, 77, 242, 186, 207, 236, 246, 209, 68, 133,
-            157, 244, 16, 239, 111, 98, 228, 105, 216, 56, 5, 27, 54, 241,
+            25, 169, 226, 211, 24, 43, 199, 231, 247, 130, 132, 89, 29, 132, 197, 45, 118, 122, 95,
+            20, 135, 211, 97, 36, 255, 158, 85, 211, 91, 144, 212, 10
         ]
     );
 }
 
 #[test]
-fn decoder_rejects_unknown_noncanonical_and_unbounded_values() {
-    let bytes = encode_record([6; 16], &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
-    let mut unknown = bytes.as_ref().to_vec();
-    unknown[1] = 99;
-    assert!(decode_record(&unknown).is_err());
+fn decoder_rejects_unknown_enum_discriminants_and_noncanonical_bytes() {
+    let bytes = encode_record(JOURNAL, &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
+    for offset in [1, 154, 155, 156, 290, 291, 294] {
+        // hash algorithm, invocation, action, resource kind, stage, outcome,
+        // and the present path disclosure class.
+        let mut unknown = bytes.as_ref().to_vec();
+        unknown[offset] = 99;
+        assert!(decode_record(&unknown).is_err(), "offset {offset}");
+    }
 
+    let decision = encode_record(JOURNAL, &decision(1, false)).unwrap();
+    let mut unknown_reason = decision.as_ref().to_vec();
+    unknown_reason[273] = 99;
+    assert!(decode_record(&unknown_reason).is_err());
     let mut trailing = bytes.as_ref().to_vec();
     trailing.push(0);
     assert!(decode_record(&trailing).is_err());
+}
 
-    let mut invalid_utf8 = bytes.as_ref().to_vec();
-    invalid_utf8[124] = 0xff;
-    assert!(decode_record(&invalid_utf8).is_err());
+#[test]
+fn persisted_schema_has_no_public_raw_text_payloads() {
+    let value = record(1, [0; 32], WitnessStage::RequestReceived);
+    let debug = format!("{value:?}");
+    for secret in ["/srv/private", "--password", "TOKEN=secret", "/dev/nvidia0"] {
+        assert!(!debug.contains(secret));
+    }
+}
 
-    let mut unknown_optional_tag = bytes.as_ref().to_vec();
-    // decision-id tag follows both policy u64 fields and the policy digest.
-    let decision_tag =
-        124 + 26 + 1 + 2 + "container.create".len() + 1 + 2 + "container:018f".len() + 8 + 8 + 32;
-    unknown_optional_tag[decision_tag] = 2;
-    assert!(decode_record(&unknown_optional_tag).is_err());
-
-    let mut overlong = record(1, [0; 32], WitnessStage::RequestReceived);
-    overlong.principal = "p".repeat(257);
-    assert!(encode_record([6; 16], &overlong).is_err());
+#[test]
+fn verifier_rejects_truncated_prefixes_and_wrong_predecessors() {
+    let chain = encoded_chain(vec![
+        record(1, [0; 32], WitnessStage::RequestReceived),
+        decision(2, false),
+        terminal_denied(3),
+    ]);
+    assert!(verify_stream(chain[1..].iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+    assert!(verify_stream(
+        chain.iter().map(AsRef::as_ref),
+        &StreamTrust::new(JOURNAL, 1, [99; 32])
+    )
+    .is_err());
 }
 
 #[test]
 fn denied_and_allowed_lifecycles_are_accepted() {
-    let mut decision = record(2, [0; 32], WitnessStage::Decision);
-    decision.decision = Some(false);
-    let mut denied = record(3, [0; 32], WitnessStage::Denied);
-    denied.outcome = WitnessOutcome::Denied;
-    let denied_chain = encoded_chain(vec![
+    let denied = encoded_chain(vec![
         record(1, [0; 32], WitnessStage::RequestReceived),
-        decision,
-        denied,
+        decision(2, false),
+        terminal_denied(3),
     ]);
-    let report = verify_stream(
-        denied_chain.iter().map(|bytes| bytes.as_ref()),
-        &StreamTrust::new([6; 16]),
-    )
-    .unwrap();
-    assert!(report.lifecycle_consistent);
-    assert_eq!(report.terminal_denied, 1);
-
-    let mut allow = record(2, [0; 32], WitnessStage::Decision);
-    allow.decision = Some(true);
-    let mut outcome = record(3, [0; 32], WitnessStage::Outcome);
-    outcome.outcome = WitnessOutcome::Succeeded;
-    let allowed_chain = encoded_chain(vec![
+    assert_eq!(
+        verify_stream(denied.iter().map(AsRef::as_ref), &genesis_trust())
+            .unwrap()
+            .terminal_denied,
+        1
+    );
+    let allowed = encoded_chain(vec![
         record(1, [0; 32], WitnessStage::RequestReceived),
-        allow,
-        outcome,
+        decision(2, true),
+        terminal_outcome(3, WitnessOutcome::Succeeded),
     ]);
-    assert!(verify_stream(
-        allowed_chain.iter().map(|bytes| bytes.as_ref()),
-        &StreamTrust::new([6; 16])
-    )
-    .is_ok());
+    assert!(verify_stream(allowed.iter().map(AsRef::as_ref), &genesis_trust()).is_ok());
 }
 
 #[test]
-fn verifier_rejects_duplicate_decisions_gaps_and_cross_journal_links() {
-    let mut decision = record(2, [0; 32], WitnessStage::Decision);
-    decision.decision = Some(true);
-    let duplicate = encoded_chain(vec![
+fn verifier_rejects_changed_immutable_request_correlation() {
+    let mut changed = decision(2, true);
+    changed.principal = PrincipalSummary::from_digest([99; 32]);
+    let chain = encoded_chain(vec![
         record(1, [0; 32], WitnessStage::RequestReceived),
-        decision.clone(),
-        {
-            let mut duplicate = decision;
-            duplicate.sequence = 3;
-            duplicate
-        },
+        changed,
+        terminal_outcome(3, WitnessOutcome::Succeeded),
     ]);
-    assert!(verify_stream(
-        duplicate.iter().map(|bytes| bytes.as_ref()),
-        &StreamTrust::new([6; 16])
-    )
-    .is_err());
+    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
 
-    let gaps = encoded_chain(vec![
+    let mut changed_terminal = terminal_outcome(3, WitnessOutcome::Succeeded);
+    changed_terminal.request_digest = [98; 32];
+    let chain = encoded_chain(vec![
         record(1, [0; 32], WitnessStage::RequestReceived),
-        record(3, [0; 32], WitnessStage::Decision),
+        decision(2, true),
+        changed_terminal,
     ]);
-    assert!(verify_stream(
-        gaps.iter().map(|bytes| bytes.as_ref()),
-        &StreamTrust::new([6; 16])
-    )
-    .is_err());
-
-    let foreign =
-        encode_record([5; 16], &record(1, [0; 32], WitnessStage::RequestReceived)).unwrap();
-    assert!(verify_stream([foreign.as_ref()], &StreamTrust::new([6; 16])).is_err());
-
-    let valid = encoded_chain(vec![
-        record(1, [0; 32], WitnessStage::RequestReceived),
-        {
-            let mut value = record(2, [0; 32], WitnessStage::Decision);
-            value.decision = Some(false);
-            value
-        },
-        {
-            let mut value = record(3, [0; 32], WitnessStage::Denied);
-            value.outcome = WitnessOutcome::Denied;
-            value
-        },
-    ]);
-    let mut damaged = valid[1].as_ref().to_vec();
-    damaged[26] ^= 1;
-    assert!(verify_stream(
-        [valid[0].as_ref(), damaged.as_slice(), valid[2].as_ref()],
-        &StreamTrust::new([6; 16])
-    )
-    .is_err());
+    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
 }
 
 #[test]
-fn recovery_must_link_the_unknown_outcome_from_the_same_request() {
-    let mut allow = record(2, [0; 32], WitnessStage::Decision);
-    allow.decision = Some(true);
-    let mut unknown = record(3, [0; 32], WitnessStage::Outcome);
-    unknown.outcome = WitnessOutcome::OutcomeUnknown;
-    let unknown_event = unknown.event_id;
+fn verifier_enforces_required_and_forbidden_stage_fields() {
+    let mut missing_id = decision(2, true);
+    missing_id.decision_id = None;
+    let chain = encoded_chain(vec![
+        record(1, [0; 32], WitnessStage::RequestReceived),
+        missing_id,
+    ]);
+    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+
+    let mut denied_without_reason = decision(2, false);
+    denied_without_reason.reason = None;
+    let chain = encoded_chain(vec![
+        record(1, [0; 32], WitnessStage::RequestReceived),
+        denied_without_reason,
+        terminal_denied(3),
+    ]);
+    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+
+    let mut denied_with_wrong_reason = decision(2, false);
+    denied_with_wrong_reason.reason = Some(ReasonCode::ExecutionFailed);
+    let chain = encoded_chain(vec![
+        record(1, [0; 32], WitnessStage::RequestReceived),
+        denied_with_wrong_reason,
+        terminal_denied(3),
+    ]);
+    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+
+    let mut polluted_received = record(1, [0; 32], WitnessStage::RequestReceived);
+    polluted_received.result_digest = Some([1; 32]);
+    assert!(verify_stream(
+        encoded_chain(vec![polluted_received])
+            .iter()
+            .map(AsRef::as_ref),
+        &genesis_trust()
+    )
+    .is_err());
+
+    let mut polluted_outcome = terminal_outcome(3, WitnessOutcome::Succeeded);
+    polluted_outcome.rule = Some(RuleSummary::from_id([4; 16]));
+    let chain = encoded_chain(vec![
+        record(1, [0; 32], WitnessStage::RequestReceived),
+        decision(2, true),
+        polluted_outcome,
+    ]);
+    assert!(verify_stream(chain.iter().map(AsRef::as_ref), &genesis_trust()).is_err());
+}
+
+#[test]
+fn recovery_links_unknown_outcome_and_preserves_decision() {
+    let unknown = terminal_outcome(3, WitnessOutcome::OutcomeUnknown);
     let mut recovery = record(4, [0; 32], WitnessStage::Recovery);
+    recovery.decision_id = Some([11; 16]);
+    recovery.result_digest = Some([15; 32]);
+    recovery.reason = Some(ReasonCode::RecoveryCompleted);
     recovery.outcome = WitnessOutcome::Recovered;
-    recovery.recovery_link = Some(unknown_event);
+    recovery.recovery_link = Some(unknown.event_id);
     let legal = encoded_chain(vec![
         record(1, [0; 32], WitnessStage::RequestReceived),
-        allow.clone(),
-        unknown.clone(),
-        recovery.clone(),
-    ]);
-    assert!(verify_stream(
-        legal.iter().map(|bytes| bytes.as_ref()),
-        &StreamTrust::new([6; 16])
-    )
-    .is_ok());
-
-    recovery.recovery_link = Some([99; 16]);
-    let illegal = encoded_chain(vec![
-        record(1, [0; 32], WitnessStage::RequestReceived),
-        allow,
+        decision(2, true),
         unknown,
         recovery,
     ]);
-    assert!(verify_stream(
-        illegal.iter().map(|bytes| bytes.as_ref()),
-        &StreamTrust::new([6; 16])
-    )
-    .is_err());
+    assert!(verify_stream(legal.iter().map(AsRef::as_ref), &genesis_trust()).is_ok());
 }
 
 #[test]
@@ -234,7 +278,7 @@ fn seeded_secrets_never_enter_encoded_records_or_errors() {
         ferro_core::witness::pseudonymize(b"purpose/request", &[42; 32], secret.as_bytes())
             .unwrap(),
     );
-    let bytes = encode_record([6; 16], &value).unwrap();
+    let bytes = encode_record(JOURNAL, &value).unwrap();
     assert!(!bytes
         .as_ref()
         .windows(secret.len())

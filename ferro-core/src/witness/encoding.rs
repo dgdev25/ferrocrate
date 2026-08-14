@@ -1,9 +1,10 @@
 use sha2::{Digest, Sha256};
 
 use super::{
-    DecodedRecord, DisclosureClass, Invocation, RecordBytes, WitnessError, WitnessOutcome,
-    WitnessRecord, WitnessStage, FORMAT_VERSION, HASH_ALGORITHM_SHA256, HASH_DOMAIN,
-    MAX_RECORD_BYTES, MAX_RESOURCE_ID, MAX_SHORT_TEXT, PSEUDONYM_DOMAIN,
+    DecodedRecord, DisclosureClass, Invocation, PrincipalSummary, ReasonCode, RecordBytes,
+    ResourceSummary, RuleSummary, WitnessAction, WitnessError, WitnessOutcome, WitnessRecord,
+    WitnessResourceKind, WitnessStage, FORMAT_VERSION, HASH_ALGORITHM_SHA256, HASH_DOMAIN,
+    MAX_RECORD_BYTES, PSEUDONYM_DOMAIN,
 };
 
 pub fn encode_record(
@@ -20,23 +21,18 @@ pub fn encode_record(
     out.extend_from_slice(&record.request_id);
     out.extend_from_slice(&record.runtime_instance_id);
     out.extend_from_slice(&record.boot_id);
-    put_text(&mut out, &record.principal, MAX_SHORT_TEXT, "principal")?;
+    out.extend_from_slice(&record.principal.digest());
     put_u8(&mut out, record.invocation as u8);
-    put_text(&mut out, &record.action, MAX_SHORT_TEXT, "action")?;
-    put_u8(&mut out, record.resource_kind);
-    put_text(
-        &mut out,
-        &record.resource_id,
-        MAX_RESOURCE_ID,
-        "resource_id",
-    )?;
+    put_u8(&mut out, record.action as u8);
+    put_u8(&mut out, record.resource_kind as u8);
+    out.extend_from_slice(&record.resource.digest());
     put_u64(&mut out, record.resource_generation);
     put_u64(&mut out, record.policy_version);
     out.extend_from_slice(&record.policy_digest);
     put_fixed_optional(&mut out, record.decision_id.as_ref());
-    put_text_optional(&mut out, record.rule.as_deref(), "rule")?;
+    put_fixed_optional(&mut out, record.rule.map(RuleSummary::id).as_ref());
     put_bool_optional(&mut out, record.decision);
-    put_text_optional(&mut out, record.reason.as_deref(), "reason")?;
+    put_enum_optional(&mut out, record.reason);
     out.extend_from_slice(&record.request_digest);
     put_fixed_optional(&mut out, record.result_digest.as_ref());
     out.extend_from_slice(&record.wall_time_ns.to_be_bytes());
@@ -50,7 +46,10 @@ pub fn encode_record(
     if out.len() > MAX_RECORD_BYTES {
         return Err(WitnessError::BoundExceeded { field: "record" });
     }
-    Ok(RecordBytes(out))
+    Ok(RecordBytes {
+        journal_id,
+        bytes: out,
+    })
 }
 
 pub fn decode_record(bytes: &[u8]) -> Result<DecodedRecord, WitnessError> {
@@ -74,18 +73,18 @@ pub fn decode_record(bytes: &[u8]) -> Result<DecodedRecord, WitnessError> {
         request_id: decoder.fixed()?,
         runtime_instance_id: decoder.fixed()?,
         boot_id: decoder.fixed()?,
-        principal: decoder.text(MAX_SHORT_TEXT)?,
+        principal: PrincipalSummary::from_digest(decoder.fixed()?),
         invocation: invocation(decoder.u8()?)?,
-        action: decoder.text(MAX_SHORT_TEXT)?,
-        resource_kind: decoder.u8()?,
-        resource_id: decoder.text(MAX_RESOURCE_ID)?,
+        action: action(decoder.u8()?)?,
+        resource_kind: resource_kind(decoder.u8()?)?,
+        resource: ResourceSummary::from_digest(decoder.fixed()?),
         resource_generation: decoder.u64()?,
         policy_version: decoder.u64()?,
         policy_digest: decoder.fixed()?,
         decision_id: decoder.fixed_optional()?,
-        rule: decoder.text_optional(MAX_SHORT_TEXT)?,
+        rule: decoder.fixed_optional()?.map(RuleSummary::from_id),
         decision: decoder.bool_optional()?,
-        reason: decoder.text_optional(MAX_SHORT_TEXT)?,
+        reason: reason_optional(&mut decoder)?,
         request_digest: decoder.fixed()?,
         result_digest: decoder.fixed_optional()?,
         wall_time_ns: decoder.i64()?,
@@ -107,17 +106,20 @@ pub fn decode_record(bytes: &[u8]) -> Result<DecodedRecord, WitnessError> {
     Ok(DecodedRecord {
         journal_id,
         record,
-        bytes: RecordBytes(bytes.to_vec()),
+        bytes: RecordBytes {
+            journal_id,
+            bytes: bytes.to_vec(),
+        },
     })
 }
 
-pub fn hash_record(journal_id: [u8; 16], record_bytes: &[u8]) -> [u8; 32] {
+pub fn hash_record(record: &RecordBytes) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(HASH_DOMAIN);
     hasher.update([FORMAT_VERSION]);
-    hasher.update(journal_id);
-    hasher.update((record_bytes.len() as u64).to_be_bytes());
-    hasher.update(record_bytes);
+    hasher.update(record.journal_id);
+    hasher.update((record.bytes.len() as u64).to_be_bytes());
+    hasher.update(&record.bytes);
     hasher.finalize().into()
 }
 
@@ -162,43 +164,6 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
-fn validate_text(value: &str, limit: usize, field: &'static str) -> Result<(), WitnessError> {
-    if value.len() > limit {
-        return Err(WitnessError::BoundExceeded { field });
-    }
-    if value.is_empty() || value.chars().any(char::is_control) {
-        return Err(WitnessError::NonCanonicalText);
-    }
-    Ok(())
-}
-
-fn put_text(
-    out: &mut Vec<u8>,
-    value: &str,
-    limit: usize,
-    field: &'static str,
-) -> Result<(), WitnessError> {
-    validate_text(value, limit, field)?;
-    out.extend_from_slice(&(value.len() as u16).to_be_bytes());
-    out.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn put_text_optional(
-    out: &mut Vec<u8>,
-    value: Option<&str>,
-    field: &'static str,
-) -> Result<(), WitnessError> {
-    match value {
-        None => out.push(0),
-        Some(value) => {
-            out.push(1);
-            put_text(out, value, MAX_SHORT_TEXT, field)?;
-        }
-    }
-    Ok(())
-}
-
 fn put_fixed_optional<const N: usize>(out: &mut Vec<u8>, value: Option<&[u8; N]>) {
     match value {
         None => out.push(0),
@@ -217,12 +182,12 @@ fn put_bool_optional(out: &mut Vec<u8>, value: Option<bool>) {
     });
 }
 
-fn put_enum_optional(out: &mut Vec<u8>, value: Option<DisclosureClass>) {
+fn put_enum_optional<T: Copy + Into<u8>>(out: &mut Vec<u8>, value: Option<T>) {
     match value {
         None => out.push(0),
         Some(value) => {
             out.push(1);
-            out.push(value as u8);
+            out.push(value.into());
         }
     }
 }
@@ -268,17 +233,6 @@ impl<'a> Decoder<'a> {
             .map_err(|_| WitnessError::Truncated)
     }
 
-    fn text(&mut self, limit: usize) -> Result<String, WitnessError> {
-        let length = u16::from_be_bytes(self.fixed()?) as usize;
-        if length > limit {
-            return Err(WitnessError::BoundExceeded { field: "text" });
-        }
-        let value =
-            std::str::from_utf8(self.take(length)?).map_err(|_| WitnessError::NonCanonicalText)?;
-        validate_text(value, limit, "text")?;
-        Ok(value.to_owned())
-    }
-
     fn tag(&mut self) -> Result<bool, WitnessError> {
         match self.u8()? {
             0 => Ok(false),
@@ -292,14 +246,6 @@ impl<'a> Decoder<'a> {
     fn fixed_optional<const N: usize>(&mut self) -> Result<Option<[u8; N]>, WitnessError> {
         if self.tag()? {
             Ok(Some(self.fixed()?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn text_optional(&mut self, limit: usize) -> Result<Option<String>, WitnessError> {
-        if self.tag()? {
-            Ok(Some(self.text(limit)?))
         } else {
             Ok(None)
         }
@@ -331,6 +277,52 @@ fn invocation(value: u8) -> Result<Invocation, WitnessError> {
         6 => Ok(Invocation::InternalCleanup),
         _ => Err(WitnessError::UnknownDiscriminant {
             field: "invocation",
+        }),
+    }
+}
+
+fn action(value: u8) -> Result<WitnessAction, WitnessError> {
+    use WitnessAction::*;
+    let action = match value {
+        1 => ContainerCreate,
+        2 => ContainerRun,
+        3 => ContainerExec,
+        4 => ContainerPause,
+        5 => ContainerResume,
+        6 => ContainerStop,
+        7 => ContainerKill,
+        8 => ContainerRestart,
+        9 => ContainerDelete,
+        10 => ImagePull,
+        11 => ImageDelete,
+        12 => VolumeCreate,
+        13 => VolumeDelete,
+        14 => VolumeMount,
+        15 => VolumeUnmount,
+        16 => NetworkCreate,
+        17 => NetworkDelete,
+        18 => NetworkAttach,
+        19 => NetworkDetach,
+        20 => DeviceUse,
+        21 => PolicyReload,
+        22 => PolicyRollback,
+        _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
+    };
+    Ok(action)
+}
+
+fn resource_kind(value: u8) -> Result<WitnessResourceKind, WitnessError> {
+    use WitnessResourceKind::*;
+    match value {
+        1 => Ok(Container),
+        2 => Ok(Image),
+        3 => Ok(Volume),
+        4 => Ok(Network),
+        5 => Ok(Device),
+        6 => Ok(Policy),
+        7 => Ok(Administrative),
+        _ => Err(WitnessError::UnknownDiscriminant {
+            field: "resource kind",
         }),
     }
 }
@@ -377,4 +369,17 @@ fn disclosure_optional(decoder: &mut Decoder<'_>) -> Result<Option<DisclosureCla
         }
     };
     Ok(Some(value))
+}
+
+fn reason_optional(decoder: &mut Decoder<'_>) -> Result<Option<ReasonCode>, WitnessError> {
+    if !decoder.tag()? {
+        return Ok(None);
+    }
+    match decoder.u8()? {
+        1 => Ok(Some(ReasonCode::PolicyDenied)),
+        2 => Ok(Some(ReasonCode::ExecutionFailed)),
+        3 => Ok(Some(ReasonCode::RecoveryCompleted)),
+        4 => Ok(Some(ReasonCode::Quarantined)),
+        _ => Err(WitnessError::UnknownDiscriminant { field: "reason" }),
+    }
 }

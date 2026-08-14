@@ -79,6 +79,60 @@ fn exec_exposes_every_durable_crash_boundary_in_order() {
 }
 
 #[test]
+fn failed_witnessed_run_leaves_no_phantom_candidate() {
+    let _guard = runtime_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let policy_path = root.path().join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy_path).unwrap(),
+    )));
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            root.path().join("witness"),
+            [62; 16],
+            JournalMode::Required,
+        ))
+        .unwrap(),
+    );
+    let runtime =
+        ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal)).unwrap();
+    let error = runtime
+        .run(
+            "example.invalid/app:latest",
+            &[],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            None,
+            Default::default(),
+            &[],
+            None,
+            &[],
+            &[],
+            false,
+            true,
+            None,
+            None,
+            None,
+            &[],
+            "none",
+            ferro_core::runtime::NetworkBackend::Iptables,
+            None,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("command is required"));
+    drop(runtime);
+    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    assert!(store.list().unwrap().is_empty());
+}
+
+#[test]
 fn creation_provenance_is_absent_for_legacy_records() {
     let value: CreationProvenance = serde_json::from_str("null").unwrap_or_default();
     assert!(!value.is_verifiable());

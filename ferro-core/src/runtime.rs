@@ -905,15 +905,28 @@ impl ContainerRuntime {
             let durable_operation = self.store.lifecycle_operation(reservation.operation_id)?;
             let truth_matches = action_matches
                 && generation_matches
-                && recovery_truth_matches(record, durable_operation.as_ref(), &reservation.action);
+                && recovery_truth_matches(record, durable_operation.as_ref(), &reservation.action)
+                && (reservation.action != "container.run"
+                    || self
+                        .runtime_dir
+                        .join("containers")
+                        .join(&record.id)
+                        .join("rootfs")
+                        .exists());
+            let run_not_applied = reservation.action == "container.run"
+                && durable_operation.as_ref().is_some_and(|operation| {
+                    operation.phase == LifecyclePhase::Reserved
+                        || operation.effect_succeeded == Some(false)
+                });
             let classification = if truth_matches {
                 crate::witness::RecoveryClassification::Recovered
             } else {
                 record.status = "quarantined".into();
                 crate::witness::RecoveryClassification::Quarantined
             };
-            let recovered_delete = reservation.action == "container.delete"
-                && classification == crate::witness::RecoveryClassification::Recovered;
+            let recovered_delete = (reservation.action == "container.delete"
+                && classification == crate::witness::RecoveryClassification::Recovered)
+                || run_not_applied;
             if recovered_delete {
                 self.store
                     .delete_for_mutation(&record.id, reservation.operation_id)?;
@@ -944,6 +957,13 @@ impl ContainerRuntime {
                 continue;
             }
             if operation.phase == LifecyclePhase::StoreDeleted {
+                self.store.acknowledge_mutation(operation.operation_id)?;
+            } else if operation.action == "container.run"
+                && operation.effect_succeeded == Some(false)
+                && self.store.get(&operation.container_id)?.is_some()
+            {
+                self.store
+                    .delete_for_mutation(&operation.container_id, operation.operation_id)?;
                 self.store.acknowledge_mutation(operation.operation_id)?;
             } else if self.store.get(&operation.container_id)?.is_some() {
                 self.store
@@ -1236,7 +1256,13 @@ impl ContainerRuntime {
         self.phase_hook
             .reached("container.run", LifecyclePhasePoint::TerminalDurable)?;
         if witnessed {
-            self.store.finish_mutation(&container_id, operation_id)?;
+            if result.is_ok() {
+                self.store.finish_mutation(&container_id, operation_id)?;
+            } else {
+                self.store
+                    .delete_for_mutation(&container_id, operation_id)?;
+                self.store.acknowledge_mutation(operation_id)?;
+            }
             self.phase_hook
                 .reached("container.run", LifecyclePhasePoint::ReservationCleared)?;
         }
@@ -2286,7 +2312,16 @@ fn recovery_truth_matches(
                 })
         }
         "container.delete" => record.status == "removed-pending",
-        "container.run" => record.creation_provenance.is_verifiable(),
+        "container.run" => operation.is_some_and(|operation| {
+            operation.phase == LifecyclePhase::EffectApplied
+                && operation.effect_succeeded == Some(true)
+                && record.creation_provenance.is_verifiable()
+                && record.status == "running"
+                && process_exists(record.pid)
+                && operation.pid_after == Some(record.pid)
+                && operation.process_start_time_after == process_start_time_for_pid(record.pid)
+                && operation.execution_generation_after == Some(operation.generation)
+        }),
         _ => false,
     }
 }

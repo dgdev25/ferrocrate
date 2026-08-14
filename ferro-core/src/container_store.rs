@@ -33,6 +33,8 @@ pub(crate) struct LifecycleOperation {
     pub execution_generation_after: Option<u64>,
     #[serde(default)]
     pub result_digest: Option<[u8; 32]>,
+    #[serde(default)]
+    pub effect_succeeded: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -611,6 +613,7 @@ impl LocalContainerStore {
                 digest.update(operation_id);
                 digest.update([u8::from(succeeded)]);
                 operation.result_digest = Some(digest.finalize().into());
+                operation.effect_succeeded = Some(succeeded);
                 let encoded = serde_json::to_vec(&operation).map_err(|e| {
                     sled::transaction::ConflictableTransactionError::Abort(
                         ContainerStoreError::Encode(e),
@@ -653,12 +656,18 @@ impl LocalContainerStore {
                         ContainerStoreError::MutationConflict,
                     ));
                 }
-                let operation = lifecycle_operation(
-                    &record,
-                    operation_id,
-                    "container.delete",
-                    LifecyclePhase::StoreDeleted,
-                );
+                let operation_bytes = operations.get(&operation_id)?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let mut operation: LifecycleOperation = serde_json::from_slice(&operation_bytes)
+                    .map_err(|error| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(error),
+                        )
+                    })?;
+                operation.phase = LifecyclePhase::StoreDeleted;
                 let encoded = serde_json::to_vec(&operation).map_err(|error| {
                     sled::transaction::ConflictableTransactionError::Abort(
                         ContainerStoreError::Encode(error),
@@ -778,6 +787,7 @@ fn lifecycle_operation(
         ownership_digest: digest.finalize().into(),
         execution_generation_after: None,
         result_digest: None,
+        effect_succeeded: None,
     }
 }
 

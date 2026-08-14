@@ -51,13 +51,13 @@ pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
         "mutation.runtime.restart",
         "ContainerRuntime::restart_authorized",
         "ContainerRuntime::restart",
-        "restart_effect_records_old_and_new_execution_generations",
+        "required_restart_success_is_witnessed",
     ),
     entry(
         "mutation.runtime.remove",
         "ContainerRuntime::remove_authorized",
         "ContainerRuntime::remove",
-        "delete_keeps_operation_tombstone_until_terminal_ack",
+        "required_remove_success_is_witnessed",
     ),
 ];
 

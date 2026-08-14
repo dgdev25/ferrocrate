@@ -208,11 +208,17 @@ mod tests {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
     struct ScopedEnv {
         key: &'static str,
         original: Option<String>,
+    }
+
+    fn entitlement_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
     impl ScopedEnv {
@@ -276,6 +282,7 @@ mod tests {
 
     #[test]
     fn require_feature_fails_closed_without_entitlement() {
+        let _guard = entitlement_env_guard();
         let temp = TempDir::new().expect("temp dir");
         let missing = temp.path().join("missing.lic");
         let _path = ScopedEnv::set(
@@ -292,6 +299,7 @@ mod tests {
 
     #[test]
     fn signed_entitlement_allows_paid_feature() {
+        let _guard = entitlement_env_guard();
         let temp = TempDir::new().expect("temp dir");
         let entitlement_path = temp.path().join("entitlement.lic");
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);

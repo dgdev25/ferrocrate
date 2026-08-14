@@ -493,6 +493,8 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             .unwrap(),
         );
         let id = "00112233445566778899aabbccddeeff";
+        let runtime_id = [93; 16];
+        std::fs::write(root.path().join("runtime-instance-id"), runtime_id).unwrap();
         let mut child = None;
         if action == "run" {
             LocalImageStore::open(root.path().join("images"))
@@ -513,16 +515,42 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             let pid = spawned.id();
             child = Some(spawned);
             let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
-            let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+            let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
                 "id":id, "pid":pid, "image":"example.invalid/app:latest",
-                "command": vec![String::from("true")],
+                "command": if action == "restart" {
+                    vec![String::from("/bin/busybox"), String::from("sleep"), String::from("30")]
+                } else { vec![String::from("true")] },
                 "created_at_unix":1,
                 "stdout_path":root.path().join("containers").join(id).join("stdout.log").to_string_lossy(),
                 "stderr_path":root.path().join("containers").join(id).join("stderr.log").to_string_lossy(),
                 "status": if action == "resume" { "paused" } else if action == "restart" || action == "remove" { "stopped" } else { "running" }
             })).unwrap();
+            if action == "remove" {
+                let compact = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .unwrap()
+                    .trim()
+                    .replace('-', "");
+                let mut boot_id = [0; 16];
+                for (index, byte) in boot_id.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).unwrap();
+                }
+                record.creation_provenance = CreationProvenance {
+                    runtime_instance_id: Some(runtime_id),
+                    boot_id: Some(boot_id),
+                    journal_id: Some([action.as_bytes()[0].wrapping_add(1); 16]),
+                    resource_uuid: Some("00112233-4455-6677-8899-aabbccddeeff".into()),
+                    resource_generation: 1,
+                    creator_operation_id: Some([94; 16]),
+                    image_digest: None,
+                };
+            }
             store.put(&record).unwrap();
             drop(store);
+            if action == "restart" {
+                let bin = root.path().join("containers").join(id).join("rootfs/bin");
+                std::fs::create_dir_all(&bin).unwrap();
+                std::fs::copy("/usr/bin/busybox", bin.join("busybox")).unwrap();
+            }
         }
         let runtime =
             ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
@@ -561,13 +589,12 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             "remove" => runtime.remove(id),
             _ => unreachable!(),
         };
-        if matches!(action, "remove" | "restart") {
-            assert!(result.is_err(), "{action} fixture should fail explicitly");
-        } else {
-            assert!(result.is_ok(), "{action} failed unexpectedly: {result:?}");
-        }
+        assert!(result.is_ok(), "{action} failed unexpectedly: {result:?}");
         if action == "remove" {
-            assert_eq!(runtime.inspect(id).unwrap().status, "quarantined");
+            assert!(matches!(
+                runtime.inspect(id),
+                Err(RuntimeError::ContainerNotFound(_))
+            ));
         }
         if let Some(mut child) = child {
             let _ = child.kill();
@@ -611,6 +638,8 @@ named_required_success!(required_pause_success_is_witnessed);
 named_required_success!(required_resume_success_is_witnessed);
 named_required_success!(required_stop_success_is_witnessed);
 named_required_success!(required_kill_success_is_witnessed);
+named_required_success!(required_restart_success_is_witnessed);
+named_required_success!(required_remove_success_is_witnessed);
 
 #[test]
 fn disabled_journal_is_exactly_compatibility_absent() {

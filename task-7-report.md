@@ -36,6 +36,14 @@ handles. Fresh store and journal adapters are opened for recovery. This models
 hard process loss while keeping the test deterministic, and covers all five
 decision-to-clear durability boundaries (15 interruption/reopen cases).
 
+Run and restart now use a supervised launch lease. The launcher installs
+`PDEATHSIG(SIGKILL)`, obtains a pidfd, and stops before executing the workload.
+The container record and lifecycle operation atomically bind the new PID and
+kernel starttime before `SIGCONT` releases user code. Persistence failure kills
+the stopped child. Real subprocess tests SIGKILL the daemon on both sides of
+identity persistence for run and restart and prove that no workload marker can
+execute early or survive as an unowned replacement.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode
@@ -43,7 +51,7 @@ Verification on 2026-08-15:
   persistence-failure/reopen cases, plus the 3x5 crash/reopen matrix.
 - `witness_journal`: 28 passed; recovery entry is now private and exercised by
   runtime startup tests rather than the public integration API.
-- `ferro-core --lib`: 262 passed, 1 ignored. Entitlement tests now serialize
+- `ferro-core --lib`: 269 passed, 1 ignored. Entitlement tests now serialize
   their process-global environment and the repeated full run is stable.
 - Recovery API compile-fail doctest: passed.
 - `cargo build -p ferro-core`: passed.

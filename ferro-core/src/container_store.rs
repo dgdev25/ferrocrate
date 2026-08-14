@@ -370,40 +370,66 @@ impl LocalContainerStore {
         operation_id: [u8; 16],
     ) -> Result<(), ContainerStoreError> {
         let tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        let operations = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
         let encoded = serde_json::to_vec(record)?;
-        tree.transaction(|tree| {
-            let current = tree.get(record.id.as_bytes())?.ok_or_else(|| {
-                sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                )
+        (&tree, &operations)
+            .transaction(|(tree, operations)| {
+                let current = tree.get(record.id.as_bytes())?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let current: ContainerRecord =
+                    serde_json::from_slice(&current).map_err(|error| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(error),
+                        )
+                    })?;
+                let reservation = current.pending_mutation.as_ref().ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                if reservation.operation_id != operation_id
+                    || reservation.generation != current.mutation_generation
+                    || record.pending_mutation.as_ref() != Some(reservation)
+                    || record.mutation_generation != current.mutation_generation
+                {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    ));
+                }
+                let operation_bytes = operations.get(operation_id)?.ok_or_else(|| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::MutationConflict,
+                    )
+                })?;
+                let mut operation: LifecycleOperation = serde_json::from_slice(&operation_bytes)
+                    .map_err(|error| {
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            ContainerStoreError::Decode(error),
+                        )
+                    })?;
+                operation.pid_after = Some(record.pid);
+                operation.process_start_time_after = process_start_time(record.pid);
+                operation.state_after = Some(record.status.clone());
+                let operation_encoded = serde_json::to_vec(&operation).map_err(|error| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        ContainerStoreError::Encode(error),
+                    )
+                })?;
+                tree.insert(record.id.as_bytes(), encoded.as_slice())?;
+                operations.insert(&operation_id, operation_encoded)?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
             })?;
-            let current: ContainerRecord = serde_json::from_slice(&current).map_err(|error| {
-                sled::transaction::ConflictableTransactionError::Abort(ContainerStoreError::Decode(
-                    error,
-                ))
-            })?;
-            let reservation = current.pending_mutation.as_ref().ok_or_else(|| {
-                sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                )
-            })?;
-            if reservation.operation_id != operation_id
-                || reservation.generation != current.mutation_generation
-                || record.pending_mutation.as_ref() != Some(reservation)
-                || record.mutation_generation != current.mutation_generation
-            {
-                return Err(sled::transaction::ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                ));
-            }
-            tree.insert(record.id.as_bytes(), encoded.as_slice())?;
-            Ok(())
-        })
-        .map_err(|error| match error {
-            sled::transaction::TransactionError::Abort(error) => error,
-            sled::transaction::TransactionError::Storage(error) => ContainerStoreError::Open(error),
-        })?;
         tree.flush()?;
+        operations.flush()?;
         Ok(())
     }
 
@@ -1166,6 +1192,28 @@ mod tests {
         store.put_reserved_creation(&record).unwrap();
         assert!(store.get("create-cas").unwrap().is_some());
         assert!(store.lifecycle_operation([8; 16]).unwrap().is_some());
+    }
+
+    #[test]
+    fn durable_launch_update_atomically_binds_new_process_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalContainerStore::open(dir.path()).unwrap();
+        let mut record =
+            ContainerRecord::authorization_candidate("launch-cas".into(), "image".into());
+        record.pending_mutation = Some(super::MutationReservation {
+            operation_id: [18; 16],
+            generation: 1,
+            expected_status: "created".into(),
+            action: "container.run".into(),
+        });
+        store.put_reserved_creation(&record).unwrap();
+        record.pid = std::process::id();
+        record.status = "running".into();
+        store.put_for_mutation(&record, [18; 16]).unwrap();
+        let operation = store.lifecycle_operation([18; 16]).unwrap().unwrap();
+        assert_eq!(operation.pid_after, Some(std::process::id()));
+        assert!(operation.process_start_time_after.is_some());
+        assert_eq!(operation.state_after.as_deref(), Some("running"));
     }
 
     #[test]

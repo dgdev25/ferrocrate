@@ -60,14 +60,14 @@ use ferro_net::{WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use rand::Rng;
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fs;
 use std::fs::OpenOptions;
 #[cfg(test)]
 use std::io::Read;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(target_os = "linux")]
@@ -1581,12 +1581,18 @@ impl ContainerRuntime {
         };
 
         rollback.persist_network()?;
-        if let Some(reservation) = record.pending_mutation.as_ref() {
+        let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
             self.store
-                .put_for_mutation(&record, reservation.operation_id)?;
+                .put_for_mutation(&record, reservation.operation_id)
         } else {
-            self.store.put(&record)?;
+            self.store.put(&record)
+        };
+        if let Err(error) = persist_result {
+            let _ = kill_pid(child_id);
+            rollback.rollback();
+            return Err(error.into());
         }
+        release_prepared_child(child_id)?;
 
         // Commit the creation - all resources are now tracked in the store
         rollback.commit();
@@ -1989,12 +1995,17 @@ impl ContainerRuntime {
 
         record.pid = child_id;
         record.status = "running".to_string();
-        if let Some(reservation) = record.pending_mutation.as_ref() {
+        let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
             self.store
-                .put_for_mutation(&record, reservation.operation_id)?;
+                .put_for_mutation(&record, reservation.operation_id)
         } else {
-            self.store.put(&record)?;
+            self.store.put(&record)
+        };
+        if let Err(error) = persist_result {
+            let _ = kill_pid(child_id);
+            return Err(error.into());
         }
+        release_prepared_child(child_id)?;
         let _ = log_event(
             &self.runtime_dir,
             make_event(
@@ -2674,7 +2685,8 @@ fn spawn_process_with_logs(
         unshare_netns,
         seccomp_profile,
     )?;
-    let (child_id, child) = spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
+    let (child_id, child, pidfd) =
+        spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -2689,6 +2701,7 @@ fn spawn_process_with_logs(
     thread::spawn(move || {
         supervise_child(
             child,
+            pidfd,
             store,
             container_id,
             cmd_owned,
@@ -2790,6 +2803,24 @@ fn build_command(
         host_cmd
     };
 
+    // The launcher shell becomes the stable process identity first, stops itself,
+    // and only execs the workload after the parent has durably recorded ownership.
+    // All subsequently configured credentials and sandboxing are inherited across
+    // the final exec. PR_SET_PDEATHSIG closes the parent-death side of the lease.
+    let workload_program = command.get_program().to_os_string();
+    let workload_args = command
+        .get_args()
+        .map(OsStr::to_os_string)
+        .collect::<Vec<_>>();
+    let mut launch_command = Command::new("/bin/sh");
+    launch_command
+        .arg("-c")
+        .arg("kill -STOP $$; exec \"$@\"")
+        .arg("ferrocrate-launch")
+        .arg(workload_program)
+        .args(workload_args);
+    command = launch_command;
+
     for entry in env {
         let mut parts = entry.splitn(2, '=');
         let key = parts.next().unwrap_or("").trim();
@@ -2838,8 +2869,17 @@ fn build_command(
     } else {
         None
     };
+    let launch_parent_pid = unsafe { nix::libc::getpid() };
     unsafe {
         command.pre_exec(move || {
+            if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if nix::libc::getppid() != launch_parent_pid {
+                return Err(io::Error::other(
+                    "launcher parent died before lease install",
+                ));
+            }
             if let Some(netns) = setup_netns.as_deref() {
                 enter_runtime_netns(netns).map_err(|err| {
                     io::Error::new(err.kind(), format!("pre_exec enter netns {netns}: {err}"))
@@ -2985,7 +3025,7 @@ fn spawn_child_with_logs(
     stdout_path: &Path,
     stderr_path: &Path,
     append: bool,
-) -> Result<(u32, Child), RuntimeError> {
+) -> Result<(u32, Child, OwnedFd), RuntimeError> {
     let stdout_file = if append {
         OpenOptions::new()
             .create(true)
@@ -3015,12 +3055,41 @@ fn spawn_child_with_logs(
         .stderr(Stdio::from(stderr_file))
         .spawn()?;
     let child_id = child.id();
-    Ok((child_id, child))
+    let raw_pidfd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, child_id, 0) } as i32;
+    if raw_pidfd < 0 {
+        return Err(RuntimeError::Io(io::Error::last_os_error()));
+    }
+    let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
+    wait_until_launch_stopped(child_id)?;
+    Ok((child_id, child, pidfd))
+}
+
+fn wait_until_launch_stopped(pid: u32) -> Result<(), RuntimeError> {
+    for _ in 0..500 {
+        let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+        if status.lines().any(|line| line.starts_with("State:\tT")) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let _ = kill_pid(pid);
+    Err(RuntimeError::InvalidState(format!(
+        "launcher {pid} did not enter the ownership barrier"
+    )))
+}
+
+fn release_prepared_child(pid: u32) -> Result<(), RuntimeError> {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGCONT,
+    )
+    .map_err(|err| RuntimeError::InvalidState(format!("release launcher {pid}: {err}")))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn supervise_child(
     mut child: Child,
+    mut _pidfd: OwnedFd,
     store: sled::Db,
     container_id: String,
     cmd: Vec<String>,
@@ -3088,15 +3157,23 @@ fn supervise_child(
             Ok(cmd) => cmd,
             Err(_) => break,
         };
-        let (pid, new_child) =
+        let (pid, new_child, new_pidfd) =
             match spawn_child_with_logs(command, &stdout_path, &stderr_path, append) {
                 Ok(tuple) => tuple,
                 Err(_) => break,
             };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             warn!("failed to update pid status for {container_id}: {e}");
+            let _ = kill_pid(pid);
+            break;
+        }
+        if let Err(e) = release_prepared_child(pid) {
+            warn!("failed to release supervised restart for {container_id}: {e}");
+            let _ = kill_pid(pid);
+            break;
         }
         child = new_child;
+        _pidfd = new_pidfd;
         container_start_time = std::time::Instant::now();
         adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
         restart_count += 1;
@@ -7111,7 +7188,10 @@ fn run_resource_monitor(
 mod tests {
     use super::{ContainerRuntime, NetworkBackend};
     use crate::cgroups::{CpuMax, ResourceLimits};
-    use crate::container_store::{now_unix, ContainerRecord, PortMappingRecord, RestartPolicy};
+    use crate::container_store::{
+        now_unix, ContainerRecord, LocalContainerStore, MutationReservation, PortMappingRecord,
+        RestartPolicy,
+    };
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
@@ -8868,5 +8948,193 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let config_path = config_root
             .join("sha256_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         std::fs::write(config_path, json).expect("write config");
+    }
+
+    #[test]
+    fn supervised_launch_blocks_workload_until_parent_release() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("workload-ran");
+        let stdout = root.path().join("stdout");
+        let stderr = root.path().join("stderr");
+        let command = super::build_command(
+            &["/usr/bin/touch".into(), marker.display().to_string()],
+            &[],
+            None,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, mut child, _pidfd) =
+            super::spawn_child_with_logs(command, &stdout, &stderr, false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(
+            !marker.exists(),
+            "workload ran before durable launch release"
+        );
+        super::release_prepared_child(pid).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(marker.exists());
+    }
+
+    fn assert_sigkill_before_release_leaves_no_workload(action: &str) {
+        let root = tempfile::tempdir().unwrap();
+        let pid_file = root.path().join("pid");
+        let marker = root.path().join("marker");
+        let mut daemon = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("runtime::tests::supervised_launch_sigkill_helper")
+            .arg("--nocapture")
+            .env("FERRO_LAUNCH_HELPER_PID", &pid_file)
+            .env("FERRO_LAUNCH_HELPER_MARKER", &marker)
+            .env("FERRO_LAUNCH_HELPER_ACTION", action)
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let workload_pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(daemon.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
+        let _ = daemon.wait();
+        for _ in 0..500 {
+            if !std::path::Path::new(&format!("/proc/{workload_pid}")).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!marker.exists(), "{action} workload crossed launch lease");
+        assert!(!std::path::Path::new(&format!("/proc/{workload_pid}")).exists());
+    }
+
+    fn assert_sigkill_after_identity_persist_is_recoverable(action: &str) {
+        let root = tempfile::tempdir().unwrap();
+        let pid_file = root.path().join("pid");
+        let marker = root.path().join("marker");
+        let store_path = root.path().join("store");
+        let mut daemon = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("runtime::tests::supervised_launch_sigkill_helper")
+            .arg("--nocapture")
+            .env("FERRO_LAUNCH_HELPER_PID", &pid_file)
+            .env("FERRO_LAUNCH_HELPER_MARKER", &marker)
+            .env("FERRO_LAUNCH_HELPER_ACTION", action)
+            .env("FERRO_LAUNCH_HELPER_STORE", &store_path)
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let workload_pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(daemon.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
+        let _ = daemon.wait();
+        for _ in 0..500 {
+            if !std::path::Path::new(&format!("/proc/{workload_pid}")).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let store = LocalContainerStore::open(&store_path).unwrap();
+        let operation = store.lifecycle_operation([71; 16]).unwrap().unwrap();
+        assert_eq!(operation.pid_after, Some(workload_pid));
+        assert!(operation.process_start_time_after.is_some());
+        assert!(!marker.exists());
+        assert!(!std::path::Path::new(&format!("/proc/{workload_pid}")).exists());
+    }
+
+    #[test]
+    fn run_sigkill_before_durable_launch_release_has_no_orphan() {
+        assert_sigkill_before_release_leaves_no_workload("run");
+    }
+
+    #[test]
+    fn restart_sigkill_before_durable_launch_release_has_no_replacement_orphan() {
+        assert_sigkill_before_release_leaves_no_workload("restart");
+    }
+
+    #[test]
+    fn run_sigkill_after_identity_persist_retains_recovery_identity() {
+        assert_sigkill_after_identity_persist_is_recoverable("run");
+    }
+
+    #[test]
+    fn restart_sigkill_after_identity_persist_retains_replacement_identity() {
+        assert_sigkill_after_identity_persist_is_recoverable("restart");
+    }
+
+    #[test]
+    fn supervised_launch_sigkill_helper() {
+        let Ok(pid_file) = std::env::var("FERRO_LAUNCH_HELPER_PID") else {
+            return;
+        };
+        let marker = std::env::var("FERRO_LAUNCH_HELPER_MARKER").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let command = super::build_command(
+            &["/usr/bin/touch".into(), marker],
+            &[],
+            None,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, _child, _pidfd) = super::spawn_child_with_logs(
+            command,
+            &root.path().join("stdout"),
+            &root.path().join("stderr"),
+            false,
+        )
+        .unwrap();
+        if let Ok(store_path) = std::env::var("FERRO_LAUNCH_HELPER_STORE") {
+            let store = LocalContainerStore::open(store_path).unwrap();
+            let mut record =
+                ContainerRecord::authorization_candidate("launch-helper".into(), "image".into());
+            record.pending_mutation = Some(MutationReservation {
+                operation_id: [71; 16],
+                generation: 1,
+                expected_status: "created".into(),
+                action: format!(
+                    "container.{}",
+                    std::env::var("FERRO_LAUNCH_HELPER_ACTION").unwrap()
+                ),
+            });
+            store.put_reserved_creation(&record).unwrap();
+            record.pid = pid;
+            record.status = "running".into();
+            store.put_for_mutation(&record, [71; 16]).unwrap();
+        }
+        std::fs::write(pid_file, pid.to_string()).unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
     }
 }

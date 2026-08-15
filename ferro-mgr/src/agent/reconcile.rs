@@ -53,6 +53,7 @@ pub struct Agent<C> {
     store: StateStore,
     netd: C,
     enforce_authorization: bool,
+    controller_keys: Vec<Vec<u8>>,
 }
 
 impl<C: NetdClient> Agent<C> {
@@ -70,6 +71,7 @@ impl<C: NetdClient> Agent<C> {
             store,
             netd,
             enforce_authorization: false,
+            controller_keys: Vec::new(),
         })
     }
 
@@ -81,6 +83,22 @@ impl<C: NetdClient> Agent<C> {
     ) -> Result<Self, AgentError> {
         let mut agent = Self::new(cluster_id, signing_key, store, netd)?;
         agent.enforce_authorization = true;
+        agent.controller_keys = vec![agent.signing_key.clone()];
+        Ok(agent)
+    }
+
+    pub fn new_enforcing_with_overlap(
+        cluster_id: impl Into<String>,
+        signing_keys: Vec<Vec<u8>>,
+        store: StateStore,
+        netd: C,
+    ) -> Result<Self, AgentError> {
+        if signing_keys.is_empty() || signing_keys.len() > 2 {
+            return Err(AgentError::InvalidAuthorization);
+        }
+        let mut agent = Self::new(cluster_id, signing_keys[0].clone(), store, netd)?;
+        agent.enforce_authorization = true;
+        agent.controller_keys = signing_keys;
         Ok(agent)
     }
 
@@ -104,15 +122,21 @@ impl<C: NetdClient> Agent<C> {
         encoded_bundle: &[u8],
         now_unix: i64,
     ) -> Result<u64, AgentError> {
-        let key: [u8; 32] = self
-            .signing_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| AgentError::InvalidAuthorization)?;
-        let key = VerifyingKey::from_bytes(&key).map_err(|_| AgentError::InvalidAuthorization)?;
-        let bundle =
-            DesiredAuthorizationBundle::decode_and_verify(encoded_bundle, &desired, &key, now_unix)
-                .map_err(|_| AgentError::InvalidAuthorization)?;
+        let bundle = self
+            .controller_keys
+            .iter()
+            .find_map(|bytes| {
+                let raw: [u8; 32] = bytes.as_slice().try_into().ok()?;
+                let key = VerifyingKey::from_bytes(&raw).ok()?;
+                DesiredAuthorizationBundle::decode_and_verify(
+                    encoded_bundle,
+                    &desired,
+                    &key,
+                    now_unix,
+                )
+                .ok()
+            })
+            .ok_or(AgentError::InvalidAuthorization)?;
         self.reconcile_verified(desired, Some(&bundle), now_unix)
     }
 

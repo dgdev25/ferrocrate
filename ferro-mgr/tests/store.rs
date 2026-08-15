@@ -1,5 +1,5 @@
-use ferro_mgr::store::{Enrollment, ManagerStore, Overlay, ScopedToken, StoreError};
 use ferro_mgr::recovery::restore_backup;
+use ferro_mgr::store::{Enrollment, ManagerStore, Overlay, ScopedToken, StoreError};
 use ipnet::Ipv4Net;
 use tempfile::tempdir;
 
@@ -10,26 +10,48 @@ fn store() -> ManagerStore {
 }
 
 fn enrollment() -> Enrollment {
-    Enrollment { node_id: "node-a".into(), public_key: vec![7; 32], endpoint: "198.51.100.10:51820".into() }
+    Enrollment {
+        node_id: "node-a".into(),
+        public_key: vec![7; 32],
+        endpoint: "198.51.100.10:51820".into(),
+    }
 }
 
 #[test]
 fn token_consumption_and_node_registration_are_atomic() {
     let store = store();
-    let token = store.create_token(ScopedToken {
-        secret: [9; 32], expected_node: "node-a".into(), approved_endpoint: "198.51.100.10:51820".into(), overlay_scope: "all".into(), expires_at: 100,
-    }).unwrap();
-    store.register_node_with_token(&token.secret, enrollment(), 99).unwrap();
-    assert!(matches!(store.register_node_with_token(&token.secret, enrollment(), 99), Err(StoreError::TokenConsumed)));
+    let token = store
+        .create_token(ScopedToken {
+            secret: [9; 32],
+            expected_node: "node-a".into(),
+            approved_endpoint: "198.51.100.10:51820".into(),
+            overlay_scope: "all".into(),
+            expires_at: 100,
+        })
+        .unwrap();
+    store
+        .register_node_with_token(&token.secret, enrollment(), 99)
+        .unwrap();
+    assert!(matches!(
+        store.register_node_with_token(&token.secret, enrollment(), 99),
+        Err(StoreError::TokenConsumed)
+    ));
 }
 
 #[test]
 fn allocation_uses_lowest_non_reserved_subnet() {
     let store = store();
     store.register_node(enrollment()).unwrap();
-    store.create_overlay(Overlay { id: "overlay-a".into(), cidr: "10.44.0.0/24".into() }).unwrap();
+    store
+        .create_overlay(Overlay {
+            id: "overlay-a".into(),
+            cidr: "10.44.0.0/24".into(),
+        })
+        .unwrap();
     let reserved: Ipv4Net = "10.44.0.0/26".parse().unwrap();
-    let allocated = store.allocate_node_subnet("overlay-a", "node-a", 26, &[reserved]).unwrap();
+    let allocated = store
+        .allocate_node_subnet("overlay-a", "node-a", 26, &[reserved])
+        .unwrap();
     assert_eq!(allocated.to_string(), "10.44.0.64/26");
 }
 
@@ -47,7 +69,12 @@ fn recovery_advances_epoch_and_invalidates_nodes() {
     let store = store();
     store.register_node(enrollment()).unwrap();
     assert_eq!(store.cluster_epoch().unwrap(), 1);
-    assert_eq!(store.recover_after_restore("database restore", 200).unwrap(), 2);
+    assert_eq!(
+        store
+            .recover_after_restore("database restore", 200)
+            .unwrap(),
+        2
+    );
     assert_eq!(store.cluster_epoch().unwrap(), 2);
     assert_eq!(store.node_count().unwrap(), 0);
     assert!(!store.node_is_active("node-a").unwrap());
@@ -57,10 +84,38 @@ fn recovery_advances_epoch_and_invalidates_nodes() {
 fn latest_revision_returns_highest_persisted_payload() {
     let store = store();
     store.register_node(enrollment()).unwrap();
-    store.create_overlay(Overlay { id: "overlay-r".into(), cidr: "10.55.0.0/24".into() }).unwrap();
+    store
+        .create_overlay(Overlay {
+            id: "overlay-r".into(),
+            cidr: "10.55.0.0/24".into(),
+        })
+        .unwrap();
     store.append_revision("overlay-r", b"first").unwrap();
     store.append_revision("overlay-r", b"second").unwrap();
-    assert_eq!(store.latest_revision().unwrap(), Some((2, b"second".to_vec())));
+    assert_eq!(
+        store.latest_revision().unwrap(),
+        Some((2, b"second".to_vec()))
+    );
+}
+
+#[test]
+fn desired_state_and_authorization_bundle_are_persisted_atomically_per_node() {
+    let store = store();
+    store.register_node(enrollment()).unwrap();
+    store
+        .create_overlay(Overlay {
+            id: "overlay-r".into(),
+            cidr: "10.55.0.0/24".into(),
+        })
+        .unwrap();
+    let revision = store
+        .append_authorized_revision("overlay-r", "node-a", b"state", b"bundle")
+        .unwrap();
+    assert_eq!(
+        store.latest_authorized_revision("node-a").unwrap(),
+        Some((revision as u64, b"state".to_vec(), b"bundle".to_vec()))
+    );
+    assert_eq!(store.latest_authorized_revision("node-b").unwrap(), None);
 }
 
 #[test]
@@ -73,5 +128,11 @@ fn backup_restore_writes_new_path_and_rotates_epoch() {
     drop(store);
     let plan = restore_backup(&source, &destination, "restore test", 500).unwrap();
     assert_eq!(plan.next_epoch, 2);
-    assert_eq!(ManagerStore::open(destination).unwrap().cluster_epoch().unwrap(), 2);
+    assert_eq!(
+        ManagerStore::open(destination)
+            .unwrap()
+            .cluster_epoch()
+            .unwrap(),
+        2
+    );
 }

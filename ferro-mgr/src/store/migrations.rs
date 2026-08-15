@@ -44,6 +44,12 @@ pub(super) fn apply(connection: &Connection) -> Result<()> {
              overlay_id TEXT NOT NULL REFERENCES overlays(overlay_id),
              payload BLOB NOT NULL
          ) STRICT;
+         CREATE TABLE IF NOT EXISTS desired_authorizations (
+             revision INTEGER NOT NULL REFERENCES desired_revisions(revision) ON DELETE CASCADE,
+             node_id TEXT NOT NULL REFERENCES nodes(node_id),
+             bundle BLOB NOT NULL,
+             PRIMARY KEY (revision, node_id)
+         ) STRICT;
          CREATE TABLE IF NOT EXISTS acknowledgements (
              node_id TEXT NOT NULL REFERENCES nodes(node_id),
              revision INTEGER NOT NULL REFERENCES desired_revisions(revision),

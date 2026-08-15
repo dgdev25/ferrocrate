@@ -167,58 +167,46 @@ impl ControlService for ControlServiceImpl {
                         .await;
                     continue;
                 }
-                let desired_state = match store.latest_revision() {
-                    Ok(Some((_, payload))) => match DesiredState::decode(payload.as_slice()) {
-                        Ok(state) => state,
+                let (desired_state, desired_authorization_bundle) =
+                    match store.latest_authorized_revision(&message.node_id) {
+                        Ok(Some((_, payload, bundle))) => {
+                            match DesiredState::decode(payload.as_slice()) {
+                                Ok(state) => (state, bundle),
+                                Err(_) => {
+                                    let _ = sender
+                                        .send(Ok(ManagerMessage {
+                                            desired_state: None,
+                                            error: "persisted desired state is invalid".into(),
+                                            desired_authorization_bundle: Vec::new(),
+                                        }))
+                                        .await;
+                                    continue;
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            let state = builder.snapshot(revision, Vec::new(), chrono_like_now());
+                            let bundle = match builder.authorization_bundle(
+                                &state,
+                                &message.node_id,
+                                Vec::new(),
+                            ) {
+                                Ok(bundle) => bundle,
+                                Err(_) => continue,
+                            };
+                            (state, bundle)
+                        }
                         Err(_) => {
                             let _ = sender
                                 .send(Ok(ManagerMessage {
                                     desired_state: None,
-                                    error: "persisted desired state is invalid".into(),
+                                    error: "manager state unavailable".into(),
                                     desired_authorization_bundle: Vec::new(),
                                 }))
                                 .await;
                             continue;
                         }
-                    },
-                    Ok(None) => builder.snapshot(revision, Vec::new(), chrono_like_now()),
-                    Err(_) => {
-                        let _ = sender
-                            .send(Ok(ManagerMessage {
-                                desired_state: None,
-                                error: "manager state unavailable".into(),
-                                desired_authorization_bundle: Vec::new(),
-                            }))
-                            .await;
-                        continue;
-                    }
-                };
-                let desired_authorization_bundle = if desired_state.overlays.is_empty() {
-                    match builder.authorization_bundle(&desired_state, &message.node_id, Vec::new())
-                    {
-                        Ok(bundle) => bundle,
-                        Err(_) => {
-                            let _ = sender
-                                .send(Ok(ManagerMessage {
-                                    desired_state: None,
-                                    error: "desired authorization unavailable".into(),
-                                    desired_authorization_bundle: Vec::new(),
-                                }))
-                                .await;
-                            continue;
-                        }
-                    }
-                } else {
-                    let _ = sender
-                        .send(Ok(ManagerMessage {
-                            desired_state: None,
-                            error: "per-resource desired authorization grants are unavailable"
-                                .into(),
-                            desired_authorization_bundle: Vec::new(),
-                        }))
-                        .await;
-                    continue;
-                };
+                    };
                 let _ = sender
                     .send(Ok(ManagerMessage {
                         desired_state: Some(desired_state),

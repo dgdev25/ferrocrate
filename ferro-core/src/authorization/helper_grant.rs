@@ -259,7 +259,7 @@ impl std::fmt::Debug for HelperGrant {
 }
 
 pub struct GrantIssuer {
-    key_id: String,
+    pub(super) key_id: String,
     key: SigningKey,
 }
 impl GrantIssuer {
@@ -305,6 +305,47 @@ impl GrantIssuer {
             claims,
             signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
         }
+    }
+    /// Mints one controller-policy-approved overlay mutation. This deliberately
+    /// excludes endpoint and inspection authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_controller_overlay(
+        &self,
+        request_id: &str,
+        action: GrantAction,
+        resource: ResourceBinding,
+        parameters: &GrantParameters,
+        boot_id: &str,
+        wall_deadline_secs: u64,
+        monotonic_deadline_millis: u64,
+        nonce: [u8; 16],
+        issuer: &str,
+        policy_digest: [u8; 32],
+    ) -> Result<HelperGrant, GrantBuildError> {
+        if !matches!(
+            action,
+            GrantAction::NetworkCreate | GrantAction::NetworkDelete
+        ) || policy_digest == [0; 32]
+        {
+            return Err(GrantBuildError::UnsupportedAction);
+        }
+        let mut claims = GrantClaims::new(
+            request_id,
+            action,
+            resource,
+            parameters.digest(),
+            boot_id,
+            wall_deadline_secs,
+            monotonic_deadline_millis,
+            nonce,
+            issuer,
+            &self.key_id,
+            GrantKind::Mutation,
+        )?;
+        claims.request_digest = parameters.digest();
+        claims.precondition_digest = policy_digest;
+        claims.recovery_recipe_digest = policy_digest;
+        Ok(self.sign(claims))
     }
     #[allow(clippy::too_many_arguments)]
     pub fn for_authorized(
@@ -460,38 +501,6 @@ impl GrantIssuer {
         claims.precondition_digest = parent_claims.precondition_digest;
         claims.recovery_recipe_digest = parent_claims.recovery_recipe_digest;
         Ok(self.sign(claims))
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub fn delegate_cleanup(
-        &self,
-        parent: &VerifiedHelperGrant,
-        child_request_id: &str,
-        action: GrantAction,
-        resource: ResourceBinding,
-        parameters: &GrantParameters,
-        origin_request_id: &str,
-        live_identity_digest: [u8; 32],
-        wall_deadline_secs: u64,
-        monotonic_deadline_millis: u64,
-        nonce: [u8; 16],
-    ) -> Result<HelperGrant, GrantBuildError> {
-        if !action.is_cleanup() || parent.claims().action != action {
-            return Err(GrantBuildError::InvalidCleanup);
-        }
-        let mut child = self.delegate_child(
-            parent,
-            child_request_id,
-            action,
-            resource,
-            parameters,
-            wall_deadline_secs,
-            monotonic_deadline_millis,
-            nonce,
-        )?;
-        child.claims = child
-            .claims
-            .cleanup(origin_request_id, live_identity_digest)?;
-        Ok(self.sign(child.claims))
     }
 }
 

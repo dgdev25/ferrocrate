@@ -48,10 +48,15 @@ impl ManagerStore {
              PRAGMA busy_timeout = 5000;",
         )?;
         migrations::apply(&connection)?;
-        Ok(Self { connection: Mutex::new(connection) })
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
     }
 
-    pub fn transact<T>(&self, operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    pub fn transact<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = operation(&transaction)?;
@@ -73,10 +78,15 @@ impl ManagerStore {
 
     pub fn consume_token(&self, secret: &[u8; 32], now_unix_secs: i64) -> Result<(), StoreError> {
         let hash = token_hash(secret);
-        self.transact(|tx| { consume_token_tx(tx, &hash, now_unix_secs).map(|_| ()) })
+        self.transact(|tx| consume_token_tx(tx, &hash, now_unix_secs).map(|_| ()))
     }
 
-    pub fn register_node_with_token(&self, secret: &[u8; 32], enrollment: Enrollment, now_unix_secs: i64) -> Result<(), StoreError> {
+    pub fn register_node_with_token(
+        &self,
+        secret: &[u8; 32],
+        enrollment: Enrollment,
+        now_unix_secs: i64,
+    ) -> Result<(), StoreError> {
         let hash = token_hash(secret);
         self.transact(|tx| {
             let (expected_node, endpoint) = consume_token_tx(tx, &hash, now_unix_secs)?;
@@ -85,7 +95,11 @@ impl ManagerStore {
             }
             tx.execute(
                 "INSERT INTO nodes (node_id, public_key, endpoint) VALUES (?1, ?2, ?3)",
-                params![enrollment.node_id, enrollment.public_key, enrollment.endpoint],
+                params![
+                    enrollment.node_id,
+                    enrollment.public_key,
+                    enrollment.endpoint
+                ],
             )?;
             Ok(())
         })
@@ -95,7 +109,11 @@ impl ManagerStore {
         self.transact(|tx| {
             tx.execute(
                 "INSERT INTO nodes (node_id, public_key, endpoint) VALUES (?1, ?2, ?3)",
-                params![enrollment.node_id, enrollment.public_key, enrollment.endpoint],
+                params![
+                    enrollment.node_id,
+                    enrollment.public_key,
+                    enrollment.endpoint
+                ],
             )?;
             Ok(())
         })
@@ -109,10 +127,15 @@ impl ManagerStore {
             for cidr in existing {
                 let existing = parse_v4(&cidr?)?;
                 if networks_overlap(network, existing) {
-                    return Err(StoreError::InvalidNetwork("overlay ranges must not overlap".into()));
+                    return Err(StoreError::InvalidNetwork(
+                        "overlay ranges must not overlap".into(),
+                    ));
                 }
             }
-            tx.execute("INSERT INTO overlays (overlay_id, cidr) VALUES (?1, ?2)", params![overlay.id, overlay.cidr])?;
+            tx.execute(
+                "INSERT INTO overlays (overlay_id, cidr) VALUES (?1, ?2)",
+                params![overlay.id, overlay.cidr],
+            )?;
             Ok(())
         })
     }
@@ -125,21 +148,41 @@ impl ManagerStore {
         host_reserved: &[Ipv4Net],
     ) -> Result<Ipv4Net, StoreError> {
         self.transact(|tx| {
-            let cidr: String = tx.query_row(
-                "SELECT cidr FROM overlays WHERE overlay_id = ?1", params![overlay_id], |row| row.get(0),
-            ).map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) { StoreError::OverlayUnknown(overlay_id.into()) } else { StoreError::Sql(error) })?;
+            let cidr: String = tx
+                .query_row(
+                    "SELECT cidr FROM overlays WHERE overlay_id = ?1",
+                    params![overlay_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                        StoreError::OverlayUnknown(overlay_id.into())
+                    } else {
+                        StoreError::Sql(error)
+                    }
+                })?;
             let overlay = parse_v4(&cidr)?;
             if prefix_len < overlay.prefix_len() || prefix_len > 30 {
-                return Err(StoreError::InvalidNetwork("node subnet prefix must be within the IPv4 overlay and no longer than /30".into()));
+                return Err(StoreError::InvalidNetwork(
+                    "node subnet prefix must be within the IPv4 overlay and no longer than /30"
+                        .into(),
+                ));
             }
-            let existing: Option<String> = tx.query_row(
-                "SELECT cidr FROM node_subnets WHERE overlay_id = ?1 AND node_id = ?2",
-                params![overlay_id, node_id], |row| row.get(0),
-            ).ok();
-            if let Some(cidr) = existing { return parse_v4(&cidr); }
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT cidr FROM node_subnets WHERE overlay_id = ?1 AND node_id = ?2",
+                    params![overlay_id, node_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(cidr) = existing {
+                return parse_v4(&cidr);
+            }
             let used = {
-                let mut statement = tx.prepare("SELECT cidr FROM node_subnets WHERE overlay_id = ?1")?;
-                let rows = statement.query_map(params![overlay_id], |row| row.get::<_, String>(0))?
+                let mut statement =
+                    tx.prepare("SELECT cidr FROM node_subnets WHERE overlay_id = ?1")?;
+                let rows = statement
+                    .query_map(params![overlay_id], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
                 rows
             };
@@ -147,10 +190,20 @@ impl ManagerStore {
             let size = 1_u64 << (32 - prefix_len);
             let base = u32::from(overlay.network()) as u64;
             for slot in 0..slots.min(MAX_ALLOCATION_CANDIDATES) {
-                let candidate = Ipv4Net::new(Ipv4Addr::from((base + slot * size) as u32), prefix_len)
-                    .map_err(|error| StoreError::InvalidNetwork(error.to_string()))?;
-                if host_reserved.iter().any(|reserved| networks_overlap(candidate, *reserved)) { continue; }
-                if used.iter().any(|cidr| parse_v4(cidr).is_ok_and(|assigned| networks_overlap(candidate, assigned))) { continue; }
+                let candidate =
+                    Ipv4Net::new(Ipv4Addr::from((base + slot * size) as u32), prefix_len)
+                        .map_err(|error| StoreError::InvalidNetwork(error.to_string()))?;
+                if host_reserved
+                    .iter()
+                    .any(|reserved| networks_overlap(candidate, *reserved))
+                {
+                    continue;
+                }
+                if used.iter().any(|cidr| {
+                    parse_v4(cidr).is_ok_and(|assigned| networks_overlap(candidate, assigned))
+                }) {
+                    continue;
+                }
                 tx.execute(
                     "INSERT INTO node_subnets (overlay_id, node_id, cidr) VALUES (?1, ?2, ?3)",
                     params![overlay_id, node_id, candidate.to_string()],
@@ -163,15 +216,58 @@ impl ManagerStore {
 
     pub fn append_revision(&self, overlay_id: &str, payload: &[u8]) -> Result<i64, StoreError> {
         self.transact(|tx| {
-            let next: i64 = tx.query_row("SELECT COALESCE(MAX(revision), 0) + 1 FROM desired_revisions", [], |row| row.get(0))?;
-            tx.execute("INSERT INTO desired_revisions (revision, overlay_id, payload) VALUES (?1, ?2, ?3)", params![next, overlay_id, payload])?;
+            let next: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM desired_revisions",
+                [],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO desired_revisions (revision, overlay_id, payload) VALUES (?1, ?2, ?3)",
+                params![next, overlay_id, payload],
+            )?;
             Ok(next)
         })
     }
 
+    pub fn append_authorized_revision(
+        &self,
+        overlay_id: &str,
+        node_id: &str,
+        payload: &[u8],
+        bundle: &[u8],
+    ) -> Result<i64, StoreError> {
+        self.transact(|tx| {
+            let next: i64 = tx.query_row("SELECT COALESCE(MAX(revision), 0) + 1 FROM desired_revisions", [], |row| row.get(0))?;
+            tx.execute("INSERT INTO desired_revisions (revision, overlay_id, payload) VALUES (?1, ?2, ?3)", params![next, overlay_id, payload])?;
+            tx.execute("INSERT INTO desired_authorizations (revision, node_id, bundle) VALUES (?1, ?2, ?3)", params![next, node_id, bundle])?;
+            Ok(next)
+        })
+    }
+
+    pub fn latest_authorized_revision(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<(u64, Vec<u8>, Vec<u8>)>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let result = connection.query_row(
+            "SELECT r.revision, r.payload, a.bundle FROM desired_revisions r JOIN desired_authorizations a ON a.revision = r.revision WHERE a.node_id = ?1 ORDER BY r.revision DESC LIMIT 1",
+            [node_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(StoreError::Sql(error)),
+        }
+    }
+
     pub fn latest_revision(&self) -> Result<Option<(u64, Vec<u8>)>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let result = connection.query_row("SELECT revision, payload FROM desired_revisions ORDER BY revision DESC LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?)));
+        let result = connection.query_row(
+            "SELECT revision, payload FROM desired_revisions ORDER BY revision DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
         match result {
             Ok((revision, payload)) => Ok(Some((revision, payload))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -183,7 +279,8 @@ impl ManagerStore {
         self.transact(|tx| {
             tx.execute(
                 "INSERT INTO acknowledgements (node_id, revision) VALUES (?1, ?2)
-                 ON CONFLICT(node_id, revision) DO NOTHING", params![node_id, revision],
+                 ON CONFLICT(node_id, revision) DO NOTHING",
+                params![node_id, revision],
             )?;
             Ok(())
         })
@@ -198,20 +295,36 @@ impl ManagerStore {
 
     pub fn node_count(&self) -> Result<u32, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        Ok(connection.query_row("SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL", [], |row| row.get(0))?)
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn node_is_active(&self, node_id: &str) -> Result<bool, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL)", [node_id], |row| row.get(0))?)
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL)",
+            [node_id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn cluster_epoch(&self) -> Result<u64, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        Ok(connection.query_row("SELECT cluster_epoch FROM cluster_metadata WHERE singleton = 1", [], |row| row.get(0))?)
+        Ok(connection.query_row(
+            "SELECT cluster_epoch FROM cluster_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
-    pub fn recover_after_restore(&self, reason: &str, now_unix_secs: i64) -> Result<u64, StoreError> {
+    pub fn recover_after_restore(
+        &self,
+        reason: &str,
+        now_unix_secs: i64,
+    ) -> Result<u64, StoreError> {
         self.transact(|tx| {
             let previous: u64 = tx.query_row("SELECT cluster_epoch FROM cluster_metadata WHERE singleton = 1", [], |row| row.get(0))?;
             let next = previous.saturating_add(1);
@@ -224,24 +337,38 @@ impl ManagerStore {
     }
 }
 
-fn consume_token_tx(tx: &Transaction<'_>, hash: &[u8; 32], now_unix_secs: i64) -> Result<(String, String), StoreError> {
+fn consume_token_tx(
+    tx: &Transaction<'_>,
+    hash: &[u8; 32],
+    now_unix_secs: i64,
+) -> Result<(String, String), StoreError> {
     let row = tx.query_row(
         "SELECT expected_node, approved_endpoint, expires_at, consumed_at FROM enrollment_tokens WHERE secret_hash = ?1",
         params![hash.as_slice()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<i64>>(3)?)),
     ).map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) { StoreError::TokenUnknown } else { StoreError::Sql(error) })?;
-    if row.3.is_some() { return Err(StoreError::TokenConsumed); }
-    if row.2 <= now_unix_secs { return Err(StoreError::TokenExpired); }
+    if row.3.is_some() {
+        return Err(StoreError::TokenConsumed);
+    }
+    if row.2 <= now_unix_secs {
+        return Err(StoreError::TokenExpired);
+    }
     tx.execute("UPDATE enrollment_tokens SET consumed_at = ?2 WHERE secret_hash = ?1 AND consumed_at IS NULL", params![hash.as_slice(), now_unix_secs])?;
     Ok((row.0, row.1))
 }
 
-fn token_hash(secret: &[u8; 32]) -> [u8; 32] { Sha256::digest(secret).into() }
+fn token_hash(secret: &[u8; 32]) -> [u8; 32] {
+    Sha256::digest(secret).into()
+}
 
 fn parse_v4(cidr: &str) -> Result<Ipv4Net, StoreError> {
-    cidr.parse::<IpNet>().map_err(|error| StoreError::InvalidNetwork(error.to_string())).and_then(|network| match network {
-        IpNet::V4(network) => Ok(network),
-        IpNet::V6(_) => Err(StoreError::InvalidNetwork("only IPv4 overlay ranges are currently supported".into())),
-    })
+    cidr.parse::<IpNet>()
+        .map_err(|error| StoreError::InvalidNetwork(error.to_string()))
+        .and_then(|network| match network {
+            IpNet::V4(network) => Ok(network),
+            IpNet::V6(_) => Err(StoreError::InvalidNetwork(
+                "only IPv4 overlay ranges are currently supported".into(),
+            )),
+        })
 }
 
 fn networks_overlap(left: Ipv4Net, right: Ipv4Net) -> bool {

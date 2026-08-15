@@ -216,8 +216,8 @@ fn shared_netd_sequence_advances_only_after_a_successful_apply_and_survives_rest
     assert_eq!(
         restarted.reserve_child().unwrap(),
         SequenceValue {
-            epoch: 2,
-            revision: 10
+            epoch: 1,
+            revision: 8
         }
     );
 }

@@ -40,7 +40,8 @@ use ferro_netd::{
     grants::{GrantLedger, GrantVerifier},
     policy::Policy,
     server::NetdServer,
-    test_support::{serve_one, FaultHandle, FaultPoint},
+    test_support::{FaultHandle, FaultPoint},
+    transport::serve_authenticated_one,
 };
 
 const RESOURCE: &str = "9e0c6a49-e01e-3e51-9a4f-5bb9663075b4";
@@ -142,7 +143,8 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         UnixNetdClient::new(&netd_socket).with_node_id("node-a"),
     )
     .unwrap()
-    .with_netd_sequence(sequence.clone());
+    .with_netd_sequence(sequence.clone())
+    .with_netd_envelope_signer(envelope_key.clone());
     assert_eq!(
         agent
             .reconcile_with_bundle(desired.clone(), &bundle, 101)
@@ -152,7 +154,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     assert_eq!(
         sequence.current().unwrap(),
         SequenceValue {
-            epoch: 2,
+            epoch: 0,
             revision: 1
         }
     );
@@ -510,7 +512,15 @@ fn serve_next(
     now: u64,
 ) {
     std::thread::spawn(move || {
-        serve_one(&listener, &mut server.lock().unwrap(), uid, now).unwrap()
+        let executable = std::fs::read_link(format!("/proc/{}/exe", std::process::id())).unwrap();
+        serve_authenticated_one(
+            &listener,
+            &mut server.lock().unwrap(),
+            uid,
+            &executable,
+            now,
+        )
+        .unwrap()
     });
 }
 

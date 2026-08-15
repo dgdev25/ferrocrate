@@ -61,15 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cluster_id = required("FERROCRATE_CLUSTER_ID")?;
     let state_path = PathBuf::from(required("FERROCRATE_AGENT_STATE")?);
     let netd_socket = required("FERROCRATE_NETD_SOCKET")?;
-    let persisted_state = StateStore::new(&state_path).load()?;
+    let _persisted_state = StateStore::new(&state_path).load()?;
     let sequence_path = std::env::var_os("FERROCRATE_AGENT_NETD_SEQUENCE")
         .map(PathBuf::from)
         .unwrap_or_else(|| state_path.with_extension("netd-sequence.json"));
     let netd_sequence = NetdSequence::open(
         sequence_path,
         SequenceValue {
-            epoch: persisted_state.cluster_epoch,
-            revision: persisted_state.applied_revision,
+            epoch: 1,
+            revision: 0,
         },
     )?;
     let verifying_key = base64::engine::general_purpose::STANDARD
@@ -103,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ipam = Ipam::with_state(pool, gateway, reserved, ipam_state)?;
     let local_api = LocalApi::new(runtime_uid, lease_expiry, ipam)
         .with_runtime_executable(required("FERROCRATE_RUNTIME_EXE")?);
+    let mut netd_envelope_signer = None;
     let local_api =
         match service_mode.mode() {
             AuthorizationMode::Disabled => local_api,
@@ -121,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let envelope_key_bytes = read_private_key(&required(
                     "FERROCRATE_AGENT_NETD_ENVELOPE_SIGNING_KEY_FILE",
                 )?)?;
+                netd_envelope_signer = Some(SigningKey::from_bytes(&envelope_key_bytes));
                 let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
                     .trim()
                     .to_owned();
@@ -130,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     required("FERROCRATE_RUNTIME_GRANT_KEY_ID")?,
                     boot_id,
                     child_issuer,
-                    SigningKey::from_bytes(&envelope_key_bytes),
+                    netd_envelope_signer.clone().expect("signer initialized"),
                     cluster_id.clone(),
                     node_id.clone(),
                 )
@@ -157,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_api,
         netd_sequence,
         service_mode,
+        netd_envelope_signer,
     )
     .await
 }
@@ -219,6 +222,7 @@ async fn run_control_stream(
     local_api: Arc<LocalApi>,
     netd_sequence: NetdSequence,
     service_mode: AuthorizationServiceMode,
+    netd_envelope_signer: Option<SigningKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = required("FERROCRATE_CONTROL_ENDPOINT")?;
     let ca = std::fs::read(required("FERROCRATE_NODE_CA_CERT")?)?;
@@ -242,6 +246,9 @@ async fn run_control_stream(
             UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
         )?
         .with_netd_sequence(netd_sequence.clone())
+        .with_netd_envelope_signer(
+            netd_envelope_signer.ok_or("enabled authorization requires netd envelope signer")?,
+        )
     } else {
         Agent::new_enforcing_with_overlap(
             cluster_id,

@@ -1,13 +1,14 @@
 use std::sync::Mutex;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use base64::Engine;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use prost::Message;
 use thiserror::Error;
 
 use crate::{
     agent::{
         desired_authorization::DesiredAuthorizationBundle,
-        netd_sequence::{NetdSequence, SequenceValue},
+        netd_sequence::NetdSequence,
         state::{AgentState, StateError, StateStore},
     },
     config::MAX_MESSAGE_BYTES,
@@ -56,6 +57,7 @@ pub struct Agent<C> {
     enforce_authorization: bool,
     controller_keys: Vec<Vec<u8>>,
     netd_sequence: Option<NetdSequence>,
+    netd_envelope_signer: Option<SigningKey>,
 }
 
 impl<C: NetdClient> Agent<C> {
@@ -75,11 +77,17 @@ impl<C: NetdClient> Agent<C> {
             enforce_authorization: false,
             controller_keys: Vec::new(),
             netd_sequence: None,
+            netd_envelope_signer: None,
         })
     }
 
     pub fn with_netd_sequence(mut self, sequence: NetdSequence) -> Self {
         self.netd_sequence = Some(sequence);
+        self
+    }
+
+    pub fn with_netd_envelope_signer(mut self, signer: SigningKey) -> Self {
+        self.netd_envelope_signer = Some(signer);
         self
     }
 
@@ -180,8 +188,34 @@ impl<C: NetdClient> Agent<C> {
                 .validate_transition(&desired, &current.overlays)
                 .map_err(|_| AgentError::InvalidAuthorization)?;
         }
+        let mapped_bundle = match (bundle, &self.netd_sequence, &self.netd_envelope_signer) {
+            (Some(bundle), Some(sequence), Some(signer)) => {
+                let mut mapped = bundle.clone();
+                for (child, operation) in mapped.operations.iter_mut().enumerate() {
+                    let reserved = sequence
+                        .reserve_controller(desired.cluster_epoch, desired.revision, child as u32)
+                        .map_err(|error| AgentError::Netd(error.to_string()))?;
+                    operation.envelope.epoch = reserved.epoch;
+                    operation.envelope.revision = reserved.revision;
+                    operation.envelope.signature.clear();
+                    operation.envelope.signature = base64::engine::general_purpose::STANDARD
+                        .encode(
+                            signer
+                                .sign(
+                                    &serde_json::to_vec(&operation.envelope)
+                                        .map_err(|error| AgentError::Netd(error.to_string()))?,
+                                )
+                                .to_bytes(),
+                        );
+                }
+                Some(mapped)
+            }
+            _ => None,
+        };
         match bundle {
-            Some(bundle) => self.netd.apply_authorized(&desired, bundle),
+            Some(bundle) => self
+                .netd
+                .apply_authorized(&desired, mapped_bundle.as_ref().unwrap_or(bundle)),
             None => self.netd.apply(&desired),
         }
         .map_err(AgentError::Netd)?;
@@ -196,14 +230,6 @@ impl<C: NetdClient> Agent<C> {
             lease_expiry: desired.lease_expires_unix,
         };
         self.store.save(&next)?;
-        if let Some(sequence) = &self.netd_sequence {
-            sequence
-                .advance_controller(SequenceValue {
-                    epoch: desired.cluster_epoch,
-                    revision: desired.revision,
-                })
-                .map_err(|error| AgentError::Netd(error.to_string()))?;
-        }
         *current = next;
         Ok(current.applied_revision)
     }

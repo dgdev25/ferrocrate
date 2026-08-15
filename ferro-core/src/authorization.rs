@@ -361,6 +361,75 @@ pub enum AuthorizationMode {
     Enforce,
 }
 
+/// One pinned rollout configuration shared by every privileged service boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizationServiceMode {
+    mode: AuthorizationMode,
+    policy_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AuthorizationServiceModeError {
+    #[error("authorization service mode is invalid")]
+    InvalidMode,
+    #[error("enabled authorization requires a pinned policy digest")]
+    MissingPolicyDigest,
+    #[error("disabled authorization cannot carry a policy digest")]
+    UnexpectedPolicyDigest,
+    #[error("authorization service configurations contradict each other")]
+    ConfigurationMismatch,
+}
+
+impl AuthorizationServiceMode {
+    pub fn new(
+        mode: AuthorizationMode,
+        policy_digest: Option<[u8; 32]>,
+    ) -> Result<Self, AuthorizationServiceModeError> {
+        let policy_digest = match (mode, policy_digest) {
+            (AuthorizationMode::Disabled, None) => [0; 32],
+            (AuthorizationMode::Disabled, Some(_)) => {
+                return Err(AuthorizationServiceModeError::UnexpectedPolicyDigest)
+            }
+            (_, Some(digest)) if digest != [0; 32] => digest,
+            _ => return Err(AuthorizationServiceModeError::MissingPolicyDigest),
+        };
+        Ok(Self {
+            mode,
+            policy_digest,
+        })
+    }
+
+    pub fn parse(
+        mode: &str,
+        policy_digest: Option<[u8; 32]>,
+    ) -> Result<Self, AuthorizationServiceModeError> {
+        let mode = match mode {
+            "enforce" => AuthorizationMode::Enforce,
+            "shadow" => AuthorizationMode::Shadow,
+            "disabled" => AuthorizationMode::Disabled,
+            _ => return Err(AuthorizationServiceModeError::InvalidMode),
+        };
+        Self::new(mode, policy_digest)
+    }
+
+    pub const fn mode(self) -> AuthorizationMode {
+        self.mode
+    }
+    pub const fn policy_digest(self) -> Option<[u8; 32]> {
+        match self.mode {
+            AuthorizationMode::Disabled => None,
+            _ => Some(self.policy_digest),
+        }
+    }
+    pub fn require_match(self, peer: Self) -> Result<(), AuthorizationServiceModeError> {
+        if self == peer {
+            Ok(())
+        } else {
+            Err(AuthorizationServiceModeError::ConfigurationMismatch)
+        }
+    }
+}
+
 /// Stable machine-readable explanations for decisions.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]

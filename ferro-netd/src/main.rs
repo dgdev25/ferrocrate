@@ -1,5 +1,6 @@
 use base64::Engine;
 use ed25519_dalek::VerifyingKey;
+use ferro_core::authorization::{AuthorizationMode, AuthorizationServiceMode};
 use ferro_netd::{
     grants::{GrantLedger, GrantVerifier},
     policy::Policy,
@@ -18,6 +19,7 @@ use std::{
 };
 
 fn main() {
+    let service_mode = authorization_service_mode().expect("invalid authorization service mode");
     let agent_uid = std::env::var("FERROCRATE_AGENT_UID")
         .expect("FERROCRATE_AGENT_UID is required")
         .parse::<u32>()
@@ -48,14 +50,25 @@ fn main() {
         .unwrap_or_else(|_| "/var/lib/ferrocrate/netd-grants.json".into());
     let grant_issuer = std::env::var("FERROCRATE_NETD_GRANT_ISSUER")
         .unwrap_or_else(|_| "ferrocrate-runtime".into());
-    server = server.with_grants(
-        load_grant_verifier(
-            grant_issuer,
-            boot_id,
-            GrantLedger::open(grant_journal.into()).expect("grant journal unavailable"),
-        )
-        .expect("invalid bounded grant verification keyring"),
-    );
+    match service_mode.mode() {
+        AuthorizationMode::Disabled => {
+            if std::env::var_os("FERROCRATE_NETD_GRANT_PUBLIC_KEYS_JSON").is_some()
+                || std::env::var_os("FERROCRATE_NETD_GRANT_PUBLIC_KEY").is_some()
+            {
+                panic!("disabled netd cannot configure grant verification keys");
+            }
+        }
+        AuthorizationMode::Enforce | AuthorizationMode::Shadow => {
+            server = server.with_grants(
+                load_grant_verifier(
+                    grant_issuer,
+                    boot_id,
+                    GrantLedger::open(grant_journal.into()).expect("grant journal unavailable"),
+                )
+                .expect("invalid bounded grant verification keyring"),
+            );
+        }
+    }
     if let Ok(path) = std::env::var("FERROCRATE_NETD_STATE") {
         server = server
             .load_journal(path.into())
@@ -124,6 +137,23 @@ fn main() {
             let _ = stream.write_all(&bytes);
         }
     }
+}
+
+fn authorization_service_mode() -> Result<AuthorizationServiceMode, String> {
+    let mode = std::env::var("FERROCRATE_AUTHORIZATION_MODE")
+        .map_err(|_| "FERROCRATE_AUTHORIZATION_MODE is required".to_string())?;
+    let digest = std::env::var("FERROCRATE_AUTHORIZATION_POLICY_DIGEST")
+        .ok()
+        .map(|value| {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .map_err(|_| "policy digest must be base64")?;
+            bytes
+                .try_into()
+                .map_err(|_| "policy digest must decode to 32 bytes")
+        })
+        .transpose()?;
+    AuthorizationServiceMode::parse(&mode, digest).map_err(|error| error.to_string())
 }
 
 #[derive(Deserialize)]

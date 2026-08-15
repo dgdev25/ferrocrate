@@ -3,6 +3,22 @@ use super::{
     ResolvedPrincipal, Resource, ResourceKind, Role,
 };
 
+#[test]
+fn service_mode_rejects_missing_digest_and_cross_service_contradictions() {
+    use super::{AuthorizationServiceMode, AuthorizationServiceModeError};
+    assert_eq!(
+        AuthorizationServiceMode::new(AuthorizationMode::Enforce, None),
+        Err(AuthorizationServiceModeError::MissingPolicyDigest)
+    );
+    let enforce = AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([7; 32])).unwrap();
+    let shadow = AuthorizationServiceMode::new(AuthorizationMode::Shadow, Some([7; 32])).unwrap();
+    assert_eq!(
+        enforce.require_match(shadow),
+        Err(AuthorizationServiceModeError::ConfigurationMismatch)
+    );
+    assert!(AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).is_ok());
+}
+
 fn policy(mode: AuthorizationMode) -> PolicyDocument {
     PolicyDocument {
         schema_version: 1,

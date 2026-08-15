@@ -194,10 +194,11 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         None,
     );
     serve_next(listener.try_clone().unwrap(), server.clone(), uid, 101);
-    assert!(matches!(
-        send(&local_socket, &attach),
-        LocalApiResponse::Attached(_)
-    ));
+    let attach_response = send(&local_socket, &attach);
+    assert!(
+        matches!(attach_response, LocalApiResponse::Attached(_)),
+        "{attach_response:?}"
+    );
 
     let persisted: serde_json::Value =
         serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
@@ -391,9 +392,9 @@ fn delegated(
         monotonic_deadline_millis: u64::MAX,
         nonce,
         operation_id: nonce,
-        request_digest: digest,
-        precondition_digest: digest,
-        recovery_recipe_digest: digest,
+        request_digest: [6; 32],
+        precondition_digest: [4; 32],
+        recovery_recipe_digest: [5; 32],
         issuer: "runtime".into(),
         key_id: "key-1".into(),
         kind: if cleanup {

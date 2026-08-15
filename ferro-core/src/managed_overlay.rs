@@ -143,9 +143,26 @@ pub(crate) struct LegacyManagedOverlayMode(());
 
 impl LegacyManagedOverlayMode {
     pub(crate) fn disabled_only() -> Result<Self, ManagedOverlayError> {
-        match std::env::var("FERROCRATE_AUTHORIZATION_MODE").as_deref() {
-            Ok("disabled") => Ok(Self(())),
-            _ => Err(ManagedOverlayError::Grant(GrantBuildError::IntentMismatch)),
+        let mode = std::env::var("FERROCRATE_AUTHORIZATION_MODE")
+            .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))?;
+        let digest = std::env::var("FERROCRATE_AUTHORIZATION_POLICY_DIGEST")
+            .ok()
+            .map(|value| {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(value)
+                    .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))?;
+                bytes
+                    .try_into()
+                    .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))
+            })
+            .transpose()?;
+        let service = crate::authorization::AuthorizationServiceMode::parse(&mode, digest)
+            .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))?;
+        if service.mode() == crate::authorization::AuthorizationMode::Disabled {
+            Ok(Self(()))
+        } else {
+            Err(ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))
         }
     }
 }

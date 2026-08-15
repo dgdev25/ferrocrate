@@ -2488,6 +2488,7 @@ impl ContainerRuntime {
             network_backend: network_setup.backend.map(|backend| backend.to_string()),
             network_ownership: network_setup.ownership.clone(),
             managed_overlay: network_setup.managed_overlay.clone(),
+            managed_cleanup_provenance: network_setup.managed_cleanup_provenance.clone(),
             managed_host_veth: network_setup.managed_host_veth.clone(),
             ai_runtime: ai_config.cloned(),
             creation_provenance: creation_provenance.clone(),
@@ -4211,6 +4212,7 @@ struct NetworkSetup {
     ownership: Option<NetworkOwnershipRecord>,
     ebpf_network: Option<EbpfNetwork>,
     managed_overlay: Option<String>,
+    managed_cleanup_provenance: Option<crate::managed_overlay::ManagedCleanupProvenance>,
     managed_host_veth: Option<String>,
 }
 
@@ -4352,6 +4354,7 @@ impl NetworkSetup {
             ownership: None,
             ebpf_network: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
         }
     }
@@ -4664,6 +4667,7 @@ fn setup_network(
         ownership: Some(ownership),
         ebpf_network: None,
         managed_overlay: None,
+        managed_cleanup_provenance: None,
         managed_host_veth: None,
     })
 }
@@ -4691,7 +4695,7 @@ fn setup_managed_network(
     };
     let client = ManagedOverlayClient::new(socket);
     let response = if let Some(intent) = intent {
-        managed_overlay_authorized_request(&client, &request, proof, intent)?
+        managed_overlay_authorized_request(&client, &request, proof, intent, None)?
     } else {
         let legacy_mode = LegacyManagedOverlayMode::disabled_only().map_err(|_| {
             RuntimeError::Authorization(
@@ -4770,6 +4774,7 @@ fn setup_managed_network(
     let mut setup =
         NetworkSetup::isolated(Some(netns_name), Some(attachment.ipv4), attachment.ipv6);
     setup.managed_overlay = Some(overlay_id.to_string());
+    setup.managed_cleanup_provenance = attachment.cleanup_provenance;
     setup.managed_host_veth = Some(host_veth);
     Ok(setup)
 }
@@ -4780,6 +4785,7 @@ fn managed_overlay_authorized_request(
     request: &ManagedOverlayRequest,
     proof: &AuthorizedRequest,
     intent: &crate::witness::DurableIntent,
+    cleanup: Option<&crate::managed_overlay::ManagedCleanupProvenance>,
 ) -> Result<Result<ManagedOverlayResponse, crate::managed_overlay::ManagedOverlayError>, RuntimeError>
 {
     let key_path = std::env::var("FERROCRATE_RUNTIME_GRANT_SIGNING_KEY_FILE").map_err(|_| {
@@ -4805,17 +4811,31 @@ fn managed_overlay_authorized_request(
         .unwrap_or(u64::MAX / 1000)
         .saturating_mul(1000);
     let nonce: [u8; 16] = rand::random();
-    Ok(client.request_authorized(
-        request,
-        proof,
-        intent,
-        &issuer,
-        boot_id.trim(),
-        now.saturating_add(30),
-        monotonic.saturating_add(30_000),
-        nonce,
-        &issuer_name,
-    ))
+    Ok(match cleanup {
+        Some(provenance) => client.request_cleanup_authorized(
+            request,
+            proof,
+            intent,
+            provenance,
+            &issuer,
+            boot_id.trim(),
+            now.saturating_add(30),
+            monotonic.saturating_add(30_000),
+            nonce,
+            &issuer_name,
+        ),
+        None => client.request_authorized(
+            request,
+            proof,
+            intent,
+            &issuer,
+            boot_id.trim(),
+            now.saturating_add(30),
+            monotonic.saturating_add(30_000),
+            nonce,
+            &issuer_name,
+        ),
+    })
 }
 
 fn build_network_plan(
@@ -6310,7 +6330,20 @@ fn cleanup_network(
         };
         let client = ManagedOverlayClient::new(socket);
         let response = match authority {
-            Some((proof, Some(intent))) => managed_overlay_authorized_request(&client, &request, proof, intent)?,
+            Some((proof, Some(intent))) => {
+                let provenance = record.managed_cleanup_provenance.as_ref().ok_or_else(|| {
+                    RuntimeError::Authorization(
+                        "managed overlay cleanup provenance is missing; quarantined".into(),
+                    )
+                })?;
+                managed_overlay_authorized_request(
+                    &client,
+                    &request,
+                    proof,
+                    intent,
+                    Some(provenance),
+                )?
+            },
             _ => {
                 let legacy_mode = LegacyManagedOverlayMode::disabled_only().map_err(|_| RuntimeError::Authorization("managed overlay cleanup delegation is required while authorization is enabled".into()))?;
                 client.request_legacy(&legacy_mode, &request)
@@ -8455,6 +8488,7 @@ mod tests {
                 ownership: Some(ownership),
                 ebpf_network: None,
                 managed_overlay: Some("test".into()),
+                managed_cleanup_provenance: None,
                 managed_host_veth: Some(format!("fake-{container_id}")),
             })
         }
@@ -8858,6 +8892,7 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
@@ -8915,6 +8950,7 @@ mod tests {
             mutation_generation: 1,
             pending_mutation: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
         };
         store.put(&record).expect("seed live record");
@@ -9337,6 +9373,7 @@ mod tests {
             mutation_generation: 1,
             pending_mutation: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
         }
     }
@@ -10203,6 +10240,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             mutation_generation: 1,
             pending_mutation: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
         };
         store.put(&existing).expect("put existing");

@@ -137,6 +137,8 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub managed_overlay: Option<String>,
     #[serde(default)]
+    pub managed_cleanup_provenance: Option<crate::managed_overlay::ManagedCleanupProvenance>,
+    #[serde(default)]
     pub managed_host_veth: Option<String>,
     #[serde(default)]
     pub ai_runtime: Option<AiRuntimeConfig>,
@@ -192,6 +194,7 @@ impl ContainerRecord {
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
@@ -1022,6 +1025,7 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
             ai_runtime: None,
             creation_provenance: Default::default(),
@@ -1070,6 +1074,7 @@ mod tests {
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,
+            managed_cleanup_provenance: None,
             managed_host_veth: None,
             ai_runtime: None,
             creation_provenance: Default::default(),

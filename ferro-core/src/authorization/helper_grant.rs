@@ -263,6 +263,60 @@ pub struct GrantIssuer {
     key: SigningKey,
 }
 impl GrantIssuer {
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_managed_overlay_cleanup(
+        &self,
+        proof: &AuthorizedRequest,
+        intent: &DurableIntent,
+        parameters: &GrantParameters,
+        provenance: &crate::managed_overlay::ManagedCleanupProvenance,
+        boot_id: &str,
+        wall_deadline_secs: u64,
+        monotonic_deadline_millis: u64,
+        nonce: [u8; 16],
+        issuer: &str,
+    ) -> Result<HelperGrant, GrantBuildError> {
+        let request_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(proof.canonical().context())
+                .map_err(|_| GrantBuildError::InvalidClaims)?,
+        )
+        .into();
+        if proof.canonical().context().action() != Action::ContainerDelete
+            || intent.execution_generation() != proof.canonical().resource_generation()
+            || intent.request_digest() != request_digest
+            || provenance.resource_uuid != proof.canonical().resource_id()
+            || provenance.resource_generation != proof.canonical().resource_generation()
+            || provenance.origin_request_id.is_empty()
+            || provenance.live_identity_digest == [0; 32]
+        {
+            return Err(GrantBuildError::IntentMismatch);
+        }
+        let mut claims = GrantClaims::new(
+            proof.canonical().request_id(),
+            GrantAction::NetworkDetach,
+            ResourceBinding::new(
+                provenance.resource_uuid.clone(),
+                provenance.resource_generation,
+            )?,
+            parameters.digest(),
+            boot_id,
+            wall_deadline_secs,
+            monotonic_deadline_millis,
+            nonce,
+            issuer,
+            &self.key_id,
+            GrantKind::Cleanup,
+        )?
+        .cleanup(
+            provenance.origin_request_id.clone(),
+            provenance.live_identity_digest,
+        )?;
+        claims.operation_id = *intent.operation_id().as_bytes();
+        claims.request_digest = request_digest;
+        claims.precondition_digest = intent.precondition_digest();
+        claims.recovery_recipe_digest = intent.recovery_recipe_digest();
+        Ok(self.sign(claims))
+    }
     pub(crate) fn new(key_id: impl Into<String>, key: SigningKey) -> Self {
         Self {
             key_id: key_id.into(),

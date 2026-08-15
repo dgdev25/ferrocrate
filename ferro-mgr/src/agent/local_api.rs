@@ -24,8 +24,8 @@ use super::netd_client::{
 };
 use ferro_core::authorization::helper_grant::GrantAction;
 use ferro_core::managed_overlay::{
-    DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest, ManagedOverlayCompatibilityMode,
-    ManagedOverlayDelegation, MANAGED_OVERLAY_PROTOCOL_VERSION,
+    DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest, ManagedCleanupProvenance,
+    ManagedOverlayCompatibilityMode, ManagedOverlayDelegation, MANAGED_OVERLAY_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +39,8 @@ pub struct Attachment {
     pub gateway: std::net::Ipv4Addr,
     pub prefix: u8,
     pub mtu: u16,
+    #[serde(default)]
+    pub cleanup_provenance: Option<ManagedCleanupProvenance>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -220,6 +222,7 @@ impl LocalApi {
             gateway: config.gateway,
             prefix: config.prefix,
             mtu: config.mtu,
+            cleanup_provenance: None,
         })
     }
 
@@ -459,7 +462,7 @@ impl LocalApi {
             ClaimOutcome::InProgress(_) => return Err(LocalApiError::InvalidDelegation),
             ClaimOutcome::Fresh(_) => {}
         }
-        let attachment = self.attach(
+        let mut attachment = self.attach(
             caller_uid,
             overlay_id.clone(),
             container_id.clone(),
@@ -502,7 +505,6 @@ impl LocalApi {
             let _ = self.ipam.release(&container_id);
             return Err(LocalApiError::NetdRejected);
         }
-        let response = LocalApiResponse::Attached(attachment);
         let provenance = CreationProvenance {
             container_id: container_id.clone(),
             overlay_id: overlay_id.clone(),
@@ -511,6 +513,13 @@ impl LocalApi {
             origin_request_id: child.request_id.clone(),
             live_identity_digest: endpoint_live_identity_digest(&container_id),
         };
+        attachment.cleanup_provenance = Some(ManagedCleanupProvenance {
+            origin_request_id: provenance.origin_request_id.clone(),
+            live_identity_digest: provenance.live_identity_digest,
+            resource_uuid: provenance.resource_uuid.clone(),
+            resource_generation: provenance.resource_generation,
+        });
+        let response = LocalApiResponse::Attached(attachment);
         delegated
             .ledger
             .complete_creation(

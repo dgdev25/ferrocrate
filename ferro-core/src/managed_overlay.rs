@@ -94,6 +94,17 @@ pub struct ManagedOverlayAttachment {
     pub gateway: String,
     pub prefix: u8,
     pub mtu: u16,
+    #[serde(default)]
+    pub cleanup_provenance: Option<ManagedCleanupProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedCleanupProvenance {
+    pub origin_request_id: String,
+    pub live_identity_digest: [u8; 32],
+    pub resource_uuid: String,
+    pub resource_generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +233,43 @@ impl ManagedOverlayClient {
             intent,
             action,
             &parameters,
+            boot_id,
+            wall_deadline_secs,
+            monotonic_deadline_millis,
+            nonce,
+            issuer_name,
+        )?;
+        self.send(&DelegatedManagedOverlayRequest {
+            request: request.clone(),
+            delegation: ManagedOverlayDelegation::new(grant),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_cleanup_authorized(
+        &self,
+        request: &ManagedOverlayRequest,
+        proof: &AuthorizedRequest,
+        intent: &DurableIntent,
+        provenance: &ManagedCleanupProvenance,
+        issuer: &GrantIssuer,
+        boot_id: &str,
+        wall_deadline_secs: u64,
+        monotonic_deadline_millis: u64,
+        nonce: [u8; 16],
+        issuer_name: &str,
+    ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
+        if !matches!(request, ManagedOverlayRequest::DetachContainer { .. }) {
+            return Err(ManagedOverlayError::Grant(
+                GrantBuildError::UnsupportedAction,
+            ));
+        }
+        let parameters = managed_parameters(request)?;
+        let grant = issuer.for_managed_overlay_cleanup(
+            proof,
+            intent,
+            &parameters,
+            provenance,
             boot_id,
             wall_deadline_secs,
             monotonic_deadline_millis,

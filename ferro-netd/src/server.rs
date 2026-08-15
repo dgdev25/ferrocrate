@@ -38,7 +38,7 @@ pub struct NetdServer {
     pub(crate) routes: BTreeMap<String, Vec<String>>,
     journal: Option<PathBuf>,
     pub(crate) kernel: Box<dyn NetKernelOps>,
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_faults: crate::test_support::FaultHandle,
 }
 impl NetdServer {
@@ -52,7 +52,7 @@ impl NetdServer {
             routes: BTreeMap::new(),
             journal: None,
             kernel: Box::new(RealNetKernelOps::new()),
-            #[cfg(feature = "test-support")]
+            #[cfg(any(test, feature = "test-support"))]
             test_faults: Default::default(),
         }
     }
@@ -78,7 +78,7 @@ impl NetdServer {
                 private_key_path,
                 listen_port,
             )),
-            #[cfg(feature = "test-support")]
+            #[cfg(any(test, feature = "test-support"))]
             test_faults: Default::default(),
         }
     }
@@ -100,7 +100,7 @@ impl NetdServer {
         Ok(self)
     }
     fn persist(&self) -> Result<(), String> {
-        #[cfg(feature = "test-support")]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .test_faults
             .take(crate::test_support::FaultPoint::StatePersist)

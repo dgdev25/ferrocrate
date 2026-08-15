@@ -214,6 +214,10 @@ fn public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() 
         let runtime = configured_runtime(mode);
         let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+            .env(
+                "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+                format!("cli-{mode}"),
+            )
             .args(["volume", "create", &format!("{mode}-volume")])
             .output()
             .expect("execute public CLI mutation");
@@ -234,6 +238,7 @@ fn public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() 
     let runtime = configured_runtime("enforce");
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "cli-enforce")
         .args(["volume", "create", "enforced-volume"])
         .output()
         .expect("execute public CLI mutation");

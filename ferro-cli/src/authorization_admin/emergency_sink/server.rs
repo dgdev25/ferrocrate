@@ -5,14 +5,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     os::unix::{
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        fs::{MetadataExt, PermissionsExt},
         net::UnixListener,
     },
     path::Path,
 };
+
+const MAX_STORE_BYTES: u64 = 128 * 1024 * 1024;
 
 pub struct SinkServeConfig<'a> {
     pub socket: &'a Path,
@@ -40,10 +42,74 @@ struct StoredSinkEntry {
     receipt: SinkReceipt,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalRecord {
+    schema: u8,
+    #[serde(rename = "type")]
+    record_type: String,
+    boot_id: String,
+    deadline_uptime_ns: u64,
+    action: String,
+    resource: String,
+    emergency_nonce: String,
+    operation_id: Option<String>,
+    terminal_event_id: Option<String>,
+    succeeded: Option<bool>,
+}
+
+fn validate_canonical_record(
+    bytes: &[u8],
+    nonce: &str,
+    sink_operation: [u8; 16],
+) -> Result<(), String> {
+    let record: CanonicalRecord =
+        serde_json::from_slice(bytes).map_err(|_| "invalid canonical emergency sink record")?;
+    let mut base = [0; 16];
+    if let Some(operation) = record.operation_id.as_deref() {
+        if operation.len() != 32 || !operation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid canonical emergency operation ID".into());
+        }
+        for (index, byte) in base.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&operation[index * 2..index * 2 + 2], 16)
+                .map_err(|_| "invalid canonical emergency operation ID")?;
+        }
+    }
+    let mut operation_input = base.to_vec();
+    operation_input.push(0);
+    operation_input.extend_from_slice(record.record_type.as_bytes());
+    let digest = Sha256::digest(&operation_input);
+    if record.schema != 1
+        || !matches!(
+            record.record_type.as_str(),
+            "activate" | "intent" | "outcome" | "reconcile"
+        )
+        || record.emergency_nonce != nonce
+        || record.action.is_empty()
+        || record.action.len() > 64
+        || record.resource.is_empty()
+        || record.resource.len() > 256
+        || serde_json::to_vec(&record).map_err(|e| e.to_string())? != bytes
+        || sink_operation != digest[..16]
+    {
+        return Err("invalid canonical emergency sink record binding".into());
+    }
+    Ok(())
+}
+
 impl UnixSinkStore {
     pub fn open(mut file: File, journal_id: [u8; 16], key: SigningKey) -> Result<Self, String> {
+        if file.metadata().map_err(|e| e.to_string())?.len() > MAX_STORE_BYTES {
+            return Err("emergency sink store exceeds bounded restart size".into());
+        }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        (&mut file)
+            .take(MAX_STORE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_STORE_BYTES {
+            return Err("emergency sink store exceeds bounded restart size".into());
+        }
         let mut offset = 0usize;
         let mut next_sequence = 0;
         let mut head = [0; 32];
@@ -64,6 +130,11 @@ impl UnixSinkStore {
             {
                 return Err("emergency sink stored record hash mismatch".into());
             }
+            validate_canonical_record(
+                &entry.record,
+                &entry.receipt.emergency_nonce,
+                entry.receipt.operation_id,
+            )?;
             let receipt = entry.receipt;
             receipt.verify(&key.verifying_key())?;
             if receipt.journal_id != journal_id || receipt.sequence != next_sequence {
@@ -101,6 +172,14 @@ impl UnixSinkStore {
 
     pub fn append(&mut self, request: SinkRequest) -> Result<SinkReceipt, String> {
         request.validate()?;
+        if request.query_head {
+            return Err("head query is not an append".into());
+        }
+        validate_canonical_record(
+            &request.record,
+            &request.emergency_nonce,
+            request.operation_id,
+        )?;
         if request.journal_id != self.journal_id {
             return Err("sink journal substitution".into());
         }
@@ -147,6 +226,25 @@ impl UnixSinkStore {
         self.receipts.insert(idempotency_key, receipt.clone());
         Ok(receipt)
     }
+
+    fn head_receipt(&self, request: &SinkRequest) -> Result<SinkReceipt, String> {
+        request.validate()?;
+        if !request.query_head || request.journal_id != self.journal_id {
+            return Err("invalid sink head query".into());
+        }
+        let mut receipt = SinkReceipt {
+            version: 1,
+            journal_id: self.journal_id,
+            sequence: self.next_sequence,
+            emergency_nonce: String::new(),
+            operation_id: [0; 16],
+            record_hash: [0; 32],
+            head: self.head,
+            signature: Vec::new(),
+        };
+        receipt.sign(&self.key)?;
+        Ok(receipt)
+    }
 }
 
 fn receipt_key(nonce: &str, operation_id: [u8; 16]) -> String {
@@ -168,7 +266,11 @@ pub fn serve_one(
         return Err("unexpected emergency sink client UID".into());
     }
     let request: SinkRequest = read_frame(&mut stream)?;
-    let receipt = store.append(request)?;
+    let receipt = if request.query_head {
+        store.head_receipt(&request)?
+    } else {
+        store.append(request)?
+    };
     write_frame(&mut stream, &receipt)
 }
 
@@ -178,18 +280,20 @@ pub fn serve(config: SinkServeConfig<'_>) -> Result<(), String> {
     if config.socket.exists() {
         return Err("sink socket path already exists".into());
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .mode(0o600)
-        .open(config.store)
-        .map_err(|e| format!("open sink store: {e}"))?;
+    let file = ferro_core::authorization::open_path_no_symlinks(
+        config.store,
+        nix::libc::O_RDWR | nix::libc::O_APPEND,
+        0,
+    )
+    .map_err(|e| format!("open sink store: {e}"))?;
     validate_owner_file(&file)?;
     let mut raw_key = Vec::new();
-    let key_file = OpenOptions::new()
-        .read(true)
-        .open(config.signing_key)
-        .map_err(|e| format!("open sink signing key: {e}"))?;
+    let key_file = ferro_core::authorization::open_path_no_symlinks(
+        config.signing_key,
+        nix::libc::O_RDONLY,
+        0,
+    )
+    .map_err(|e| format!("open sink signing key: {e}"))?;
     validate_owner_file(&key_file)?;
     if key_file.metadata().map_err(|e| e.to_string())?.len() != 32 {
         return Err("sink signing key must contain exactly 32 raw bytes".into());
@@ -246,15 +350,32 @@ mod tests {
     use sha2::Digest;
 
     fn request(nonce: &str, sequence: u64, body: &[u8]) -> SinkRequest {
+        let body = serde_json::to_vec(&CanonicalRecord {
+            schema: 1,
+            record_type: "intent".into(),
+            boot_id: "boot".into(),
+            deadline_uptime_ns: 10,
+            action: "container.stop".into(),
+            resource: String::from_utf8_lossy(body).into_owned(),
+            emergency_nonce: nonce.into(),
+            operation_id: None,
+            terminal_event_id: None,
+            succeeded: None,
+        })
+        .unwrap();
+        let operation_digest = Sha256::digest([&[0; 16][..], &[0], b"intent"].concat());
+        let mut operation_id = [0; 16];
+        operation_id.copy_from_slice(&operation_digest[..16]);
         SinkRequest {
             version: 1,
+            query_head: false,
             journal_id: [1; 16],
             expected_sequence: sequence,
             expected_head: if sequence == 0 { [0; 32] } else { [9; 32] },
             emergency_nonce: nonce.into(),
-            operation_id: [2; 16],
-            record: body.into(),
-            record_hash: Sha256::digest(body).into(),
+            operation_id,
+            record_hash: Sha256::digest(&body).into(),
+            record: body,
         }
     }
 
@@ -314,5 +435,65 @@ mod tests {
             .err()
             .unwrap()
             .contains("stored record hash mismatch"));
+    }
+
+    #[test]
+    fn restart_rejects_oversized_store_without_allocating_it() {
+        let named = tempfile::NamedTempFile::new().unwrap();
+        named.as_file().set_len(MAX_STORE_BYTES + 1).unwrap();
+        assert!(UnixSinkStore::open(
+            named.reopen().unwrap(),
+            [1; 16],
+            SigningKey::from_bytes(&[7; 32])
+        )
+        .err()
+        .unwrap()
+        .contains("bounded restart size"));
+    }
+
+    #[test]
+    fn service_rejects_symlinked_or_writable_store_and_signing_key() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = root.path().join("store");
+        let key = root.path().join("key");
+        std::fs::write(&store, b"").unwrap();
+        std::fs::write(&key, [7; 32]).unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store_link = root.path().join("store-link");
+        std::os::unix::fs::symlink(&store, &store_link).unwrap();
+        let socket = root.path().join("socket");
+        let uid = nix::unistd::geteuid().as_raw();
+        assert!(serve(SinkServeConfig {
+            socket: &socket,
+            store: &store_link,
+            signing_key: &key,
+            journal_id: [1; 16],
+            expected_uid: uid,
+            requests: Some(0)
+        })
+        .is_err());
+        let key_link = root.path().join("key-link");
+        std::os::unix::fs::symlink(&key, &key_link).unwrap();
+        assert!(serve(SinkServeConfig {
+            socket: &socket,
+            store: &store,
+            signing_key: &key_link,
+            journal_id: [1; 16],
+            expected_uid: uid,
+            requests: Some(0)
+        })
+        .is_err());
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(serve(SinkServeConfig {
+            socket: &socket,
+            store: &store,
+            signing_key: &key,
+            journal_id: [1; 16],
+            expected_uid: uid,
+            requests: Some(0)
+        })
+        .is_err());
     }
 }

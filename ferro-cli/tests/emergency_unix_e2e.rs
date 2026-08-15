@@ -266,7 +266,7 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
     assert!(!restored_gate.status.success());
     assert!(!String::from_utf8_lossy(&restored_gate.stderr).contains("reconciliation is required"));
 
-    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 1);
+    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 2);
     wait_socket(&socket);
     let activate = run(&runtime, &activate_args);
     assert!(activate.status.success(), "{}", output_text(&activate));
@@ -290,7 +290,7 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
     );
     assert!(!unavailable.status.success());
 
-    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 2);
+    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 1);
     wait_socket(&socket);
     let execute = run(
         &runtime,
@@ -305,12 +305,33 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
             "container:e2e".into(),
         ],
     );
-    assert!(execute.status.success(), "{}", output_text(&execute));
+    assert!(
+        !execute.status.success(),
+        "outcome sink outage must leave a recoverable unknown state"
+    );
     assert!(server.wait().unwrap().success());
     assert!(
         !sleeper.wait().unwrap().success(),
         "real runtime stop must terminate the fixture process"
     );
+
+    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 1);
+    wait_socket(&socket);
+    let recovered = run(
+        &runtime,
+        &[
+            "emergency".into(),
+            "execute".into(),
+            "--sink-backend".into(),
+            "unix".into(),
+            "--action".into(),
+            "container.stop".into(),
+            "--resource".into(),
+            "container:e2e".into(),
+        ],
+    );
+    assert!(recovered.status.success(), "{}", output_text(&recovered));
+    assert!(server.wait().unwrap().success());
 
     let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 1);
     wait_socket(&socket);

@@ -27,6 +27,29 @@ impl UnixAppendOnlySink {
     }
 
     pub fn append(&self, request: &SinkRequest) -> Result<SinkReceipt, String> {
+        if request.query_head {
+            return Err("head query is not an append".into());
+        }
+        self.exchange(request, false)
+    }
+
+    pub fn head(&self, journal_id: [u8; 16]) -> Result<(u64, [u8; 32]), String> {
+        let request = SinkRequest {
+            version: 1,
+            query_head: true,
+            journal_id,
+            expected_sequence: 0,
+            expected_head: [0; 32],
+            emergency_nonce: String::new(),
+            operation_id: [0; 16],
+            record: Vec::new(),
+            record_hash: [0; 32],
+        };
+        let receipt = self.exchange(&request, true)?;
+        Ok((receipt.sequence, receipt.head))
+    }
+
+    fn exchange(&self, request: &SinkRequest, query: bool) -> Result<SinkReceipt, String> {
         let metadata = std::fs::symlink_metadata(&self.socket).map_err(|e| e.to_string())?;
         validate_socket(&metadata, self.server_uid)?;
         if (metadata.dev(), metadata.ino()) != self.socket_identity {
@@ -42,10 +65,14 @@ impl UnixAppendOnlySink {
         let receipt: SinkReceipt = read_frame(&mut stream)?;
         receipt.verify(&self.key)?;
         if receipt.journal_id != request.journal_id
-            || receipt.emergency_nonce != request.emergency_nonce
-            || receipt.operation_id != request.operation_id
-            || receipt.record_hash != request.record_hash
-            || receipt.sequence != request.expected_sequence
+            || (!query && receipt.emergency_nonce != request.emergency_nonce)
+            || (!query && receipt.operation_id != request.operation_id)
+            || (!query && receipt.record_hash != request.record_hash)
+            || (!query && receipt.sequence != request.expected_sequence)
+            || (query
+                && (!receipt.emergency_nonce.is_empty()
+                    || receipt.operation_id != [0; 16]
+                    || receipt.record_hash != [0; 32]))
         {
             return Err("emergency sink receipt binding mismatch".into());
         }
@@ -86,14 +113,18 @@ mod tests {
                 UnixSinkStore::open(tempfile::tempfile().unwrap(), [3; 16], key).unwrap();
             serve_one(&listener, &mut store, uid).unwrap();
         });
-        let record = b"intent".to_vec();
+        let record = br#"{"schema":1,"type":"intent","boot_id":"boot","deadline_uptime_ns":10,"action":"container.stop","resource":"container:x","emergency_nonce":"nonce","operation_id":null,"terminal_event_id":null,"succeeded":null}"#.to_vec();
+        let operation_digest = Sha256::digest([&[0; 16][..], &[0], b"intent"].concat());
+        let mut operation_id = [0; 16];
+        operation_id.copy_from_slice(&operation_digest[..16]);
         let request = SinkRequest {
             version: 1,
+            query_head: false,
             journal_id: [3; 16],
             expected_sequence: 0,
             expected_head: [0; 32],
             emergency_nonce: "nonce".into(),
-            operation_id: [4; 16],
+            operation_id,
             record_hash: Sha256::digest(&record).into(),
             record,
         };

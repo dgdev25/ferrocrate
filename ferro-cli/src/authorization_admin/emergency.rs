@@ -94,7 +94,12 @@ impl EmergencyState {
         {
             return Err("emergency sink receipt does not match the exact state transition".into());
         }
-        let previous = self.sink_receipts.last().map_or([0; 32], |item| item.head);
+        let previous = self
+            .sink_head
+            .as_deref()
+            .map(decode_hex::<32>)
+            .transpose()?
+            .unwrap_or([0; 32]);
         let mut digest = sha2::Sha256::new();
         use sha2::Digest;
         digest.update(previous);
@@ -122,6 +127,7 @@ enum EmergencyStatus {
     Terminal,
     Unknown,
     Quarantined,
+    Reconciled,
 }
 
 #[derive(Serialize)]
@@ -331,9 +337,7 @@ pub fn activate_emergency(args: EmergencyActivate<'_>) -> Result<String, String>
     require_preprovisioned_state_dir(args.state_dir)?;
     match args.sink {
         EmergencySink::Filesystem(path) => require_append_only_sink(path)?,
-        EmergencySink::Unix(config) => {
-            config.connect()?;
-        }
+        EmergencySink::Unix(_) => {}
     }
     activate_verified(args)
 }
@@ -411,6 +415,13 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
             Some(super::hex(&config.journal_id)),
         ),
     };
+    let (initial_sink_sequence, initial_sink_head) = match args.sink {
+        EmergencySink::Unix(config) => {
+            let (sequence, head) = config.connect()?.head(config.journal_id)?;
+            (sequence, Some(super::hex(&head)))
+        }
+        EmergencySink::Filesystem(_) => (0, None),
+    };
     let mut state = EmergencyState {
         schema: 1,
         generation: 0,
@@ -427,8 +438,8 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         sink_receipt_key,
         sink_server_uid,
         sink_journal_id,
-        sink_sequence: 0,
-        sink_head: None,
+        sink_sequence: initial_sink_sequence,
+        sink_head: initial_sink_head,
         sink_receipts: Vec::new(),
         status: EmergencyStatus::Activated,
         main_witness_first: None,
@@ -454,9 +465,7 @@ pub fn reconcile_emergency(state_dir: &Path, sink: EmergencySink<'_>) -> Result<
     require_preprovisioned_state_dir(state_dir)?;
     match sink {
         EmergencySink::Filesystem(path) => require_append_only_sink(path)?,
-        EmergencySink::Unix(config) => {
-            config.connect()?;
-        }
+        EmergencySink::Unix(_) => {}
     }
     reconcile_verified(state_dir, sink)
 }
@@ -466,6 +475,12 @@ fn reconcile_verified(state_dir: &Path, sink: EmergencySink<'_>) -> Result<Strin
     let state = store.read().map_err(|e| format!("emergency state: {e}"))?;
     if state.schema != 1 || state.boot_id != boot_id()? {
         return Err("emergency state is from another boot; operator recovery is required".into());
+    }
+    if state.status == EmergencyStatus::Reconciled {
+        store.unlink_cas(state.generation)?;
+        return Ok(
+            "emergency reconciled receipt_persisted=true normal_operations_allowed=true".into(),
+        );
     }
     if !matches!(
         state.status,
@@ -491,6 +506,7 @@ fn reconcile_verified(state_dir: &Path, sink: EmergencySink<'_>) -> Result<Strin
         None,
     )?;
     append_selected_transition(&mut state, sink, "reconcile", operation_id, &record)?;
+    state.status = EmergencyStatus::Reconciled;
     let expected = state.generation;
     store.write_cas(Some(expected), &mut state)?;
     store.unlink_cas(state.generation)?;
@@ -534,10 +550,7 @@ where
     if state.boot_id != boot_id()? || uptime_ns()? >= state.deadline_uptime_ns {
         return Err("emergency permit boot or monotonic deadline is invalid".into());
     }
-    if state.action != action
-        || state.resource != resource
-        || state.status != EmergencyStatus::Activated
-    {
+    if state.action != action || state.resource != resource {
         return Err("emergency permit action/resource is out of scope or already consumed".into());
     }
     let operation_digest = super::digest(
@@ -549,6 +562,44 @@ where
     );
     let mut operation_id = [0; 16];
     operation_id.copy_from_slice(&operation_digest[..16]);
+    if matches!(
+        state.status,
+        EmergencyStatus::IntentDurable | EmergencyStatus::Unknown
+    ) {
+        let Some((sequence, event, succeeded)) =
+            observe_terminal_event(state_dir, operation_id, action)?
+        else {
+            state.status = EmergencyStatus::Quarantined;
+            let expected = state.generation;
+            store.write_cas(Some(expected), state)?;
+            return Err("emergency effect cannot be safely replayed and no exact terminal witness exists; state quarantined for operator recovery".into());
+        };
+        state.main_witness_first = Some(sequence);
+        state.main_witness_last = Some(sequence);
+        state.terminal_event_id = Some(super::hex(&event));
+        let outcome = canonical_transition(
+            state,
+            "outcome",
+            state.operation_id.as_deref(),
+            state.terminal_event_id.as_deref(),
+            Some(succeeded),
+        )?;
+        append_selected_transition(state, sink, "outcome", operation_id, &outcome)?;
+        state.status = EmergencyStatus::Terminal;
+        let expected = state.generation;
+        store.write_cas(Some(expected), state)?;
+        return if succeeded {
+            Ok("emergency execution recovered terminal=true reconciliation_required=true".into())
+        } else {
+            Err(
+                "emergency execution recovered a witnessed failed outcome; reconciliation required"
+                    .into(),
+            )
+        };
+    }
+    if state.status != EmergencyStatus::Activated {
+        return Err("emergency permit action/resource is out of scope or already consumed".into());
+    }
     state.operation_id = Some(super::hex(&operation_id));
     let intent = canonical_transition(state, "intent", state.operation_id.as_deref(), None, None)?;
     append_selected_transition(state, sink, "intent", operation_id, &intent)?;
@@ -704,6 +755,39 @@ fn find_terminal_event(
         .ok_or_else(|| "main journal lacks exact terminal evidence for emergency operation".into())
 }
 
+fn observe_terminal_event(
+    state_dir: &Path,
+    operation_id: [u8; 16],
+    action: &str,
+) -> Result<Option<(u64, [u8; 16], bool)>, String> {
+    if !secure_exists(&state_dir.join("journal-id"))? {
+        return Ok(None);
+    }
+    let expected = emergency_witness_action(action)?;
+    let id_text = String::from_utf8(secure_read(&state_dir.join("journal-id"), 4096)?)
+        .map_err(|e| e.to_string())?;
+    let id = decode_hex::<16>(id_text.trim())?;
+    let mut reader =
+        ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
+            .map_err(|e| e.to_string())?;
+    let mut terminal = None;
+    while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
+        let record = ferro_core::witness::decode_record(&bytes).map_err(|e| e.to_string())?;
+        if record.request_id() == operation_id
+            && record.action() == expected
+            && record.stage() == ferro_core::witness::WitnessStage::Outcome
+        {
+            if terminal.is_some() {
+                return Err("multiple terminal events exist for the emergency operation ID".into());
+            }
+            let succeeded = record.outcome() == ferro_core::witness::WitnessOutcome::Succeeded;
+            terminal = Some((record.sequence(), record.event_id(), succeeded));
+        }
+    }
+    reader.finish().map_err(|e| e.to_string())?;
+    Ok(terminal)
+}
+
 fn emergency_witness_action(action: &str) -> Result<ferro_core::witness::WitnessAction, String> {
     match action {
         "container.stop" => Ok(ferro_core::witness::WitnessAction::ContainerStop),
@@ -855,6 +939,7 @@ fn append_selected_transition(
                 .unwrap_or([0; 32]);
             let request = super::emergency_sink::SinkRequest {
                 version: 1,
+                query_head: false,
                 journal_id: config.journal_id,
                 expected_sequence: state.sink_sequence,
                 expected_head,
@@ -1124,7 +1209,7 @@ mod tests {
             store_path.clone(),
             sink_key_path.clone(),
             journal_id,
-            1,
+            2,
         );
         wait_for_socket(&socket);
         activate_verified(EmergencyActivate {
@@ -1191,7 +1276,7 @@ mod tests {
         let reconcile_server = start_unix_sink(
             socket.clone(),
             store_path.clone(),
-            sink_key_path,
+            sink_key_path.clone(),
             journal_id,
             1,
         );
@@ -1199,6 +1284,75 @@ mod tests {
         let restarted_config = persisted_unix_sink(&state_dir).unwrap();
         reconcile_verified(&state_dir, EmergencySink::Unix(&restarted_config)).unwrap();
         reconcile_server.join().unwrap();
+        assert!(ensure_reconciled(&state_dir).is_ok());
+
+        let second_nonce = "unix-second-0123456789";
+        let second_payload = format!("FERROCRATE-EMERGENCY-APPROVAL-V1\n{}\ncontainer.stop\ncontainer:unix\n{second_nonce}\n{deadline}\n", boot_id().unwrap());
+        protected(
+            &approval_path,
+            &serde_json::to_vec(&serde_json::json!({
+                "payload": second_payload,
+                "signature": super::super::hex(&recovery.sign(second_payload.as_bytes()).to_bytes())
+            }))
+            .unwrap(),
+        );
+        let second_activation = start_unix_sink(
+            socket.clone(),
+            store_path.clone(),
+            sink_key_path.clone(),
+            journal_id,
+            2,
+        );
+        wait_for_socket(&socket);
+        activate_verified(EmergencyActivate {
+            origin: "console",
+            state_dir: &state_dir,
+            sink: EmergencySink::Unix(&config),
+            recovery_public_key: &recovery_path,
+            recovery_approval: &approval_path,
+            action: "container.stop",
+            resource: "container:unix",
+            nonce: second_nonce,
+            deadline_uptime_ns: deadline,
+        })
+        .unwrap();
+        second_activation.join().unwrap();
+        assert_eq!(
+            EmergencyStateStore::open(&state_dir)
+                .unwrap()
+                .read()
+                .unwrap()
+                .sink_sequence,
+            5
+        );
+        let second_execute = start_unix_sink(
+            socket.clone(),
+            store_path.clone(),
+            sink_key_path.clone(),
+            journal_id,
+            2,
+        );
+        wait_for_socket(&socket);
+        let pinned = persisted_unix_sink(&state_dir).unwrap();
+        execute_verified(
+            &state_dir,
+            EmergencySink::Unix(&pinned),
+            "container.stop",
+            "container:unix",
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        second_execute.join().unwrap();
+        let second_reconcile = start_unix_sink(
+            socket.clone(),
+            store_path.clone(),
+            sink_key_path.clone(),
+            journal_id,
+            1,
+        );
+        wait_for_socket(&socket);
+        reconcile_verified(&state_dir, EmergencySink::Unix(&pinned)).unwrap();
+        second_reconcile.join().unwrap();
         assert!(ensure_reconciled(&state_dir).is_ok());
 
         let file = fs::OpenOptions::new()
@@ -1375,6 +1529,8 @@ mod tests {
         let attacker = temp.path().join("attacker");
         fs::create_dir(&state).unwrap();
         fs::create_dir(&attacker).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&attacker, fs::Permissions::from_mode(0o700)).unwrap();
         let directory = ferro_core::authorization::SecureDirectory::open(&state).unwrap();
         let retained = temp.path().join("retained");
         fs::rename(&state, &retained).unwrap();
@@ -1428,5 +1584,47 @@ mod tests {
         let mut concurrent = store.read().unwrap();
         store.write_cas(Some(stale), &mut concurrent).unwrap();
         assert!(store.write_cas(Some(stale), &mut state).is_err());
+
+        let mut reconciled = store.read().unwrap();
+        reconciled.boot_id = boot_id().unwrap();
+        reconciled.status = EmergencyStatus::Reconciled;
+        let generation = reconciled.generation;
+        store.write_cas(Some(generation), &mut reconciled).unwrap();
+        let config = super::super::emergency_sink::UnixSinkConfig::from_pinned(
+            temp.path().join("absent.sock"),
+            [3; 32],
+            [4; 16],
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+        reconcile_verified(&state_dir, EmergencySink::Unix(&config)).unwrap();
+        assert!(!store.exists().unwrap());
+
+        reconciled.status = EmergencyStatus::IntentDurable;
+        reconciled.deadline_uptime_ns = uptime_ns().unwrap() + 30_000_000_000;
+        let digest = super::super::digest(
+            format!(
+                "FERROCRATE-EMERGENCY-OP-V1\0{}\0{}\0{}\0{}",
+                reconciled.boot_id, reconciled.nonce, reconciled.action, reconciled.resource
+            )
+            .as_bytes(),
+        );
+        reconciled.operation_id = Some(super::super::hex(&digest[..16]));
+        store.write_cas(None, &mut reconciled).unwrap();
+        let called = std::sync::atomic::AtomicBool::new(false);
+        let error = execute_verified(
+            &state_dir,
+            EmergencySink::Unix(&config),
+            "container.stop",
+            "container:x",
+            |_, _| {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("quarantined"));
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(store.read().unwrap().status, EmergencyStatus::Quarantined);
     }
 }

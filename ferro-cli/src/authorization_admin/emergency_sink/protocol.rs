@@ -9,6 +9,8 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct SinkRequest {
     pub version: u8,
+    #[serde(default)]
+    pub query_head: bool,
     pub journal_id: [u8; 16],
     pub expected_sequence: u64,
     pub expected_head: [u8; 32],
@@ -33,6 +35,13 @@ pub struct SinkReceipt {
 
 impl SinkRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if self.query_head {
+            return if self.version == 1 && self.record.is_empty() {
+                Ok(())
+            } else {
+                Err("invalid emergency sink head query".into())
+            };
+        }
         if self.version != 1 || self.emergency_nonce.is_empty() || self.emergency_nonce.len() > 128
         {
             return Err("invalid emergency sink request metadata".into());

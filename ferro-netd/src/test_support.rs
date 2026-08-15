@@ -55,6 +55,10 @@ pub struct NetdTestSnapshot {
     pub endpoints: BTreeMap<String, String>,
     pub routes: BTreeMap<String, Vec<String>>,
     pub receipts: Vec<GrantReceiptSummary>,
+    pub quarantined: Vec<String>,
+    pub intents: BTreeMap<String, String>,
+    pub topology_exact: bool,
+    pub ownership_consistent: bool,
 }
 impl NetdServer {
     pub fn deterministic(uid: u32, policy: Policy, kernel_state: PathBuf) -> Self {
@@ -77,6 +81,16 @@ impl NetdServer {
         server
     }
     pub fn test_snapshot(&self) -> NetdTestSnapshot {
+        let topology_exact = self.effect_receipts.values().all(|receipt| {
+            self.kernel.observe_effect(receipt) == crate::kernel_ops::LiveEffectObservation::Exact
+        });
+        let ownership_consistent = self.overlays.iter().all(|overlay| {
+            self.effect_receipts
+                .contains_key(&format!("overlay:{overlay}"))
+        }) && self.endpoints.keys().all(|endpoint| {
+            self.effect_receipts
+                .contains_key(&format!("endpoint:{endpoint}"))
+        });
         NetdTestSnapshot {
             overlays: self.overlays.iter().cloned().collect(),
             endpoints: self.endpoints.clone(),
@@ -86,8 +100,28 @@ impl NetdServer {
                 .as_ref()
                 .map(GrantVerifier::receipt_summaries)
                 .unwrap_or_default(),
+            quarantined: self.quarantined.iter().cloned().collect(),
+            intents: self
+                .overlay_intents
+                .iter()
+                .map(|(identity, intent)| (identity.clone(), intent.phase.clone()))
+                .collect(),
+            topology_exact,
+            ownership_consistent,
         }
     }
+}
+
+pub fn normalized_request_parameters(
+    request: &crate::protocol::NetdRequest,
+) -> Result<
+    (
+        ferro_core::authorization::helper_grant::GrantAction,
+        ferro_core::authorization::helper_grant::GrantParameters,
+    ),
+    crate::protocol::RejectionCode,
+> {
+    crate::request_binding::request_parameters(request)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -311,6 +311,8 @@ impl NetdServer {
             self.mark_overlay_intent(&identity, "routes_applied")
                 .map_err(|_| RejectionCode::Busy)?;
             self.overlays.insert(overlay.overlay_id.clone());
+            self.addresses
+                .insert(overlay.overlay_id.clone(), overlay.addresses);
             self.routes
                 .insert(overlay.overlay_id.clone(), overlay.routes);
             self.effect_receipts
@@ -431,6 +433,186 @@ mod tests {
             }
         ));
         assert_eq!(send(&mut server, &key, desired), NetdResponse::Applied);
+    }
+
+    #[test]
+    fn actual_legacy_overlay_phase_fault_matrix_reopens_safely() {
+        #[derive(Clone)]
+        struct Case {
+            name: &'static str,
+            prior_mode: Option<bool>,
+            desired_mode: Option<bool>,
+            phase: &'static str,
+        }
+        let mut cases = Vec::new();
+        for phase in [
+            "bridge_created",
+            "addresses_applied",
+            "stale_routes_removed",
+            "routes_applied",
+        ] {
+            cases.push(Case {
+                name: "create",
+                prior_mode: None,
+                desired_mode: Some(false),
+                phase,
+            });
+        }
+        for (name, prior_mode, desired_mode) in [
+            ("create", None, Some(false)),
+            ("update", Some(false), Some(false)),
+            ("bridge-to-wg", Some(false), Some(true)),
+            ("wg-to-bridge", Some(true), Some(false)),
+            ("remove", Some(true), None),
+        ] {
+            cases.push(Case {
+                name,
+                prior_mode,
+                desired_mode,
+                phase: "ownership_persist",
+            });
+        }
+        for phase in [
+            "addresses_applied",
+            "stale_routes_removed",
+            "routes_applied",
+        ] {
+            cases.push(Case {
+                name: "update",
+                prior_mode: Some(false),
+                desired_mode: Some(false),
+                phase,
+            });
+        }
+        for phase in [
+            "wireguard_configured",
+            "forwarding_enabled",
+            "addresses_applied",
+            "stale_routes_removed",
+            "routes_applied",
+        ] {
+            cases.push(Case {
+                name: "bridge-to-wg",
+                prior_mode: Some(false),
+                desired_mode: Some(true),
+                phase,
+            });
+        }
+        for phase in [
+            "addresses_applied",
+            "stale_routes_removed",
+            "stale_wireguard_removed",
+            "routes_applied",
+        ] {
+            cases.push(Case {
+                name: "wg-to-bridge",
+                prior_mode: Some(true),
+                desired_mode: Some(false),
+                phase,
+            });
+        }
+        for phase in [
+            "routes_removed",
+            "addresses_removed",
+            "wireguard_removed",
+            "bridge_removed",
+        ] {
+            cases.push(Case {
+                name: "remove",
+                prior_mode: Some(true),
+                desired_mode: None,
+                phase,
+            });
+        }
+        for case in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let key = SigningKey::from_bytes(&[46; 32]);
+            let public =
+                base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+            let kernel_path = directory.path().join("kernel.json");
+            let journal_path = directory.path().join("ownership.json");
+            let faults = crate::test_support::FaultHandle::default();
+            let make_server = |faults: crate::test_support::FaultHandle| {
+                NetdServer::deterministic_with_faults(
+                    1001,
+                    Policy::new("cluster".into(), "node".into(), &public).unwrap(),
+                    kernel_path.clone(),
+                    faults,
+                )
+                .with_authorization_identity(
+                    AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+                    "boot-a",
+                )
+                .load_journal(journal_path.clone())
+                .unwrap()
+            };
+            let overlay = |mode: bool, revision: u64| OverlayState {
+                overlay_id: "matrix-overlay".into(),
+                routes: vec![format!("10.{revision}.0.0/16")],
+                peers: vec![],
+                wireguard: Some(mode),
+                addresses: vec![format!("10.{revision}.0.1/24")],
+            };
+            let desired = |revision: u64, mode: Option<bool>| DesiredState {
+                cluster_id: "cluster".into(),
+                cluster_epoch: 1,
+                revision,
+                overlays: mode
+                    .into_iter()
+                    .map(|mode| overlay(mode, revision))
+                    .collect(),
+                signature: vec![],
+                lease_expires_unix: 500,
+            };
+            let mut server = make_server(faults.clone());
+            if let Some(mode) = case.prior_mode {
+                assert_eq!(
+                    send(&mut server, &key, desired(1, Some(mode))),
+                    NetdResponse::Applied,
+                    "{} baseline",
+                    case.name
+                );
+            }
+            if case.phase == "ownership_persist" {
+                faults.fail_once(crate::test_support::FaultPoint::OwnershipPersist);
+            } else {
+                faults.fail_phase_once(case.phase);
+            }
+            let target = desired(2, case.desired_mode);
+            assert!(
+                matches!(
+                    send(&mut server, &key, target.clone()),
+                    NetdResponse::Rejected { .. }
+                ),
+                "{}:{}",
+                case.name,
+                case.phase
+            );
+            drop(server);
+            let mut reopened = make_server(Default::default());
+            let identity = "overlay:matrix-overlay";
+            let quarantined = reopened.overlay_is_quarantined("matrix-overlay");
+            let exact_owned = reopened
+                .effect_receipts
+                .get(identity)
+                .is_some_and(|receipt| {
+                    reopened.kernel.observe_effect(receipt)
+                        == crate::kernel_ops::LiveEffectObservation::Exact
+                });
+            assert!(
+                quarantined || exact_owned || !reopened.overlays.contains("matrix-overlay"),
+                "{}:{} reopened to dishonest ownership",
+                case.name,
+                case.phase
+            );
+            let replay = send(&mut reopened, &key, target);
+            assert!(
+                quarantined || matches!(replay, NetdResponse::Applied),
+                "{}:{} replay wedged: {replay:?}",
+                case.name,
+                case.phase
+            );
+        }
     }
 
     fn send(server: &mut NetdServer, key: &SigningKey, desired: DesiredState) -> NetdResponse {

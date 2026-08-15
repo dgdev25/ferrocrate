@@ -12,7 +12,7 @@ mod intent_tests {
     };
 
     #[test]
-    fn phase_persist_fault_reopens_to_exact_desired_state() {
+    fn supplemental_phase_marker_fault_reopens_to_exact_desired_state() {
         let directory = tempfile::tempdir().unwrap();
         let kernel_path = directory.path().join("kernel.json");
         let journal = directory.path().join("ownership.json");

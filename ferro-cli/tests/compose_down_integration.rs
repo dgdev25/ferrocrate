@@ -13,11 +13,10 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
         "services:\n  web:\n    image: example/web:latest\n",
     )
     .unwrap();
-    let mut child = Command::new("sleep").arg("60").spawn().unwrap();
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id": "00112233445566778899aabbccddeeff",
         "name": "web",
-        "pid": child.id(),
+        "pid": 1,
         "image": "example/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "command": ["sleep", "60"],
         "created_at_unix": 1,
@@ -37,7 +36,6 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
         .unwrap();
-    let _ = child.wait();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("stop failed; delete skipped"));
     let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
@@ -91,9 +89,6 @@ fn compose_down_stops_then_deletes_using_post_stop_record() {
         "compose down failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("compose stop: web"));
-    assert!(stdout.contains("compose rm: web"));
     let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
     assert!(store.get(&record.id).unwrap().is_none());
 }

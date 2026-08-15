@@ -3067,7 +3067,7 @@ impl ContainerRuntime {
         expected_status: &str,
         next_status: &str,
     ) -> Result<(), RuntimeError> {
-        let result = if let Some(intent) = intent {
+        let result = if intent.is_some() {
             self.phase_hook
                 .reached(
                     "container.lifecycle-effect",
@@ -3076,15 +3076,31 @@ impl ContainerRuntime {
                 .map_err(|_| {
                     RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
                 })?;
+            let operation_id = self
+                .store
+                .get(id)?
+                .and_then(|record| record.pending_mutation.map(|reservation| reservation.operation_id))
+                .ok_or(ContainerStoreError::MutationConflict)?;
             self.store.transition_status_for_mutation(
                 id,
-                *intent.operation_id().as_bytes(),
+                operation_id,
                 proof.canonical().resource_generation(),
                 expected_status,
                 next_status,
             )
         } else {
-            self.store.update_status(id, next_status)
+            let operation_id = self
+                .store
+                .get(id)?
+                .and_then(|record| record.pending_mutation.map(|reservation| reservation.operation_id))
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            self.store.transition_status_for_mutation(
+                id,
+                operation_id,
+                proof.canonical().resource_generation(),
+                expected_status,
+                next_status,
+            )
         };
         result.map_err(RuntimeError::PostEffectPersistence)
     }
@@ -3306,16 +3322,30 @@ impl ContainerRuntime {
         status: &str,
         intent: Option<&crate::witness::DurableIntent>,
     ) -> Result<(), RuntimeError> {
-        if let Some(intent) = intent {
+        if intent.is_some() {
             let mut record = self
                 .store
                 .get(id)?
                 .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
             record.status = status.to_owned();
-            self.store
-                .put_for_mutation(&record, *intent.operation_id().as_bytes())?;
+            let operation_id = record
+                .pending_mutation
+                .as_ref()
+                .map(|reservation| reservation.operation_id)
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            self.store.put_for_mutation(&record, operation_id)?;
         } else {
-            self.store.update_status(id, status)?;
+            let mut record = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
+            record.status = status.to_owned();
+            let operation_id = record
+                .pending_mutation
+                .as_ref()
+                .map(|reservation| reservation.operation_id)
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            self.store.put_for_mutation(&record, operation_id)?;
         }
         Ok(())
     }

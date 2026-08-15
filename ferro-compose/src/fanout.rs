@@ -9,6 +9,7 @@ pub enum FanoutAction {
     ContainerDelete,
     ImagePull,
     VolumeCreate,
+    ImageBuild,
 }
 
 impl FanoutAction {
@@ -19,6 +20,7 @@ impl FanoutAction {
             Self::ContainerDelete => 3,
             Self::ImagePull => 4,
             Self::VolumeCreate => 5,
+            Self::ImageBuild => 6,
         }
     }
 }
@@ -150,7 +152,10 @@ impl FanoutPlan {
         mutation: ServiceMutation,
     ) -> Result<Self, FanoutError> {
         self.verify_child(predecessor, predecessor.deadline_unix_ms)?;
-        let next_ordinal = predecessor.ordinal.checked_add(1).ok_or(FanoutError::Replay)?;
+        let next_ordinal = predecessor
+            .ordinal
+            .checked_add(1)
+            .ok_or(FanoutError::Replay)?;
         self.commitments
             .get(next_ordinal as usize)
             .filter(|(service, action)| service == &mutation.service && *action == mutation.action)
@@ -168,11 +173,9 @@ impl FanoutPlan {
         plan.update(mutation.request_digest);
         let digest: [u8; 32] = plan.finalize().into();
         let mut idem = Sha256::new();
-        idem.update(b"ferrocrate/compose-dependent-idempotency/v1");
+        idem.update(b"ferrocrate/compose-idempotency/v1");
         idem.update(predecessor.parent_request_id);
-        idem.update(self.digest);
-        idem.update(predecessor.child_id);
-        idem.update(predecessor_outcome);
+        idem.update(digest);
         idem.update(next_ordinal.to_be_bytes());
         idem.update([mutation.action.code()]);
         idem.update((mutation.service.len() as u64).to_be_bytes());
@@ -180,7 +183,7 @@ impl FanoutPlan {
         idem.update(mutation.request_digest);
         let idempotency_key: [u8; 32] = idem.finalize().into();
         let mut id = Sha256::new();
-        id.update(b"ferrocrate/compose-dependent-child/v1");
+        id.update(b"ferrocrate/compose-child/v1");
         id.update(idempotency_key);
         id.update(predecessor.attempt.to_be_bytes());
         let id_hash: [u8; 32] = id.finalize().into();
@@ -276,7 +279,11 @@ impl FanoutPlan {
                 }
             })
             .collect();
-        Ok(Self { digest, children, commitments })
+        Ok(Self {
+            digest,
+            children,
+            commitments,
+        })
     }
     pub fn children(&self) -> &[FanoutChild] {
         &self.children
@@ -371,7 +378,6 @@ impl FanoutResult {
         ok > 0 && ok < self.statuses.len()
     }
 }
-
 
 /// Execute every child through the same verified, durably claimed command
 /// path. A denial or failure is recorded per child and never aborts or erases

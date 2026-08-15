@@ -1,6 +1,6 @@
 use ferro_compose::{
-    execute_fanout, FanoutAction, FanoutError, FanoutExecutionError, FanoutPlan,
-    FanoutReplayStore, FanoutResult, FanoutStatus, ServiceMutation,
+    execute_fanout, FanoutAction, FanoutError, FanoutExecutionError, FanoutPlan, FanoutReplayStore,
+    FanoutResult, FanoutStatus, ServiceMutation,
 };
 
 fn mutation(name: &str, digest: u8) -> ServiceMutation {
@@ -16,15 +16,24 @@ fn command_path_preserves_success_denial_and_failure_for_every_child() {
         [5; 32],
         10_000,
         0,
-        [mutation("ok", 1), mutation("denied", 2), mutation("failed", 3)],
+        [
+            mutation("ok", 1),
+            mutation("denied", 2),
+            mutation("failed", 3),
+        ],
     )
     .unwrap();
     let replay = FanoutReplayStore::open(temp.path()).unwrap();
-    let result = execute_fanout(&plan, &replay, || 9_000, |child| match child.service() {
-        "ok" => Ok(()),
-        "denied" => Err(FanoutExecutionError::Denied("policy-denied".into())),
-        _ => Err(FanoutExecutionError::Failed("executor-failed".into())),
-    });
+    let result = execute_fanout(
+        &plan,
+        &replay,
+        || 9_000,
+        |child| match child.service() {
+            "ok" => Ok(()),
+            "denied" => Err(FanoutExecutionError::Denied("policy-denied".into())),
+            _ => Err(FanoutExecutionError::Failed("executor-failed".into())),
+        },
+    );
 
     assert_eq!(result.statuses().len(), 3);
     assert_eq!(result.denied(), 1);
@@ -38,23 +47,36 @@ fn command_path_rejects_restart_replay_and_executes_attempt_scoped_retry() {
     let first = FanoutPlan::derive([6; 16], 2, [7; 32], 10_000, 0, [mutation("web", 1)]).unwrap();
     let retry = FanoutPlan::derive([6; 16], 2, [7; 32], 10_000, 1, [mutation("web", 1)]).unwrap();
     let store = FanoutReplayStore::open(temp.path()).unwrap();
-    assert_eq!(execute_fanout(&first, &store, || 9_000, |_| Ok(())).failed(), 0);
+    assert_eq!(
+        execute_fanout(&first, &store, || 9_000, |_| Ok(())).failed(),
+        0
+    );
     drop(store);
 
     let reopened = FanoutReplayStore::open(temp.path()).unwrap();
     let mut replay_executed = false;
-    let replay = execute_fanout(&first, &reopened, || 9_000, |_| {
-        replay_executed = true;
-        Ok(())
-    });
+    let replay = execute_fanout(
+        &first,
+        &reopened,
+        || 9_000,
+        |_| {
+            replay_executed = true;
+            Ok(())
+        },
+    );
     assert_eq!(replay.failed(), 1);
     assert!(!replay_executed);
 
     let mut retry_executed = false;
-    let retried = execute_fanout(&retry, &reopened, || 9_000, |_| {
-        retry_executed = true;
-        Ok(())
-    });
+    let retried = execute_fanout(
+        &retry,
+        &reopened,
+        || 9_000,
+        |_| {
+            retry_executed = true;
+            Ok(())
+        },
+    );
     assert_eq!(retried.failed(), 0);
     assert!(retry_executed);
 }
@@ -88,10 +110,16 @@ fn dependent_delete_is_bound_to_stop_receipt_and_committed_graph_position() {
             ServiceMutation::new("web", FanoutAction::ContainerDelete, [8; 32]),
         )
         .unwrap();
-    assert_eq!(first.children()[0].parent_request_id(), stop.parent_request_id());
+    assert_eq!(
+        first.children()[0].parent_request_id(),
+        stop.parent_request_id()
+    );
     assert_eq!(first.children()[0].ordinal(), 1);
     assert_eq!(first.children()[0].policy_digest(), stop.policy_digest());
-    assert_ne!(first.children()[0].child_id(), changed_receipt.children()[0].child_id());
+    assert_ne!(
+        first.children()[0].child_id(),
+        changed_receipt.children()[0].child_id()
+    );
     assert!(matches!(
         root.derive_dependent(
             stop,
@@ -111,7 +139,7 @@ fn dependent_prerequisites_advance_only_through_committed_graph() {
         10_000,
         0,
         [
-            ServiceMutation::new("web-image", FanoutAction::ImagePull, [1; 32]),
+            ServiceMutation::new("web-image", FanoutAction::ImageBuild, [1; 32]),
             ServiceMutation::new("web-data", FanoutAction::VolumeCreate, [2; 32]),
             ServiceMutation::new("web", FanoutAction::ContainerRun, [0; 32]),
         ],
@@ -132,7 +160,10 @@ fn dependent_prerequisites_advance_only_through_committed_graph() {
         )
         .unwrap();
     assert_eq!(run.children()[0].ordinal(), 2);
-    assert_eq!(run.children()[0].parent_request_id(), root.children()[0].parent_request_id());
+    assert_eq!(
+        run.children()[0].parent_request_id(),
+        root.children()[0].parent_request_id()
+    );
     assert!(matches!(
         volume.derive_dependent(
             &volume.children()[0],

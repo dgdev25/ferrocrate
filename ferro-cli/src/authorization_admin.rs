@@ -5,8 +5,8 @@ pub mod emergency_sink;
 mod witness;
 
 pub use emergency::{
-    activate_emergency, ensure_reconciled, execute_emergency, reconcile_emergency,
-    EmergencyActivate, EmergencyAuthorityMaterial,
+    activate_emergency, ensure_reconciled, execute_emergency, persisted_unix_sink,
+    reconcile_emergency, EmergencyActivate, EmergencyAuthorityMaterial, EmergencySink,
 };
 pub use witness::{
     checkpoint, checkpoint_on, open_required_journal, rotate_key, rotate_key_on, show, verify,

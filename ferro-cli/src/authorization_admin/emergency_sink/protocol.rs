@@ -11,6 +11,7 @@ pub struct SinkRequest {
     pub version: u8,
     pub journal_id: [u8; 16],
     pub expected_sequence: u64,
+    pub expected_head: [u8; 32],
     pub emergency_nonce: String,
     pub operation_id: [u8; 16],
     pub record: Vec<u8>,

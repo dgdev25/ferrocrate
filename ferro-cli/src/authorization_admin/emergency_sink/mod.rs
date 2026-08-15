@@ -10,6 +10,7 @@ use ed25519_dalek::VerifyingKey;
 use std::path::{Path, PathBuf};
 
 /// Explicit production selection for a separately administered Unix sink.
+#[derive(Clone, Debug)]
 pub struct UnixSinkConfig {
     pub socket: PathBuf,
     pub receipt_key: VerifyingKey,
@@ -59,5 +60,20 @@ impl UnixSinkConfig {
 
     pub fn connect(&self) -> Result<UnixAppendOnlySink, String> {
         UnixAppendOnlySink::open(&self.socket, self.server_uid, self.receipt_key)
+    }
+
+    pub fn from_pinned(
+        socket: PathBuf,
+        receipt_key: [u8; 32],
+        journal_id: [u8; 16],
+        server_uid: u32,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            socket,
+            receipt_key: VerifyingKey::from_bytes(&receipt_key)
+                .map_err(|_| "invalid pinned sink receipt public key")?,
+            journal_id,
+            server_uid,
+        })
     }
 }

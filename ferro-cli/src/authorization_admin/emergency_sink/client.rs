@@ -91,6 +91,7 @@ mod tests {
             version: 1,
             journal_id: [3; 16],
             expected_sequence: 0,
+            expected_head: [0; 32],
             emergency_nonce: "nonce".into(),
             operation_id: [4; 16],
             record_hash: Sha256::digest(&record).into(),

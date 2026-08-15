@@ -17,13 +17,19 @@ const ALLOWED_ACTIONS: &[&str] = &["container.stop", "container.kill", "containe
 pub struct EmergencyActivate<'a> {
     pub origin: &'a str,
     pub state_dir: &'a Path,
-    pub sink: &'a Path,
+    pub sink: EmergencySink<'a>,
     pub recovery_public_key: &'a Path,
     pub recovery_approval: &'a Path,
     pub action: &'a str,
     pub resource: &'a str,
     pub nonce: &'a str,
     pub deadline_uptime_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+pub enum EmergencySink<'a> {
+    Filesystem(&'a Path),
+    Unix(&'a super::emergency_sink::UnixSinkConfig),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -38,8 +44,14 @@ struct EmergencyState {
     resource: String,
     nonce: String,
     sink: String,
+    #[serde(default = "default_sink_kind")]
+    sink_kind: String,
     sink_device: u64,
     sink_inode: u64,
+    #[serde(default)]
+    sink_receipt_key: Option<String>,
+    #[serde(default)]
+    sink_server_uid: Option<u32>,
     #[serde(default)]
     sink_journal_id: Option<String>,
     #[serde(default)]
@@ -62,6 +74,46 @@ struct EmergencyState {
     recovery_public_key: String,
 }
 
+fn default_sink_kind() -> String {
+    "filesystem".into()
+}
+
+impl EmergencyState {
+    fn accept_sink_receipt(
+        &mut self,
+        receipt: super::emergency_sink::SinkReceipt,
+        journal_id: [u8; 16],
+        operation_id: [u8; 16],
+        record_hash: [u8; 32],
+    ) -> Result<(), String> {
+        if receipt.journal_id != journal_id
+            || receipt.sequence != self.sink_sequence
+            || receipt.emergency_nonce != self.nonce
+            || receipt.operation_id != operation_id
+            || receipt.record_hash != record_hash
+        {
+            return Err("emergency sink receipt does not match the exact state transition".into());
+        }
+        let previous = self.sink_receipts.last().map_or([0; 32], |item| item.head);
+        let mut digest = sha2::Sha256::new();
+        use sha2::Digest;
+        digest.update(previous);
+        digest.update(record_hash);
+        let expected: [u8; 32] = digest.finalize().into();
+        if receipt.head != expected {
+            return Err("emergency sink receipt chain fork".into());
+        }
+        self.sink_journal_id = Some(super::hex(&journal_id));
+        self.sink_sequence = self
+            .sink_sequence
+            .checked_add(1)
+            .ok_or("sink sequence overflow")?;
+        self.sink_head = Some(super::hex(&receipt.head));
+        self.sink_receipts.push(receipt);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum EmergencyStatus {
@@ -70,6 +122,54 @@ enum EmergencyStatus {
     Terminal,
     Unknown,
     Quarantined,
+}
+
+#[derive(Serialize)]
+struct CanonicalSinkRecord<'a> {
+    schema: u8,
+    #[serde(rename = "type")]
+    record_type: &'a str,
+    boot_id: &'a str,
+    deadline_uptime_ns: u64,
+    action: &'a str,
+    resource: &'a str,
+    emergency_nonce: &'a str,
+    operation_id: Option<&'a str>,
+    terminal_event_id: Option<&'a str>,
+    succeeded: Option<bool>,
+}
+
+fn canonical_transition(
+    state: &EmergencyState,
+    record_type: &str,
+    operation_id: Option<&str>,
+    terminal_event_id: Option<&str>,
+    succeeded: Option<bool>,
+) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&CanonicalSinkRecord {
+        schema: 1,
+        record_type,
+        boot_id: &state.boot_id,
+        deadline_uptime_ns: state.deadline_uptime_ns,
+        action: &state.action,
+        resource: &state.resource,
+        emergency_nonce: &state.nonce,
+        operation_id,
+        terminal_event_id,
+        succeeded,
+    })
+    .map_err(|e| e.to_string())
+}
+
+fn transition_operation_id(base: [u8; 16], transition: &str) -> [u8; 16] {
+    let mut bytes = Vec::with_capacity(16 + transition.len() + 1);
+    bytes.extend_from_slice(&base);
+    bytes.push(0);
+    bytes.extend_from_slice(transition.as_bytes());
+    let digest = super::digest(&bytes);
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
 }
 
 struct EmergencyPermit(EmergencyState);
@@ -217,13 +317,24 @@ struct Approval {
 }
 
 pub fn activate_emergency(args: EmergencyActivate<'_>) -> Result<String, String> {
-    if args.origin != "console" {
+    let test_console = cfg!(feature = "test-console")
+        && args.origin == "test-console"
+        && std::env::var_os("FERROCRATE_TEST_CONSOLE").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+    if args.origin != "console" && !test_console {
         return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into());
     }
-    require_host_admin()?;
-    require_console()?;
+    if !test_console {
+        require_host_admin()?;
+        require_console()?;
+    }
     require_preprovisioned_state_dir(args.state_dir)?;
-    require_append_only_sink(args.sink)?;
+    match args.sink {
+        EmergencySink::Filesystem(path) => require_append_only_sink(path)?,
+        EmergencySink::Unix(config) => {
+            config.connect()?;
+        }
+    }
     activate_verified(args)
 }
 
@@ -261,16 +372,46 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
     if secure_exists(&nonce_marker)? {
         return Err("emergency recovery approval nonce has already been consumed".into());
     }
-    let sink =
-        fs::canonicalize(args.sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
     let state_root = fs::canonicalize(args.state_dir).map_err(|e| e.to_string())?;
-    if sink.starts_with(&state_root) {
-        return Err(
-            "emergency sink must be independently provisioned outside runtime state".into(),
-        );
-    }
-    let sink_metadata = fs::metadata(&sink).map_err(|e| e.to_string())?;
-    let state = EmergencyState {
+    let (
+        sink_name,
+        sink_kind,
+        sink_device,
+        sink_inode,
+        sink_receipt_key,
+        sink_server_uid,
+        sink_journal_id,
+    ) = match args.sink {
+        EmergencySink::Filesystem(path) => {
+            let sink =
+                fs::canonicalize(path).map_err(|e| format!("emergency sink unavailable: {e}"))?;
+            if sink.starts_with(&state_root) {
+                return Err(
+                    "emergency sink must be independently provisioned outside runtime state".into(),
+                );
+            }
+            let metadata = fs::metadata(&sink).map_err(|e| e.to_string())?;
+            (
+                sink.display().to_string(),
+                "filesystem".into(),
+                metadata.dev(),
+                metadata.ino(),
+                None,
+                None,
+                None,
+            )
+        }
+        EmergencySink::Unix(config) => (
+            config.socket.display().to_string(),
+            "unix".into(),
+            0,
+            0,
+            Some(super::hex(config.receipt_key.as_bytes())),
+            Some(config.server_uid),
+            Some(super::hex(&config.journal_id)),
+        ),
+    };
+    let mut state = EmergencyState {
         schema: 1,
         generation: 0,
         boot_id,
@@ -279,10 +420,13 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         action: args.action.into(),
         resource: args.resource.into(),
         nonce: args.nonce.into(),
-        sink: sink.display().to_string(),
-        sink_device: sink_metadata.dev(),
-        sink_inode: sink_metadata.ino(),
-        sink_journal_id: None,
+        sink: sink_name,
+        sink_kind,
+        sink_device,
+        sink_inode,
+        sink_receipt_key,
+        sink_server_uid,
+        sink_journal_id,
         sink_sequence: 0,
         sink_head: None,
         sink_receipts: Vec::new(),
@@ -295,13 +439,9 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         approval_signature: super::hex(&approval_signature),
         recovery_public_key: super::hex(&recovery_public_key),
     };
-    let receipt = serde_json::json!({"type":"activate","schema":1,"boot_id":state.boot_id,"deadline_uptime_ns":deadline,"action":state.action,"resource":state.resource,"nonce":state.nonce});
-    append_sink(
-        &sink,
-        &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
-    )?;
+    let receipt = canonical_transition(&state, "activate", None, None, None)?;
+    append_selected_transition(&mut state, args.sink, "activate", [0; 16], &receipt)?;
     persist_nonce(&nonce_marker)?;
-    let mut state = state;
     store.write_cas(None, &mut state)?;
     Ok(format!(
         "emergency active action={} resource={} deadline_uptime_ns={} reconciliation_required=true",
@@ -309,26 +449,24 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
     ))
 }
 
-pub fn reconcile_emergency(state_dir: &Path, sink: &Path) -> Result<String, String> {
-    require_host_admin()?;
-    require_console()?;
+pub fn reconcile_emergency(state_dir: &Path, sink: EmergencySink<'_>) -> Result<String, String> {
+    require_emergency_console()?;
     require_preprovisioned_state_dir(state_dir)?;
-    require_append_only_sink(sink)?;
+    match sink {
+        EmergencySink::Filesystem(path) => require_append_only_sink(path)?,
+        EmergencySink::Unix(config) => {
+            config.connect()?;
+        }
+    }
     reconcile_verified(state_dir, sink)
 }
 
-fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
+fn reconcile_verified(state_dir: &Path, sink: EmergencySink<'_>) -> Result<String, String> {
     let store = EmergencyStateStore::open(state_dir)?;
     let state = store.read().map_err(|e| format!("emergency state: {e}"))?;
     if state.schema != 1 || state.boot_id != boot_id()? {
         return Err("emergency state is from another boot; operator recovery is required".into());
     }
-    let canonical_sink =
-        fs::canonicalize(sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
-    if canonical_sink.display().to_string() != state.sink {
-        return Err("reconciliation sink does not match the activation receipt sink".into());
-    }
-    validate_sink_identity(&canonical_sink, &state)?;
     if !matches!(
         state.status,
         EmergencyStatus::Terminal | EmergencyStatus::Quarantined
@@ -338,18 +476,30 @@ fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
         );
     }
     verify_main_witness(state_dir, &state)?;
-    let receipt = serde_json::json!({"type":"reconcile","schema":1,"boot_id":state.boot_id,"action":state.action,"resource":state.resource,"nonce":state.nonce,"reconciled_uptime_ns":uptime_ns()?});
-    append_sink(
-        &canonical_sink,
-        &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
+    let mut state = state;
+    let operation_id = decode_hex::<16>(
+        state
+            .operation_id
+            .as_deref()
+            .ok_or("missing emergency operation ID")?,
     )?;
+    let record = canonical_transition(
+        &state,
+        "reconcile",
+        state.operation_id.as_deref(),
+        state.terminal_event_id.as_deref(),
+        None,
+    )?;
+    append_selected_transition(&mut state, sink, "reconcile", operation_id, &record)?;
+    let expected = state.generation;
+    store.write_cas(Some(expected), &mut state)?;
     store.unlink_cas(state.generation)?;
     Ok("emergency reconciled receipt_persisted=true normal_operations_allowed=true".into())
 }
 
 pub fn execute_emergency<F>(
     state_dir: &Path,
-    sink: &Path,
+    sink: EmergencySink<'_>,
     action: &str,
     resource: &str,
     execute: F,
@@ -357,16 +507,20 @@ pub fn execute_emergency<F>(
 where
     F: FnOnce([u8; 16], EmergencyAuthorityMaterial) -> Result<(), String>,
 {
-    require_host_admin()?;
-    require_console()?;
+    require_emergency_console()?;
     require_preprovisioned_state_dir(state_dir)?;
-    require_append_only_sink(sink)?;
+    match sink {
+        EmergencySink::Filesystem(path) => require_append_only_sink(path)?,
+        EmergencySink::Unix(config) => {
+            config.connect()?;
+        }
+    }
     execute_verified(state_dir, sink, action, resource, execute)
 }
 
 fn execute_verified<F>(
     state_dir: &Path,
-    sink: &Path,
+    sink: EmergencySink<'_>,
     action: &str,
     resource: &str,
     execute: F,
@@ -386,9 +540,6 @@ where
     {
         return Err("emergency permit action/resource is out of scope or already consumed".into());
     }
-    let canonical_sink =
-        fs::canonicalize(sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
-    validate_sink_identity(&canonical_sink, &state)?;
     let operation_digest = super::digest(
         format!(
             "FERROCRATE-EMERGENCY-OP-V1\0{}\0{}\0{}\0{}",
@@ -399,11 +550,8 @@ where
     let mut operation_id = [0; 16];
     operation_id.copy_from_slice(&operation_digest[..16]);
     state.operation_id = Some(super::hex(&operation_id));
-    let intent = serde_json::json!({"type":"intent","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"operation_id":state.operation_id,"uptime_ns":uptime_ns()?});
-    append_sink(
-        &canonical_sink,
-        &serde_json::to_vec(&intent).map_err(|e| e.to_string())?,
-    )?;
+    let intent = canonical_transition(state, "intent", state.operation_id.as_deref(), None, None)?;
+    append_selected_transition(state, sink, "intent", operation_id, &intent)?;
     state.status = EmergencyStatus::IntentDurable;
     let expected = state.generation;
     store.write_cas(Some(expected), state)?;
@@ -422,20 +570,23 @@ where
             state.status = EmergencyStatus::Unknown;
             let expected = state.generation;
             store.write_cas(Some(expected), state)?;
-            return Err(
-                "emergency outcome is unknown because no main-journal evidence was published"
-                    .into(),
-            );
+            return Err(match &result {
+                Ok(()) => "emergency outcome is unknown because no main-journal evidence was published".into(),
+                Err(error) => format!("emergency outcome is unknown because no main-journal evidence was published; executor error: {error}"),
+            });
         }
         state.main_witness_first = Some(before.saturating_add(1));
         state.main_witness_last = Some(after);
         state.terminal_event_id = Some(find_terminal_event(state_dir, operation_id, action)?);
     }
-    let outcome = serde_json::json!({"type":"outcome","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"operation_id":state.operation_id,"terminal_event_id":state.terminal_event_id,"succeeded":result.is_ok(),"uptime_ns":uptime_ns()?});
-    if let Err(error) = append_sink(
-        &canonical_sink,
-        &serde_json::to_vec(&outcome).map_err(|e| e.to_string())?,
-    ) {
+    let outcome = canonical_transition(
+        state,
+        "outcome",
+        state.operation_id.as_deref(),
+        state.terminal_event_id.as_deref(),
+        Some(result.is_ok()),
+    )?;
+    if let Err(error) = append_selected_transition(state, sink, "outcome", operation_id, &outcome) {
         state.status = EmergencyStatus::Unknown;
         let expected = state.generation;
         store.write_cas(Some(expected), state)?;
@@ -542,10 +693,9 @@ fn find_terminal_event(
         if record.request_id() == operation_id
             && record.action() == expected
             && record.stage() == ferro_core::witness::WitnessStage::Outcome
+            && terminal.replace(record.event_id()).is_some()
         {
-            if terminal.replace(record.event_id()).is_some() {
-                return Err("multiple terminal events exist for the emergency operation ID".into());
-            }
+            return Err("multiple terminal events exist for the emergency operation ID".into());
         }
     }
     reader.finish().map_err(|e| e.to_string())?;
@@ -665,6 +815,93 @@ fn append_sink(path: &Path, receipt: &[u8]) -> Result<(), String> {
     sink.append_durable(receipt)
 }
 
+fn append_selected_transition(
+    state: &mut EmergencyState,
+    selected: EmergencySink<'_>,
+    transition: &str,
+    base_operation_id: [u8; 16],
+    record: &[u8],
+) -> Result<(), String> {
+    match selected {
+        EmergencySink::Filesystem(path) => {
+            if state.sink_kind != "filesystem" {
+                return Err("emergency sink backend does not match activation".into());
+            }
+            let canonical =
+                fs::canonicalize(path).map_err(|e| format!("emergency sink unavailable: {e}"))?;
+            if canonical.display().to_string() != state.sink {
+                return Err("emergency sink does not match activation".into());
+            }
+            validate_sink_identity(&canonical, state)?;
+            append_sink(&canonical, record)
+        }
+        EmergencySink::Unix(config) => {
+            if state.sink_kind != "unix"
+                || config.socket.display().to_string() != state.sink
+                || state.sink_journal_id.as_deref() != Some(&super::hex(&config.journal_id))
+                || state.sink_receipt_key.as_deref()
+                    != Some(&super::hex(config.receipt_key.as_bytes()))
+                || state.sink_server_uid != Some(config.server_uid)
+            {
+                return Err("Unix emergency sink configuration does not match activation".into());
+            }
+            let operation_id = transition_operation_id(base_operation_id, transition);
+            let record_hash = super::digest(record);
+            let expected_head = state
+                .sink_head
+                .as_deref()
+                .map(decode_hex::<32>)
+                .transpose()?
+                .unwrap_or([0; 32]);
+            let request = super::emergency_sink::SinkRequest {
+                version: 1,
+                journal_id: config.journal_id,
+                expected_sequence: state.sink_sequence,
+                expected_head,
+                emergency_nonce: state.nonce.clone(),
+                operation_id,
+                record: record.to_vec(),
+                record_hash,
+            };
+            let receipt = config.connect()?.append(&request)?;
+            state.accept_sink_receipt(receipt, config.journal_id, operation_id, record_hash)
+        }
+    }
+}
+
+pub fn persisted_unix_sink(
+    state_dir: &Path,
+) -> Result<super::emergency_sink::UnixSinkConfig, String> {
+    let state = EmergencyStateStore::open(state_dir)?.read()?;
+    persisted_unix_config(&state)
+}
+
+fn persisted_unix_config(
+    state: &EmergencyState,
+) -> Result<super::emergency_sink::UnixSinkConfig, String> {
+    if state.sink_kind != "unix" {
+        return Err("emergency state does not select a Unix sink".into());
+    }
+    super::emergency_sink::UnixSinkConfig::from_pinned(
+        PathBuf::from(&state.sink),
+        decode_hex::<32>(
+            state
+                .sink_receipt_key
+                .as_deref()
+                .ok_or("missing pinned sink receipt key")?,
+        )?,
+        decode_hex::<16>(
+            state
+                .sink_journal_id
+                .as_deref()
+                .ok_or("missing pinned sink journal ID")?,
+        )?,
+        state
+            .sink_server_uid
+            .ok_or("missing pinned sink server UID")?,
+    )
+}
+
 fn validate_sink_file(file: &fs::File) -> Result<fs::Metadata, String> {
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file()
@@ -773,6 +1010,15 @@ fn require_console() -> Result<(), String> {
     Ok(())
 }
 
+fn require_emergency_console() -> Result<(), String> {
+    #[cfg(feature = "test-console")]
+    if std::env::var_os("FERROCRATE_TEST_CONSOLE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return Ok(());
+    }
+    require_host_admin()?;
+    require_console()
+}
+
 fn boot_id() -> Result<String, String> {
     fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map(|v| v.trim().to_owned())
@@ -802,6 +1048,169 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    fn start_unix_sink(
+        socket: PathBuf,
+        store: PathBuf,
+        key_path: PathBuf,
+        journal_id: [u8; 16],
+        requests: u64,
+    ) -> std::thread::JoinHandle<()> {
+        let uid = nix::unistd::geteuid().as_raw();
+        let handle = std::thread::spawn(move || {
+            super::super::emergency_sink::serve(super::super::emergency_sink::SinkServeConfig {
+                socket: &socket,
+                store: &store,
+                signing_key: &key_path,
+                journal_id,
+                expected_uid: uid,
+                requests: Some(requests),
+            })
+            .unwrap();
+        });
+        handle
+    }
+
+    fn wait_for_socket(path: &Path) {
+        for _ in 0..200 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("sink socket was not created");
+    }
+
+    #[test]
+    fn unix_sink_survives_process_restarts_and_persists_each_signed_transition() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let state_dir = temp.path().join("state");
+        let socket = temp.path().join("sink.sock");
+        let store_path = temp.path().join("sink.store");
+        let sink_key_path = temp.path().join("sink.key");
+        let sink_key = SigningKey::from_bytes(&[0x31; 32]);
+        protected(&store_path, b"");
+        protected(&sink_key_path, sink_key.as_bytes());
+        let journal_id = [0x42; 16];
+
+        let recovery = SigningKey::from_bytes(&[0x51; 32]);
+        let recovery_path = temp.path().join("recovery.pub");
+        protected(
+            &recovery_path,
+            super::super::hex(recovery.verifying_key().as_bytes()).as_bytes(),
+        );
+        let deadline = uptime_ns().unwrap() + 60_000_000_000;
+        let nonce = "unix-restart-0123456789";
+        let payload = format!("FERROCRATE-EMERGENCY-APPROVAL-V1\n{}\ncontainer.stop\ncontainer:unix\n{nonce}\n{deadline}\n", boot_id().unwrap());
+        let approval_path = temp.path().join("approval.json");
+        protected(
+            &approval_path,
+            &serde_json::to_vec(&serde_json::json!({
+                "payload": payload,
+                "signature": super::super::hex(&recovery.sign(payload.as_bytes()).to_bytes())
+            }))
+            .unwrap(),
+        );
+        let config = super::super::emergency_sink::UnixSinkConfig::from_pinned(
+            socket.clone(),
+            sink_key.verifying_key().to_bytes(),
+            journal_id,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+
+        let server = start_unix_sink(
+            socket.clone(),
+            store_path.clone(),
+            sink_key_path.clone(),
+            journal_id,
+            1,
+        );
+        wait_for_socket(&socket);
+        activate_verified(EmergencyActivate {
+            origin: "console",
+            state_dir: &state_dir,
+            sink: EmergencySink::Unix(&config),
+            recovery_public_key: &recovery_path,
+            recovery_approval: &approval_path,
+            action: "container.stop",
+            resource: "container:unix",
+            nonce,
+            deadline_uptime_ns: deadline,
+        })
+        .unwrap();
+        server.join().unwrap();
+        let activated = EmergencyStateStore::open(&state_dir)
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(activated.sink_sequence, 1);
+        assert_eq!(activated.sink_receipts.len(), 1);
+        assert!(execute_verified(
+            &state_dir,
+            EmergencySink::Unix(&config),
+            "container.stop",
+            "container:unix",
+            |_, _| Ok(())
+        )
+        .is_err());
+        assert_eq!(
+            EmergencyStateStore::open(&state_dir)
+                .unwrap()
+                .read()
+                .unwrap()
+                .status,
+            EmergencyStatus::Activated
+        );
+
+        let execute_server = start_unix_sink(
+            socket.clone(),
+            store_path.clone(),
+            sink_key_path.clone(),
+            journal_id,
+            2,
+        );
+        wait_for_socket(&socket);
+        let restarted_config = persisted_unix_sink(&state_dir).unwrap();
+        execute_verified(
+            &state_dir,
+            EmergencySink::Unix(&restarted_config),
+            "container.stop",
+            "container:unix",
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        execute_server.join().unwrap();
+        let terminal = EmergencyStateStore::open(&state_dir)
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(terminal.sink_sequence, 3);
+        assert_eq!(terminal.sink_receipts.len(), 3);
+
+        let reconcile_server = start_unix_sink(
+            socket.clone(),
+            store_path.clone(),
+            sink_key_path,
+            journal_id,
+            1,
+        );
+        wait_for_socket(&socket);
+        let restarted_config = persisted_unix_sink(&state_dir).unwrap();
+        reconcile_verified(&state_dir, EmergencySink::Unix(&restarted_config)).unwrap();
+        reconcile_server.join().unwrap();
+        assert!(ensure_reconciled(&state_dir).is_ok());
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(store_path)
+            .unwrap();
+        let restarted =
+            super::super::emergency_sink::UnixSinkStore::open(file, journal_id, sink_key).unwrap();
+        drop(restarted);
+    }
+
     #[test]
     fn activation_is_sink_first_replay_safe_and_reconciliation_gated() {
         let temp = tempfile::tempdir().unwrap();
@@ -823,7 +1232,7 @@ mod tests {
         let args = || EmergencyActivate {
             origin: "console",
             state_dir: &state_dir,
-            sink: &sink,
+            sink: EmergencySink::Filesystem(&sink),
             recovery_public_key: &key_path,
             recovery_approval: &approval,
             action: "container.stop",
@@ -842,20 +1251,22 @@ mod tests {
         let original_boot = persisted.boot_id.clone();
         persisted.boot_id = "replayed-on-another-boot".into();
         write_state(&state_path, &persisted).unwrap();
-        assert!(reconcile_verified(&state_dir, &sink)
-            .unwrap_err()
-            .contains("another boot"));
+        assert!(
+            reconcile_verified(&state_dir, EmergencySink::Filesystem(&sink))
+                .unwrap_err()
+                .contains("another boot")
+        );
         persisted.boot_id = original_boot;
         write_state(&state_path, &persisted).unwrap();
         execute_verified(
             &state_dir,
-            &sink,
+            EmergencySink::Filesystem(&sink),
             "container.stop",
             "container:abc",
             |_, _| Ok(()),
         )
         .unwrap();
-        reconcile_verified(&state_dir, &sink).unwrap();
+        reconcile_verified(&state_dir, EmergencySink::Filesystem(&sink)).unwrap();
         assert!(ensure_reconciled(&state_dir).is_ok());
         assert!(activate_verified(args())
             .unwrap_err()
@@ -875,7 +1286,7 @@ mod tests {
         let base = EmergencyActivate {
             origin: "console",
             state_dir: &state,
-            sink: &missing,
+            sink: EmergencySink::Filesystem(&missing),
             recovery_public_key: &placeholder,
             recovery_approval: &placeholder,
             action: "gate.disable",
@@ -996,6 +1407,9 @@ mod tests {
             sink: "/sink".into(),
             sink_device: 1,
             sink_inode: 2,
+            sink_kind: "filesystem".into(),
+            sink_receipt_key: None,
+            sink_server_uid: None,
             sink_journal_id: None,
             sink_sequence: 0,
             sink_head: None,

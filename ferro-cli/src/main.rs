@@ -459,6 +459,10 @@ pub enum EmergencyCommands {
     Activate {
         #[arg(long, default_value = "console", hide = true)] origin: String,
         #[arg(long)] sink: Option<PathBuf>,
+        #[arg(long, default_value = "filesystem")] sink_backend: String,
+        #[arg(long)] sink_receipt_key: Option<PathBuf>,
+        #[arg(long)] sink_journal_id: Option<String>,
+        #[arg(long)] sink_server_uid: Option<u32>,
         #[arg(long)] recovery_public_key: Option<PathBuf>,
         #[arg(long)] recovery_approval: Option<PathBuf>,
         #[arg(long)] action: Option<String>,
@@ -469,10 +473,12 @@ pub enum EmergencyCommands {
     Execute {
         #[arg(long)] action: String,
         #[arg(long)] resource: String,
-        #[arg(long)] sink: PathBuf,
+        #[arg(long, default_value = "filesystem")] sink_backend: String,
+        #[arg(long)] sink: Option<PathBuf>,
     },
     Reconcile {
-        #[arg(long)] sink: PathBuf,
+        #[arg(long, default_value = "filesystem")] sink_backend: String,
+        #[arg(long)] sink: Option<PathBuf>,
     },
     SinkServe {
         #[arg(long)] socket: PathBuf,
@@ -1623,22 +1629,51 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
             })?;
             Ok("emergency sink service stopped".into())
         }
-        EmergencyCommands::Activate { origin, sink, recovery_public_key, recovery_approval, action, resource, nonce, deadline_uptime_ns } => {
-            if origin != "console" { return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into()); }
+        EmergencyCommands::Activate { origin, sink, sink_backend, sink_receipt_key, sink_journal_id, sink_server_uid, recovery_public_key, recovery_approval, action, resource, nonce, deadline_uptime_ns } => {
+            if origin != "console" && !(cfg!(feature = "test-console") && origin == "test-console") { return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into()); }
             let default_state_dir = runtime_dir.join("authorization");
+            let unix_config;
+            let selected = match sink_backend.as_str() {
+                "filesystem" => authorization_admin::EmergencySink::Filesystem(sink.as_deref().ok_or("--sink is required")?),
+                "unix" => {
+                    let endpoint = sink.as_ref().and_then(|value| value.to_str()).ok_or("--sink unix:/absolute/path is required")?;
+                    unix_config = authorization_admin::emergency_sink::UnixSinkConfig::from_cli(
+                        endpoint,
+                        sink_receipt_key.as_deref().ok_or("--sink-receipt-key is required for Unix sink")?,
+                        authorization_admin::decode_hex::<16>(sink_journal_id.as_deref().ok_or("--sink-journal-id is required for Unix sink")?)?,
+                        sink_server_uid.ok_or("--sink-server-uid is required for Unix sink")?,
+                    )?;
+                    authorization_admin::EmergencySink::Unix(&unix_config)
+                }
+                _ => return Err("--sink-backend must be filesystem or unix".into()),
+            };
             authorization_admin::activate_emergency(authorization_admin::EmergencyActivate {
                 origin, state_dir: &default_state_dir,
-                sink: sink.as_deref().ok_or("--sink is required")?,
+                sink: selected,
                 recovery_public_key: recovery_public_key.as_deref().ok_or("--recovery-public-key is required")?,
                 recovery_approval: recovery_approval.as_deref().ok_or("--recovery-approval is required")?,
                 action: action.as_deref().ok_or("--action is required")?, resource: resource.as_deref().ok_or("--resource is required")?,
                 nonce: nonce.as_deref().ok_or("--nonce is required")?, deadline_uptime_ns: deadline_uptime_ns.ok_or("--deadline-uptime-ns is required")?,
             })
         }
-        EmergencyCommands::Reconcile { sink } => authorization_admin::reconcile_emergency(&runtime_dir.join("authorization"), sink),
-        EmergencyCommands::Execute { action, resource, sink } => {
+        EmergencyCommands::Reconcile { sink_backend, sink } => {
+            let state_dir = runtime_dir.join("authorization");
+            match sink_backend.as_str() {
+                "filesystem" => authorization_admin::reconcile_emergency(&state_dir, authorization_admin::EmergencySink::Filesystem(sink.as_deref().ok_or("--sink is required")?)),
+                "unix" => { let config = authorization_admin::persisted_unix_sink(&state_dir)?; authorization_admin::reconcile_emergency(&state_dir, authorization_admin::EmergencySink::Unix(&config)) },
+                _ => Err("--sink-backend must be filesystem or unix".into()),
+            }
+        }
+        EmergencyCommands::Execute { action, resource, sink_backend, sink } => {
+            let state_dir = runtime_dir.join("authorization");
+            let unix_config;
+            let selected = match sink_backend.as_str() {
+                "filesystem" => authorization_admin::EmergencySink::Filesystem(sink.as_deref().ok_or("--sink is required")?),
+                "unix" => { unix_config = authorization_admin::persisted_unix_sink(&state_dir)?; authorization_admin::EmergencySink::Unix(&unix_config) },
+                _ => return Err("--sink-backend must be filesystem or unix".into()),
+            };
             authorization_admin::execute_emergency(
-                &runtime_dir.join("authorization"), sink, action, resource,
+                &state_dir, selected, action, resource,
                 |operation_id, material| {
                     let origin = RequestOrigin::cli_current_for_operation(operation_id)
                         .map_err(|error| error.to_string())?;

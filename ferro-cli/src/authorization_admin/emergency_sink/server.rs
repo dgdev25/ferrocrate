@@ -62,7 +62,10 @@ impl UnixSinkStore {
                 return Err("emergency sink store head mismatch".into());
             }
             if receipts
-                .insert(receipt.emergency_nonce.clone(), receipt.clone())
+                .insert(
+                    receipt_key(&receipt.emergency_nonce, receipt.operation_id),
+                    receipt.clone(),
+                )
                 .is_some()
             {
                 return Err("duplicate emergency nonce in sink store".into());
@@ -86,7 +89,8 @@ impl UnixSinkStore {
         if request.journal_id != self.journal_id {
             return Err("sink journal substitution".into());
         }
-        if let Some(receipt) = self.receipts.get(&request.emergency_nonce) {
+        let idempotency_key = receipt_key(&request.emergency_nonce, request.operation_id);
+        if let Some(receipt) = self.receipts.get(&idempotency_key) {
             if receipt.operation_id == request.operation_id
                 && receipt.record_hash == request.record_hash
             {
@@ -94,7 +98,7 @@ impl UnixSinkStore {
             }
             return Err("emergency nonce replay fork".into());
         }
-        if request.expected_sequence != self.next_sequence {
+        if request.expected_sequence != self.next_sequence || request.expected_head != self.head {
             return Err("sink sequence fork".into());
         }
         let mut hash = Sha256::new();
@@ -120,10 +124,17 @@ impl UnixSinkStore {
             .map_err(|e| e.to_string())?;
         self.next_sequence += 1;
         self.head = head;
-        self.receipts
-            .insert(request.emergency_nonce, receipt.clone());
+        self.receipts.insert(idempotency_key, receipt.clone());
         Ok(receipt)
     }
+}
+
+fn receipt_key(nonce: &str, operation_id: [u8; 16]) -> String {
+    let operation = operation_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{nonce}:{operation}")
 }
 
 pub fn serve_one(
@@ -219,6 +230,7 @@ mod tests {
             version: 1,
             journal_id: [1; 16],
             expected_sequence: sequence,
+            expected_head: if sequence == 0 { [0; 32] } else { [9; 32] },
             emergency_nonce: nonce.into(),
             operation_id: [2; 16],
             record: body.into(),

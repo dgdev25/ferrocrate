@@ -146,6 +146,57 @@ impl AuthorizationFixtureEvidence {
     }
 }
 
+/// Persist evidence for one externally exercised authorization fixture when
+/// qualification has explicitly supplied an output directory. This is an
+/// observability side channel only: callers must take snapshots around the
+/// real mutation and it never influences authorization or execution.
+pub fn persist_authorization_fixture_evidence(
+    fixture: &str,
+    before: AuthorizationMetricsSnapshot,
+    after: AuthorizationMetricsSnapshot,
+) -> Result<bool, std::io::Error> {
+    let Some(root) = std::env::var_os("FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT") else {
+        return Ok(false);
+    };
+    if fixture.is_empty()
+        || !fixture
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid authorization fixture identifier",
+        ));
+    }
+    let root = Path::new(&root);
+    fs::create_dir_all(root)?;
+    let evidence = AuthorizationFixtureEvidence::new(
+        fixture,
+        FixtureClassification::ActualFixture,
+        before,
+        after,
+    );
+    crate::fs_atomic::write_atomic(
+        &root.join(format!("fixture-{fixture}.json")),
+        &serde_json::to_vec(&evidence)?,
+    )?;
+    Ok(true)
+}
+
+/// Return the explicitly selected qualification fixture name, or `default`.
+/// The accepted alphabet is intentionally the same as persisted artifact IDs.
+pub fn qualification_fixture(default: &'static str) -> String {
+    std::env::var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE")
+        .ok()
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .unwrap_or_else(|| default.into())
+}
+
 impl AuthorizationMetricsSnapshot {
     /// Percentage of externally evaluated mutations that had an authenticated
     /// principal. `None` means this snapshot contains no external evaluations

@@ -4,22 +4,22 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 #[cfg(target_os = "linux")]
+use ferro_cli::authorization_admin;
+#[cfg(target_os = "linux")]
 use ferro_compose::compose::{
     compose_down, compose_logs, compose_ps, compose_up, find_compose_file, ComposeProject,
 };
 #[cfg(target_os = "linux")]
 use ferro_compose::{
     Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
-    Environment as ComposeEnvironment, FanoutAction,
-    FanoutPlan, FanoutReplayStore, Service as ComposeService, ServiceMutation,
+    Environment as ComposeEnvironment, FanoutAction, FanoutPlan, FanoutReplayStore,
+    Service as ComposeService, ServiceMutation,
 };
 #[cfg(target_os = "linux")]
-use sha2::{Digest, Sha256};
-use ferro_core::docker_auth::resolve_registry_auth;
+use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
 #[cfg(target_os = "linux")]
 use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, ResourceKind};
-#[cfg(target_os = "linux")]
-use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
+use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
@@ -30,13 +30,11 @@ use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{parse_image_reference, RegistryClient};
 #[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
-use ferro_core::runtime::NetworkBackend;
 #[cfg(target_os = "linux")]
 use ferro_core::runtime::ContainerRuntime;
+use ferro_core::runtime::NetworkBackend;
 #[cfg(target_os = "linux")]
 use ferro_core::volume_store::LocalVolumeStore;
-#[cfg(target_os = "linux")]
-use ferro_cli::authorization_admin;
 use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
@@ -52,22 +50,24 @@ use ferro_mind::ai::training::{
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::net::Ipv4Addr;
-#[cfg(target_os = "macos")]
-use std::net::TcpStream;
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
-#[cfg(all(unix, target_os = "linux"))]
-use std::os::unix::net::UnixStream;
+#[cfg(target_os = "macos")]
+use std::net::TcpStream;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::net::UnixListener;
+#[cfg(all(unix, target_os = "linux"))]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
@@ -79,10 +79,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
-use std::time::SystemTime;
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
+use std::time::SystemTime;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -408,7 +408,9 @@ pub enum Commands {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommands {
-    Check { path: PathBuf },
+    Check {
+        path: PathBuf,
+    },
     Reload {
         path: PathBuf,
         #[arg(long)]
@@ -420,36 +422,60 @@ pub enum PolicyCommands {
 #[derive(Debug, Subcommand)]
 pub enum WitnessCommands {
     Show {
-        #[arg(long)] journal: PathBuf,
-        #[arg(long)] journal_id: String,
-        #[arg(long, default_value_t = 100)] limit: usize,
-        #[arg(long)] from_sequence: Option<u64>,
-        #[arg(long)] stage: Option<String>,
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_id: String,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        from_sequence: Option<u64>,
+        #[arg(long)]
+        stage: Option<String>,
     },
     Verify {
-        #[arg(long)] journal: PathBuf,
-        #[arg(long)] trust_bundle: PathBuf,
-        #[arg(long)] minimum_checkpoint: PathBuf,
-        #[arg(long = "checkpoint", required = true)] checkpoints: Vec<PathBuf>,
-        #[arg(long, default_value_t = 300)] max_age_seconds: u64,
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        trust_bundle: PathBuf,
+        #[arg(long)]
+        minimum_checkpoint: PathBuf,
+        #[arg(long = "checkpoint", required = true)]
+        checkpoints: Vec<PathBuf>,
+        #[arg(long, default_value_t = 300)]
+        max_age_seconds: u64,
     },
     Checkpoint {
-        #[arg(long)] journal: PathBuf,
-        #[arg(long)] journal_id: String,
-        #[arg(long)] artifact: PathBuf,
-        #[arg(long)] key_dir: Option<PathBuf>,
-        #[arg(long)] key_name: Option<String>,
-        #[arg(long)] predecessor: Option<PathBuf>,
-        #[arg(long)] recover_pending: bool,
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_id: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        key_dir: Option<PathBuf>,
+        #[arg(long)]
+        key_name: Option<String>,
+        #[arg(long)]
+        predecessor: Option<PathBuf>,
+        #[arg(long)]
+        recover_pending: bool,
     },
     RotateKey {
-        #[arg(long)] journal: PathBuf,
-        #[arg(long)] journal_id: String,
-        #[arg(long)] artifact: PathBuf,
-        #[arg(long)] key_dir: PathBuf,
-        #[arg(long)] old_key: String,
-        #[arg(long)] new_key: String,
-        #[arg(long)] predecessor: PathBuf,
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_id: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        key_dir: PathBuf,
+        #[arg(long)]
+        old_key: String,
+        #[arg(long)]
+        new_key: String,
+        #[arg(long)]
+        predecessor: PathBuf,
     },
 }
 
@@ -457,36 +483,60 @@ pub enum WitnessCommands {
 #[derive(Debug, Subcommand)]
 pub enum EmergencyCommands {
     Activate {
-        #[arg(long, default_value = "console", hide = true)] origin: String,
-        #[arg(long)] sink: Option<PathBuf>,
-        #[arg(long, default_value = "filesystem")] sink_backend: String,
-        #[arg(long)] sink_receipt_key: Option<PathBuf>,
-        #[arg(long)] sink_journal_id: Option<String>,
-        #[arg(long)] sink_server_uid: Option<u32>,
-        #[arg(long)] recovery_public_key: Option<PathBuf>,
-        #[arg(long)] recovery_approval: Option<PathBuf>,
-        #[arg(long)] action: Option<String>,
-        #[arg(long)] resource: Option<String>,
-        #[arg(long)] nonce: Option<String>,
-        #[arg(long)] deadline_uptime_ns: Option<u64>,
+        #[arg(long, default_value = "console", hide = true)]
+        origin: String,
+        #[arg(long)]
+        sink: Option<PathBuf>,
+        #[arg(long, default_value = "filesystem")]
+        sink_backend: String,
+        #[arg(long)]
+        sink_receipt_key: Option<PathBuf>,
+        #[arg(long)]
+        sink_journal_id: Option<String>,
+        #[arg(long)]
+        sink_server_uid: Option<u32>,
+        #[arg(long)]
+        recovery_public_key: Option<PathBuf>,
+        #[arg(long)]
+        recovery_approval: Option<PathBuf>,
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        resource: Option<String>,
+        #[arg(long)]
+        nonce: Option<String>,
+        #[arg(long)]
+        deadline_uptime_ns: Option<u64>,
     },
     Execute {
-        #[arg(long)] action: String,
-        #[arg(long)] resource: String,
-        #[arg(long, default_value = "filesystem")] sink_backend: String,
-        #[arg(long)] sink: Option<PathBuf>,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        resource: String,
+        #[arg(long, default_value = "filesystem")]
+        sink_backend: String,
+        #[arg(long)]
+        sink: Option<PathBuf>,
     },
     Reconcile {
-        #[arg(long, default_value = "filesystem")] sink_backend: String,
-        #[arg(long)] sink: Option<PathBuf>,
+        #[arg(long, default_value = "filesystem")]
+        sink_backend: String,
+        #[arg(long)]
+        sink: Option<PathBuf>,
     },
     SinkServe {
-        #[arg(long)] socket: PathBuf,
-        #[arg(long)] store: PathBuf,
-        #[arg(long)] signing_key: PathBuf,
-        #[arg(long)] journal_id: String,
-        #[arg(long)] expected_uid: u32,
-        #[arg(long)] requests: Option<u64>,
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        signing_key: PathBuf,
+        #[arg(long)]
+        journal_id: String,
+        #[arg(long)]
+        expected_uid: u32,
+        #[arg(long)]
+        requests: Option<u64>,
     },
 }
 
@@ -692,7 +742,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -708,12 +758,24 @@ fn main() {
         }
     }
     let cli = Cli::parse();
+    let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
+    let qualification_fixture = ferro_core::observability::qualification_fixture("cli");
     if let Err(err) = dispatch(cli.command) {
         let normalized = normalize_cli_error(err);
+        let _ = ferro_core::observability::persist_authorization_fixture_evidence(
+            &qualification_fixture,
+            qualification_before,
+            ferro_core::observability::authorization_metrics_snapshot(),
+        );
         tracing::error!("{normalized}");
         eprintln!("error: {normalized}");
         process::exit(1);
     }
+    let _ = ferro_core::observability::persist_authorization_fixture_evidence(
+        &qualification_fixture,
+        qualification_before,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    );
 }
 
 #[cfg(all(any(test, not(target_os = "linux")), target_os = "macos"))]
@@ -1178,7 +1240,13 @@ fn doctor_guest_ssh_diagnose(
     Err(format!("ssh failed: {stderr}"))
 }
 
-fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json: bool) -> Result<(), String> {
+fn handle_doctor(
+    fix: bool,
+    bootstrap: bool,
+    dry_run: bool,
+    confirm: bool,
+    json: bool,
+) -> Result<(), String> {
     let mut checks = Vec::<DoctorCheck>::new();
 
     #[cfg(target_os = "macos")]
@@ -1231,7 +1299,11 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
             let action = (!ok && fix).then_some(DoctorAction {
                 id: format!("install_{bin}"),
                 description: format!("install {formula} via brew"),
-                command: vec!["brew".to_string(), "install".to_string(), formula.to_string()],
+                command: vec![
+                    "brew".to_string(),
+                    "install".to_string(),
+                    formula.to_string(),
+                ],
                 requires_confirmation: true,
             });
             checks.push(DoctorCheck {
@@ -1335,7 +1407,12 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
             )
             .is_ok();
             if !ssh_ok {
-                ssh_diag = doctor_guest_ssh_diagnose(vm_ssh_port, vm_guest_user.clone(), vm_ssh_key.clone()).err();
+                ssh_diag = doctor_guest_ssh_diagnose(
+                    vm_ssh_port,
+                    vm_guest_user.clone(),
+                    vm_ssh_key.clone(),
+                )
+                .err();
             }
         }
         checks.push(DoctorCheck {
@@ -1346,12 +1423,10 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
             } else {
                 format!("guest SSH not reachable on 127.0.0.1:{vm_ssh_port}")
             },
-            hint: (!ssh_ok).then_some(
-                ssh_diag.clone().unwrap_or_else(|| {
-                    "ensure VM networking/port-forward is healthy (`ferro-desktop vm status --json`)"
-                        .to_string()
-                }),
-            ),
+            hint: (!ssh_ok).then_some(ssh_diag.clone().unwrap_or_else(|| {
+                "ensure VM networking/port-forward is healthy (`ferro-desktop vm status --json`)"
+                    .to_string()
+            })),
             remediated: false,
             action: None,
         });
@@ -1409,10 +1484,15 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
     #[cfg(target_os = "macos")]
     if fix && bootstrap && !healthy {
         if !confirm {
-            return Err("doctor bootstrap requires --confirm to execute. Use --dry-run to preview actions.".to_string());
+            return Err(
+                "doctor bootstrap requires --confirm to execute. Use --dry-run to preview actions."
+                    .to_string(),
+            );
         }
         if dry_run {
-            return Err("doctor bootstrap requested with --dry-run; no changes applied.".to_string());
+            return Err(
+                "doctor bootstrap requested with --dry-run; no changes applied.".to_string(),
+            );
         }
         let mut bootstrap_ok = false;
         let mut bootstrap_msg = "bootstrap script not found".to_string();
@@ -1494,7 +1574,10 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
             } else {
                 ""
             };
-            println!("  [{}] {}: {}{}", status, check.id, check.message, remediated);
+            println!(
+                "  [{}] {}: {}{}",
+                status, check.id, check.message, remediated
+            );
             if !check.ok {
                 if let Some(hint) = &check.hint {
                     println!("      hint: {hint}");
@@ -1518,7 +1601,10 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
 fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), String> {
     let output = match command {
         PolicyCommands::Check { path } => authorization_admin::policy_check(path),
-        PolicyCommands::Reload { path, rollback_approval } => {
+        PolicyCommands::Reload {
+            path,
+            rollback_approval,
+        } => {
             let active = runtime_dir.join("authorization/active-policy.toml");
             let candidate = ferro_core::authorization::policy::PolicyStore::load_candidate(path)
                 .map_err(|error| error.to_string())?;
@@ -1533,7 +1619,8 @@ fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), S
             } else {
                 AuthorizationAction::PolicyReload
             };
-            let canonical_name = candidate.snapshot()
+            let canonical_name = candidate
+                .snapshot()
                 .digest
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
@@ -1543,7 +1630,9 @@ fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), S
                 .with_request_origin(
                     RequestOrigin::cli_current().map_err(|error| error.to_string())?,
                 );
-            let origin = runtime.request_origin().ok_or("policy reload identity unavailable")?;
+            let origin = runtime
+                .request_origin()
+                .ok_or("policy reload identity unavailable")?;
             let authorization = runtime
                 .surface_authorization()
                 .map_err(|error| error.to_string())?;
@@ -1563,8 +1652,13 @@ fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), S
                 &permit,
                 action,
                 &canonical_name,
-            ).and_then(|output| runtime.install_policy_candidate(&candidate, rollback)
-                .map(|_| output).map_err(|error| error.to_string()));
+            )
+            .and_then(|output| {
+                runtime
+                    .install_policy_candidate(&candidate, rollback)
+                    .map(|_| output)
+                    .map_err(|error| error.to_string())
+            });
             permit
                 .finish(result.is_ok())
                 .map_err(|error| error.to_string())?;
@@ -1578,69 +1672,216 @@ fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), S
 #[cfg(target_os = "linux")]
 fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(), String> {
     let output = match command {
-        WitnessCommands::Show { journal, journal_id, limit, from_sequence, stage } => authorization_admin::show(authorization_admin::ShowArgs { journal, journal_id, limit: *limit, from_sequence: *from_sequence, stage: stage.as_deref() }),
-        WitnessCommands::Verify { journal, trust_bundle, minimum_checkpoint, checkpoints, max_age_seconds } => authorization_admin::verify(authorization_admin::VerifyArgs { journal, trust_bundle, minimum_checkpoint, checkpoints, max_age_seconds: *max_age_seconds }),
-        WitnessCommands::Checkpoint { journal, journal_id, artifact, key_dir, key_name, predecessor, recover_pending } => {
-            let args = authorization_admin::CheckpointArgs { journal, journal_id, artifact, key_dir: key_dir.as_deref(), key_name: key_name.as_deref(), predecessor: predecessor.as_deref(), recover_pending: *recover_pending };
-            let action = if *recover_pending { AuthorizationAction::CheckpointRecover } else { AuthorizationAction::CheckpointPublish };
-            administer_witness(runtime_dir, journal, journal_id, artifact, action, &artifact.to_string_lossy(), |open| authorization_admin::checkpoint_on(args, open))
-        },
-        WitnessCommands::RotateKey { journal, journal_id, artifact, key_dir, old_key, new_key, predecessor } => {
-            let args = authorization_admin::RotateArgs { journal, journal_id, artifact, key_dir, old_key, new_key, predecessor };
-            let predecessor_digest = Sha256::digest(std::fs::read(predecessor).map_err(|error| error.to_string())?);
+        WitnessCommands::Show {
+            journal,
+            journal_id,
+            limit,
+            from_sequence,
+            stage,
+        } => authorization_admin::show(authorization_admin::ShowArgs {
+            journal,
+            journal_id,
+            limit: *limit,
+            from_sequence: *from_sequence,
+            stage: stage.as_deref(),
+        }),
+        WitnessCommands::Verify {
+            journal,
+            trust_bundle,
+            minimum_checkpoint,
+            checkpoints,
+            max_age_seconds,
+        } => authorization_admin::verify(authorization_admin::VerifyArgs {
+            journal,
+            trust_bundle,
+            minimum_checkpoint,
+            checkpoints,
+            max_age_seconds: *max_age_seconds,
+        }),
+        WitnessCommands::Checkpoint {
+            journal,
+            journal_id,
+            artifact,
+            key_dir,
+            key_name,
+            predecessor,
+            recover_pending,
+        } => {
+            let args = authorization_admin::CheckpointArgs {
+                journal,
+                journal_id,
+                artifact,
+                key_dir: key_dir.as_deref(),
+                key_name: key_name.as_deref(),
+                predecessor: predecessor.as_deref(),
+                recover_pending: *recover_pending,
+            };
+            let action = if *recover_pending {
+                AuthorizationAction::CheckpointRecover
+            } else {
+                AuthorizationAction::CheckpointPublish
+            };
+            administer_witness(
+                runtime_dir,
+                journal,
+                journal_id,
+                artifact,
+                action,
+                &artifact.to_string_lossy(),
+                |open| authorization_admin::checkpoint_on(args, open),
+            )
+        }
+        WitnessCommands::RotateKey {
+            journal,
+            journal_id,
+            artifact,
+            key_dir,
+            old_key,
+            new_key,
+            predecessor,
+        } => {
+            let args = authorization_admin::RotateArgs {
+                journal,
+                journal_id,
+                artifact,
+                key_dir,
+                old_key,
+                new_key,
+                predecessor,
+            };
+            let predecessor_digest =
+                Sha256::digest(std::fs::read(predecessor).map_err(|error| error.to_string())?);
             let binding = format!("old={old_key};new={new_key};predecessor={predecessor_digest:x}");
-            administer_witness(runtime_dir, journal, journal_id, artifact, AuthorizationAction::KeyRotate, &binding, |open| authorization_admin::rotate_key_on(args, open))
-        },
+            administer_witness(
+                runtime_dir,
+                journal,
+                journal_id,
+                artifact,
+                AuthorizationAction::KeyRotate,
+                &binding,
+                |open| authorization_admin::rotate_key_on(args, open),
+            )
+        }
     }?;
     println!("{output}");
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn administer_witness<F>(runtime_dir: &Path, journal: &Path, journal_id: &str, artifact: &Path, action: AuthorizationAction, resource_binding: &str, execute: F) -> Result<String, String>
-where F: FnOnce(&ferro_core::witness::WitnessJournal) -> Result<String, String> {
+fn administer_witness<F>(
+    runtime_dir: &Path,
+    journal: &Path,
+    journal_id: &str,
+    artifact: &Path,
+    action: AuthorizationAction,
+    resource_binding: &str,
+    execute: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&ferro_core::witness::WitnessJournal) -> Result<String, String>,
+{
     authorization_admin::require_host_admin()?;
     let root = runtime_dir.join("authorization");
     if journal != root.join("witness-journal") || artifact != root.join("checkpoint.bin") {
         return Err("administrative witness mutation requires the runtime's fixed journal and checkpoint paths".into());
     }
-    let policies = std::sync::Arc::new(ferro_core::authorization::policy::PolicyStore::load(root.join("active-policy.toml")).map_err(|error| error.to_string())?);
-    let gate = std::sync::Arc::new(ferro_core::authorization::gate::AuthorizationGate::new(policies));
+    let policies = std::sync::Arc::new(
+        ferro_core::authorization::policy::PolicyStore::load(root.join("active-policy.toml"))
+            .map_err(|error| error.to_string())?,
+    );
+    let gate = std::sync::Arc::new(ferro_core::authorization::gate::AuthorizationGate::new(
+        policies,
+    ));
     let open = authorization_admin::open_required_journal(journal, journal_id)?;
-    let surface = ferro_core::authorization::surface::SurfaceAuthorization::local_administrative(gate, open.clone(), [0x41; 16]);
+    let surface = ferro_core::authorization::surface::SurfaceAuthorization::local_administrative(
+        gate,
+        open.clone(),
+        [0x41; 16],
+    );
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-    let permit = surface.authorize_named(&origin, action, ResourceKind::Administrative, resource_binding, 1).map_err(|error| error.to_string())?;
+    let permit = surface
+        .authorize_named(
+            &origin,
+            action,
+            ResourceKind::Administrative,
+            resource_binding,
+            1,
+        )
+        .map_err(|error| error.to_string())?;
     let result = execute(&open);
-    permit.finish(result.is_ok()).map_err(|error| error.to_string())?;
+    permit
+        .finish(result.is_ok())
+        .map_err(|error| error.to_string())?;
     result
 }
 
 #[cfg(target_os = "linux")]
 fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result<(), String> {
     let output = match command {
-        EmergencyCommands::SinkServe { socket, store, signing_key, journal_id, expected_uid, requests } => {
-            if nix::unistd::geteuid().as_raw() != 0 && nix::unistd::geteuid().as_raw() != *expected_uid {
+        EmergencyCommands::SinkServe {
+            socket,
+            store,
+            signing_key,
+            journal_id,
+            expected_uid,
+            requests,
+        } => {
+            if nix::unistd::geteuid().as_raw() != 0
+                && nix::unistd::geteuid().as_raw() != *expected_uid
+            {
                 return Err("emergency sink service requires host administrator authority".into());
             }
-            authorization_admin::emergency_sink::serve(authorization_admin::emergency_sink::SinkServeConfig {
-                socket, store, signing_key,
-                journal_id: authorization_admin::decode_hex::<16>(journal_id)?,
-                expected_uid: *expected_uid, requests: *requests,
-            })?;
+            authorization_admin::emergency_sink::serve(
+                authorization_admin::emergency_sink::SinkServeConfig {
+                    socket,
+                    store,
+                    signing_key,
+                    journal_id: authorization_admin::decode_hex::<16>(journal_id)?,
+                    expected_uid: *expected_uid,
+                    requests: *requests,
+                },
+            )?;
             Ok("emergency sink service stopped".into())
         }
-        EmergencyCommands::Activate { origin, sink, sink_backend, sink_receipt_key, sink_journal_id, sink_server_uid, recovery_public_key, recovery_approval, action, resource, nonce, deadline_uptime_ns } => {
-            if origin != "console" && !(cfg!(feature = "test-console") && origin == "test-console") { return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into()); }
+        EmergencyCommands::Activate {
+            origin,
+            sink,
+            sink_backend,
+            sink_receipt_key,
+            sink_journal_id,
+            sink_server_uid,
+            recovery_public_key,
+            recovery_approval,
+            action,
+            resource,
+            nonce,
+            deadline_uptime_ns,
+        } => {
+            if origin != "console" && !(cfg!(feature = "test-console") && origin == "test-console")
+            {
+                return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into());
+            }
             let default_state_dir = runtime_dir.join("authorization");
             let unix_config;
             let selected = match sink_backend.as_str() {
-                "filesystem" => authorization_admin::EmergencySink::Filesystem(sink.as_deref().ok_or("--sink is required")?),
+                "filesystem" => authorization_admin::EmergencySink::Filesystem(
+                    sink.as_deref().ok_or("--sink is required")?,
+                ),
                 "unix" => {
-                    let endpoint = sink.as_ref().and_then(|value| value.to_str()).ok_or("--sink unix:/absolute/path is required")?;
+                    let endpoint = sink
+                        .as_ref()
+                        .and_then(|value| value.to_str())
+                        .ok_or("--sink unix:/absolute/path is required")?;
                     unix_config = authorization_admin::emergency_sink::UnixSinkConfig::from_cli(
                         endpoint,
-                        sink_receipt_key.as_deref().ok_or("--sink-receipt-key is required for Unix sink")?,
-                        authorization_admin::decode_hex::<16>(sink_journal_id.as_deref().ok_or("--sink-journal-id is required for Unix sink")?)?,
+                        sink_receipt_key
+                            .as_deref()
+                            .ok_or("--sink-receipt-key is required for Unix sink")?,
+                        authorization_admin::decode_hex::<16>(
+                            sink_journal_id
+                                .as_deref()
+                                .ok_or("--sink-journal-id is required for Unix sink")?,
+                        )?,
                         sink_server_uid.ok_or("--sink-server-uid is required for Unix sink")?,
                     )?;
                     authorization_admin::EmergencySink::Unix(&unix_config)
@@ -1648,32 +1889,63 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
                 _ => return Err("--sink-backend must be filesystem or unix".into()),
             };
             authorization_admin::activate_emergency(authorization_admin::EmergencyActivate {
-                origin, state_dir: &default_state_dir,
+                origin,
+                state_dir: &default_state_dir,
                 sink: selected,
-                recovery_public_key: recovery_public_key.as_deref().ok_or("--recovery-public-key is required")?,
-                recovery_approval: recovery_approval.as_deref().ok_or("--recovery-approval is required")?,
-                action: action.as_deref().ok_or("--action is required")?, resource: resource.as_deref().ok_or("--resource is required")?,
-                nonce: nonce.as_deref().ok_or("--nonce is required")?, deadline_uptime_ns: deadline_uptime_ns.ok_or("--deadline-uptime-ns is required")?,
+                recovery_public_key: recovery_public_key
+                    .as_deref()
+                    .ok_or("--recovery-public-key is required")?,
+                recovery_approval: recovery_approval
+                    .as_deref()
+                    .ok_or("--recovery-approval is required")?,
+                action: action.as_deref().ok_or("--action is required")?,
+                resource: resource.as_deref().ok_or("--resource is required")?,
+                nonce: nonce.as_deref().ok_or("--nonce is required")?,
+                deadline_uptime_ns: deadline_uptime_ns.ok_or("--deadline-uptime-ns is required")?,
             })
         }
         EmergencyCommands::Reconcile { sink_backend, sink } => {
             let state_dir = runtime_dir.join("authorization");
             match sink_backend.as_str() {
-                "filesystem" => authorization_admin::reconcile_emergency(&state_dir, authorization_admin::EmergencySink::Filesystem(sink.as_deref().ok_or("--sink is required")?)),
-                "unix" => { let config = authorization_admin::persisted_unix_sink(&state_dir)?; authorization_admin::reconcile_emergency(&state_dir, authorization_admin::EmergencySink::Unix(&config)) },
+                "filesystem" => authorization_admin::reconcile_emergency(
+                    &state_dir,
+                    authorization_admin::EmergencySink::Filesystem(
+                        sink.as_deref().ok_or("--sink is required")?,
+                    ),
+                ),
+                "unix" => {
+                    let config = authorization_admin::persisted_unix_sink(&state_dir)?;
+                    authorization_admin::reconcile_emergency(
+                        &state_dir,
+                        authorization_admin::EmergencySink::Unix(&config),
+                    )
+                }
                 _ => Err("--sink-backend must be filesystem or unix".into()),
             }
         }
-        EmergencyCommands::Execute { action, resource, sink_backend, sink } => {
+        EmergencyCommands::Execute {
+            action,
+            resource,
+            sink_backend,
+            sink,
+        } => {
             let state_dir = runtime_dir.join("authorization");
             let unix_config;
             let selected = match sink_backend.as_str() {
-                "filesystem" => authorization_admin::EmergencySink::Filesystem(sink.as_deref().ok_or("--sink is required")?),
-                "unix" => { unix_config = authorization_admin::persisted_unix_sink(&state_dir)?; authorization_admin::EmergencySink::Unix(&unix_config) },
+                "filesystem" => authorization_admin::EmergencySink::Filesystem(
+                    sink.as_deref().ok_or("--sink is required")?,
+                ),
+                "unix" => {
+                    unix_config = authorization_admin::persisted_unix_sink(&state_dir)?;
+                    authorization_admin::EmergencySink::Unix(&unix_config)
+                }
                 _ => return Err("--sink-backend must be filesystem or unix".into()),
             };
             authorization_admin::execute_emergency(
-                &state_dir, selected, action, resource,
+                &state_dir,
+                selected,
+                action,
+                resource,
                 |operation_id, material| {
                     let origin = RequestOrigin::cli_current_for_operation(operation_id)
                         .map_err(|error| error.to_string())?;
@@ -1683,25 +1955,42 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
                     let runtime = ContainerRuntime::new(runtime_dir)
                         .map_err(|error| error.to_string())?
                         .with_request_origin(origin.clone());
-                    let record = runtime.inspect(container_id).map_err(|error| error.to_string())?;
+                    let record = runtime
+                        .inspect(container_id)
+                        .map_err(|error| error.to_string())?;
                     let emergency_action = match action.as_str() {
                         "container.stop" => AuthorizationAction::ContainerStop,
                         "container.kill" => AuthorizationAction::ContainerKill,
                         "container.remove" => AuthorizationAction::ContainerDelete,
                         _ => return Err("emergency action has no private executor".into()),
                     };
-                    let authority = ferro_core::authorization::emergency::EmergencyAuthority::verify(
-                        &material.signed_payload, material.signature, material.recovery_key,
-                        emergency_action, container_id.to_owned(), record.mutation_generation.max(1),
-                        material.boot_id, material.deadline_uptime_ns, origin.principal(),
-                        runtime.policy_binding().1, operation_id,
-                    ).map_err(|error| error.to_string())?;
+                    let authority =
+                        ferro_core::authorization::emergency::EmergencyAuthority::verify(
+                            &material.signed_payload,
+                            material.signature,
+                            material.recovery_key,
+                            emergency_action,
+                            container_id.to_owned(),
+                            record.mutation_generation.max(1),
+                            material.boot_id,
+                            material.deadline_uptime_ns,
+                            origin.principal(),
+                            runtime.policy_binding().1,
+                            operation_id,
+                        )
+                        .map_err(|error| error.to_string())?;
                     let runtime = runtime.with_emergency_authority(authority);
                     match action.as_str() {
-                    "container.stop" => runtime.stop(container_id, Duration::from_secs(10)).map_err(|error| error.to_string()),
-                    "container.kill" => runtime.kill(container_id).map_err(|error| error.to_string()),
-                    "container.remove" => runtime.remove(container_id).map_err(|error| error.to_string()),
-                    _ => Err("emergency action has no private executor".into()),
+                        "container.stop" => runtime
+                            .stop(container_id, Duration::from_secs(10))
+                            .map_err(|error| error.to_string()),
+                        "container.kill" => runtime
+                            .kill(container_id)
+                            .map_err(|error| error.to_string()),
+                        "container.remove" => runtime
+                            .remove(container_id)
+                            .map_err(|error| error.to_string()),
+                        _ => Err("emergency action has no private executor".into()),
                     }
                 },
             )
@@ -1727,12 +2016,12 @@ fn dispatch(command: Commands) -> Result<(), String> {
         let runtime_dir = runtime_dir();
 
         match &command {
-            Commands::Policy { command: command @ PolicyCommands::Check { .. } } => {
-                return dispatch_policy(command, &runtime_dir)
-            }
-            Commands::Witness { command: command @ (WitnessCommands::Show { .. } | WitnessCommands::Verify { .. }) } => {
-                return dispatch_witness(command, &runtime_dir)
-            }
+            Commands::Policy {
+                command: command @ PolicyCommands::Check { .. },
+            } => return dispatch_policy(command, &runtime_dir),
+            Commands::Witness {
+                command: command @ (WitnessCommands::Show { .. } | WitnessCommands::Verify { .. }),
+            } => return dispatch_witness(command, &runtime_dir),
             Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
             _ => {}
         }
@@ -1757,8 +2046,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
 
         let runtime = ContainerRuntime::new(&runtime_dir)
             .map_err(|err| err.to_string())?
-            .with_request_origin(ferro_core::authorization::RequestOrigin::cli_current().map_err(|error| format!("CLI identity resolution failed: {error}"))?);
-        let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
+            .with_request_origin(
+                ferro_core::authorization::RequestOrigin::cli_current()
+                    .map_err(|error| format!("CLI identity resolution failed: {error}"))?,
+            );
+        let surface_authorization = runtime
+            .surface_authorization()
+            .map_err(|error| error.to_string())?;
         let image_store =
             LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
@@ -1854,7 +2148,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 embed_model,
             } => handle_build(
                 &image_store,
-                &runtime.request_origin().ok_or_else(|| "build: authenticated request origin unavailable".to_string())?,
+                &runtime
+                    .request_origin()
+                    .ok_or_else(|| "build: authenticated request origin unavailable".to_string())?,
                 &surface_authorization,
                 dockerfile.as_deref(),
                 ferrofile.as_deref(),
@@ -1866,9 +2162,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
             Commands::ImagePrune => handle_image_prune(&image_store, &surface_authorization),
-            Commands::Volume { command } => handle_volume(&runtime_dir, command, &surface_authorization),
+            Commands::Volume { command } => {
+                handle_volume(&runtime_dir, command, &surface_authorization)
+            }
             #[cfg(target_os = "linux")]
-            Commands::Network { command } => handle_network(&runtime_dir, &runtime, command, &surface_authorization),
+            Commands::Network { command } => {
+                handle_network(&runtime_dir, &runtime, command, &surface_authorization)
+            }
             #[cfg(target_os = "linux")]
             Commands::Containers { format } => handle_containers(&runtime, &format),
             #[cfg(target_os = "linux")]
@@ -1895,10 +2195,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }
             #[cfg(target_os = "linux")]
             Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
-            Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy, &surface_authorization),
+            Commands::Pull { image, lazy } => {
+                handle_pull(&image_store, &image, lazy, &surface_authorization)
+            }
             Commands::Push { image } => handle_push(&image_store, &image),
             #[cfg(target_os = "linux")]
-            Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner, &surface_authorization),
+            Commands::Scan { image, scanner } => {
+                handle_scan(&image_store, &image, &scanner, &surface_authorization)
+            }
             #[cfg(target_os = "linux")]
             Commands::Compose { file, command } => {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
@@ -1914,7 +2218,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Daemon { .. } => {
                 unreachable!("daemon command handled before runtime initialization")
             }
-            Commands::Policy { .. } | Commands::Witness { .. } | Commands::Emergency { .. } => unreachable!("authorization administration handled before runtime initialization"),
+            Commands::Policy { .. } | Commands::Witness { .. } | Commands::Emergency { .. } => {
+                unreachable!("authorization administration handled before runtime initialization")
+            }
             #[cfg(target_os = "linux")]
             Commands::Completion { shell } => handle_completion(&shell),
             Commands::Tui => handle_tui(&runtime),
@@ -2653,17 +2959,17 @@ fn handle_run(
         ));
     }
     parse_image_reference(image).map_err(|error| error.to_string())?;
-    let origin = runtime.request_origin().ok_or_else(|| "run: authenticated request origin unavailable".to_string())?;
-    let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
+    let origin = runtime
+        .request_origin()
+        .ok_or_else(|| "run: authenticated request origin unavailable".to_string())?;
+    let surface_authorization = runtime
+        .surface_authorization()
+        .map_err(|error| error.to_string())?;
     ensure_image_present(store, image, &origin, &surface_authorization)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
-    let volume_mounts = parse_volume_mounts(
-        volume_store,
-        volumes,
-        &origin,
-        &surface_authorization,
-    )?;
+    let volume_mounts =
+        parse_volume_mounts(volume_store, volumes, &origin, &surface_authorization)?;
     let mut mounts = mounts;
     mounts.extend(volume_mounts);
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
@@ -3189,7 +3495,12 @@ fn parse_tmpfs_mounts(
     Ok(out)
 }
 
-fn ensure_image_present(store: &LocalImageStore, image: &str, origin: &RequestOrigin, authorization: &SurfaceAuthorization) -> Result<(), String> {
+fn ensure_image_present(
+    store: &LocalImageStore,
+    image: &str,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
     let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
     let existing = resolve_reference(store, &canonical).map_err(|err| err.to_string())?;
@@ -3248,10 +3559,12 @@ fn handle_build(
             store,
         )
         .map_err(|err| err.to_string())?;
-        let permit = authorization.authorize_image_build_plan(origin, &plan)
+        let permit = authorization
+            .authorize_image_build_plan(origin, &plan)
             .map_err(|error| error.to_string())?;
-        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
-            .map_err(|error| error.to_string())?;
+        let r =
+            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
+                .map_err(|error| error.to_string())?;
         let desc = format!("ferrofile={}", ferrofile_path);
         (r, desc)
     } else {
@@ -3274,10 +3587,12 @@ fn handle_build(
             store,
         )
         .map_err(|err| err.to_string())?;
-        let permit = authorization.authorize_image_build_plan(origin, &plan)
+        let permit = authorization
+            .authorize_image_build_plan(origin, &plan)
             .map_err(|error| error.to_string())?;
-        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
-            .map_err(|error| error.to_string())?;
+        let r =
+            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
+                .map_err(|error| error.to_string())?;
         let desc = format!("dockerfile={}", dockerfile_path.display());
         (r, desc)
     };
@@ -3428,7 +3743,11 @@ fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_rmi(store: &LocalImageStore, image: &str, authorization: &SurfaceAuthorization) -> Result<(), String> {
+fn handle_rmi(
+    store: &LocalImageStore,
+    image: &str,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     handle_rmi_authorized(store, image, &origin, authorization)
@@ -3445,7 +3764,13 @@ fn handle_rmi_authorized(
         .map_err(|err| err.to_string())?
         .ok_or_else(|| format!("rmi: not found {canonical}"))?;
     let proof = authorization
-        .authorize_image_binding(origin, AuthorizationAction::ImageDelete, &canonical, &record.digest, 1)
+        .authorize_image_binding(
+            origin,
+            AuthorizationAction::ImageDelete,
+            &canonical,
+            &record.digest,
+            1,
+        )
         .map_err(|error| error.to_string())?;
     execute_image_delete(store, &canonical, &record.digest, proof)
 }
@@ -3467,7 +3792,10 @@ fn execute_image_delete(
     Ok(())
 }
 
-fn handle_image_prune(store: &LocalImageStore, authorization: &SurfaceAuthorization) -> Result<(), String> {
+fn handle_image_prune(
+    store: &LocalImageStore,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     let records = store.list_references().map_err(|error| error.to_string())?;
     let permits = records
@@ -3663,7 +3991,11 @@ fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> 
     Ok(())
 }
 
-fn handle_volume(runtime_dir: &Path, command: VolumeCommands, authorization: &SurfaceAuthorization) -> Result<(), String> {
+fn handle_volume(
+    runtime_dir: &Path,
+    command: VolumeCommands,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     handle_volume_authorized(runtime_dir, command, &origin, authorization)
 }
@@ -3700,13 +4032,22 @@ fn handle_volume_authorized(
                 let permit = authorization
                     .authorize_volume_create_plan(origin, &plan)
                     .map_err(|error| error.to_string())?;
-                store.create_with_driver_authorized(plan, permit)
+                store
+                    .create_with_driver_authorized(plan, permit)
                     .map_err(|err| err.to_string())?;
             }
             let permit = authorization
-                .authorize_named(origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, &name, 1)
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::VolumeCreate,
+                    ResourceKind::Volume,
+                    &name,
+                    1,
+                )
                 .map_err(|error| error.to_string())?;
-            store.restore_authorized(&name, &path, permit).map_err(|err| err.to_string())?;
+            store
+                .restore_authorized(&name, &path, permit)
+                .map_err(|err| err.to_string())?;
             println!("volume restore: {name} <- {path}");
         }
         VolumeCommands::Ls => {
@@ -3721,7 +4062,13 @@ fn handle_volume_authorized(
         }
         VolumeCommands::Rm { name } => {
             let proof = authorization
-                .authorize_named(origin, AuthorizationAction::VolumeDelete, ResourceKind::Volume, &name, 1)
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::VolumeDelete,
+                    ResourceKind::Volume,
+                    &name,
+                    1,
+                )
                 .map_err(|error| error.to_string())?;
             let removed = execute_volume_remove(&store, &name, proof)?;
             if removed {
@@ -3739,7 +4086,9 @@ fn execute_volume_create(
     plan: ferro_core::volume_store::VolumeCreatePlan,
     permit: SurfacePermit,
 ) -> Result<ferro_core::volume_store::VolumeRecord, String> {
-    store.create_with_driver_authorized(plan, permit).map_err(|error| error.to_string())
+    store
+        .create_with_driver_authorized(plan, permit)
+        .map_err(|error| error.to_string())
 }
 
 fn execute_volume_remove(
@@ -3747,7 +4096,9 @@ fn execute_volume_remove(
     name: &str,
     permit: SurfacePermit,
 ) -> Result<bool, String> {
-    store.remove_authorized(name, permit).map_err(|error| error.to_string())
+    store
+        .remove_authorized(name, permit)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3763,7 +4114,9 @@ struct NetworkRecord {
     generation: u64,
 }
 
-fn default_resource_generation() -> u64 { 1 }
+fn default_resource_generation() -> u64 {
+    1
+}
 
 fn is_builtin_network_mode(value: &str) -> bool {
     matches!(value, "bridge" | "host" | "none" | "wireguard")
@@ -3941,7 +4294,13 @@ fn handle_network_authorized(
             }
             let record = create_network_record(&name, subnet.as_deref(), gateway.as_deref())?;
             let proof = authorization
-                .authorize_named(origin, AuthorizationAction::NetworkCreate, ResourceKind::Network, &name, record.generation)
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkCreate,
+                    ResourceKind::Network,
+                    &name,
+                    record.generation,
+                )
                 .map_err(|error| error.to_string())?;
             execute_network_create(runtime_dir, &mut records, &record, proof)?;
             println!(
@@ -3971,10 +4330,19 @@ fn handle_network_authorized(
                 return Err(format!("network: in use by running containers {name}"));
             }
             let mut records = load_networks(runtime_dir)?;
-            let generation = records.iter().find(|record| record.name == name)
-                .map(|record| record.generation).ok_or_else(|| format!("network: not found {name}"))?;
+            let generation = records
+                .iter()
+                .find(|record| record.name == name)
+                .map(|record| record.generation)
+                .ok_or_else(|| format!("network: not found {name}"))?;
             let proof = authorization
-                .authorize_named(origin, AuthorizationAction::NetworkDelete, ResourceKind::Network, &name, generation)
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkDelete,
+                    ResourceKind::Network,
+                    &name,
+                    generation,
+                )
                 .map_err(|error| error.to_string())?;
             execute_network_remove(runtime_dir, &mut records, &name, generation, proof)?;
             println!("network rm: {name}");
@@ -3989,12 +4357,20 @@ fn execute_network_create(
     record: &NetworkRecord,
     permit: SurfacePermit,
 ) -> Result<(), String> {
-    SurfaceAuthorization::validate_execution(&permit, AuthorizationAction::NetworkCreate, ResourceKind::Network, &record.name, record.generation)
-        .map_err(|error| error.to_string())?;
+    SurfaceAuthorization::validate_execution(
+        &permit,
+        AuthorizationAction::NetworkCreate,
+        ResourceKind::Network,
+        &record.name,
+        record.generation,
+    )
+    .map_err(|error| error.to_string())?;
     records.push(record.clone());
     records.sort_by(|a, b| a.name.cmp(&b.name));
     let result = save_networks(runtime_dir, records);
-    permit.finish(result.is_ok()).map_err(|error| error.to_string())?;
+    permit
+        .finish(result.is_ok())
+        .map_err(|error| error.to_string())?;
     result
 }
 
@@ -4005,15 +4381,23 @@ fn execute_network_remove(
     generation: u64,
     permit: SurfacePermit,
 ) -> Result<(), String> {
-    SurfaceAuthorization::validate_execution(&permit, AuthorizationAction::NetworkDelete, ResourceKind::Network, name, generation)
-        .map_err(|error| error.to_string())?;
+    SurfaceAuthorization::validate_execution(
+        &permit,
+        AuthorizationAction::NetworkDelete,
+        ResourceKind::Network,
+        name,
+        generation,
+    )
+    .map_err(|error| error.to_string())?;
     let before = records.len();
     records.retain(|record| record.name != name);
     if records.len() == before {
         return Err(format!("network: not found {name}"));
     }
     let result = save_networks(runtime_dir, records);
-    permit.finish(result.is_ok()).map_err(|error| error.to_string())?;
+    permit
+        .finish(result.is_ok())
+        .map_err(|error| error.to_string())?;
     result
 }
 
@@ -4175,7 +4559,12 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
     }
 }
 
-fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool, authorization: &SurfaceAuthorization) -> Result<(), String> {
+fn handle_pull(
+    store: &LocalImageStore,
+    image: &str,
+    lazy: bool,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     handle_pull_authorized(store, image, lazy, &origin, authorization)
 }
@@ -4187,8 +4576,8 @@ fn handle_pull_authorized(
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
-    let binding = ferro_core::image_fetch::inspect_image_binding(image)
-        .map_err(|error| error.to_string())?;
+    let binding =
+        ferro_core::image_fetch::inspect_image_binding(image).map_err(|error| error.to_string())?;
     let proof = authorization
         .authorize_image_fetch_plan(origin, &binding, 1)
         .map_err(|error| error.to_string())?;
@@ -4203,16 +4592,19 @@ fn execute_image_pull(
 ) -> Result<(), String> {
     if lazy {
         let runtime_dir = runtime_dir();
-        let canonical =
-            ferro_core::image_fetch::pull_manifest_only_with_store_authorized(&runtime_dir, &plan, store, permit)
-                .map_err(|err| err.to_string())?;
+        let canonical = ferro_core::image_fetch::pull_manifest_only_with_store_authorized(
+            &runtime_dir,
+            &plan,
+            store,
+            permit,
+        )
+        .map_err(|err| err.to_string())?;
         println!("pull: manifest-only image={canonical}");
         return Ok(());
     }
     let runtime_dir = runtime_dir();
-    ferro_core::image_fetch::pull_image_with_store_authorized(
-        &runtime_dir, &plan, store, permit,
-    ).map_err(|error| error.to_string())?;
+    ferro_core::image_fetch::pull_image_with_store_authorized(&runtime_dir, &plan, store, permit)
+        .map_err(|error| error.to_string())?;
     println!("pull: image={}", plan.canonical_reference());
     Ok(())
 }
@@ -4265,7 +4657,12 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn handle_scan(store: &LocalImageStore, image: &str, scanner: &str, authorization: &SurfaceAuthorization) -> Result<(), String> {
+fn handle_scan(
+    store: &LocalImageStore,
+    image: &str,
+    scanner: &str,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     ensure_image_present(store, image, &origin, authorization)?;
     let runtime_dir = runtime_dir();
@@ -4345,11 +4742,9 @@ impl ComposePrerequisite {
                 FanoutAction::ImagePull,
                 plan.plan_digest(),
             ),
-            Self::VolumeCreate(plan) => ServiceMutation::new(
-                plan.name(),
-                FanoutAction::VolumeCreate,
-                plan.plan_digest(),
-            ),
+            Self::VolumeCreate(plan) => {
+                ServiceMutation::new(plan.name(), FanoutAction::VolumeCreate, plan.plan_digest())
+            }
         }
     }
 }
@@ -4405,7 +4800,10 @@ fn prepare_compose_service(
                 continue;
             }
             if planned_volumes.insert(source.to_string())
-                && volume_store.get(source).map_err(|error| error.to_string())?.is_none()
+                && volume_store
+                    .get(source)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
             {
                 prerequisites.push(ComposePrerequisite::VolumeCreate(
                     volume_store
@@ -4415,7 +4813,12 @@ fn prepare_compose_service(
             }
         }
     }
-    Ok(PreparedComposeService { name, instance, image, prerequisites })
+    Ok(PreparedComposeService {
+        name,
+        instance,
+        image,
+        prerequisites,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -4506,7 +4909,9 @@ fn handle_compose(
             let mut failures = Vec::new();
             for prepared in prepared {
                 let service = project
-                    .compose.services.get(&prepared.name)
+                    .compose
+                    .services
+                    .get(&prepared.name)
                     .ok_or_else(|| format!("compose: missing service {}", prepared.name))?;
                 let mut mutations = prepared
                     .prerequisites
@@ -4523,7 +4928,8 @@ fn handle_compose(
                         service,
                         &prepared.instance,
                         &prepared.image,
-                    )?.1
+                    )?
+                    .1
                 } else {
                     [0; 32]
                 };
@@ -4559,7 +4965,10 @@ fn handle_compose(
                         .verify_child(&child, current_unix_ms())
                         .and_then(|_| replay_store.claim(&child))
                     {
-                        failures.push(format!("{} prerequisite denied/skipped: {error}", prepared.instance));
+                        failures.push(format!(
+                            "{} prerequisite denied/skipped: {error}",
+                            prepared.instance
+                        ));
                         prerequisite_failed = true;
                         break;
                     }
@@ -4571,7 +4980,10 @@ fn handle_compose(
                         store,
                         volume_store,
                     ) {
-                        failures.push(format!("{} prerequisite failed: {error}", prepared.instance));
+                        failures.push(format!(
+                            "{} prerequisite failed: {error}",
+                            prepared.instance
+                        ));
                         prerequisite_failed = true;
                         break;
                     }
@@ -4594,7 +5006,8 @@ fn handle_compose(
                     service,
                     &prepared.instance,
                     &prepared.image,
-                )?.1;
+                )?
+                .1;
                 let run_child = if let Some(previous) = predecessor.as_ref() {
                     current_plan = current_plan
                         .derive_dependent(
@@ -4618,21 +5031,23 @@ fn handle_compose(
                     failures.push(format!("{} run denied/skipped: {error}", prepared.instance));
                     continue;
                 }
-                let child_runtime = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(
-                    &parent_origin,
-                    *run_child.child_id(),
-                    *run_child.parent_request_id(),
-                    *run_child.idempotency_key(),
-                    ferro_core::authorization::Action::ContainerRun,
-                    &prepared.instance,
-                    *run_child.request_digest(),
-                    run_child.deadline_unix_ms(),
-                    run_child.policy_generation(),
-                    *run_child.policy_digest(),
-                    run_child.attempt(),
-                    run_child.ordinal(),
-                    *run_child.plan_digest(),
-                ));
+                let child_runtime = runtime.request_scoped(
+                    ferro_core::authorization::RequestOrigin::compose_child(
+                        &parent_origin,
+                        *run_child.child_id(),
+                        *run_child.parent_request_id(),
+                        *run_child.idempotency_key(),
+                        ferro_core::authorization::Action::ContainerRun,
+                        &prepared.instance,
+                        *run_child.request_digest(),
+                        run_child.deadline_unix_ms(),
+                        run_child.policy_generation(),
+                        *run_child.policy_digest(),
+                        run_child.attempt(),
+                        run_child.ordinal(),
+                        *run_child.plan_digest(),
+                    ),
+                );
                 if let Err(error) = run_compose_service(
                     &child_runtime,
                     store,
@@ -4676,85 +5091,182 @@ fn handle_compose(
         ComposeCommands::Down => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
             let containers = runtime.list().map_err(|err| err.to_string())?;
-            let selected: Vec<_> = order.into_iter().flat_map(|name| {
-                containers.iter().filter(move |rec| {
-                    rec.name
-                        .as_deref()
-                        .map(|val| val == name || val.starts_with(&format!("{name}-")))
-                        .unwrap_or(false)
-                }).cloned().collect::<Vec<_>>()
-            }).collect();
+            let selected: Vec<_> = order
+                .into_iter()
+                .flat_map(|name| {
+                    containers
+                        .iter()
+                        .filter(move |rec| {
+                            rec.name
+                                .as_deref()
+                                .map(|val| val == name || val.starts_with(&format!("{name}-")))
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect();
             let parent_origin = ferro_core::authorization::RequestOrigin::cli_current()
                 .map_err(|error| format!("compose identity resolution failed: {error}"))?;
             let mut parent_hasher = Sha256::new();
             parent_hasher.update(b"ferrocrate/compose-down-parent/v1");
-            parent_hasher.update(SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_be_bytes());
-            let parent_hash: [u8;32] = parent_hasher.finalize().into();
-            let mut parent_id=[0;16]; parent_id.copy_from_slice(&parent_hash[..16]);
+            parent_hasher.update(
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .to_be_bytes(),
+            );
+            let parent_hash: [u8; 32] = parent_hasher.finalize().into();
+            let mut parent_id = [0; 16];
+            parent_id.copy_from_slice(&parent_hash[..16]);
             let (generation, policy_digest) = runtime.policy_binding();
-            let deadline = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().saturating_add(300_000).min(u64::MAX as u128) as u64;
+            let deadline = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .saturating_add(300_000)
+                .min(u64::MAX as u128) as u64;
             let mutations = selected.iter().flat_map(|record| {
-                [FanoutAction::ContainerStop, FanoutAction::ContainerDelete].into_iter().map(move |action| {
-                    let runtime_action = match action {
-                        FanoutAction::ContainerStop => ferro_core::authorization::Action::ContainerStop,
-                        FanoutAction::ContainerDelete => ferro_core::authorization::Action::ContainerDelete,
-                        FanoutAction::ContainerRun
-                        | FanoutAction::ImagePull
-                        | FanoutAction::VolumeCreate
-                        | FanoutAction::ImageBuild => unreachable!(),
-                    };
-                    ServiceMutation::new(
-                        record.name.clone().unwrap_or_else(|| record.id.clone()),
-                        action,
-                        if action == FanoutAction::ContainerDelete {
-                            Sha256::digest([
-                                b"ferrocrate/compose-down-delete-intent/v1".as_slice(),
-                                record.id.as_bytes(),
-                            ].concat()).into()
-                        } else {
-                            ferro_core::authorization::compose_down_executor_digest(record, runtime_action)
-                        },
-                    )
-                })
+                [FanoutAction::ContainerStop, FanoutAction::ContainerDelete]
+                    .into_iter()
+                    .map(move |action| {
+                        let runtime_action = match action {
+                            FanoutAction::ContainerStop => {
+                                ferro_core::authorization::Action::ContainerStop
+                            }
+                            FanoutAction::ContainerDelete => {
+                                ferro_core::authorization::Action::ContainerDelete
+                            }
+                            FanoutAction::ContainerRun
+                            | FanoutAction::ImagePull
+                            | FanoutAction::VolumeCreate
+                            | FanoutAction::ImageBuild => unreachable!(),
+                        };
+                        ServiceMutation::new(
+                            record.name.clone().unwrap_or_else(|| record.id.clone()),
+                            action,
+                            if action == FanoutAction::ContainerDelete {
+                                Sha256::digest(
+                                    [
+                                        b"ferrocrate/compose-down-delete-intent/v1".as_slice(),
+                                        record.id.as_bytes(),
+                                    ]
+                                    .concat(),
+                                )
+                                .into()
+                            } else {
+                                ferro_core::authorization::compose_down_executor_digest(
+                                    record,
+                                    runtime_action,
+                                )
+                            },
+                        )
+                    })
             });
-            let fanout = FanoutPlan::derive(parent_id, generation, policy_digest, deadline, 0, mutations).map_err(|error| error.to_string())?;
+            let fanout =
+                FanoutPlan::derive(parent_id, generation, policy_digest, deadline, 0, mutations)
+                    .map_err(|error| error.to_string())?;
             let mut failures = Vec::new();
             for (index, record) in selected.iter().enumerate() {
                 let stop_child = &fanout.children()[index * 2];
-                if let Err(error) = fanout.verify_child(stop_child, current_unix_ms()).and_then(|_| replay_store.claim(stop_child)) {
+                if let Err(error) = fanout
+                    .verify_child(stop_child, current_unix_ms())
+                    .and_then(|_| replay_store.claim(stop_child))
+                {
                     failures.push(format!("{}: stop denied/skipped: {error}", record.id));
                     continue;
                 }
                 let action = ferro_core::authorization::Action::ContainerStop;
-                    let resource = record.name.clone().unwrap_or_else(|| record.id.clone());
-                let scoped = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(&parent_origin, *stop_child.child_id(), parent_id, *stop_child.idempotency_key(), action, resource.clone(), *stop_child.request_digest(), stop_child.deadline_unix_ms(), stop_child.policy_generation(), *stop_child.policy_digest(), stop_child.attempt(), stop_child.ordinal(), *stop_child.plan_digest()));
+                let resource = record.name.clone().unwrap_or_else(|| record.id.clone());
+                let scoped = runtime.request_scoped(
+                    ferro_core::authorization::RequestOrigin::compose_child(
+                        &parent_origin,
+                        *stop_child.child_id(),
+                        parent_id,
+                        *stop_child.idempotency_key(),
+                        action,
+                        resource.clone(),
+                        *stop_child.request_digest(),
+                        stop_child.deadline_unix_ms(),
+                        stop_child.policy_generation(),
+                        *stop_child.policy_digest(),
+                        stop_child.attempt(),
+                        stop_child.ordinal(),
+                        *stop_child.plan_digest(),
+                    ),
+                );
                 if let Err(error) = scoped.stop(&record.id, std::time::Duration::from_secs(5)) {
-                    failures.push(format!("{}: stop failed; delete skipped: {error}", record.id));
+                    failures.push(format!(
+                        "{}: stop failed; delete skipped: {error}",
+                        record.id
+                    ));
                     continue;
                 }
-                let stopped = runtime.inspect(&record.id).map_err(|error| error.to_string())?;
-                let delete_digest = ferro_core::authorization::compose_down_executor_digest(&stopped, ferro_core::authorization::Action::ContainerDelete);
-                let predecessor_digest: [u8; 32] = Sha256::digest([
-                    b"ferrocrate/compose-predecessor-outcome/v1".as_slice(),
-                    stop_child.child_id(),
-                    stopped.status.as_bytes(),
-                    &stopped.mutation_generation.to_be_bytes(),
-                    fanout.plan_digest(),
-                ].concat()).into();
-                let delete_plan = fanout.derive_dependent(stop_child, predecessor_digest, ServiceMutation::new(resource.clone(), FanoutAction::ContainerDelete, delete_digest)).map_err(|error| error.to_string())?;
+                let stopped = runtime
+                    .inspect(&record.id)
+                    .map_err(|error| error.to_string())?;
+                let delete_digest = ferro_core::authorization::compose_down_executor_digest(
+                    &stopped,
+                    ferro_core::authorization::Action::ContainerDelete,
+                );
+                let predecessor_digest: [u8; 32] = Sha256::digest(
+                    [
+                        b"ferrocrate/compose-predecessor-outcome/v1".as_slice(),
+                        stop_child.child_id(),
+                        stopped.status.as_bytes(),
+                        &stopped.mutation_generation.to_be_bytes(),
+                        fanout.plan_digest(),
+                    ]
+                    .concat(),
+                )
+                .into();
+                let delete_plan = fanout
+                    .derive_dependent(
+                        stop_child,
+                        predecessor_digest,
+                        ServiceMutation::new(
+                            resource.clone(),
+                            FanoutAction::ContainerDelete,
+                            delete_digest,
+                        ),
+                    )
+                    .map_err(|error| error.to_string())?;
                 let delete_child = &delete_plan.children()[0];
                 let delete_parent = *delete_child.parent_request_id();
-                if let Err(error) = delete_plan.verify_child(delete_child, current_unix_ms()).and_then(|_| replay_store.claim(delete_child)) {
+                if let Err(error) = delete_plan
+                    .verify_child(delete_child, current_unix_ms())
+                    .and_then(|_| replay_store.claim(delete_child))
+                {
                     failures.push(format!("{}: delete denied/skipped: {error}", record.id));
                     continue;
                 }
-                let delete_runtime = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(&parent_origin, *delete_child.child_id(), delete_parent, *delete_child.idempotency_key(), ferro_core::authorization::Action::ContainerDelete, resource, *delete_child.request_digest(), delete_child.deadline_unix_ms(), delete_child.policy_generation(), *delete_child.policy_digest(), delete_child.attempt(), delete_child.ordinal(), *delete_child.plan_digest()));
+                let delete_runtime = runtime.request_scoped(
+                    ferro_core::authorization::RequestOrigin::compose_child(
+                        &parent_origin,
+                        *delete_child.child_id(),
+                        delete_parent,
+                        *delete_child.idempotency_key(),
+                        ferro_core::authorization::Action::ContainerDelete,
+                        resource,
+                        *delete_child.request_digest(),
+                        delete_child.deadline_unix_ms(),
+                        delete_child.policy_generation(),
+                        *delete_child.policy_digest(),
+                        delete_child.attempt(),
+                        delete_child.ordinal(),
+                        *delete_child.plan_digest(),
+                    ),
+                );
                 if let Err(error) = delete_runtime.remove(&record.id) {
                     failures.push(format!("{}: delete failed: {error}", record.id));
                 }
             }
             if !failures.is_empty() {
-                return Err(format!("compose down partial result: {}", failures.join("; ")));
+                return Err(format!(
+                    "compose down partial result: {}",
+                    failures.join("; ")
+                ));
             }
         }
         ComposeCommands::Ps => {
@@ -4878,8 +5390,12 @@ fn execute_compose_prerequisite(
     volume_store: &LocalVolumeStore,
 ) -> Result<(), String> {
     let (action, resource) = match &prerequisite {
-        ComposePrerequisite::ImageBuild(plan) => (AuthorizationAction::ImageBuild, plan.canonical_tag()),
-        ComposePrerequisite::ImagePull(plan) => (AuthorizationAction::ImagePull, plan.canonical_reference()),
+        ComposePrerequisite::ImageBuild(plan) => {
+            (AuthorizationAction::ImageBuild, plan.canonical_tag())
+        }
+        ComposePrerequisite::ImagePull(plan) => {
+            (AuthorizationAction::ImagePull, plan.canonical_reference())
+        }
         ComposePrerequisite::VolumeCreate(plan) => (AuthorizationAction::VolumeCreate, plan.name()),
     };
     let origin = RequestOrigin::compose_child(
@@ -4933,14 +5449,16 @@ fn execute_compose_prerequisite(
 
 #[cfg(target_os = "linux")]
 fn compose_predecessor_outcome_digest(child: &ferro_compose::FanoutChild) -> [u8; 32] {
-    Sha256::digest([
-        b"ferrocrate/compose-predecessor-success/v1".as_slice(),
-        child.child_id(),
-        child.plan_digest(),
-        child.request_digest(),
-        &child.ordinal().to_be_bytes(),
-    ]
-    .concat())
+    Sha256::digest(
+        [
+            b"ferrocrate/compose-predecessor-success/v1".as_slice(),
+            child.child_id(),
+            child.plan_digest(),
+            child.request_digest(),
+            &child.ordinal().to_be_bytes(),
+        ]
+        .concat(),
+    )
     .into()
 }
 
@@ -4959,7 +5477,9 @@ fn run_compose_service(
     let image = if let Some(image) = prepared_image {
         image.to_owned()
     } else {
-        return Err(format!("compose: service {name} image prerequisite was not prepared"));
+        return Err(format!(
+            "compose: service {name} image prerequisite was not prepared"
+        ));
     };
     if let Some(networks) = service.networks.as_ref() {
         if networks.iter().any(|net| net != "default") {
@@ -4981,14 +5501,20 @@ fn run_compose_service(
         "on-failure" => "on-failure",
         _ => "no",
     };
-    let replicas = if instance_override.is_some() { 1 } else { service
-        .deploy
-        .as_ref()
-        .and_then(|deploy| deploy.replicas)
-        .unwrap_or(1) };
+    let replicas = if instance_override.is_some() {
+        1
+    } else {
+        service
+            .deploy
+            .as_ref()
+            .and_then(|deploy| deploy.replicas)
+            .unwrap_or(1)
+    };
 
     for idx in 1..=replicas {
-        let instance_name = if let Some(instance) = instance_override { instance.to_owned() } else if replicas == 1 {
+        let instance_name = if let Some(instance) = instance_override {
+            instance.to_owned()
+        } else if replicas == 1 {
             name.to_string()
         } else {
             format!("{name}-{idx}")
@@ -5073,7 +5599,11 @@ fn compose_service_execution_digest(
         None | Some("bridge") => "bridge",
         Some("host") => "host",
         Some("none") => "none",
-        Some(other) => return Err(format!("compose: unsupported network_mode {other} for service {name}")),
+        Some(other) => {
+            return Err(format!(
+                "compose: unsupported network_mode {other} for service {name}"
+            ))
+        }
     };
     let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
         let mut value = parse_entrypoint(entrypoint)?;
@@ -5456,6 +5986,7 @@ fn handle_docker_compat_connection(
     volume_store: Arc<LocalVolumeStore>,
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
+    let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -5468,7 +5999,9 @@ fn handle_docker_compat_connection(
         let runtime = ContainerRuntime::new(&runtime_dir)
             .map_err(|err| err.to_string())?
             .with_request_origin(origin.clone());
-        let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
+        let surface_authorization = runtime
+            .surface_authorization()
+            .map_err(|error| error.to_string())?;
 
         let (path, query) = split_path_query(&request.path);
         let path = normalize_docker_api_path(&path);
@@ -5809,11 +6342,24 @@ fn handle_docker_compat_connection(
             ("POST", "/volumes/create") => {
                 let body: serde_json::Value = serde_json::from_slice(&request.body)
                     .map_err(|error| format!("docker: invalid volume create payload: {error}"))?;
-                let name = body.get("Name").and_then(serde_json::Value::as_str)
+                let name = body
+                    .get("Name")
+                    .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| "docker: volume Name is required".to_string())?;
-                let driver = body.get("Driver").and_then(serde_json::Value::as_str).unwrap_or("local");
-                let opts: Vec<String> = body.get("DriverOpts").and_then(serde_json::Value::as_object)
-                    .map(|map| map.iter().map(|(key, value)| format!("{key}={}", value.as_str().unwrap_or_default())).collect())
+                let driver = body
+                    .get("Driver")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("local");
+                let opts: Vec<String> = body
+                    .get("DriverOpts")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|map| {
+                        map.iter()
+                            .map(|(key, value)| {
+                                format!("{key}={}", value.as_str().unwrap_or_default())
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let driver_opts = parse_driver_opts(&opts)?;
                 let plan = volume_store
@@ -5823,7 +6369,9 @@ fn handle_docker_compat_connection(
                     .authorize_volume_create_plan(&origin, &plan)
                     .map_err(|error| error.to_string())?;
                 execute_volume_create(&volume_store, plan, proof)?;
-                let record = volume_store.get(name).map_err(|error| error.to_string())?
+                let record = volume_store
+                    .get(name)
+                    .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: volume not found after create: {name}"))?;
                 let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
                 http_response(201, body.to_string().as_bytes(), "application/json")
@@ -5831,7 +6379,13 @@ fn handle_docker_compat_connection(
             ("DELETE", path) if path.starts_with("/volumes/") => {
                 let name = path.trim_start_matches("/volumes/");
                 let proof = surface_authorization
-                    .authorize_named(&origin, AuthorizationAction::VolumeDelete, ResourceKind::Volume, name, 1)
+                    .authorize_named(
+                        &origin,
+                        AuthorizationAction::VolumeDelete,
+                        ResourceKind::Volume,
+                        name,
+                        1,
+                    )
                     .map_err(|error| error.to_string())?;
                 execute_volume_remove(&volume_store, name, proof)?;
                 http_response(204, &[], "text/plain")
@@ -5847,6 +6401,12 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    let fixture = ferro_core::observability::qualification_fixture("docker");
+    let _ = ferro_core::observability::persist_authorization_fixture_evidence(
+        &fixture,
+        qualification_before,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    );
     Ok(())
 }
 
@@ -6172,10 +6732,10 @@ mod tests {
         handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
         handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, should_desktop_forward,
-        structured_desktop_error, top_level_command_name, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        NetworkCommands, VolumeCommands,
+        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, should_desktop_forward, structured_desktop_error,
+        top_level_command_name, validate_network_backend, validate_network_mode, AiCommands, Cli,
+        Commands, ComposeCommands, ConfigCommands, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -6784,7 +7344,9 @@ mod tests {
     fn network_handlers_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let authorization = runtime.surface_authorization().expect("surface authorization");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
         handle_network(
             temp.path(),
             &runtime,
@@ -7008,8 +7570,18 @@ mod tests {
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let authorization = runtime.surface_authorization().expect("authorization");
         let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
-        let err = handle_build(&store, &origin, &authorization, None, None, None, "gzip", "oci", None)
-            .expect_err("dockerfile should be read");
+        let err = handle_build(
+            &store,
+            &origin,
+            &authorization,
+            None,
+            None,
+            None,
+            "gzip",
+            "oci",
+            None,
+        )
+        .expect_err("dockerfile should be read");
         assert!(
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
@@ -7023,8 +7595,18 @@ mod tests {
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let authorization = runtime.surface_authorization().expect("authorization");
         let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
-        let err = handle_build(&store, &origin, &authorization, Some("./Dockerfile"), None, Some(""), "gzip", "oci", None)
-            .expect_err("invalid tag");
+        let err = handle_build(
+            &store,
+            &origin,
+            &authorization,
+            Some("./Dockerfile"),
+            None,
+            Some(""),
+            "gzip",
+            "oci",
+            None,
+        )
+        .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
     }
 

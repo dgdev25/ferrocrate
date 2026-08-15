@@ -970,7 +970,7 @@ pub mod test_support {
     use crate::{
         authorization::{
             gate::{AuthorizationGate, AuthorizedRequest},
-            Action,
+            Action, RequestOrigin,
         },
         container_store::ContainerRecord,
         witness::{DurableIntent, WitnessJournal},
@@ -1035,7 +1035,10 @@ pub mod test_support {
         );
         record.status = "stopped".into();
         record.mutation_generation = resource_generation;
-        let runtime = RuntimeAuthorization::new_with_id(gate, Some(journal), [91; 16]);
+        let runtime = RuntimeAuthorization::new_with_id(gate, Some(journal), [91; 16]).with_origin(
+            RequestOrigin::cli_current()
+                .map_err(|error| format!("fixture CLI identity unavailable: {error}"))?,
+        );
         let permit = if let Some(overlay_id) = overlay_id {
             runtime.authorize_run(
                 &record,

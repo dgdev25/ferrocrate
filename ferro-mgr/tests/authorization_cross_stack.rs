@@ -49,6 +49,7 @@ const RESOURCE: &str = "9e0c6a49-e01e-3e51-9a4f-5bb9663075b4";
 
 #[test]
 fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
+    let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let directory = tempfile::tempdir().unwrap();
     let uid = nix::unistd::geteuid().as_raw();
     let helper_key = SigningKey::from_bytes(&[8; 32]);
@@ -438,7 +439,10 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         ManagedOverlayResponse::Rejected { .. }
     ));
     let snapshot = server.lock().unwrap().test_snapshot();
-    assert_eq!(snapshot.endpoints.get("container-b").map(String::as_str), Some("wg0"));
+    assert_eq!(
+        snapshot.endpoints.get("container-b").map(String::as_str),
+        Some("wg0")
+    );
     let failure = snapshot
         .receipts
         .iter()
@@ -518,6 +522,12 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         receipt.outcome.as_deref() == Some("recovered_after_unknown_effect")
             && receipt.phase == "succeeded"
     }));
+    ferro_core::observability::persist_authorization_fixture_evidence(
+        "managed-overlay",
+        qualification_before,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    )
+    .expect("persist managed-overlay qualification evidence");
 }
 
 #[test]
@@ -562,18 +572,23 @@ fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
         overlay_id: "wg0".into(),
         now_unix: 100,
     };
+    let disabled_client = ManagedOverlayClient::new(&socket).with_authorization_identity(
+        AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+        "boot-disabled",
+    );
     assert!(matches!(
-        send(
-            &socket,
-            &LegacyManagedOverlayRequest {
-                schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
-                mode: ManagedOverlayCompatibilityMode::Disabled,
-                policy_digest: None,
-                instance_boot: "boot-disabled".into(),
-                request: request.clone(),
-            }
-        ),
-        LocalApiResponse::Overlay { .. }
+        disabled_client.request_disabled_compatibility(&request),
+        Ok(ManagedOverlayResponse::Overlay { .. })
+    ));
+    let shadow_client = ManagedOverlayClient::new(&socket).with_authorization_identity(
+        AuthorizationServiceMode::new(AuthorizationMode::Shadow, Some([7; 32])).unwrap(),
+        "boot-shadow",
+    );
+    assert!(matches!(
+        shadow_client.request_disabled_compatibility(&request),
+        Err(ferro_core::managed_overlay::ManagedOverlayError::Grant(
+            ferro_core::authorization::helper_grant::GrantBuildError::IntentMismatch
+        ))
     ));
     assert!(matches!(
         send(&socket, &request),

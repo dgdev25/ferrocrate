@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 
-use ferro_core::rootless::{apply_user_namespace_mappings, RootlessConfig, RootlessMapping};
+use ferro_core::authorization::{Action, RequestOrigin, ResourceKind};
+use ferro_core::rootless::{apply_user_namespace_mappings, RootlessConfig};
+use ferro_core::runtime::ContainerRuntime;
+use std::process::Command;
 
 #[test]
 fn resolves_rootless_config_from_system() {
@@ -9,38 +12,46 @@ fn resolves_rootless_config_from_system() {
     assert!(config.gid_mapping.size > 0);
 }
 
+/// Uses the host's real `unshare(2)` launcher and `/proc/<pid>` mapping files,
+/// with the production setuid mapping-helper fallback where needed. There is
+/// no proc-shaped substitute. The surrounding production runtime obtains an
+/// authenticated permit before the rootless mapping mutation.
 #[test]
-fn rootless_configuration_mutates_the_configured_runtime_proc_view() {
-    let runtime = tempfile::tempdir().expect("configured rootless runtime");
-    let pid = 4242;
-    let proc_dir = runtime.path().join(pid.to_string());
-    std::fs::create_dir(&proc_dir).expect("create runtime proc entry");
-    std::fs::write(proc_dir.join("setgroups"), "").expect("seed setgroups control");
-    let config = RootlessConfig {
-        username: "qualification".into(),
-        uid_mapping: RootlessMapping {
-            container_id: 0,
-            host_id: 120_000,
-            size: 65_536,
-        },
-        gid_mapping: RootlessMapping {
-            container_id: 0,
-            host_id: 220_000,
-            size: 65_536,
-        },
-    };
-    apply_user_namespace_mappings(runtime.path(), pid, &config)
-        .expect("apply production rootless mappings");
-    assert_eq!(
-        std::fs::read_to_string(proc_dir.join("setgroups")).unwrap(),
-        "deny\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(proc_dir.join("uid_map")).unwrap(),
-        "0 120000 65536\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(proc_dir.join("gid_map")).unwrap(),
-        "0 220000 65536\n"
-    );
+fn rootless_configuration_mutates_the_real_runtime_namespaces() {
+    let before = ferro_core::observability::authorization_metrics_snapshot();
+    let runtime_dir = tempfile::tempdir().expect("runtime directory");
+    let origin = RequestOrigin::cli_current().expect("authenticated CLI origin");
+    let runtime = ContainerRuntime::new(runtime_dir.path())
+        .expect("construct production runtime")
+        .with_request_origin(origin.clone());
+    let surface = runtime
+        .surface_authorization()
+        .expect("surface authorization");
+    let permit = surface
+        .authorize_named(
+            &origin,
+            Action::VolumeCreate,
+            ResourceKind::Volume,
+            "rootless-namespace-fixture",
+            1,
+        )
+        .expect("authorize rootless runtime mutation");
+    let config = RootlessConfig::from_system().expect("resolve production rootless config");
+    let mut child = Command::new("unshare")
+        .args(["--user", "--fork", "sleep", "30"])
+        .spawn()
+        .expect("launch the real rootless namespace runtime");
+    let result = apply_user_namespace_mappings(std::path::Path::new("/proc"), child.id(), &config);
+    let _ = child.kill();
+    let _ = child.wait();
+    permit
+        .finish(result.is_ok())
+        .expect("finish rootless permit");
+    result.expect("apply production rootless mapping to real child procfs");
+    ferro_core::observability::persist_authorization_fixture_evidence(
+        "rootless",
+        before,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    )
+    .expect("persist rootless qualification evidence");
 }

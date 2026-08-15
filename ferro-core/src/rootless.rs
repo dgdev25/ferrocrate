@@ -3,6 +3,7 @@ use nix::unistd::{Gid, Uid, User};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,13 @@ pub enum RootlessError {
     Namespace(#[from] NamespaceError),
     #[error("failed to write mapping file {path}: {source}")]
     WriteMapping { path: PathBuf, source: io::Error },
+    #[error("failed to launch {helper} for rootless mapping: {source}")]
+    LaunchMappingHelper {
+        helper: &'static str,
+        source: io::Error,
+    },
+    #[error("{helper} rejected rootless mapping")]
+    MappingHelperRejected { helper: &'static str },
 }
 
 impl RootlessConfig {
@@ -116,25 +124,65 @@ pub fn apply_user_namespace_mappings(
 ) -> Result<(), RootlessError> {
     let proc_pid_dir = proc_root.join(pid.to_string());
 
-    write_file(&proc_pid_dir.join("setgroups"), b"deny\n", true)?;
-    write_file(
+    write_setgroups(&proc_pid_dir.join("setgroups"))?;
+    write_id_mapping(
         &proc_pid_dir.join("uid_map"),
-        config.uid_mapping.as_uid_map_entry().as_bytes(),
-        false,
+        pid,
+        &config.uid_mapping,
+        "newuidmap",
     )?;
-    write_file(
+    write_id_mapping(
         &proc_pid_dir.join("gid_map"),
-        config.gid_mapping.as_gid_map_entry().as_bytes(),
-        false,
+        pid,
+        &config.gid_mapping,
+        "newgidmap",
     )?;
 
     Ok(())
 }
 
-fn write_file(path: &Path, content: &[u8], allow_missing: bool) -> Result<(), RootlessError> {
-    match fs::write(path, content) {
+fn write_setgroups(path: &Path) -> Result<(), RootlessError> {
+    match fs::write(path, b"deny\n") {
         Ok(()) => Ok(()),
-        Err(err) if allow_missing && err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        // An unprivileged parent cannot always write this control before the
+        // namespace's setuid `newgidmap` helper takes ownership. The helper
+        // applies the kernel-required transition with the gid map below.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(()),
+        Err(source) => Err(RootlessError::WriteMapping {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Write a single mapping directly when the kernel permits it. Subordinate-ID
+/// mappings require the setuid helper on ordinary unprivileged hosts; using it
+/// here keeps the production mapping path pointed at the real procfs target.
+fn write_id_mapping(
+    path: &Path,
+    pid: u32,
+    mapping: &RootlessMapping,
+    helper: &'static str,
+) -> Result<(), RootlessError> {
+    match fs::write(path, mapping.as_uid_map_entry()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            let status = Command::new(helper)
+                .args([
+                    pid.to_string(),
+                    mapping.container_id.to_string(),
+                    mapping.host_id.to_string(),
+                    mapping.size.to_string(),
+                ])
+                .status()
+                .map_err(|source| RootlessError::LaunchMappingHelper { helper, source })?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(RootlessError::MappingHelperRejected { helper })
+            }
+        }
         Err(source) => Err(RootlessError::WriteMapping {
             path: path.to_path_buf(),
             source,

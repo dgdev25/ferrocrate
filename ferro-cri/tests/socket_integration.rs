@@ -1,5 +1,7 @@
 use ed25519_dalek::{Signer, SigningKey};
-use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore, Action, PrincipalResolver};
+use ferro_core::authorization::{
+    gate::AuthorizationGate, policy::PolicyStore, Action, PrincipalResolver,
+};
 use ferro_core::runtime::ContainerRuntime;
 use ferro_core::witness::{JournalConfig, JournalMode, WitnessJournal};
 use ferro_cri::runtime::image_service_client::ImageServiceClient;
@@ -38,6 +40,7 @@ async fn wait_for_socket(path: &std::path::Path) {
 #[allow(clippy::await_holding_lock)]
 async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let socket = runtime.path().join("delegated-cri.sock");
     unsafe {
@@ -248,6 +251,13 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
 
     server.abort();
     let _ = server.await;
+
+    ferro_core::observability::persist_authorization_fixture_evidence(
+        "cri",
+        qualification_before,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    )
+    .expect("persist CRI qualification evidence");
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }

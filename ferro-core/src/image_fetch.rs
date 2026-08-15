@@ -54,12 +54,12 @@ pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, Image
     })
 }
 
-pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, ImageFetchError> {
+pub(crate) fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, ImageFetchError> {
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     pull_image_with_store(runtime_dir, image, &store)
 }
 
-pub fn pull_image_with_store(
+pub(crate) fn pull_image_with_store(
     runtime_dir: &Path,
     image: &str,
     store: &LocalImageStore,

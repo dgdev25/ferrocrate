@@ -36,6 +36,8 @@ pub enum VolumeStoreError {
     UnknownDriver(String),
     #[error("volume not found: {0}")]
     NotFound(String),
+    #[error("volume authorization binding failed: {0}")]
+    Authorization(String),
 }
 
 pub trait VolumeDriver: Send + Sync {
@@ -121,7 +123,7 @@ impl LocalVolumeStore {
         self.create_with_driver(name, "local", BTreeMap::new())
     }
 
-    pub fn create_with_driver(
+    pub(crate) fn create_with_driver(
         &self,
         name: &str,
         driver: &str,
@@ -149,6 +151,24 @@ impl LocalVolumeStore {
         Ok(record)
     }
 
+    pub fn create_with_driver_authorized(
+        &self,
+        name: &str,
+        driver: &str,
+        driver_opts: BTreeMap<String, String>,
+        proof: crate::authorization::gate::AuthorizedRequest,
+    ) -> Result<VolumeRecord, VolumeStoreError> {
+        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+            &proof,
+            crate::authorization::Action::VolumeCreate,
+            crate::authorization::ResourceKind::Volume,
+            name,
+            1,
+        )
+        .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+        self.create_with_driver(name, driver, driver_opts)
+    }
+
     pub fn list(&self) -> Result<Vec<VolumeRecord>, VolumeStoreError> {
         let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
         let mut out = Vec::new();
@@ -172,7 +192,7 @@ impl LocalVolumeStore {
         Ok(Some(record))
     }
 
-    pub fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {
+    pub(crate) fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {
         let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
         let Some(value) = tree.get(name.as_bytes())? else {
             return Ok(false);
@@ -190,6 +210,22 @@ impl LocalVolumeStore {
         tree.remove(name.as_bytes())?;
         tree.flush()?;
         Ok(true)
+    }
+
+    pub fn remove_authorized(
+        &self,
+        name: &str,
+        proof: crate::authorization::gate::AuthorizedRequest,
+    ) -> Result<bool, VolumeStoreError> {
+        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+            &proof,
+            crate::authorization::Action::VolumeDelete,
+            crate::authorization::ResourceKind::Volume,
+            name,
+            1,
+        )
+        .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+        self.remove(name)
     }
 
     pub fn backup(&self, name: &str, dest: impl AsRef<Path>) -> Result<(), VolumeStoreError> {

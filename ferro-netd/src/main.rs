@@ -4,16 +4,13 @@ use ferro_core::authorization::{AuthorizationMode, AuthorizationServiceMode};
 use ferro_netd::{
     grants::{GrantLedger, GrantVerifier},
     policy::Policy,
-    protocol::{response_frame, MAX_FRAME_BYTES},
     server::NetdServer,
+    transport::serve_authenticated_one,
 };
-use nix::sys::socket::{
-    getsockopt, recvmsg, sockopt::PeerCredentials, ControlMessageOwned, MsgFlags,
-};
+use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use serde::Deserialize;
 use std::{
     fs,
-    io::Write,
     os::unix::{fs::PermissionsExt, net::UnixListener},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -90,52 +87,19 @@ fn main() {
     )
     .expect("secure socket ACL");
     restrict_privileges().expect("failed to restrict netd privileges");
-    for stream in listener.incoming() {
-        let mut stream = match stream {
-            Ok(stream) => stream,
-            Err(_) => continue,
-        };
-        let credentials = match getsockopt(&stream, PeerCredentials) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let peer_uid = credentials.uid();
-        if peer_uid != agent_uid {
-            continue;
-        }
-        let expected_exe = match std::env::var("FERROCRATE_AGENT_EXE") {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let peer =
-            match authenticate_peer_process(credentials.pid(), std::path::Path::new(&expected_exe))
-            {
-                Ok(peer) => peer,
-                Err(()) => continue,
-            };
-        let mut prefix = [0_u8; 4];
-        if receive_prefix_without_descriptors(&stream, &mut prefix).is_err() {
-            continue;
-        }
-        let length = u32::from_be_bytes(prefix) as usize;
-        let mut frame = prefix.to_vec();
-        if length <= MAX_FRAME_BYTES {
-            let mut body = vec![0_u8; length];
-            if receive_body_without_descriptors(&stream, &mut body).is_err() {
-                continue;
-            }
-            frame.extend(body);
-        }
+    let expected_exe = std::env::var("FERROCRATE_AGENT_EXE")
+        .expect("FERROCRATE_AGENT_EXE is required for peer attestation");
+    loop {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs());
-        if !peer.still_valid() {
-            continue;
-        }
-        let response = server.handle_peer(peer_uid, &frame, now);
-        if let Ok(bytes) = response_frame(&response) {
-            let _ = stream.write_all(&bytes);
-        }
+        let _ = serve_authenticated_one(
+            &listener,
+            &mut server,
+            agent_uid,
+            std::path::Path::new(&expected_exe),
+            now,
+        );
     }
 }
 

@@ -217,17 +217,29 @@ impl NetdServer {
                     .apply_wireguard(&overlay_id, &addresses, &peers)
                     .is_err()
                 {
-                    return reject(RejectionCode::Busy, "failed to apply WireGuard overlay");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to apply WireGuard overlay",
+                        format!("overlay:{overlay_id}")
+                    );
                 }
                 if !self.overlays.contains(&overlay_id)
                     && self.kernel.create_overlay(&overlay_id).is_err()
                 {
-                    return reject(RejectionCode::Busy, "failed to create overlay bridge");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to create overlay bridge",
+                        format!("overlay:{overlay_id}")
+                    );
                 }
                 if self.kernel.apply_routes(&overlay_id, &routes).is_err() {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
-                    return reject(RejectionCode::Busy, "failed to apply overlay routes");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to apply overlay routes",
+                        format!("overlay:{overlay_id}")
+                    );
                 }
                 self.overlays.insert(overlay_id.clone());
                 self.routes.insert(overlay_id.clone(), routes);
@@ -236,7 +248,11 @@ impl NetdServer {
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
                     self.overlays.remove(&overlay_id);
                     let _ = self.kernel.remove_overlay(&overlay_id);
-                    return reject(RejectionCode::Busy, "failed to persist overlay ownership");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to persist overlay ownership",
+                        format!("overlay:{overlay_id}")
+                    );
                 }
                 if self
                     .record_grant_result(
@@ -252,18 +268,40 @@ impl NetdServer {
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
-                let _ = self.kernel.remove_wireguard(&overlay_id);
+                if self.kernel.remove_wireguard(&overlay_id).is_err() {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to remove WireGuard overlay",
+                        format!("overlay:{overlay_id}")
+                    );
+                }
                 if self.overlays.contains(&overlay_id) {
                     if let Some(routes) = self.routes.get(&overlay_id) {
                         if self.kernel.remove_routes(&overlay_id, routes).is_err() {
-                            return reject(RejectionCode::Busy, "failed to remove overlay routes");
+                            reject_effect!(
+                                RejectionCode::Busy,
+                                "failed to remove overlay routes",
+                                format!("overlay:{overlay_id}")
+                            );
                         }
                     }
                     self.routes.remove(&overlay_id);
                     self.overlays.remove(&overlay_id);
-                    let _ = self.kernel.remove_overlay(&overlay_id);
+                    if self.kernel.remove_overlay(&overlay_id).is_err() {
+                        reject_effect!(
+                            RejectionCode::Busy,
+                            "failed to remove overlay bridge",
+                            format!("overlay:{overlay_id}")
+                        );
+                    }
                 }
-                let _ = self.persist();
+                if self.persist().is_err() {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to persist overlay deletion",
+                        format!("overlay:{overlay_id}")
+                    );
+                }
                 if self
                     .record_grant_result(
                         &request_id,
@@ -282,7 +320,25 @@ impl NetdServer {
                 endpoint_id,
                 netns,
             } => {
-                if self.endpoints.contains_key(&endpoint_id) {
+                if let Some(existing_overlay) = self.endpoints.get(&endpoint_id) {
+                    if existing_overlay != &overlay_id || !self.kernel.observe_link(&endpoint_id) {
+                        reject_effect!(
+                            RejectionCode::PolicyViolation,
+                            "endpoint identity conflict",
+                            format!("endpoint:{endpoint_id}")
+                        );
+                    }
+                    if self
+                        .record_grant_result(
+                            &request_id,
+                            nonce,
+                            format!("endpoint:{endpoint_id}"),
+                            "attached_idempotent",
+                        )
+                        .is_err()
+                    {
+                        return reject(RejectionCode::Busy, "result witness unavailable");
+                    }
                     return NetdResponse::Attached;
                 }
                 let container = format!("fc-{endpoint_id}");

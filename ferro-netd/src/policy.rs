@@ -114,7 +114,7 @@ impl Policy {
         Ok(())
     }
 
-    pub fn validate_desired_state(
+    pub(crate) fn validate_desired_state(
         &mut self,
         bytes: &[u8],
         node_id: &str,

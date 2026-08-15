@@ -694,6 +694,7 @@ fn require_preprovisioned_state_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn write_state(path: &Path, state: &EmergencyState) -> Result<(), String> {
     let bytes = serde_json::to_vec(state).map_err(|e| e.to_string())?;
     let (directory, name) = secure_parent(path)?;

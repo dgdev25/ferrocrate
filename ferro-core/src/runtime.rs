@@ -3604,6 +3604,13 @@ fn load_mutation_admission(
     let public = trust_value.get("initial_public_key").and_then(serde_json::Value::as_str)
         .ok_or_else(|| RuntimeError::Authorization("trust bundle lacks initial_public_key".into()))?;
     let public = decode_fixed_hex::<32>(public)?;
+    let initial_key_id = sha2::Sha256::digest(public)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !manifest.trust_key_ids.iter().any(|key_id| key_id == &initial_key_id) {
+        return Err(RuntimeError::Authorization("admission manifest omits the initial trust key ID".into()));
+    }
     let key = ed25519_dalek::VerifyingKey::from_bytes(&public)
         .map_err(|_| RuntimeError::Authorization("trust bundle public key is invalid".into()))?;
     let minimum = crate::witness::Checkpoint::decode(&read_artifact(&manifest.minimum_checkpoint, 16 * 1024 * 1024)?)
@@ -3612,6 +3619,13 @@ fn load_mutation_admission(
     for artifact in &manifest.checkpoint_chain {
         checkpoints.push(crate::witness::Checkpoint::decode(&read_artifact(artifact, 16 * 1024 * 1024)?)
             .map_err(|error| RuntimeError::Authorization(error.to_string()))?);
+    }
+    let latest = checkpoints.last().ok_or_else(|| RuntimeError::Authorization("checkpoint chain is empty".into()))?;
+    if manifest.checkpoint_chain.last().map(|entry| entry.file.as_str())
+        != Some(manifest.latest_checkpoint.as_str())
+        || latest.created_at_secs != manifest.latest_created_at_secs
+    {
+        return Err(RuntimeError::Authorization("admission manifest latest checkpoint binding mismatch".into()));
     }
     let confirmation = directory.read_bounded("manifest.json", 1024 * 1024)
         .map_err(|error| RuntimeError::Authorization(error.to_string()))?;

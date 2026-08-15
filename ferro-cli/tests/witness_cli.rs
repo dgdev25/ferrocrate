@@ -71,7 +71,7 @@ fn provision_admission_with_key(
         .as_secs();
     let checkpoint = ferro_core::witness::Checkpoint::sign(
         ferro_core::witness::FlushedHead::new(id, 1, 0, [0; 32]),
-        now,
+        now.saturating_sub(1),
         &key,
         ferro_core::witness::CheckpointKind::Periodic,
     )

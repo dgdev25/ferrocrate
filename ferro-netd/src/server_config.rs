@@ -6,6 +6,7 @@ use crate::{
 use ferro_core::authorization::AuthorizationServiceMode;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::File,
     path::PathBuf,
 };
 
@@ -22,6 +23,7 @@ pub struct NetdServer {
     pub(crate) overlay_intents: BTreeMap<String, crate::server_state::OverlayMutationIntent>,
     pub(crate) authorization_identity: Option<(AuthorizationServiceMode, String)>,
     pub(crate) journal: Option<PathBuf>,
+    pub(crate) journal_lock: Option<File>,
     pub(crate) kernel: Box<dyn NetKernelOps>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_faults: crate::test_support::FaultHandle,
@@ -53,6 +55,7 @@ impl NetdServer {
             overlay_intents: BTreeMap::new(),
             authorization_identity: None,
             journal: None,
+            journal_lock: None,
             #[cfg(any(test, feature = "test-support"))]
             test_faults: Default::default(),
         }

@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
 };
 
@@ -118,6 +118,91 @@ mod intent_tests {
             "recovered"
         );
     }
+
+    #[test]
+    fn unresolved_intent_blocks_same_process_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut server = NetdServer::deterministic(
+            1,
+            Policy::new(
+                "c".into(),
+                "n".into(),
+                &base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            )
+            .unwrap(),
+            directory.path().join("kernel.json"),
+        )
+        .load_journal(directory.path().join("ownership.json"))
+        .unwrap();
+        let request = NetdRequest::ApplyOverlay {
+            overlay_id: "overlay-a".into(),
+            mode: OverlayMode::BridgeOnly,
+            peers: vec![],
+            routes: vec![],
+            addresses: vec![],
+        };
+        server
+            .begin_overlay_intent(
+                [1; 16],
+                "apply",
+                crate::effect_receipt::EffectReceipt::from_request(&request, 1, 1, 1),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        server
+            .mark_overlay_intent("overlay:overlay-a", "outcome_unknown")
+            .unwrap();
+
+        assert!(server.request_is_quarantined(&request));
+        assert!(server.overlay_is_quarantined("overlay-a"));
+    }
+
+    #[test]
+    fn stale_temporary_journal_does_not_wedge_next_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("ownership.json");
+        std::fs::write(journal.with_extension("tmp"), b"truncated").unwrap();
+        let mut server = NetdServer::deterministic(
+            1,
+            Policy::new(
+                "c".into(),
+                "n".into(),
+                &base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            )
+            .unwrap(),
+            directory.path().join("kernel.json"),
+        )
+        .load_journal(journal.clone())
+        .unwrap();
+        let request = NetdRequest::ApplyOverlay {
+            overlay_id: "overlay-a".into(),
+            mode: OverlayMode::BridgeOnly,
+            peers: vec![],
+            routes: vec![],
+            addresses: vec![],
+        };
+        server
+            .begin_overlay_intent(
+                [3; 16],
+                "apply",
+                crate::effect_receipt::EffectReceipt::from_request(&request, 1, 1, 1),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        assert!(journal.exists());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -145,7 +230,7 @@ impl NetdServer {
         addresses: Vec<String>,
     ) -> Result<(), String> {
         let identity = desired.identity();
-        self.overlay_intents.insert(
+        let previous = self.overlay_intents.insert(
             identity.clone(),
             OverlayMutationIntent {
                 operation_id,
@@ -158,7 +243,18 @@ impl NetdServer {
                 observed_phases: Vec::new(),
             },
         );
-        self.persist()
+        if let Err(error) = self.persist() {
+            match previous {
+                Some(previous) => {
+                    self.overlay_intents.insert(identity, previous);
+                }
+                None => {
+                    self.overlay_intents.remove(&identity);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
     pub(crate) fn mark_overlay_intent(
         &mut self,
@@ -231,9 +327,13 @@ impl NetdServer {
         self.overlay_is_quarantined(crate::request_binding::request_overlay_id(request))
             || match request {
                 crate::protocol::NetdRequest::AttachEndpoint { endpoint_id, .. }
-                | crate::protocol::NetdRequest::DetachEndpoint { endpoint_id, .. } => self
-                    .quarantined
-                    .contains(&format!("legacy-endpoint:{endpoint_id}")),
+                | crate::protocol::NetdRequest::DetachEndpoint { endpoint_id, .. } => {
+                    let identity = format!("endpoint:{endpoint_id}");
+                    self.quarantined
+                        .iter()
+                        .any(|entry| entry.ends_with(&identity))
+                        || self.intent_is_unresolved(&identity)
+                }
                 _ => false,
             }
     }
@@ -242,6 +342,15 @@ impl NetdServer {
         self.quarantined
             .iter()
             .any(|entry| entry.ends_with(&suffix))
+            || self.intent_is_unresolved(&suffix)
+    }
+    fn intent_is_unresolved(&self, identity: &str) -> bool {
+        self.overlay_intents.get(identity).is_some_and(|intent| {
+            !matches!(
+                intent.phase.as_str(),
+                "succeeded" | "recovered" | "not_applied"
+            )
+        })
     }
     pub(crate) fn finish_inspect(
         &mut self,
@@ -270,6 +379,19 @@ impl NetdServer {
         }
     }
     pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
+        use fs2::FileExt;
+        let lock_path = path.with_extension("lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&lock_path)
+            .map_err(|error| error.to_string())?;
+        lock.try_lock_exclusive()
+            .map_err(|_| "ownership journal already has a writer".to_string())?;
+        self.journal_lock = Some(lock);
         if path.exists() {
             let state: PersistedState =
                 serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
@@ -425,28 +547,50 @@ impl NetdServer {
         let Some(path) = &self.journal else {
             return Ok(());
         };
-        let temporary = path.with_extension("tmp");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
+        static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file_name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or("invalid journal path")?;
+        let temporary = path.with_file_name(format!(
+            ".{file_name}.tmp.{}.{}",
+            std::process::id(),
+            sequence
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&temporary)
+                .map_err(|error| error.to_string())?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+            file.write_all(
+                &serde_json::to_vec(&PersistedState {
+                    overlays: self.overlays.clone(),
+                    endpoints: self.endpoints.clone(),
+                    routes: self.routes.clone(),
+                    addresses: self.addresses.clone(),
+                    effect_receipts: self.effect_receipts.clone(),
+                    quarantined: self.quarantined.clone(),
+                    overlay_intents: self.overlay_intents.clone(),
+                })
+                .map_err(|error| error.to_string())?,
+            )
             .map_err(|error| error.to_string())?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
-        file.write_all(
-            &serde_json::to_vec(&PersistedState {
-                overlays: self.overlays.clone(),
-                endpoints: self.endpoints.clone(),
-                routes: self.routes.clone(),
-                addresses: self.addresses.clone(),
-                effect_receipts: self.effect_receipts.clone(),
-                quarantined: self.quarantined.clone(),
-                overlay_intents: self.overlay_intents.clone(),
-            })
-            .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        fs::rename(temporary, path).map_err(|error| error.to_string())
+            file.sync_all().map_err(|error| error.to_string())?;
+            fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+            let parent = path.parent().ok_or("journal has no parent directory")?;
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 }

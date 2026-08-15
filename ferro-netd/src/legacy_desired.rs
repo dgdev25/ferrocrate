@@ -82,9 +82,14 @@ impl NetdServer {
                 "legacy desired signature or revision rejected",
             ));
         }
-        Some(self.apply_legacy_desired(&desired).unwrap_or_else(|code| {
-            crate::server_grants::reject(code, "legacy desired mutation failed")
-        }))
+        Some(match self.apply_legacy_desired(&desired) {
+            Ok(response) => response,
+            Err(code) => {
+                self.policy
+                    .rollback("__desired__", desired.epoch, desired.revision);
+                crate::server_grants::reject(code, "legacy desired mutation failed")
+            }
+        })
     }
 
     pub(crate) fn apply_legacy_desired(
@@ -382,6 +387,50 @@ mod tests {
             NetdResponse::Applied
         );
         assert!(server.overlays.is_empty());
+    }
+
+    #[test]
+    fn disabled_pre_effect_persist_failure_can_retry_same_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[45; 32]);
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let faults = crate::test_support::FaultHandle::default();
+        let mut server = NetdServer::deterministic_with_faults(
+            1001,
+            Policy::new("cluster".into(), "node".into(), &public).unwrap(),
+            directory.path().join("kernel.json"),
+            faults.clone(),
+        )
+        .with_authorization_identity(
+            AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+            "boot-a",
+        )
+        .load_journal(directory.path().join("ownership.json"))
+        .unwrap();
+        let desired = DesiredState {
+            cluster_id: "cluster".into(),
+            cluster_epoch: 1,
+            revision: 7,
+            overlays: vec![OverlayState {
+                overlay_id: "bridge-a".into(),
+                routes: vec![],
+                peers: vec![],
+                wireguard: Some(false),
+                addresses: vec![],
+            }],
+            signature: vec![],
+            lease_expires_unix: 500,
+        };
+        faults.fail_once(crate::test_support::FaultPoint::StatePersist);
+        assert!(matches!(
+            send(&mut server, &key, desired.clone()),
+            NetdResponse::Rejected {
+                code: RejectionCode::Busy,
+                ..
+            }
+        ));
+        assert_eq!(send(&mut server, &key, desired), NetdResponse::Applied);
     }
 
     fn send(server: &mut NetdServer, key: &SigningKey, desired: DesiredState) -> NetdResponse {

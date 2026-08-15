@@ -259,7 +259,10 @@ impl LocalImageStore {
         Ok(out)
     }
 
-    pub(crate) fn prune_references(&self) -> Result<usize, ImageStoreError> {
+    pub(crate) fn prune_references(
+        &self,
+        _authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    ) -> Result<usize, ImageStoreError> {
         let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
         let keys: Vec<Vec<u8>> = tree
             .iter()
@@ -306,7 +309,14 @@ impl LocalImageStore {
                 ));
             }
         }
-        match self.prune_references() {
+        if permits.is_empty() {
+            return Ok(0);
+        }
+        let result = {
+            let authority = permits[0].mutation_authority();
+            self.prune_references(&authority)
+        };
+        match result {
             Ok(removed) => {
                 for permit in permits {
                     permit
@@ -487,7 +497,11 @@ mod tests {
             )
             .expect("store record");
 
-        let removed = store.prune_references().expect("prune");
+        let removed = store
+            .prune_references(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            )
+            .expect("prune");
         assert_eq!(removed, 2);
         let listed = store.list_references().expect("list");
         assert!(listed.is_empty());

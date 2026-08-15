@@ -34,3 +34,16 @@ Task 8 replaces ambient manager/netd authority with signed, bounded, single-use 
 - Workspace-wide `cargo fmt --check` reports extensive pre-existing formatting drift in unrelated crates; every Task 8 file was formatted directly with `rustfmt` and passes `git diff --check`.
 
 The untracked `.superpowers/toolchain/` linker support and `docs/research/` material are pre-existing workspace artifacts and are intentionally excluded.
+
+## Round 4 production composition
+
+- `AdminService.PublishDesired` is a real authenticated gRPC mutation API. The production listener derives an administrator principal from mTLS, rechecks role, method, cluster and active node, then invokes the exact-diff controller issuer and atomically stores state plus its bundle. Empty desired state authorizes deletion of the final overlay rather than hiding it.
+- Controller semantic revisions no longer enter netd policy ordering. Every controller child and local child reserves one globally monotonic durable netd sequence; the controller `(epoch, revision, child)` mapping is idempotent across restart.
+- Manager and netd frames bind lowercase authorization mode, optional policy digest and boot instance. Both services invoke `AuthorizationServiceMode::require_match` before mutation. Production disabled mode uses a signed, bounded prost desired-state envelope; netd applies exact nonempty state and removes it on a later signed empty state. Enforcing netd rejects this legacy envelope.
+- The binary and cross-stack test share the library production accept-one handler. It derives `SO_PEERCRED`, pins a pidfd and executable/start time, rejects ancillary descriptors, bounds length before allocation, and revalidates the process before dispatch.
+- Every armed operation persists an action-specific `EffectReceipt`. Overlay receipts bind generation, peer/public-key digest, address digest, route digest and netd policy epoch/revision. Endpoint receipts bind generation, overlay/master digest and observed netns inode. Restart requires the exact receipt, ownership record and live kernel link to agree; missing or partial receipt state is quarantined rather than reported as success.
+
+Round 4 verification:
+
+- `cargo test -p ferro-netd --all-targets --quiet` — passed: 5 library tests, 2 binary tests, 7 grant tests and 6 socket tests.
+- `cargo test -p ferro-mgr --all-targets --quiet` — passed: 19 manager unit tests and every integration target, including authenticated PublishDesired, global sequence restart, matching/mismatching handshakes, disabled nonempty-to-empty reconciliation, and real Unix cross-stack mutation.

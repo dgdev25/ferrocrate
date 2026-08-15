@@ -62,11 +62,11 @@ pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
     entry("mutation.cli", "ferro-cli direct runtime mutation", "CLI effective RequestOrigin -> ContainerRuntime mediated method", "cli_identity_uses_effective_authority_not_sudo_environment"),
     entry("mutation.docker", "Docker Unix peer -> private runtime executor", "authenticate before read_http_request -> RequestOrigin -> ContainerRuntime mediated method", "docker_authentication_happens_from_socket_not_headers"),
     entry("mutation.compose", "verified FanoutPlan child -> private runtime executor", "verify_child -> child RequestOrigin -> ContainerRuntime mediated method", "children_bind_parent_order_action_digest_deadline_and_attempt"),
-    entry("mutation.cri", "CRI image mutation executor with effective identity", "authenticated Unix connect info -> resolve identity -> SurfaceAuthorization::authorize_image", "transport_is_authoritative_by_default_and_metadata_cannot_elevate"),
+    entry("mutation.cri", "CRI image mutation executor with effective identity", "authenticated Unix connect info -> immutable image binding -> SurfaceAuthorization::authorize_image_binding -> proof-consuming image executor", "transport_is_authoritative_by_default_and_metadata_cannot_elevate"),
     entry("mutation.runtime-background", "runtime-owned recovery and cleanup", "RuntimeAuthorization internal recovery", "required_cleanup_reserve_survives_enospc"),
-    entry("mutation.images", "image mutation executors", "owning image mediation task", "authorization_gate_inventory_has_stable_unique_surface_ids"),
-    entry("mutation.volumes", "volume mutation executors", "owning volume mediation task", "authorization_gate_inventory_has_stable_unique_surface_ids"),
-    entry("mutation.networks", "network mutation executors", "managed overlay authorized request and grant", "managed_kernel_transaction_requires_authority"),
+    entry("mutation.images", "private execute_image_pull / execute_image_delete", "CLI or authenticated Docker origin -> immutable binding -> SurfaceAuthorization::authorize_image_binding", "image_authorization_binds_the_immutable_digest"),
+    entry("mutation.volumes", "private execute_volume_create / execute_volume_remove", "CLI or authenticated Docker origin -> SurfaceAuthorization::authorize_named", "docker_compat_volume_create_delete_routes_are_mediated"),
+    entry("mutation.networks", "private execute_network_create / execute_network_remove", "CLI or authenticated Docker origin -> SurfaceAuthorization::authorize_named", "docker_compat_network_create_list_delete_routes_work"),
     entry("mutation.helper-calls", "privileged helper mutation executors", "GrantVerifier::verify -> request-bound grant", "helper_grant_is_single_use"),
 ];
 

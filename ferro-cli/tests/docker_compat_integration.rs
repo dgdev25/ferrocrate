@@ -168,3 +168,19 @@ fn docker_compat_network_create_list_delete_routes_work() {
     let (delete_status, delete_resp) = harness.request("DELETE", "/v1.45/networks/compat-net");
     assert_eq!(delete_status, 204, "delete body={delete_resp}");
 }
+
+#[test]
+fn docker_compat_volume_create_delete_routes_are_mediated() {
+    let harness = DaemonHarness::spawn();
+    let body = r#"{"Name":"compat-volume","Driver":"local","DriverOpts":{}}"#;
+    let request = format!(
+        "POST /v1.45/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 201, "create body={response}");
+    assert!(response.contains("compat-volume"), "body={response}");
+
+    let (status, response) = harness.request("DELETE", "/v1.45/volumes/compat-volume");
+    assert_eq!(status, 204, "delete body={response}");
+}

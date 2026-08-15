@@ -23,6 +23,8 @@ pub enum ImageStoreError {
     Encode(#[from] serde_json::Error),
     #[error("failed to decode image record: {0}")]
     Decode(#[source] serde_json::Error),
+    #[error("image authorization binding failed: {0}")]
+    Authorization(String),
 }
 
 #[derive(Clone)]
@@ -93,6 +95,28 @@ impl LocalImageStore {
         let removed = tree.remove(reference.as_bytes())?.is_some();
         tree.flush()?;
         Ok(removed)
+    }
+
+    pub fn remove_reference_authorized(
+        &self,
+        reference: &str,
+        digest: &str,
+        proof: crate::authorization::gate::AuthorizedRequest,
+    ) -> Result<bool, ImageStoreError> {
+        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+            &proof,
+            crate::authorization::Action::ImageDelete,
+            crate::authorization::ResourceKind::Image,
+            reference,
+            1,
+        )
+        .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+        if proof.canonical().image_digest() != Some(digest) {
+            return Err(ImageStoreError::Authorization(
+                "image digest does not match executor".to_string(),
+            ));
+        }
+        self.remove_reference(reference)
     }
 
     pub fn list_references(&self) -> Result<Vec<ImageRecord>, ImageStoreError> {

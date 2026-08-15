@@ -33,6 +33,27 @@ pub struct ImageFetchResult {
     pub layer_paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InspectedImageBinding {
+    pub reference: String,
+    pub digest: String,
+}
+
+/// Resolve the platform manifest and its immutable config digest without
+/// writing image metadata or blobs. Authorization callers use this before
+/// opening the mutation boundary.
+pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, ImageFetchError> {
+    parse_image_reference(image)?;
+    let client = RegistryClient::new()?;
+    let auth = resolve_registry_auth(image)?;
+    let manifest_json = resolve_manifest_json(&client, image, auth.as_ref())?;
+    let manifest = parse_image_manifest(&manifest_json)?;
+    Ok(InspectedImageBinding {
+        reference: crate::image_tagging::canonicalize_reference(image)?,
+        digest: manifest.config.digest,
+    })
+}
+
 pub fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, ImageFetchError> {
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     pull_image_with_store(runtime_dir, image, &store)
@@ -92,6 +113,30 @@ pub fn pull_image_with_store(
         reference: canonical,
         layer_paths,
     })
+}
+
+pub fn pull_image_with_store_authorized(
+    runtime_dir: &Path,
+    image: &str,
+    canonical: &str,
+    digest: &str,
+    store: &LocalImageStore,
+    proof: crate::authorization::gate::AuthorizedRequest,
+) -> Result<ImageFetchResult, ImageFetchError> {
+    crate::authorization::surface::SurfaceAuthorization::validate_execution(
+        &proof,
+        crate::authorization::Action::ImagePull,
+        crate::authorization::ResourceKind::Image,
+        canonical,
+        1,
+    )
+    .map_err(|error| ImageFetchError::Integrity(error.to_string()))?;
+    if proof.canonical().image_digest() != Some(digest) {
+        return Err(ImageFetchError::Integrity(
+            "image authorization digest does not match executor".to_string(),
+        ));
+    }
+    pull_image_with_store(runtime_dir, image, store)
 }
 
 pub fn pull_manifest_only(runtime_dir: &Path, image: &str) -> Result<String, ImageFetchError> {
@@ -323,7 +368,7 @@ fn verify_digest(path: &Path, digest: &str) -> Result<(), ImageFetchError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pull_image, pull_manifest_only};
+    use super::{inspect_image_binding, pull_image, pull_manifest_only};
     use httptest::matchers::request;
     use httptest::responders::status_code;
     use httptest::{Expectation, Server};
@@ -365,6 +410,24 @@ mod tests {
             .join("shake256")
             .join(hash);
         assert!(cas_path.exists());
+    }
+
+    #[test]
+    fn inspects_immutable_binding_without_mutating_the_store() {
+        let server = Server::run();
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[]}"#;
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/library/probe/manifests/latest",
+            ))
+            .respond_with(status_code(200).body(manifest_json)),
+        );
+        let image = format!("{}/library/probe", server.addr());
+        let binding = inspect_image_binding(&image).expect("inspect image");
+
+        assert_eq!(binding.reference, format!("{image}:latest"));
+        assert_eq!(binding.digest, "sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be");
     }
 
     #[test]

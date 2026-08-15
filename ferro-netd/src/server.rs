@@ -1,3 +1,4 @@
+use crate::kernel_ops::{NetKernelOps, RealNetKernelOps};
 use crate::policy::Policy;
 use crate::{
     grants::{GrantError, GrantVerifier},
@@ -9,9 +10,8 @@ use crate::{
 use ferro_core::authorization::helper_grant::{GrantAction, GrantParameters};
 use ferro_net::{
     bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig},
-    exec_cmd, exec_cmd_capture,
-    netns::move_to_netns,
-    veth::{create_veth_pair, destroy_veth_pair, VethConfig, VethPair},
+    exec_cmd,
+    veth::{destroy_veth_pair, VethConfig, VethPair},
     WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ pub struct NetdServer {
     routes: BTreeMap<String, Vec<String>>,
     wireguard: Option<(WireGuardManager, PathBuf, u16)>,
     journal: Option<PathBuf>,
+    kernel: Box<dyn NetKernelOps>,
 }
 impl NetdServer {
     pub fn new(uid: u32, policy: Policy) -> Self {
@@ -52,6 +53,7 @@ impl NetdServer {
             routes: BTreeMap::new(),
             wireguard: None,
             journal: None,
+            kernel: Box::new(RealNetKernelOps),
         }
     }
     pub fn with_grants(mut self, grants: GrantVerifier) -> Self {
@@ -73,6 +75,7 @@ impl NetdServer {
             routes: BTreeMap::new(),
             wireguard: Some((WireGuardManager::new(None), private_key_path, listen_port)),
             journal: None,
+            kernel: Box::new(RealNetKernelOps),
         }
     }
     pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
@@ -85,26 +88,10 @@ impl NetdServer {
             self.routes = state.routes;
         }
         self.journal = Some(path);
-        self.overlays.retain(|overlay| {
-            exec_cmd_capture(&vec![
-                "ip".into(),
-                "link".into(),
-                "show".into(),
-                "dev".into(),
-                overlay.clone(),
-            ])
-            .is_ok()
-        });
-        self.endpoints.retain(|endpoint, _| {
-            exec_cmd_capture(&vec![
-                "ip".into(),
-                "link".into(),
-                "show".into(),
-                "dev".into(),
-                endpoint.clone(),
-            ])
-            .is_ok()
-        });
+        self.overlays
+            .retain(|overlay| self.kernel.observe_link(overlay));
+        self.endpoints
+            .retain(|endpoint, _| self.kernel.observe_link(endpoint));
         self.persist()?;
         Ok(self)
     }
@@ -264,12 +251,7 @@ impl NetdServer {
                     }
                 }
                 if !self.overlays.contains(&overlay_id)
-                    && create_bridge(&BridgeConfig {
-                        name: overlay_id.clone(),
-                        cidr: String::new(),
-                        ipv6_cidr: None,
-                    })
-                    .is_err()
+                    && self.kernel.create_overlay(&overlay_id).is_err()
                 {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
@@ -463,7 +445,7 @@ impl NetdServer {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
                     self.overlays.remove(&overlay_id);
-                    let _ = destroy_bridge(&overlay_id);
+                    let _ = self.kernel.remove_overlay(&overlay_id);
                     return reject(RejectionCode::Busy, "failed to persist overlay ownership");
                 }
                 if self
@@ -496,7 +478,7 @@ impl NetdServer {
                     }
                     self.routes.remove(&overlay_id);
                     self.overlays.remove(&overlay_id);
-                    let _ = destroy_bridge(&overlay_id);
+                    let _ = self.kernel.remove_overlay(&overlay_id);
                 }
                 let _ = self.persist();
                 if self
@@ -530,25 +512,23 @@ impl NetdServer {
                     host_addr: None,
                     container_addr: None,
                 };
-                if create_veth_pair(&config).is_err() {
+                if self.kernel.create_endpoint(&config).is_err() {
                     reject_effect!(
                         RejectionCode::Busy,
                         "failed to create endpoint veth",
                         format!("endpoint:{endpoint_id}")
                     );
                 }
-                let master = match build_ip_link_set_master_cmd(&endpoint_id, &overlay_id) {
-                    Ok(command) => command,
-                    Err(_) => {
-                        let _ = destroy_veth_pair(&endpoint_id);
-                        return reject(
-                            RejectionCode::PolicyViolation,
-                            "invalid endpoint interface",
-                        );
-                    }
-                };
-                if exec_cmd(&master).is_err() {
-                    let _ = destroy_veth_pair(&endpoint_id);
+                if build_ip_link_set_master_cmd(&endpoint_id, &overlay_id).is_err() {
+                    let _ = self.kernel.remove_endpoint(&endpoint_id);
+                    return reject(RejectionCode::PolicyViolation, "invalid endpoint interface");
+                }
+                if self
+                    .kernel
+                    .attach_endpoint(&endpoint_id, &overlay_id)
+                    .is_err()
+                {
+                    let _ = self.kernel.remove_endpoint(&endpoint_id);
                     reject_effect!(
                         RejectionCode::Busy,
                         "failed to attach endpoint veth",
@@ -556,8 +536,12 @@ impl NetdServer {
                     );
                 }
                 if let Some(netns) = netns {
-                    if move_to_netns(&format!("fc-{endpoint_id}"), &netns).is_err() {
-                        let _ = destroy_veth_pair(&endpoint_id);
+                    if self
+                        .kernel
+                        .move_endpoint(&format!("fc-{endpoint_id}"), &netns)
+                        .is_err()
+                    {
+                        let _ = self.kernel.remove_endpoint(&endpoint_id);
                         reject_effect!(
                             RejectionCode::Busy,
                             "failed to move endpoint into namespace",
@@ -568,7 +552,7 @@ impl NetdServer {
                 self.endpoints.insert(endpoint_id.clone(), overlay_id);
                 if self.persist().is_err() {
                     let _ = self.endpoints.remove(&endpoint_id);
-                    let _ = destroy_veth_pair(&endpoint_id);
+                    let _ = self.kernel.remove_endpoint(&endpoint_id);
                     reject_effect!(
                         RejectionCode::Busy,
                         "failed to persist endpoint ownership",
@@ -590,7 +574,7 @@ impl NetdServer {
             }
             NetdRequest::DetachEndpoint { endpoint_id, .. } => {
                 if self.endpoints.remove(&endpoint_id).is_some()
-                    && destroy_veth_pair(&endpoint_id).is_err()
+                    && self.kernel.remove_endpoint(&endpoint_id).is_err()
                 {
                     reject_effect!(
                         RejectionCode::Busy,

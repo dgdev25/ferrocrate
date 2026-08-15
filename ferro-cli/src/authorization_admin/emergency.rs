@@ -29,6 +29,8 @@ pub struct EmergencyActivate<'a> {
 #[derive(Debug, Deserialize, Serialize)]
 struct EmergencyState {
     schema: u8,
+    #[serde(default)]
+    generation: u64,
     boot_id: String,
     activated_uptime_ns: u64,
     deadline_uptime_ns: u64,
@@ -63,6 +65,64 @@ enum EmergencyStatus {
 }
 
 struct EmergencyPermit(EmergencyState);
+
+struct EmergencyStateStore {
+    directory: ferro_core::authorization::SecureDirectory,
+}
+
+impl EmergencyStateStore {
+    fn open(path: &Path) -> Result<Self, String> {
+        Ok(Self {
+            directory: ferro_core::authorization::SecureDirectory::open(path)
+                .map_err(|e| e.to_string())?,
+        })
+    }
+
+    fn exists(&self) -> Result<bool, String> {
+        self.directory.exists(STATE_FILE).map_err(|e| e.to_string())
+    }
+
+    fn read(&self) -> Result<EmergencyState, String> {
+        serde_json::from_slice(
+            &self
+                .directory
+                .read_bounded(STATE_FILE, 1024 * 1024)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn write_cas(&self, expected: Option<u64>, state: &mut EmergencyState) -> Result<(), String> {
+        match expected {
+            None if self.exists()? => return Err("emergency state already exists".into()),
+            Some(generation) => {
+                let current = self.read()?;
+                if current.generation != generation {
+                    return Err("emergency state generation changed concurrently".into());
+                }
+            }
+            None => {}
+        }
+        state.generation = expected
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("emergency state generation overflow")?;
+        self.directory
+            .write_atomic(
+                STATE_FILE,
+                &serde_json::to_vec(state).map_err(|e| e.to_string())?,
+                0o600,
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    fn unlink_cas(&self, generation: u64) -> Result<(), String> {
+        if self.read()?.generation != generation {
+            return Err("emergency state generation changed concurrently".into());
+        }
+        self.directory.unlink(STATE_FILE).map_err(|e| e.to_string())
+    }
+}
 
 pub trait AppendOnlySink {
     fn durable_append_capable(&self) -> bool;
@@ -171,8 +231,8 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         return Err("emergency scope, nonce, or deadline is invalid".into());
     }
     prepare_state_dir(args.state_dir)?;
-    let state_path = args.state_dir.join(STATE_FILE);
-    if secure_exists(&state_path)? {
+    let store = EmergencyStateStore::open(args.state_dir)?;
+    if store.exists()? {
         return Err("an emergency grant is already active or awaits reconciliation".into());
     }
     let boot_id = boot_id()?;
@@ -204,6 +264,7 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
     let sink_metadata = fs::metadata(&sink).map_err(|e| e.to_string())?;
     let state = EmergencyState {
         schema: 1,
+        generation: 0,
         boot_id,
         activated_uptime_ns: now,
         deadline_uptime_ns: deadline,
@@ -228,7 +289,8 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
     )?;
     persist_nonce(&nonce_marker)?;
-    write_state(&state_path, &state)?;
+    let mut state = state;
+    store.write_cas(None, &mut state)?;
     Ok(format!(
         "emergency active action={} resource={} deadline_uptime_ns={} reconciliation_required=true",
         state.action, state.resource, deadline
@@ -244,11 +306,8 @@ pub fn reconcile_emergency(state_dir: &Path, sink: &Path) -> Result<String, Stri
 }
 
 fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
-    let path = state_dir.join(STATE_FILE);
-    let state: EmergencyState = serde_json::from_slice(
-        &secure_read(&path, 1024 * 1024).map_err(|e| format!("emergency state: {e}"))?,
-    )
-    .map_err(|e| format!("emergency state: {e}"))?;
+    let store = EmergencyStateStore::open(state_dir)?;
+    let state = store.read().map_err(|e| format!("emergency state: {e}"))?;
     if state.schema != 1 || state.boot_id != boot_id()? {
         return Err("emergency state is from another boot; operator recovery is required".into());
     }
@@ -272,7 +331,7 @@ fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
         &canonical_sink,
         &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
     )?;
-    secure_unlink(&path)?;
+    store.unlink_cas(state.generation)?;
     Ok("emergency reconciled receipt_persisted=true normal_operations_allowed=true".into())
 }
 
@@ -303,13 +362,8 @@ fn execute_verified<F>(
 where
     F: FnOnce([u8; 16], EmergencyAuthorityMaterial) -> Result<(), String>,
 {
-    let path = state_dir.join(STATE_FILE);
-    let mut permit = EmergencyPermit(
-        serde_json::from_slice(
-            &secure_read(&path, 1024 * 1024).map_err(|e| format!("emergency state: {e}"))?,
-        )
-        .map_err(|e| e.to_string())?,
-    );
+    let store = EmergencyStateStore::open(state_dir)?;
+    let mut permit = EmergencyPermit(store.read().map_err(|e| format!("emergency state: {e}"))?);
     let state = &mut permit.0;
     if state.boot_id != boot_id()? || uptime_ns()? >= state.deadline_uptime_ns {
         return Err("emergency permit boot or monotonic deadline is invalid".into());
@@ -339,7 +393,8 @@ where
         &serde_json::to_vec(&intent).map_err(|e| e.to_string())?,
     )?;
     state.status = EmergencyStatus::IntentDurable;
-    write_state(&path, &state)?;
+    let expected = state.generation;
+    store.write_cas(Some(expected), state)?;
     let before = main_witness_head(state_dir)?;
     let material = EmergencyAuthorityMaterial {
         signed_payload: state.approval_payload.as_bytes().to_vec(),
@@ -353,7 +408,8 @@ where
     if let (Some(before), Some(after)) = (before, after) {
         if after <= before {
             state.status = EmergencyStatus::Unknown;
-            write_state(&path, &state)?;
+            let expected = state.generation;
+            store.write_cas(Some(expected), state)?;
             return Err(
                 "emergency outcome is unknown because no main-journal evidence was published"
                     .into(),
@@ -369,13 +425,15 @@ where
         &serde_json::to_vec(&outcome).map_err(|e| e.to_string())?,
     ) {
         state.status = EmergencyStatus::Unknown;
-        write_state(&path, &state)?;
+        let expected = state.generation;
+        store.write_cas(Some(expected), state)?;
         return Err(format!(
             "emergency outcome is unknown because the sink failed: {error}"
         ));
     }
     state.status = EmergencyStatus::Terminal;
-    write_state(&path, &state)?;
+    let expected = state.generation;
+    store.write_cas(Some(expected), state)?;
     result?;
     Ok("emergency execution terminal=true reconciliation_required=true".into())
 }
@@ -688,11 +746,6 @@ fn secure_exists(path: &Path) -> Result<bool, String> {
     directory.exists(&name).map_err(|e| e.to_string())
 }
 
-fn secure_unlink(path: &Path) -> Result<(), String> {
-    let (directory, name) = secure_parent(path)?;
-    directory.unlink(&name).map_err(|e| e.to_string())
-}
-
 fn require_console() -> Result<(), String> {
     if !std::io::stdin().is_terminal() {
         return Err("emergency activation is local-console-only (stdin is not a terminal)".into());
@@ -909,5 +962,40 @@ mod tests {
 
         assert_eq!(fs::read(retained.join("state.json")).unwrap(), b"safe");
         assert!(!attacker.join("state.json").exists());
+    }
+
+    #[test]
+    fn emergency_state_store_rejects_stale_generation_transition() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        fs::create_dir(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let store = EmergencyStateStore::open(&state_dir).unwrap();
+        let mut state = EmergencyState {
+            schema: 1,
+            generation: 0,
+            boot_id: "boot".into(),
+            activated_uptime_ns: 1,
+            deadline_uptime_ns: 2,
+            action: "container.stop".into(),
+            resource: "container:x".into(),
+            nonce: "0123456789abcdef".into(),
+            sink: "/sink".into(),
+            sink_device: 1,
+            sink_inode: 2,
+            status: EmergencyStatus::Activated,
+            main_witness_first: None,
+            main_witness_last: None,
+            operation_id: None,
+            terminal_event_id: None,
+            approval_payload: "payload".into(),
+            approval_signature: "signature".into(),
+            recovery_public_key: "key".into(),
+        };
+        store.write_cas(None, &mut state).unwrap();
+        let stale = state.generation;
+        let mut concurrent = store.read().unwrap();
+        store.write_cas(Some(stale), &mut concurrent).unwrap();
+        assert!(store.write_cas(Some(stale), &mut state).is_err());
     }
 }

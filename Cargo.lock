@@ -908,6 +908,7 @@ dependencies = [
  "ferro-compose",
  "ferro-core",
  "ferro-mind",
+ "nix",
  "owo-colors",
  "proptest",
  "serde",

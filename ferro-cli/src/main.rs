@@ -35,6 +35,8 @@ use ferro_core::runtime::NetworkBackend;
 use ferro_core::runtime::ContainerRuntime;
 #[cfg(target_os = "linux")]
 use ferro_core::volume_store::LocalVolumeStore;
+#[cfg(target_os = "linux")]
+use ferro_cli::authorization_admin;
 use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
@@ -92,6 +94,21 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[cfg(target_os = "linux")]
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+    #[cfg(target_os = "linux")]
+    Witness {
+        #[command(subcommand)]
+        command: WitnessCommands,
+    },
+    #[cfg(target_os = "linux")]
+    Emergency {
+        #[command(subcommand)]
+        command: EmergencyCommands,
+    },
     #[cfg(target_os = "linux")]
     Run {
         image: String,
@@ -385,6 +402,74 @@ pub enum Commands {
     Migrate {
         #[command(subcommand)]
         target: MigrateCommands,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommands {
+    Check { path: PathBuf },
+    Reload {
+        path: PathBuf,
+        #[arg(long)]
+        active: PathBuf,
+        #[arg(long)]
+        rollback_approval: Option<PathBuf>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub enum WitnessCommands {
+    Show {
+        #[arg(long)] journal: PathBuf,
+        #[arg(long)] journal_id: String,
+        #[arg(long, default_value_t = 100)] limit: usize,
+        #[arg(long)] from_sequence: Option<u64>,
+        #[arg(long)] stage: Option<String>,
+    },
+    Verify {
+        #[arg(long)] journal: PathBuf,
+        #[arg(long)] trust_bundle: PathBuf,
+        #[arg(long)] minimum_checkpoint: PathBuf,
+        #[arg(long = "checkpoint", required = true)] checkpoints: Vec<PathBuf>,
+        #[arg(long, default_value_t = 300)] max_age_seconds: u64,
+    },
+    Checkpoint {
+        #[arg(long)] journal: PathBuf,
+        #[arg(long)] journal_id: String,
+        #[arg(long)] artifact: PathBuf,
+        #[arg(long)] key_dir: Option<PathBuf>,
+        #[arg(long)] key_name: Option<String>,
+        #[arg(long)] predecessor: Option<PathBuf>,
+        #[arg(long)] recover_pending: bool,
+    },
+    RotateKey {
+        #[arg(long)] journal: PathBuf,
+        #[arg(long)] journal_id: String,
+        #[arg(long)] artifact: PathBuf,
+        #[arg(long)] key_dir: PathBuf,
+        #[arg(long)] old_key: String,
+        #[arg(long)] new_key: String,
+        #[arg(long)] predecessor: PathBuf,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub enum EmergencyCommands {
+    Activate {
+        #[arg(long, default_value = "console", hide = true)] origin: String,
+        #[arg(long)] sink: Option<PathBuf>,
+        #[arg(long)] recovery_public_key: Option<PathBuf>,
+        #[arg(long)] recovery_approval: Option<PathBuf>,
+        #[arg(long)] action: Option<String>,
+        #[arg(long)] resource: Option<String>,
+        #[arg(long)] nonce: Option<String>,
+        #[arg(long)] deadline_uptime_ns: Option<u64>,
+    },
+    Reconcile {
+        #[arg(long)] sink: PathBuf,
     },
 }
 
@@ -1412,6 +1497,99 @@ fn handle_doctor(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool, json:
     }
 }
 
+#[cfg(target_os = "linux")]
+fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), String> {
+    let output = match command {
+        PolicyCommands::Check { path } => authorization_admin::policy_check(path),
+        PolicyCommands::Reload { path, active, rollback_approval } => {
+            let candidate = ferro_core::authorization::policy::PolicyStore::load(path)
+                .map_err(|error| error.to_string())?
+                .snapshot();
+            let rollback = active.exists()
+                && ferro_core::authorization::policy::PolicyStore::load(active)
+                    .map_err(|error| error.to_string())?
+                    .snapshot()
+                    .generation
+                    > candidate.generation;
+            let action = if rollback {
+                AuthorizationAction::PolicyRollback
+            } else {
+                AuthorizationAction::PolicyReload
+            };
+            let canonical_name = candidate
+                .digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let runtime = ContainerRuntime::new(runtime_dir)
+                .map_err(|error| error.to_string())?
+                .with_request_origin(
+                    RequestOrigin::cli_current().map_err(|error| error.to_string())?,
+                );
+            let origin = runtime.request_origin().ok_or("policy reload identity unavailable")?;
+            let authorization = runtime
+                .surface_authorization()
+                .map_err(|error| error.to_string())?;
+            let permit = authorization
+                .authorize_named(
+                    &origin,
+                    action,
+                    ResourceKind::Policy,
+                    &canonical_name,
+                    candidate.generation,
+                )
+                .map_err(|error| error.to_string())?;
+            let result = authorization_admin::policy_reload(
+                path,
+                active,
+                rollback_approval.as_deref(),
+                &permit,
+                action,
+                &canonical_name,
+            );
+            permit
+                .finish(result.is_ok())
+                .map_err(|error| error.to_string())?;
+            result
+        }
+    }?;
+    println!("{output}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_witness(command: &WitnessCommands) -> Result<(), String> {
+    let output = match command {
+        WitnessCommands::Show { journal, journal_id, limit, from_sequence, stage } => authorization_admin::show(authorization_admin::ShowArgs { journal, journal_id, limit: *limit, from_sequence: *from_sequence, stage: stage.as_deref() }),
+        WitnessCommands::Verify { journal, trust_bundle, minimum_checkpoint, checkpoints, max_age_seconds } => authorization_admin::verify(authorization_admin::VerifyArgs { journal, trust_bundle, minimum_checkpoint, checkpoints, max_age_seconds: *max_age_seconds }),
+        WitnessCommands::Checkpoint { journal, journal_id, artifact, key_dir, key_name, predecessor, recover_pending } => authorization_admin::checkpoint(authorization_admin::CheckpointArgs { journal, journal_id, artifact, key_dir: key_dir.as_deref(), key_name: key_name.as_deref(), predecessor: predecessor.as_deref(), recover_pending: *recover_pending }),
+        WitnessCommands::RotateKey { journal, journal_id, artifact, key_dir, old_key, new_key, predecessor } => authorization_admin::rotate_key(authorization_admin::RotateArgs { journal, journal_id, artifact, key_dir, old_key, new_key, predecessor }),
+    }?;
+    println!("{output}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result<(), String> {
+    let output = match command {
+        EmergencyCommands::Activate { origin, sink, recovery_public_key, recovery_approval, action, resource, nonce, deadline_uptime_ns } => {
+            if origin != "console" { return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into()); }
+            let default_state_dir = runtime_dir.join("authorization");
+            authorization_admin::activate_emergency(authorization_admin::EmergencyActivate {
+                origin, state_dir: &default_state_dir,
+                sink: sink.as_deref().ok_or("--sink is required")?,
+                recovery_public_key: recovery_public_key.as_deref().ok_or("--recovery-public-key is required")?,
+                recovery_approval: recovery_approval.as_deref().ok_or("--recovery-approval is required")?,
+                action: action.as_deref().ok_or("--action is required")?, resource: resource.as_deref().ok_or("--resource is required")?,
+                nonce: nonce.as_deref().ok_or("--nonce is required")?, deadline_uptime_ns: deadline_uptime_ns.ok_or("--deadline-uptime-ns is required")?,
+            })
+        }
+        EmergencyCommands::Reconcile { sink } => authorization_admin::reconcile_emergency(&runtime_dir.join("authorization"), sink),
+    }?;
+    println!("{output}");
+    Ok(())
+}
+
 fn dispatch(command: Commands) -> Result<(), String> {
     // Handle platform-agnostic commands that don't need runtime
     if let Commands::AiAudit {
@@ -1426,6 +1604,23 @@ fn dispatch(command: Commands) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let runtime_dir = runtime_dir();
+
+        match &command {
+            Commands::Policy { command: command @ PolicyCommands::Check { .. } } => {
+                return dispatch_policy(command, &runtime_dir)
+            }
+            Commands::Witness { command: command @ (WitnessCommands::Show { .. } | WitnessCommands::Verify { .. }) } => {
+                return dispatch_witness(command)
+            }
+            Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
+            _ => {}
+        }
+        authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
+        match &command {
+            Commands::Policy { command } => return dispatch_policy(command, &runtime_dir),
+            Commands::Witness { command } => return dispatch_witness(command),
+            _ => {}
+        }
 
         // Handle Daemon command
         if let Commands::Daemon {
@@ -1598,6 +1793,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Daemon { .. } => {
                 unreachable!("daemon command handled before runtime initialization")
             }
+            Commands::Policy { .. } | Commands::Witness { .. } | Commands::Emergency { .. } => unreachable!("authorization administration handled before runtime initialization"),
             #[cfg(target_os = "linux")]
             Commands::Completion { shell } => handle_completion(&shell),
             Commands::Tui => handle_tui(&runtime),

@@ -370,7 +370,17 @@ impl NetdServer {
         lock.try_lock_exclusive()
             .map_err(|_| "ownership journal already has a writer".to_string())?;
         self.journal_lock = Some(lock);
-        let loaded = crate::ownership_journal::load(&path)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let faults = self.test_faults.clone();
+        let loaded = crate::ownership_journal::load(&path, |phase| {
+            #[cfg(any(test, feature = "test-support"))]
+            if faults.take(crate::test_support::FaultPoint::JournalPersist(
+                phase.into(),
+            )) {
+                return Err(format!("injected journal {phase} failure"));
+            }
+            Ok(())
+        })?;
         self.journal_id = loaded.journal_id;
         self.journal_generation = loaded.generation;
         if let Some(state) = loaded.state {
@@ -541,6 +551,18 @@ impl NetdServer {
                 effect_receipts: self.effect_receipts.clone(),
                 quarantined: self.quarantined.clone(),
                 overlay_intents: self.overlay_intents.clone(),
+            },
+            |phase| {
+                #[cfg(any(test, feature = "test-support"))]
+                if self
+                    .test_faults
+                    .take(crate::test_support::FaultPoint::JournalPersist(
+                        phase.into(),
+                    ))
+                {
+                    return Err(format!("injected journal {phase} failure"));
+                }
+                Ok(())
             },
         )?;
         self.journal_generation = generation;

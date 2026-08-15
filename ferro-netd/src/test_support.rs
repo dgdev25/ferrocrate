@@ -97,6 +97,7 @@ pub enum FaultPoint {
     OwnershipPersist,
     ResultPersist,
     PhasePersist(String),
+    JournalPersist(String),
 }
 
 #[derive(Clone, Default)]
@@ -107,6 +108,9 @@ impl FaultHandle {
     }
     pub fn fail_phase_once(&self, phase: impl Into<String>) {
         self.fail_once(FaultPoint::PhasePersist(phase.into()));
+    }
+    pub fn fail_journal_once(&self, phase: impl Into<String>) {
+        self.fail_once(FaultPoint::JournalPersist(phase.into()));
     }
     pub(crate) fn take(&self, point: FaultPoint) -> bool {
         let mut faults = self.0.lock().expect("fault lock");

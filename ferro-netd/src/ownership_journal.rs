@@ -37,7 +37,11 @@ pub(crate) struct LoadedJournal {
     pub(crate) generation: u64,
 }
 
-pub(crate) fn load(path: &Path) -> Result<LoadedJournal, String> {
+pub(crate) fn load(
+    path: &Path,
+    mut checkpoint: impl FnMut(&str) -> Result<(), String>,
+) -> Result<LoadedJournal, String> {
+    checkpoint("open")?;
     quarantine_stale_temps(path)?;
     if !path.exists() {
         return Ok(LoadedJournal {
@@ -64,6 +68,7 @@ pub(crate) fn store(
     journal_id: [u8; 16],
     generation: u64,
     state: &PersistedState,
+    mut checkpoint: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<(), String> {
     static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let bytes = encode(journal_id, generation, state)?;
@@ -77,6 +82,7 @@ pub(crate) fn store(
         TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let result = (|| {
+        checkpoint("create")?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -84,9 +90,13 @@ pub(crate) fn store(
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&temporary)
             .map_err(|error| error.to_string())?;
+        checkpoint("write")?;
         file.write_all(&bytes).map_err(|error| error.to_string())?;
+        checkpoint("file_fsync")?;
         file.sync_all().map_err(|error| error.to_string())?;
+        checkpoint("rename")?;
         fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+        checkpoint("dir_fsync")?;
         sync_parent(path)
     })();
     if result.is_err() {
@@ -193,5 +203,35 @@ mod tests {
         bytes[HEADER_LEN] ^= 1;
         assert!(decode(&bytes).unwrap_err().contains("checksum"));
         assert!(decode(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn filesystem_faults_reopen_only_old_or_new_complete_generation() {
+        for phase in ["create", "write", "file_fsync", "rename", "dir_fsync"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("ownership.journal");
+            let mut old = PersistedState::default();
+            old.overlays.insert("old".into());
+            store(&path, [9; 16], 1, &old, |_| Ok(())).unwrap();
+            let mut new = PersistedState::default();
+            new.overlays.insert("new".into());
+            let result = store(&path, [9; 16], 2, &new, |at| {
+                if at == phase {
+                    Err(format!("injected {phase}"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "{phase}");
+            let reopened = load(&path, |_| Ok(())).unwrap();
+            let state = reopened.state.unwrap();
+            if phase == "dir_fsync" {
+                assert_eq!(reopened.generation, 2, "{phase}");
+                assert!(state.overlays.contains("new"), "{phase}");
+            } else {
+                assert_eq!(reopened.generation, 1, "{phase}");
+                assert!(state.overlays.contains("old"), "{phase}");
+            }
+        }
     }
 }

@@ -129,6 +129,11 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Outcome, id)?;
+        crate::observability::authorization_metrics().record(
+            crate::observability::AuthorizationMetric::Recovery(
+                crate::observability::RecoveryMetric::OutcomeUnknown,
+            ),
+        );
         self.post_ack_rotation();
         Ok(())
     }
@@ -211,6 +216,11 @@ impl WitnessJournal {
             return Err(JournalError::AutomationStopped);
         }
         self.finish_cleanup_reservation(reserve_after)?;
+        crate::observability::authorization_metrics().record(
+            crate::observability::AuthorizationMetric::Recovery(
+                crate::observability::RecoveryMetric::Recovered,
+            ),
+        );
         self.post_ack_rotation();
         Ok(())
     }

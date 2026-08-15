@@ -186,6 +186,31 @@ fn lock_is_exclusive_and_tied_to_journal_identity() {
 }
 
 #[test]
+fn process_writer_child() {
+    let Ok(path) = std::env::var("FERRO_WITNESS_LOCK_CHILD") else {
+        return;
+    };
+    assert!(matches!(
+        WitnessJournal::open(config(std::path::Path::new(&path))),
+        Err(JournalError::Locked)
+    ));
+}
+
+#[test]
+fn journal_lock_rejects_a_distinct_process_writer() {
+    let root = tempdir().unwrap();
+    let _owner = WitnessJournal::open(config(root.path())).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("process_writer_child")
+        .arg("--nocapture")
+        .env("FERRO_WITNESS_LOCK_CHILD", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
 fn disabled_mode_never_mints_or_appends_durable_intent() {
     let root = tempdir().unwrap();
     let journal = WitnessJournal::open(JournalConfig::new(
@@ -864,6 +889,7 @@ fn temp_only_stop_marker_and_repeated_stop_are_fail_closed() {
 #[test]
 fn enospc_received_transaction_and_flush_matrix_reopens_safely() {
     for (point, previsible) in [
+        (FaultPoint::BeforeTransaction(FlushBoundary::Received), true),
         (FaultPoint::Transaction(FlushBoundary::Received), true),
         (FaultPoint::BeforeFlush(FlushBoundary::Received), false),
         (FaultPoint::DuringFlush(FlushBoundary::Received), false),
@@ -898,6 +924,7 @@ fn enospc_received_transaction_and_flush_matrix_reopens_safely() {
 #[test]
 fn enospc_decision_transaction_and_each_flush_boundary_reopen_safely() {
     for (point, previsible) in [
+        (FaultPoint::BeforeTransaction(FlushBoundary::Decision), true),
         (FaultPoint::Transaction(FlushBoundary::Decision), true),
         (FaultPoint::BeforeFlush(FlushBoundary::Decision), false),
         (FaultPoint::DuringFlush(FlushBoundary::Decision), false),
@@ -937,6 +964,7 @@ fn enospc_decision_transaction_and_each_flush_boundary_reopen_safely() {
 #[test]
 fn enospc_outcome_transaction_and_each_flush_boundary_reopen_safely() {
     for (point, previsible) in [
+        (FaultPoint::BeforeTransaction(FlushBoundary::Outcome), true),
         (FaultPoint::Transaction(FlushBoundary::Outcome), true),
         (FaultPoint::BeforeFlush(FlushBoundary::Outcome), false),
         (FaultPoint::DuringFlush(FlushBoundary::Outcome), false),
@@ -969,10 +997,12 @@ fn enospc_outcome_transaction_and_each_flush_boundary_reopen_safely() {
 #[test]
 fn enospc_reserve_and_cleanup_result_boundaries_latch_fail_stop() {
     let points = [
+        FaultPoint::BeforeTransaction(FlushBoundary::Reserve),
         FaultPoint::Transaction(FlushBoundary::Reserve),
         FaultPoint::BeforeFlush(FlushBoundary::Reserve),
         FaultPoint::DuringFlush(FlushBoundary::Reserve),
         FaultPoint::AfterFlush(FlushBoundary::Reserve),
+        FaultPoint::BeforeTransaction(FlushBoundary::Outcome),
         FaultPoint::Transaction(FlushBoundary::Outcome),
         FaultPoint::BeforeFlush(FlushBoundary::Outcome),
         FaultPoint::DuringFlush(FlushBoundary::Outcome),

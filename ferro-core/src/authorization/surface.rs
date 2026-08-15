@@ -1026,6 +1026,77 @@ mod tests {
     }
 
     #[test]
+    fn production_surface_canary_is_absent_from_witness_mirror_errors_logs_and_metrics() {
+        const CANARY: &str = "surface-secret-canary-30c8";
+        let root = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
+                root.path().join("journal"),
+                [91; 16],
+                crate::witness::JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let auth = SurfaceAuthorization::with_journal(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            Arc::clone(&journal),
+            [92; 16],
+        );
+        let permit = auth
+            .authorize_named(
+                &origin(),
+                Action::VolumeCreate,
+                ResourceKind::Volume,
+                CANARY,
+                1,
+            )
+            .unwrap();
+        let error = SurfaceAuthorization::validate_execution(
+            &permit,
+            Action::VolumeCreate,
+            ResourceKind::Volume,
+            "different-resource",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        permit.finish(false).unwrap();
+        crate::observability::authorization_metrics()
+            .export_json(&root.path().join("metrics.json"))
+            .unwrap();
+        crate::observability::log_event(
+            root.path(),
+            crate::observability::make_event(
+                "authorization.evaluate",
+                None,
+                None,
+                Some("failed"),
+                Some("attributes redacted"),
+            ),
+        )
+        .unwrap();
+        drop(journal);
+
+        let mut stack = vec![root.path().to_path_buf()];
+        while let Some(path) = stack.pop() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    assert!(!bytes
+                        .windows(CANARY.len())
+                        .any(|window| window == CANARY.as_bytes()));
+                }
+            }
+        }
+        assert!(!error.contains(CANARY));
+    }
+
+    #[test]
     fn completing_surface_permit_clears_pending_recovery() {
         let root = tempfile::tempdir().unwrap();
         let journal = Arc::new(

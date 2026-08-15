@@ -365,6 +365,8 @@ impl CheckpointCoordinator {
         secure_unlink(&self.pending_path())
     }
     pub fn allows_user_mutation(&self, newest_checkpoint_secs: u64, now_secs: u64) -> bool {
+        crate::observability::authorization_metrics()
+            .set_checkpoint_age_seconds(now_secs.saturating_sub(newest_checkpoint_secs));
         now_secs >= newest_checkpoint_secs
             && now_secs - newest_checkpoint_secs
                 <= self.max_age.saturating_add(self.grace).as_secs()

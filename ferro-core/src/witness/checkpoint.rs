@@ -415,12 +415,17 @@ impl CheckpointVerifier {
         now_secs: u64,
         max_age: Duration,
     ) -> Result<VerificationReport, CheckpointError> {
-        self.verify_iter(
+        let result = self.verify_iter(
             evidence.iter().map(Vec::as_slice),
             checkpoints,
             now_secs,
             max_age,
-        )
+        );
+        if result.is_err() {
+            crate::observability::authorization_metrics()
+                .record(crate::observability::AuthorizationMetric::VerificationFailure);
+        }
+        result
     }
 
     pub fn verify_iter<I, T>(

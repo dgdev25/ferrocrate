@@ -1,4 +1,5 @@
 use super::{FaultPoint, FlushBoundary, JournalError, WitnessJournal};
+use crate::observability::{authorization_metrics, AuthorizationMetric, JournalMetric};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -70,6 +71,8 @@ impl WitnessJournal {
         if self.faults.take(FaultPoint::BeforeTransaction(boundary))
             || self.faults.take(FaultPoint::Transaction(boundary))
         {
+            authorization_metrics()
+                .record(AuthorizationMetric::Journal(JournalMetric::AppendFailure));
             Err(JournalError::UnavailableBeforeVisibility)
         } else {
             Ok(())
@@ -81,16 +84,24 @@ impl WitnessJournal {
         id: crate::witness::OperationId,
     ) -> Result<(), JournalError> {
         if self.faults.take(FaultPoint::BeforeFlush(boundary)) {
+            authorization_metrics()
+                .record(AuthorizationMetric::Journal(JournalMetric::FlushFailure));
             return Err(JournalError::Indeterminate { operation_id: id });
         }
         if self.faults.take(FaultPoint::DuringFlush(boundary)) {
+            authorization_metrics()
+                .record(AuthorizationMetric::Journal(JournalMetric::FlushFailure));
             return Err(JournalError::Indeterminate { operation_id: id });
         }
         if self.db.flush().is_err() {
+            authorization_metrics()
+                .record(AuthorizationMetric::Journal(JournalMetric::FlushFailure));
             let _ = self.operations.get(id.0);
             return Err(JournalError::Indeterminate { operation_id: id });
         }
         if self.faults.take(FaultPoint::AfterFlush(boundary)) {
+            authorization_metrics()
+                .record(AuthorizationMetric::Journal(JournalMetric::FlushFailure));
             Err(JournalError::Indeterminate { operation_id: id })
         } else {
             Ok(())

@@ -1,6 +1,7 @@
 use ferro_core::authorization::inventory::MUTATION_INVENTORY;
 use ferro_core::observability::{
-    AuthorizationMetric, AuthorizationMetrics, DecisionMetric, JournalMetric, RecoveryMetric,
+    authorization_metrics, authorization_metrics_snapshot, AuthorizationMetric,
+    AuthorizationMetrics, DecisionMetric, JournalMetric, RecoveryMetric,
 };
 use ferro_core::witness::{FaultPoint, FlushBoundary};
 use sha2::{Digest, Sha256};
@@ -50,6 +51,18 @@ fn authorization_metrics_have_a_closed_nonsecret_schema() {
         !rendered.contains('{'),
         "labels are intentionally closed: {rendered}"
     );
+}
+
+#[test]
+fn production_metrics_have_a_machine_readable_snapshot() {
+    let before = authorization_metrics_snapshot();
+    authorization_metrics().record(AuthorizationMetric::BypassDetected);
+    let after = authorization_metrics_snapshot();
+    assert_eq!(
+        after.bypass_detected_total,
+        before.bypass_detected_total + 1
+    );
+    assert!(!serde_json::to_string(&after).unwrap().contains(SECRET));
 }
 
 #[test]

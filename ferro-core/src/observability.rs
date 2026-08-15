@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// A closed, allocation-free authorization metric vocabulary. Callers cannot
@@ -57,6 +58,32 @@ pub struct AuthorizationMetrics {
     checkpoint_age_seconds: AtomicU64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct AuthorizationMetricsSnapshot {
+    pub attributed_total: u64,
+    pub unknown_principal_total: u64,
+    pub would_deny_total: u64,
+    pub enforced_denial_total: u64,
+    pub bypass_detected_total: u64,
+    pub append_failure_total: u64,
+    pub flush_failure_total: u64,
+    pub pending_intent_total: u64,
+    pub outcome_unknown_total: u64,
+    pub recovered_total: u64,
+    pub verification_failure_total: u64,
+    pub checkpoint_age_seconds: u64,
+}
+
+static AUTHORIZATION_METRICS: OnceLock<AuthorizationMetrics> = OnceLock::new();
+
+pub fn authorization_metrics() -> &'static AuthorizationMetrics {
+    AUTHORIZATION_METRICS.get_or_init(AuthorizationMetrics::new)
+}
+
+pub fn authorization_metrics_snapshot() -> AuthorizationMetricsSnapshot {
+    authorization_metrics().snapshot()
+}
+
 impl AuthorizationMetrics {
     pub fn new() -> Self {
         Self::default()
@@ -82,6 +109,29 @@ impl AuthorizationMetrics {
     pub fn set_checkpoint_age_seconds(&self, seconds: u64) {
         self.checkpoint_age_seconds
             .store(seconds, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> AuthorizationMetricsSnapshot {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        AuthorizationMetricsSnapshot {
+            attributed_total: load(&self.attributed),
+            unknown_principal_total: load(&self.unknown_principal),
+            would_deny_total: load(&self.would_deny),
+            enforced_denial_total: load(&self.enforced_denial),
+            bypass_detected_total: load(&self.bypass_detected),
+            append_failure_total: load(&self.append_failure),
+            flush_failure_total: load(&self.flush_failure),
+            pending_intent_total: load(&self.pending_intent),
+            outcome_unknown_total: load(&self.outcome_unknown),
+            recovered_total: load(&self.recovered),
+            verification_failure_total: load(&self.verification_failure),
+            checkpoint_age_seconds: load(&self.checkpoint_age_seconds),
+        }
+    }
+
+    pub fn export_json(&self, path: &Path) -> Result<(), std::io::Error> {
+        let bytes = serde_json::to_vec(&self.snapshot())?;
+        crate::fs_atomic::write_atomic(path, &bytes)
     }
 
     /// Renders a deliberately label-free Prometheus text snapshot.

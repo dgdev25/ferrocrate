@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use super::policy::{PolicySnapshot, PolicyStore};
 use super::{Decision, MountClass, ReasonCode, RequestContext, ResourceKind, ResourceState};
+use crate::observability::{authorization_metrics, AuthorizationMetric, DecisionMetric};
 
 /// A policy snapshot pinned before request fan-out.
 #[derive(Clone, Debug)]
@@ -481,11 +482,19 @@ impl AuthorizationGate {
 
     /// Validate immutable bindings, evaluate the pinned policy, and mint a proof.
     pub fn authorize(&self, request: CanonicalRequest) -> Result<AuthorizedRequest, Denial> {
+        if request.context().principal().is_some() {
+            authorization_metrics().record(AuthorizationMetric::Attributed);
+        } else {
+            authorization_metrics().record(AuthorizationMetric::UnknownPrincipal);
+        }
         validate_policy_binding(&request)?;
         validate_canonical_bindings(&request)?;
 
         let decision = request.policy.snapshot.document.evaluate(&request.context);
         if !decision.allowed {
+            authorization_metrics().record(AuthorizationMetric::Decision(
+                DecisionMetric::EnforcedDenial,
+            ));
             return Err(Denial::policy(&request, &decision));
         }
         Ok(AuthorizedRequest::new(request, decision))
@@ -494,12 +503,17 @@ impl AuthorizationGate {
     pub(crate) fn policy_would_deny(&self, request: &CanonicalRequest) -> Result<bool, Denial> {
         validate_policy_binding(request)?;
         validate_canonical_bindings(request)?;
-        Ok(!request
+        let denied = !request
             .policy
             .snapshot
             .document
             .evaluate(&request.context)
-            .allowed)
+            .allowed;
+        if denied {
+            authorization_metrics()
+                .record(AuthorizationMetric::Decision(DecisionMetric::WouldDeny));
+        }
+        Ok(denied)
     }
 
     pub(crate) fn authorize_emergency(

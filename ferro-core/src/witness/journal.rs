@@ -419,6 +419,8 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Received, id)?;
+        crate::observability::authorization_metrics()
+            .record(crate::observability::AuthorizationMetric::PendingIntent);
         self.update_read_mirror_best_effort();
         self.post_ack_rotation();
         Ok(())
@@ -590,6 +592,11 @@ impl WitnessJournal {
             .faults
             .take(FaultPoint::BeforeFlush(FlushBoundary::Outcome));
         if forced_unknown {
+            crate::observability::authorization_metrics().record(
+                crate::observability::AuthorizationMetric::Recovery(
+                    crate::observability::RecoveryMetric::OutcomeUnknown,
+                ),
+            );
             record.outcome = super::WitnessOutcome::OutcomeUnknown;
             record.reason = Some(super::ReasonCode::ExecutionFailed);
         }
@@ -643,6 +650,13 @@ impl WitnessJournal {
             Err(JournalError::Indeterminate { operation_id: id })
         } else {
             self.flush(FlushBoundary::Outcome, id)?;
+            if record.outcome == super::WitnessOutcome::OutcomeUnknown {
+                crate::observability::authorization_metrics().record(
+                    crate::observability::AuthorizationMetric::Recovery(
+                        crate::observability::RecoveryMetric::OutcomeUnknown,
+                    ),
+                );
+            }
             self.update_read_mirror_best_effort();
             self.post_ack_rotation();
             Ok(())

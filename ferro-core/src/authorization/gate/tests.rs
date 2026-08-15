@@ -450,6 +450,34 @@ fn authorization_gate_proof_binds_every_executor_safe_identity() {
     assert_eq!(canonical.mount_handles()[0].class(), MountClass::Workspace);
 }
 
+#[test]
+fn production_gate_updates_bounded_attribution_and_denial_metrics() {
+    let before = crate::observability::authorization_metrics_snapshot();
+    let fixture = Fixture::new(AuthorizationMode::Enforce);
+    fixture
+        .gate
+        .authorize(fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}")))
+        .expect_err("unknown principal denied");
+    fixture
+        .gate
+        .authorize(fixture.request(
+            Some(Role::Developer),
+            true,
+            &format!("registry/app@{IMAGE_DIGEST}"),
+        ))
+        .expect_err("privileged developer denied");
+    let after = crate::observability::authorization_metrics_snapshot();
+    assert_eq!(
+        after.unknown_principal_total,
+        before.unknown_principal_total + 1
+    );
+    assert_eq!(after.attributed_total, before.attributed_total + 1);
+    assert_eq!(
+        after.enforced_denial_total,
+        before.enforced_denial_total + 2
+    );
+}
+
 fn write_policy(
     dir: &TempDir,
     name: &str,

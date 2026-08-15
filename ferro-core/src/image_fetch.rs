@@ -54,7 +54,10 @@ pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, Image
     })
 }
 
-pub(crate) fn pull_image(runtime_dir: &Path, image: &str) -> Result<ImageFetchResult, ImageFetchError> {
+pub(crate) fn pull_image(
+    runtime_dir: &Path,
+    image: &str,
+) -> Result<ImageFetchResult, ImageFetchError> {
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     pull_image_with_store(runtime_dir, image, &store)
 }
@@ -121,22 +124,35 @@ pub fn pull_image_with_store_authorized(
     canonical: &str,
     digest: &str,
     store: &LocalImageStore,
-    proof: crate::authorization::gate::AuthorizedRequest,
+    permit: crate::authorization::surface::SurfacePermit,
 ) -> Result<ImageFetchResult, ImageFetchError> {
     crate::authorization::surface::SurfaceAuthorization::validate_execution(
-        &proof,
+        &permit,
         crate::authorization::Action::ImagePull,
         crate::authorization::ResourceKind::Image,
         canonical,
         1,
     )
     .map_err(|error| ImageFetchError::Integrity(error.to_string()))?;
-    if proof.canonical().image_digest() != Some(digest) {
+    if permit.proof().canonical().image_digest() != Some(digest) {
         return Err(ImageFetchError::Integrity(
             "image authorization digest does not match executor".to_string(),
         ));
     }
-    pull_image_with_store(runtime_dir, image, store)
+    match pull_image_with_store(runtime_dir, image, store) {
+        Ok(result) => {
+            permit
+                .finish(true)
+                .map_err(|error| ImageFetchError::Integrity(error.to_string()))?;
+            Ok(result)
+        }
+        Err(error) => {
+            permit
+                .finish(false)
+                .map_err(|finish| ImageFetchError::Integrity(finish.to_string()))?;
+            Err(error)
+        }
+    }
 }
 
 pub fn pull_manifest_only(runtime_dir: &Path, image: &str) -> Result<String, ImageFetchError> {
@@ -427,7 +443,10 @@ mod tests {
         let binding = inspect_image_binding(&image).expect("inspect image");
 
         assert_eq!(binding.reference, format!("{image}:latest"));
-        assert_eq!(binding.digest, "sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be");
+        assert_eq!(
+            binding.digest,
+            "sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be"
+        );
     }
 
     #[test]

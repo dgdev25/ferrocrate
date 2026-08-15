@@ -126,7 +126,24 @@ fn resolve_request_identity<T>(
     let transport = trusted_transport(request)?;
     // CRI metadata is telemetry only. A signed assertion can only arrive as
     // a typed extension inserted by a trusted transport integrity layer.
-    let assertion = request.extensions().get::<DelegationAssertion>().cloned();
+    let extension_assertion = request.extensions().get::<DelegationAssertion>().cloned();
+    let wire_assertion = request
+        .metadata()
+        .get_bin("ferro-delegation-bin")
+        .map(|value| {
+            let bytes = value
+                .to_bytes()
+                .map_err(|_| Status::permission_denied("malformed CRI delegation metadata"))?;
+            DelegationAssertion::from_wire_bytes(&bytes)
+                .map_err(|_| Status::permission_denied("malformed CRI delegation token"))
+        })
+        .transpose()?;
+    if extension_assertion.is_some() && wire_assertion.is_some() {
+        return Err(Status::permission_denied(
+            "multiple CRI delegation assertions are not allowed",
+        ));
+    }
+    let assertion = wire_assertion.or(extension_assertion);
     let telemetry = request
         .metadata()
         .get("x-ferrocrate-delegated-principal")
@@ -239,6 +256,11 @@ impl CriRuntime {
 
     pub fn with_identity_policy(mut self, policy: CriIdentityPolicy) -> Self {
         self.identity_policy = policy;
+        self
+    }
+
+    pub fn with_surface_authorization(mut self, authorization: Arc<SurfaceAuthorization>) -> Self {
+        self.authorization = authorization;
         self
     }
 }

@@ -157,11 +157,11 @@ impl RecoveryRecipe {
                 WitnessResourceKind::Container,
                 WitnessAction::ContainerDelete
             ) | (
-                WitnessAction::ImagePull,
+                WitnessAction::ImagePull | WitnessAction::ImageDelete,
                 WitnessResourceKind::Image,
                 WitnessAction::ImageDelete
             ) | (
-                WitnessAction::VolumeCreate,
+                WitnessAction::VolumeCreate | WitnessAction::VolumeDelete,
                 WitnessResourceKind::Volume,
                 WitnessAction::VolumeDelete
             ) | (
@@ -169,7 +169,7 @@ impl RecoveryRecipe {
                 WitnessResourceKind::Volume,
                 WitnessAction::VolumeUnmount
             ) | (
-                WitnessAction::NetworkCreate,
+                WitnessAction::NetworkCreate | WitnessAction::NetworkDelete,
                 WitnessResourceKind::Network,
                 WitnessAction::NetworkDelete
             ) | (
@@ -295,9 +295,12 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         8 => Some(WitnessAction::ContainerRestart),
         9 => Some(WitnessAction::ContainerDelete),
         10 => Some(WitnessAction::ImagePull),
+        11 => Some(WitnessAction::ImageDelete),
         12 => Some(WitnessAction::VolumeCreate),
+        13 => Some(WitnessAction::VolumeDelete),
         14 => Some(WitnessAction::VolumeMount),
         16 => Some(WitnessAction::NetworkCreate),
+        17 => Some(WitnessAction::NetworkDelete),
         18 => Some(WitnessAction::NetworkAttach),
         _ => None,
     }

@@ -1,7 +1,9 @@
 //! Complete-mediation adapter for non-container entry-point mutations.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 use super::gate::{
@@ -9,6 +11,12 @@ use super::gate::{
 };
 use super::policy::PolicyStore;
 use super::{Action, RequestContext, RequestFacts, RequestOrigin, Resource, ResourceKind};
+use crate::witness::{
+    DurableIntent, ObservationDigest, ObservationHandle, OperationId, PendingOperation,
+    PrincipalSummary, ReasonCode, RecoveryRecipe, RecoveryTruthStrategy, ResourceSummary,
+    RuleSummary, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord, WitnessResourceKind,
+    WitnessStage,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceAuthorizationError {
@@ -16,6 +24,10 @@ pub enum SurfaceAuthorizationError {
     StaleIdentity(#[from] super::PrincipalResolutionError),
     #[error(transparent)]
     Denied(#[from] Denial),
+    #[error("witness journal failed: {0}")]
+    Journal(#[from] crate::witness::JournalError),
+    #[error("surface authorization binding is invalid")]
+    InvalidBinding,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -28,20 +40,88 @@ pub enum SurfaceExecutionError {
     GenerationMismatch,
 }
 
-#[derive(Debug)]
 pub struct SurfaceAuthorization {
-    gate: AuthorizationGate,
+    gate: Arc<AuthorizationGate>,
+    journal: Option<Arc<WitnessJournal>>,
+    runtime_id: [u8; 16],
+    boot_id: [u8; 16],
+    pseudonym_key: [u8; 32],
+}
+
+/// Single-use authority for exactly one canonical non-container mutation.
+///
+/// The durable intent is deliberately owned rather than cloneable. Executors
+/// consume this value, preventing an allowed decision from authorizing a
+/// second mutation.
+pub struct SurfacePermit {
+    proof: AuthorizedRequest,
+    intent: Option<DurableIntent>,
+    operation: OperationId,
+    decision_id: Option<[u8; 16]>,
+    journal: Option<Arc<WitnessJournal>>,
+    template: WitnessRecord,
+}
+
+impl SurfacePermit {
+    /// ```compile_fail
+    /// use ferro_core::authorization::surface::SurfacePermit;
+    /// fn duplicate(permit: SurfacePermit) { let _ = permit.clone(); }
+    /// ```
+    pub fn proof(&self) -> &AuthorizedRequest {
+        &self.proof
+    }
+
+    pub fn durable_intent(&self) -> Option<&DurableIntent> {
+        self.intent.as_ref()
+    }
+
+    pub fn operation_id(&self) -> OperationId {
+        self.operation
+    }
+
+    pub fn finish(self, succeeded: bool) -> Result<(), SurfaceAuthorizationError> {
+        complete_permit(
+            self,
+            if succeeded {
+                WitnessOutcome::Succeeded
+            } else {
+                WitnessOutcome::Failed
+            },
+        )
+    }
+
+    pub fn finish_unknown(self) -> Result<(), SurfaceAuthorizationError> {
+        complete_permit(self, WitnessOutcome::OutcomeUnknown)
+    }
 }
 
 impl SurfaceAuthorization {
     pub fn compatibility() -> Self {
+        let mut rng = rand::rng();
         Self {
-            gate: AuthorizationGate::new(Arc::new(PolicyStore::compatibility_disabled())),
+            gate: Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            journal: None,
+            runtime_id: rng.random(),
+            boot_id: read_boot_id().unwrap_or_else(|| rng.random()),
+            pseudonym_key: rng.random(),
         }
     }
 
-    pub fn with_gate(gate: AuthorizationGate) -> Self {
-        Self { gate }
+    pub fn with_journal(
+        gate: Arc<AuthorizationGate>,
+        journal: Arc<WitnessJournal>,
+        runtime_id: [u8; 16],
+    ) -> Self {
+        let mut rng = rand::rng();
+        Self {
+            gate,
+            journal: Some(journal),
+            runtime_id,
+            boot_id: read_boot_id().unwrap_or_else(|| rng.random()),
+            pseudonym_key: rng.random(),
+        }
     }
 
     pub fn authorize_image_binding(
@@ -51,7 +131,7 @@ impl SurfaceAuthorization {
         canonical_name: &str,
         digest: &str,
         generation: u64,
-    ) -> Result<AuthorizedRequest, SurfaceAuthorizationError> {
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
         origin.revalidate_transport()?;
         debug_assert!(matches!(action, Action::ImagePull | Action::ImageDelete));
         let resource_id = stable_resource_id(ResourceKind::Image, canonical_name);
@@ -72,7 +152,7 @@ impl SurfaceAuthorization {
         let binding = super::gate::ImageBinding::new(pinned_reference, digest);
         let bindings = ExecutionBindings::new(Some(binding), generation, None, None, Vec::new());
         let request = CanonicalRequest::new(context, self.gate.pin(), bindings.clone(), bindings);
-        Ok(self.gate.authorize(request)?)
+        self.authorize(origin, request, action, ResourceKind::Image)
     }
 
     pub fn authorize_named(
@@ -82,7 +162,7 @@ impl SurfaceAuthorization {
         kind: ResourceKind,
         canonical_name: &str,
         generation: u64,
-    ) -> Result<AuthorizedRequest, SurfaceAuthorizationError> {
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
         origin.revalidate_transport()?;
         let resource_id = stable_resource_id(kind, canonical_name);
         let resource = Resource::canonical(kind, resource_id.clone(), None, generation);
@@ -95,16 +175,17 @@ impl SurfaceAuthorization {
         );
         let bindings = ExecutionBindings::new(None, generation, None, None, Vec::new());
         let request = CanonicalRequest::new(context, self.gate.pin(), bindings.clone(), bindings);
-        Ok(self.gate.authorize(request)?)
+        self.authorize(origin, request, action, kind)
     }
 
     pub fn validate_execution(
-        proof: &AuthorizedRequest,
+        permit: &SurfacePermit,
         action: Action,
         kind: ResourceKind,
         canonical_name: &str,
         generation: u64,
     ) -> Result<(), SurfaceExecutionError> {
+        let proof = permit.proof();
         if proof.canonical().context().action() != action {
             return Err(SurfaceExecutionError::ActionMismatch);
         }
@@ -117,6 +198,245 @@ impl SurfaceAuthorization {
             return Err(SurfaceExecutionError::GenerationMismatch);
         }
         Ok(())
+    }
+
+    fn authorize(
+        &self,
+        origin: &RequestOrigin,
+        request: CanonicalRequest,
+        action: Action,
+        kind: ResourceKind,
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        let operation = OperationId::from_bytes(rand::rng().random());
+        let template = self.record_template(origin, &request, operation, action, kind)?;
+        if let Some(journal) = &self.journal {
+            let witness_action = witness_action(action)?;
+            let witness_kind = witness_kind(kind)?;
+            let recipe = RecoveryRecipe::for_original_with_observation(
+                witness_action,
+                witness_kind,
+                recovery_action(witness_action),
+                template.request_digest,
+                request.resource_generation(),
+                RecoveryTruthStrategy::InversePrecondition,
+                ObservationDigest::from_bytes(surface_observation_digest(
+                    action,
+                    kind,
+                    request.resource_id(),
+                    request.resource_generation(),
+                )),
+                ObservationHandle::from_bytes(surface_observation_handle(
+                    kind,
+                    request.resource_id(),
+                )),
+            )
+            .map_err(|_| SurfaceAuthorizationError::InvalidBinding)?;
+            journal.append_received(
+                operation,
+                request.resource_generation(),
+                recipe,
+                at_stage(&template, WitnessStage::RequestReceived, 1),
+            )?;
+        }
+        match self.gate.authorize(request) {
+            Ok(proof) => {
+                let mut decision_id = None;
+                let intent = if let Some(journal) = &self.journal {
+                    let id = rand::rng().random();
+                    decision_id = Some(id);
+                    let mut decision = at_stage(&template, WitnessStage::Decision, 2);
+                    decision.decision = Some(true);
+                    decision.decision_id = Some(id);
+                    decision.rule = Some(rule_summary(proof.decision().matched_rule.as_bytes()));
+                    Some(journal.append_decision(operation, decision)?)
+                } else {
+                    None
+                };
+                Ok(SurfacePermit {
+                    proof,
+                    intent,
+                    operation,
+                    decision_id,
+                    journal: self.journal.clone(),
+                    template,
+                })
+            }
+            Err(denial) => {
+                if let Some(journal) = &self.journal {
+                    let decision_id = rand::rng().random();
+                    let mut decision = at_stage(&template, WitnessStage::Decision, 2);
+                    decision.decision = Some(false);
+                    decision.decision_id = Some(decision_id);
+                    decision.rule = Some(rule_summary(b"policy.denied"));
+                    decision.reason = Some(ReasonCode::PolicyDenied);
+                    let mut denied = at_stage(&template, WitnessStage::Denied, 3);
+                    denied.decision_id = Some(decision_id);
+                    denied.reason = Some(ReasonCode::PolicyDenied);
+                    denied.outcome = WitnessOutcome::Denied;
+                    journal.deny(operation, decision, denied)?;
+                }
+                Err(SurfaceAuthorizationError::Denied(denial))
+            }
+        }
+    }
+
+    pub fn complete(
+        &self,
+        permit: SurfacePermit,
+        succeeded: bool,
+    ) -> Result<(), SurfaceAuthorizationError> {
+        complete_permit(
+            permit,
+            if succeeded {
+                WitnessOutcome::Succeeded
+            } else {
+                WitnessOutcome::Failed
+            },
+        )
+    }
+
+    pub fn complete_unknown(&self, permit: SurfacePermit) -> Result<(), SurfaceAuthorizationError> {
+        complete_permit(permit, WitnessOutcome::OutcomeUnknown)
+    }
+
+    /// Reconcile journal-pending surface mutations from action-specific live
+    /// state. The observer can inspect the closed recipe but has no authority
+    /// to replay the original operation.
+    pub fn reconcile_pending(
+        &self,
+        mut observe: impl FnMut(&PendingOperation) -> (ObservationDigest, bool),
+    ) -> Result<usize, SurfaceAuthorizationError> {
+        let Some(journal) = &self.journal else {
+            return Ok(0);
+        };
+        let pending = journal.pending()?;
+        let count = pending.len();
+        for operation in pending {
+            let (digest, recovered) = observe(&operation);
+            journal.reconcile_observed(crate::witness::RecoveryEvidence::verified(
+                &operation, digest, recovered,
+            ))?;
+        }
+        Ok(count)
+    }
+
+    fn record_template(
+        &self,
+        origin: &RequestOrigin,
+        request: &CanonicalRequest,
+        operation: OperationId,
+        action: Action,
+        kind: ResourceKind,
+    ) -> Result<WitnessRecord, SurfaceAuthorizationError> {
+        let request_bytes = serde_json::to_vec(request.context())
+            .map_err(|_| SurfaceAuthorizationError::InvalidBinding)?;
+        let resource =
+            ResourceSummary::pseudonymize(&self.pseudonym_key, request.resource_id().as_bytes())
+                .map_err(|_| SurfaceAuthorizationError::InvalidBinding)?;
+        let principal = PrincipalSummary::pseudonymize(
+            &self.pseudonym_key,
+            origin.principal().id().as_str().as_bytes(),
+        )
+        .map_err(|_| SurfaceAuthorizationError::InvalidBinding)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Ok(WitnessRecord {
+            epoch: 1,
+            sequence: 0,
+            previous_hash: [0; 32],
+            event_id: rand::rng().random(),
+            request_id: *operation.as_bytes(),
+            runtime_instance_id: self.runtime_id,
+            boot_id: self.boot_id,
+            principal,
+            invocation: origin.invocation(),
+            action: witness_action(action)?,
+            resource_kind: witness_kind(kind)?,
+            resource,
+            resource_generation: request.resource_generation(),
+            policy_version: request.policy_generation(),
+            policy_digest: *request.policy_digest(),
+            decision_id: None,
+            rule: None,
+            decision: None,
+            reason: None,
+            request_digest: Sha256::digest(request_bytes).into(),
+            result_digest: None,
+            wall_time_ns: now.as_nanos().min(i64::MAX as u128) as i64,
+            monotonic_ns: now.as_nanos().min(u64::MAX as u128) as u64,
+            stage: WitnessStage::RequestReceived,
+            outcome: WitnessOutcome::None,
+            recovery_link: None,
+            path_class: None,
+            device_class: None,
+            correlation_digest: None,
+        })
+    }
+}
+
+fn complete_permit(
+    permit: SurfacePermit,
+    outcome: WitnessOutcome,
+) -> Result<(), SurfaceAuthorizationError> {
+    if let (Some(journal), Some(intent)) = (permit.journal, permit.intent) {
+        let mut record = at_stage(&permit.template, WitnessStage::Outcome, 4);
+        record.decision_id = permit.decision_id;
+        record.outcome = outcome;
+        record.result_digest = Some(Sha256::digest([outcome as u8]).into());
+        if matches!(
+            outcome,
+            WitnessOutcome::Failed | WitnessOutcome::OutcomeUnknown
+        ) {
+            record.reason = Some(ReasonCode::ExecutionFailed);
+        }
+        journal.complete(intent, record)?;
+    }
+    Ok(())
+}
+
+fn at_stage(template: &WitnessRecord, stage: WitnessStage, salt: u8) -> WitnessRecord {
+    let mut record = template.clone();
+    record.stage = stage;
+    record.event_id[0] ^= salt;
+    record
+}
+
+fn rule_summary(value: &[u8]) -> RuleSummary {
+    RuleSummary::from_id(
+        Sha256::digest(value)[..16]
+            .try_into()
+            .expect("digest length"),
+    )
+}
+
+fn witness_action(action: Action) -> Result<WitnessAction, SurfaceAuthorizationError> {
+    Ok(match action {
+        Action::ImagePull => WitnessAction::ImagePull,
+        Action::ImageDelete => WitnessAction::ImageDelete,
+        Action::VolumeCreate => WitnessAction::VolumeCreate,
+        Action::VolumeDelete => WitnessAction::VolumeDelete,
+        Action::NetworkCreate => WitnessAction::NetworkCreate,
+        Action::NetworkDelete => WitnessAction::NetworkDelete,
+        _ => return Err(SurfaceAuthorizationError::InvalidBinding),
+    })
+}
+
+fn witness_kind(kind: ResourceKind) -> Result<WitnessResourceKind, SurfaceAuthorizationError> {
+    Ok(match kind {
+        ResourceKind::Image => WitnessResourceKind::Image,
+        ResourceKind::Volume => WitnessResourceKind::Volume,
+        ResourceKind::Network => WitnessResourceKind::Network,
+        _ => return Err(SurfaceAuthorizationError::InvalidBinding),
+    })
+}
+
+fn recovery_action(action: WitnessAction) -> WitnessAction {
+    match action {
+        WitnessAction::ImagePull | WitnessAction::ImageDelete => WitnessAction::ImageDelete,
+        WitnessAction::VolumeCreate | WitnessAction::VolumeDelete => WitnessAction::VolumeDelete,
+        WitnessAction::NetworkCreate | WitnessAction::NetworkDelete => WitnessAction::NetworkDelete,
+        _ => action,
     }
 }
 
@@ -131,6 +451,58 @@ fn stable_resource_id(kind: ResourceKind, canonical_name: &str) -> String {
     )
     .into();
     uuid(&digest)
+}
+
+/// Canonical action-specific observation identity used by startup recovery.
+/// Callers scan live state and compare this handle/digest pair; no mutation is
+/// replayed by the reconciliation API.
+pub fn recovery_observation(
+    action: Action,
+    kind: ResourceKind,
+    canonical_name: &str,
+    generation: u64,
+) -> (ObservationHandle, ObservationDigest) {
+    let resource_id = stable_resource_id(kind, canonical_name);
+    (
+        ObservationHandle::from_bytes(surface_observation_handle(kind, &resource_id)),
+        ObservationDigest::from_bytes(surface_observation_digest(
+            action,
+            kind,
+            &resource_id,
+            generation,
+        )),
+    )
+}
+
+fn surface_observation_handle(kind: ResourceKind, resource_id: &str) -> [u8; 16] {
+    Sha256::digest(
+        [
+            b"ferrocrate/surface-observation-handle/v1".as_slice(),
+            format!("{kind:?}").as_bytes(),
+            resource_id.as_bytes(),
+        ]
+        .concat(),
+    )[..16]
+        .try_into()
+        .expect("digest length")
+}
+
+fn surface_observation_digest(
+    action: Action,
+    kind: ResourceKind,
+    resource_id: &str,
+    generation: u64,
+) -> [u8; 32] {
+    Sha256::digest(
+        [
+            b"ferrocrate/surface-observation/v1".as_slice(),
+            format!("{action:?}/{kind:?}").as_bytes(),
+            resource_id.as_bytes(),
+            &generation.to_be_bytes(),
+        ]
+        .concat(),
+    )
+    .into()
 }
 
 fn request_id(resource_id: &str, action: Action) -> String {
@@ -160,6 +532,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn read_boot_id() -> Option<[u8; 16]> {
+    let value = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let compact = value.trim().replace('-', "");
+    if compact.len() != 32 {
+        return None;
+    }
+    let mut out = [0; 16];
+    for (index, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,9 +565,15 @@ mod tests {
             )
             .expect("authorized image");
 
-        assert_eq!(proof.canonical().image_digest(), Some(digest.as_str()));
-        assert_eq!(proof.canonical().resource_generation(), 7);
-        assert_eq!(proof.canonical().context().action(), Action::ImagePull);
+        assert_eq!(
+            proof.proof().canonical().image_digest(),
+            Some(digest.as_str())
+        );
+        assert_eq!(proof.proof().canonical().resource_generation(), 7);
+        assert_eq!(
+            proof.proof().canonical().context().action(),
+            Action::ImagePull
+        );
     }
 
     #[test]
@@ -217,14 +608,14 @@ mod tests {
             .expect("authorized network");
 
         assert_eq!(
-            volume.canonical().resource_id(),
-            volume_again.canonical().resource_id()
+            volume.proof().canonical().resource_id(),
+            volume_again.proof().canonical().resource_id()
         );
         assert_ne!(
-            volume.canonical().resource_id(),
-            network.canonical().resource_id()
+            volume.proof().canonical().resource_id(),
+            network.proof().canonical().resource_id()
         );
-        assert_eq!(volume.canonical().resource_generation(), 3);
+        assert_eq!(volume.proof().canonical().resource_generation(), 3);
     }
 
     #[test]
@@ -249,5 +640,125 @@ mod tests {
         )
         .expect_err("resource substitution must fail");
         assert_eq!(error, SurfaceExecutionError::ResourceMismatch);
+    }
+
+    #[test]
+    fn required_surface_decision_is_durable_before_permit_is_returned() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
+                root.path(),
+                [81; 16],
+                crate::witness::JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let auth = SurfaceAuthorization::with_journal(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            Arc::clone(&journal),
+            [82; 16],
+        );
+
+        let permit = auth
+            .authorize_named(
+                &origin(),
+                Action::VolumeCreate,
+                ResourceKind::Volume,
+                "data",
+                1,
+            )
+            .unwrap();
+
+        assert!(permit.durable_intent().is_some());
+        assert_eq!(journal.records().unwrap().len(), 2);
+        assert_eq!(journal.pending().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn completing_surface_permit_clears_pending_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
+                root.path(),
+                [83; 16],
+                crate::witness::JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let auth = SurfaceAuthorization::with_journal(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            Arc::clone(&journal),
+            [84; 16],
+        );
+        let permit = auth
+            .authorize_named(
+                &origin(),
+                Action::NetworkCreate,
+                ResourceKind::Network,
+                "frontend",
+                4,
+            )
+            .unwrap();
+
+        auth.complete(permit, true).unwrap();
+
+        assert!(journal.pending().unwrap().is_empty());
+        assert_eq!(journal.records().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn crash_before_execution_reopens_as_pending_and_reconciles_without_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::witness::JournalConfig::new(
+            root.path(),
+            [85; 16],
+            crate::witness::JournalMode::Required,
+        );
+        let journal = Arc::new(crate::witness::WitnessJournal::open(config.clone()).unwrap());
+        let auth = SurfaceAuthorization::with_journal(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            Arc::clone(&journal),
+            [86; 16],
+        );
+        let permit = auth
+            .authorize_named(
+                &origin(),
+                Action::VolumeDelete,
+                ResourceKind::Volume,
+                "data",
+                9,
+            )
+            .unwrap();
+        let operation = permit.operation_id();
+        drop(permit);
+        drop(auth);
+        drop(journal);
+
+        let reopened = Arc::new(crate::witness::WitnessJournal::open(config).unwrap());
+        let auth = SurfaceAuthorization::with_journal(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            Arc::clone(&reopened),
+            [86; 16],
+        );
+        assert_eq!(reopened.pending().unwrap()[0].operation_id(), operation);
+        let mut observations = 0;
+        assert_eq!(
+            auth.reconcile_pending(|pending| {
+                observations += 1;
+                (*pending.recipe().observation_digest(), true)
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(observations, 1);
+        assert!(reopened.pending().unwrap().is_empty());
     }
 }

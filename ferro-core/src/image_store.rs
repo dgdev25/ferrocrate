@@ -101,22 +101,35 @@ impl LocalImageStore {
         &self,
         reference: &str,
         digest: &str,
-        proof: crate::authorization::gate::AuthorizedRequest,
+        permit: crate::authorization::surface::SurfacePermit,
     ) -> Result<bool, ImageStoreError> {
         crate::authorization::surface::SurfaceAuthorization::validate_execution(
-            &proof,
+            &permit,
             crate::authorization::Action::ImageDelete,
             crate::authorization::ResourceKind::Image,
             reference,
             1,
         )
         .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
-        if proof.canonical().image_digest() != Some(digest) {
+        if permit.proof().canonical().image_digest() != Some(digest) {
             return Err(ImageStoreError::Authorization(
                 "image digest does not match executor".to_string(),
             ));
         }
-        self.remove_reference(reference)
+        match self.remove_reference(reference) {
+            Ok(removed) => {
+                permit
+                    .finish(true)
+                    .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+                Ok(removed)
+            }
+            Err(error) => {
+                permit
+                    .finish(false)
+                    .map_err(|finish| ImageStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
     }
 
     pub fn list_references(&self) -> Result<Vec<ImageRecord>, ImageStoreError> {
@@ -134,7 +147,7 @@ impl LocalImageStore {
         Ok(out)
     }
 
-    pub fn prune_references(&self) -> Result<usize, ImageStoreError> {
+    pub(crate) fn prune_references(&self) -> Result<usize, ImageStoreError> {
         let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
         let keys: Vec<Vec<u8>> = tree
             .iter()
@@ -152,6 +165,53 @@ impl LocalImageStore {
         digest_tree.clear()?;
         digest_tree.flush()?;
         Ok(removed)
+    }
+
+    /// Consume one independently authorized permit for every reference that
+    /// will be removed. A concurrent inventory change fails closed.
+    pub fn prune_references_authorized(
+        &self,
+        permits: Vec<crate::authorization::surface::SurfacePermit>,
+    ) -> Result<usize, ImageStoreError> {
+        let records = self.list_references()?;
+        if records.len() != permits.len() {
+            return Err(ImageStoreError::Authorization(
+                "image prune authorization set does not match current inventory".to_string(),
+            ));
+        }
+        for (record, permit) in records.iter().zip(&permits) {
+            crate::authorization::surface::SurfaceAuthorization::validate_execution(
+                permit,
+                crate::authorization::Action::ImageDelete,
+                crate::authorization::ResourceKind::Image,
+                &record.reference,
+                1,
+            )
+            .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+            if permit.proof().canonical().image_digest() != Some(record.digest.as_str()) {
+                return Err(ImageStoreError::Authorization(
+                    "image prune digest does not match executor".to_string(),
+                ));
+            }
+        }
+        match self.prune_references() {
+            Ok(removed) => {
+                for permit in permits {
+                    permit
+                        .finish(true)
+                        .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+                }
+                Ok(removed)
+            }
+            Err(error) => {
+                for permit in permits {
+                    permit
+                        .finish_unknown()
+                        .map_err(|finish| ImageStoreError::Authorization(finish.to_string()))?;
+                }
+                Err(error)
+            }
+        }
     }
 }
 

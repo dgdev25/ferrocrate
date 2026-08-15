@@ -156,17 +156,30 @@ impl LocalVolumeStore {
         name: &str,
         driver: &str,
         driver_opts: BTreeMap<String, String>,
-        proof: crate::authorization::gate::AuthorizedRequest,
+        permit: crate::authorization::surface::SurfacePermit,
     ) -> Result<VolumeRecord, VolumeStoreError> {
         crate::authorization::surface::SurfaceAuthorization::validate_execution(
-            &proof,
+            &permit,
             crate::authorization::Action::VolumeCreate,
             crate::authorization::ResourceKind::Volume,
             name,
             1,
         )
         .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
-        self.create_with_driver(name, driver, driver_opts)
+        match self.create_with_driver(name, driver, driver_opts) {
+            Ok(record) => {
+                permit
+                    .finish(true)
+                    .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+                Ok(record)
+            }
+            Err(error) => {
+                permit
+                    .finish(false)
+                    .map_err(|finish| VolumeStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
     }
 
     pub fn list(&self) -> Result<Vec<VolumeRecord>, VolumeStoreError> {
@@ -215,17 +228,30 @@ impl LocalVolumeStore {
     pub fn remove_authorized(
         &self,
         name: &str,
-        proof: crate::authorization::gate::AuthorizedRequest,
+        permit: crate::authorization::surface::SurfacePermit,
     ) -> Result<bool, VolumeStoreError> {
         crate::authorization::surface::SurfaceAuthorization::validate_execution(
-            &proof,
+            &permit,
             crate::authorization::Action::VolumeDelete,
             crate::authorization::ResourceKind::Volume,
             name,
             1,
         )
         .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
-        self.remove(name)
+        match self.remove(name) {
+            Ok(removed) => {
+                permit
+                    .finish(true)
+                    .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+                Ok(removed)
+            }
+            Err(error) => {
+                permit
+                    .finish(false)
+                    .map_err(|finish| VolumeStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
     }
 
     pub fn backup(&self, name: &str, dest: impl AsRef<Path>) -> Result<(), VolumeStoreError> {
@@ -243,7 +269,11 @@ impl LocalVolumeStore {
         Ok(())
     }
 
-    pub fn restore(&self, name: &str, src: impl AsRef<Path>) -> Result<(), VolumeStoreError> {
+    pub(crate) fn restore(
+        &self,
+        name: &str,
+        src: impl AsRef<Path>,
+    ) -> Result<(), VolumeStoreError> {
         let record = self
             .get(name)?
             .ok_or_else(|| VolumeStoreError::NotFound(name.to_string()))?;
@@ -253,6 +283,36 @@ impl LocalVolumeStore {
         let mut archive = Archive::new(file);
         archive.unpack(&volume_dir)?;
         Ok(())
+    }
+
+    pub fn restore_authorized(
+        &self,
+        name: &str,
+        src: impl AsRef<Path>,
+        permit: crate::authorization::surface::SurfacePermit,
+    ) -> Result<(), VolumeStoreError> {
+        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+            &permit,
+            crate::authorization::Action::VolumeCreate,
+            crate::authorization::ResourceKind::Volume,
+            name,
+            1,
+        )
+        .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+        match self.restore(name, src) {
+            Ok(()) => {
+                permit
+                    .finish(true)
+                    .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+                Ok(())
+            }
+            Err(error) => {
+                permit
+                    .finish_unknown()
+                    .map_err(|finish| VolumeStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
     }
 }
 

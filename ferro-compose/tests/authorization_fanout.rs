@@ -103,6 +103,47 @@ fn dependent_delete_is_bound_to_stop_receipt_and_committed_graph_position() {
 }
 
 #[test]
+fn dependent_prerequisites_advance_only_through_committed_graph() {
+    let root = FanoutPlan::derive(
+        [3; 16],
+        4,
+        [5; 32],
+        10_000,
+        0,
+        [
+            ServiceMutation::new("web-image", FanoutAction::ImagePull, [1; 32]),
+            ServiceMutation::new("web-data", FanoutAction::VolumeCreate, [2; 32]),
+            ServiceMutation::new("web", FanoutAction::ContainerRun, [0; 32]),
+        ],
+    )
+    .unwrap();
+    let volume = root
+        .derive_dependent(
+            &root.children()[0],
+            [7; 32],
+            ServiceMutation::new("web-data", FanoutAction::VolumeCreate, [2; 32]),
+        )
+        .unwrap();
+    let run = volume
+        .derive_dependent(
+            &volume.children()[0],
+            [8; 32],
+            ServiceMutation::new("web", FanoutAction::ContainerRun, [9; 32]),
+        )
+        .unwrap();
+    assert_eq!(run.children()[0].ordinal(), 2);
+    assert_eq!(run.children()[0].parent_request_id(), root.children()[0].parent_request_id());
+    assert!(matches!(
+        volume.derive_dependent(
+            &volume.children()[0],
+            [8; 32],
+            ServiceMutation::new("substituted", FanoutAction::ContainerRun, [9; 32]),
+        ),
+        Err(FanoutError::Replay)
+    ));
+}
+
+#[test]
 fn replay_claims_are_durable_and_attempt_scoped() {
     let temp = tempfile::tempdir().unwrap();
     let first = FanoutPlan::derive([1; 16], 7, [2; 32], 10_000, 0, [mutation("web", 4)]).unwrap();

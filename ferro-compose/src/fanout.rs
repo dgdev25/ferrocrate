@@ -7,6 +7,8 @@ pub enum FanoutAction {
     ContainerRun,
     ContainerStop,
     ContainerDelete,
+    ImagePull,
+    VolumeCreate,
 }
 
 impl FanoutAction {
@@ -15,6 +17,8 @@ impl FanoutAction {
             Self::ContainerRun => 1,
             Self::ContainerStop => 2,
             Self::ContainerDelete => 3,
+            Self::ImagePull => 4,
+            Self::VolumeCreate => 5,
         }
     }
 }
@@ -93,6 +97,7 @@ impl FanoutChild {
 pub struct FanoutPlan {
     digest: [u8; 32],
     children: Vec<FanoutChild>,
+    commitments: Vec<(String, FanoutAction)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -145,12 +150,10 @@ impl FanoutPlan {
         mutation: ServiceMutation,
     ) -> Result<Self, FanoutError> {
         self.verify_child(predecessor, predecessor.deadline_unix_ms)?;
-        let template = self
-            .children
-            .get(predecessor.ordinal as usize + 1)
-            .filter(|template| {
-                template.service == mutation.service && template.action == mutation.action
-            })
+        let next_ordinal = predecessor.ordinal.checked_add(1).ok_or(FanoutError::Replay)?;
+        self.commitments
+            .get(next_ordinal as usize)
+            .filter(|(service, action)| service == &mutation.service && *action == mutation.action)
             .ok_or(FanoutError::Replay)?;
         let mut plan = Sha256::new();
         plan.update(b"ferrocrate/compose-dependent-plan/v1");
@@ -158,7 +161,7 @@ impl FanoutPlan {
         plan.update(predecessor.parent_request_id);
         plan.update(predecessor.child_id);
         plan.update(predecessor_outcome);
-        plan.update(template.ordinal.to_be_bytes());
+        plan.update(next_ordinal.to_be_bytes());
         plan.update([mutation.action.code()]);
         plan.update((mutation.service.len() as u64).to_be_bytes());
         plan.update(mutation.service.as_bytes());
@@ -170,7 +173,7 @@ impl FanoutPlan {
         idem.update(self.digest);
         idem.update(predecessor.child_id);
         idem.update(predecessor_outcome);
-        idem.update(template.ordinal.to_be_bytes());
+        idem.update(next_ordinal.to_be_bytes());
         idem.update([mutation.action.code()]);
         idem.update((mutation.service.len() as u64).to_be_bytes());
         idem.update(mutation.service.as_bytes());
@@ -196,9 +199,10 @@ impl FanoutPlan {
                 policy_generation: predecessor.policy_generation,
                 policy_digest: predecessor.policy_digest,
                 attempt: predecessor.attempt,
-                ordinal: template.ordinal,
+                ordinal: next_ordinal,
                 plan_digest: digest,
             }],
+            commitments: self.commitments.clone(),
         })
     }
 
@@ -231,6 +235,10 @@ impl FanoutPlan {
             plan.update(mutation.request_digest);
         }
         let digest: [u8; 32] = plan.finalize().into();
+        let commitments = mutations
+            .iter()
+            .map(|mutation| (mutation.service.clone(), mutation.action))
+            .collect();
         let children = mutations
             .into_iter()
             .enumerate()
@@ -268,7 +276,7 @@ impl FanoutPlan {
                 }
             })
             .collect();
-        Ok(Self { digest, children })
+        Ok(Self { digest, children, commitments })
     }
     pub fn children(&self) -> &[FanoutChild] {
         &self.children

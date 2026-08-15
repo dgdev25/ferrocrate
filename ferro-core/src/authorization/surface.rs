@@ -473,22 +473,14 @@ impl SurfaceAuthorization {
         canonical_name: &str,
         generation: u64,
     ) -> Result<(), SurfaceExecutionError> {
-        let proof = permit.proof();
-        let result = if proof.canonical().context().action() != action {
-            Err(SurfaceExecutionError::ActionMismatch)
-        } else if proof.canonical().context().resource().kind() != kind
-            || proof.canonical().resource_id() != stable_resource_id(kind, canonical_name)
-        {
-            Err(SurfaceExecutionError::ResourceMismatch)
-        } else if proof.canonical().resource_generation() != generation {
-            Err(SurfaceExecutionError::GenerationMismatch)
-        } else {
-            Ok(())
-        };
-        if result.is_err() {
-            crate::observability::authorization_metrics().record_bypass_probe(true);
-        }
-        result
+        validate_execution_with_comparator(
+            permit,
+            action,
+            kind,
+            canonical_name,
+            generation,
+            std::convert::identity,
+        )
     }
 
     fn authorize(
@@ -674,6 +666,40 @@ impl SurfaceAuthorization {
             correlation_digest: None,
         })
     }
+}
+
+fn validate_execution_with_comparator<F>(
+    permit: &SurfacePermit,
+    action: Action,
+    kind: ResourceKind,
+    canonical_name: &str,
+    generation: u64,
+    comparator: F,
+) -> Result<(), SurfaceExecutionError>
+where
+    F: FnOnce(Result<(), SurfaceExecutionError>) -> Result<(), SurfaceExecutionError>,
+{
+    let proof = permit.proof();
+    let expected_mismatch = proof.canonical().context().action() != action
+        || proof.canonical().context().resource().kind() != kind
+        || proof.canonical().resource_id() != stable_resource_id(kind, canonical_name)
+        || proof.canonical().resource_generation() != generation;
+    let actual = if proof.canonical().context().action() != action {
+        Err(SurfaceExecutionError::ActionMismatch)
+    } else if proof.canonical().context().resource().kind() != kind
+        || proof.canonical().resource_id() != stable_resource_id(kind, canonical_name)
+    {
+        Err(SurfaceExecutionError::ResourceMismatch)
+    } else if proof.canonical().resource_generation() != generation {
+        Err(SurfaceExecutionError::GenerationMismatch)
+    } else {
+        Ok(())
+    };
+    let result = comparator(actual);
+    if expected_mismatch {
+        crate::observability::authorization_metrics().record_bypass_probe(result.is_err());
+    }
+    result
 }
 
 fn complete_permit(
@@ -1107,6 +1133,27 @@ mod tests {
             }
         }
         assert!(!error.contains(&canary));
+    }
+
+    #[test]
+    fn diagnostic_broken_comparator_records_a_successful_bypass() {
+        let auth = SurfaceAuthorization::compatibility();
+        let permit = auth
+            .authorize_named(&origin(), Action::VolumeCreate, ResourceKind::Volume, "data", 1)
+            .unwrap();
+        let before = crate::observability::authorization_metrics_snapshot();
+        let result = validate_execution_with_comparator(
+            &permit,
+            Action::VolumeCreate,
+            ResourceKind::Volume,
+            "attacker-substitution",
+            1,
+            |_| Ok(()),
+        );
+        assert!(result.is_ok(), "fault seam intentionally accepts mismatch");
+        let after = crate::observability::authorization_metrics_snapshot();
+        assert_eq!(after.bypass_probe_total, before.bypass_probe_total + 1);
+        assert_eq!(after.successful_bypass_total, before.successful_bypass_total + 1);
     }
 
     #[test]

@@ -20,7 +20,12 @@ run() {
   "$@" 2>&1 | tee -a "$qualification_log"
 }
 
+verify_bypass_artifact() {
+  jq -e '.bypass_probe_total > 0 and .successful_bypass_total == 0 and .bypass_detected_total > 0' "$1" >/dev/null
+}
+
 run metrics-and-matrices cargo test -p ferro-core --test authorization_faults
+run bypass-regression-diagnostic cargo test -p ferro-core --lib authorization::surface::tests::diagnostic_broken_comparator_records_a_successful_bypass -- --exact
 run production-canary-scan cargo test -p ferro-core --lib production_surface_canary_is_absent_from_witness_mirror_errors_logs_and_metrics
 run inventory-and-bypass cargo test -p ferro-core --test authorization_gate
 run policy-source-validation cargo test -p ferro-core --test authorization_policy
@@ -72,7 +77,13 @@ while IFS= read -r entry; do
 done < <(jq -c '.[]' "$inventory_json")
 
 metric_artifact="$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/metrics.json"
-jq -e '.bypass_probe_total > 0 and .successful_bypass_total == 0 and .bypass_detected_total > 0' "$metric_artifact" >/dev/null
+bad_metric_artifact="$qualification_dir/intentionally-broken-bypass-metrics.json"
+jq '.successful_bypass_total = 1' "$metric_artifact" > "$bad_metric_artifact"
+if verify_bypass_artifact "$bad_metric_artifact"; then
+  printf 'qualification failed: quality gate accepted an intentional successful bypass artifact\n' >&2
+  exit 1
+fi
+verify_bypass_artifact "$metric_artifact"
 bypasses="$(jq '.successful_bypass_total' "$metric_artifact")"
 probes="$(jq '.bypass_probe_total' "$metric_artifact")"
 jq -n --argjson total "$total" --argjson passed "$passed" \

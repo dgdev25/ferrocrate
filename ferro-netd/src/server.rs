@@ -374,6 +374,17 @@ impl NetdServer {
         }
         let request_id = granted.grant.claims.request_id.clone();
         let nonce = granted.grant.claims.nonce;
+        macro_rules! reject_effect {
+            ($code:expr, $reason:expr, $identity:expr) => {{
+                if self
+                    .record_grant_failure(&request_id, nonce, $identity, $reason)
+                    .is_err()
+                {
+                    return reject(RejectionCode::Busy, "failure witness unavailable");
+                }
+                return reject($code, $reason);
+            }};
+        }
         match envelope.request {
             NetdRequest::ApplyOverlay {
                 overlay_id,
@@ -520,7 +531,11 @@ impl NetdServer {
                     container_addr: None,
                 };
                 if create_veth_pair(&config).is_err() {
-                    return reject(RejectionCode::Busy, "failed to create endpoint veth");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to create endpoint veth",
+                        format!("endpoint:{endpoint_id}")
+                    );
                 }
                 let master = match build_ip_link_set_master_cmd(&endpoint_id, &overlay_id) {
                     Ok(command) => command,
@@ -534,14 +549,19 @@ impl NetdServer {
                 };
                 if exec_cmd(&master).is_err() {
                     let _ = destroy_veth_pair(&endpoint_id);
-                    return reject(RejectionCode::Busy, "failed to attach endpoint veth");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to attach endpoint veth",
+                        format!("endpoint:{endpoint_id}")
+                    );
                 }
                 if let Some(netns) = netns {
                     if move_to_netns(&format!("fc-{endpoint_id}"), &netns).is_err() {
                         let _ = destroy_veth_pair(&endpoint_id);
-                        return reject(
+                        reject_effect!(
                             RejectionCode::Busy,
                             "failed to move endpoint into namespace",
+                            format!("endpoint:{endpoint_id}")
                         );
                     }
                 }
@@ -549,7 +569,11 @@ impl NetdServer {
                 if self.persist().is_err() {
                     let _ = self.endpoints.remove(&endpoint_id);
                     let _ = destroy_veth_pair(&endpoint_id);
-                    return reject(RejectionCode::Busy, "failed to persist endpoint ownership");
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to persist endpoint ownership",
+                        format!("endpoint:{endpoint_id}")
+                    );
                 }
                 if self
                     .record_grant_result(
@@ -565,10 +589,22 @@ impl NetdServer {
                 NetdResponse::Attached
             }
             NetdRequest::DetachEndpoint { endpoint_id, .. } => {
-                if self.endpoints.remove(&endpoint_id).is_some() {
-                    let _ = destroy_veth_pair(&endpoint_id);
+                if self.endpoints.remove(&endpoint_id).is_some()
+                    && destroy_veth_pair(&endpoint_id).is_err()
+                {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to destroy endpoint veth",
+                        format!("endpoint:{endpoint_id}")
+                    );
                 }
-                let _ = self.persist();
+                if self.persist().is_err() {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to persist endpoint deletion",
+                        format!("endpoint:{endpoint_id}")
+                    );
+                }
                 if self
                     .record_grant_result(
                         &request_id,
@@ -636,6 +672,20 @@ impl NetdServer {
             verifier.record_result(&consumed, identity, outcome)?;
         }
         Ok(())
+    }
+    fn record_grant_failure(
+        &mut self,
+        request_id: &str,
+        nonce: [u8; 16],
+        identity: String,
+        outcome: &str,
+    ) -> Result<(), GrantError> {
+        let verifier = self.grants.as_mut().ok_or(GrantError::NotConsumed)?;
+        verifier.record_failure(
+            &crate::grants::ConsumedGrant::restored(request_id, nonce),
+            identity,
+            outcome,
+        )
     }
 }
 

@@ -11,6 +11,7 @@ use nix::sys::socket::{
 };
 use policy::Policy;
 use protocol::{response_frame, MAX_FRAME_BYTES};
+use serde::Deserialize;
 use server::NetdServer;
 use std::{
     fs,
@@ -42,18 +43,6 @@ fn main() {
         ),
         Err(_) => NetdServer::new(agent_uid, policy),
     };
-    let grant_key = std::env::var("FERROCRATE_NETD_GRANT_PUBLIC_KEY")
-        .expect("FERROCRATE_NETD_GRANT_PUBLIC_KEY is required");
-    let grant_key = base64::engine::general_purpose::STANDARD
-        .decode(grant_key)
-        .expect("grant public key must be base64");
-    let grant_key = VerifyingKey::from_bytes(
-        grant_key
-            .as_slice()
-            .try_into()
-            .expect("grant public key must be 32 bytes"),
-    )
-    .expect("invalid grant public key");
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .expect("kernel boot ID is required")
         .trim()
@@ -62,15 +51,14 @@ fn main() {
         .unwrap_or_else(|_| "/var/lib/ferrocrate/netd-grants.json".into());
     let grant_issuer = std::env::var("FERROCRATE_NETD_GRANT_ISSUER")
         .unwrap_or_else(|_| "ferrocrate-runtime".into());
-    let grant_key_id = std::env::var("FERROCRATE_NETD_GRANT_KEY_ID")
-        .expect("FERROCRATE_NETD_GRANT_KEY_ID is required");
-    server = server.with_grants(GrantVerifier::new(
-        grant_key,
-        grant_issuer,
-        grant_key_id,
-        boot_id,
-        GrantLedger::open(grant_journal.into()).expect("grant journal unavailable"),
-    ));
+    server = server.with_grants(
+        load_grant_verifier(
+            grant_issuer,
+            boot_id,
+            GrantLedger::open(grant_journal.into()).expect("grant journal unavailable"),
+        )
+        .expect("invalid bounded grant verification keyring"),
+    );
     if let Ok(path) = std::env::var("FERROCRATE_NETD_STATE") {
         server = server
             .load_journal(path.into())
@@ -139,6 +127,67 @@ fn main() {
             let _ = stream.write_all(&bytes);
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationKeyConfig {
+    key_id: String,
+    public_key: String,
+    status: KeyStatus,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum KeyStatus {
+    Active,
+    Overlap,
+    Retired,
+}
+
+fn load_grant_verifier(
+    issuer: String,
+    boot_id: String,
+    ledger: GrantLedger,
+) -> Result<GrantVerifier, String> {
+    let encoded = std::env::var("FERROCRATE_NETD_GRANT_KEYRING_JSON")
+        .map_err(|_| "FERROCRATE_NETD_GRANT_KEYRING_JSON is required".to_string())?;
+    if encoded.len() > 16 * 1024 {
+        return Err("keyring exceeds 16 KiB".into());
+    }
+    let entries: Vec<VerificationKeyConfig> =
+        serde_json::from_str(&encoded).map_err(|_| "keyring JSON is invalid".to_string())?;
+    if entries.is_empty() || entries.len() > 8 {
+        return Err("keyring must contain 1..=8 entries".into());
+    }
+    let mut active = entries
+        .iter()
+        .filter(|entry| entry.status != KeyStatus::Retired);
+    let first = active
+        .next()
+        .ok_or_else(|| "keyring has no active verification key".to_string())?;
+    let decode = |entry: &VerificationKeyConfig| -> Result<VerifyingKey, String> {
+        if entry.key_id.is_empty() || entry.key_id.len() > 64 {
+            return Err("invalid key ID".into());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&entry.public_key)
+            .map_err(|_| "public key is not base64".to_string())?;
+        VerifyingKey::from_bytes(
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "public key must be 32 bytes".to_string())?,
+        )
+        .map_err(|_| "invalid public key".to_string())
+    };
+    let mut verifier = GrantVerifier::new(decode(first)?, issuer, &first.key_id, boot_id, ledger);
+    for entry in active {
+        verifier
+            .add_verification_key(&entry.key_id, decode(entry)?)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(verifier)
 }
 
 fn receive_prefix_without_descriptors(

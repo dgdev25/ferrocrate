@@ -106,7 +106,7 @@ impl GrantLedger {
     fn result(&self, request_id: &str) -> Option<&GrantResult> {
         self.state.results.get(request_id)
     }
-    fn record(&mut self, result: GrantResult) -> Result<(), GrantError> {
+    fn record(&mut self, result: GrantResult, phase: GrantPhase) -> Result<(), GrantError> {
         if self
             .state
             .consumed
@@ -129,7 +129,7 @@ impl GrantLedger {
             .consumed
             .get_mut(&nonce)
             .expect("validated nonce")
-            .phase = GrantPhase::Succeeded;
+            .phase = phase;
         self.persist()
     }
     fn validates_cleanup(&self, grant: &HelperGrant) -> bool {
@@ -385,12 +385,31 @@ impl GrantVerifier {
         identity: impl Into<String>,
         outcome: impl Into<String>,
     ) -> Result<(), GrantError> {
-        self.ledger.record(GrantResult {
-            request_id: consumed.request_id.clone(),
-            nonce: consumed.nonce,
-            result_identity: identity.into(),
-            outcome: outcome.into(),
-        })
+        self.ledger.record(
+            GrantResult {
+                request_id: consumed.request_id.clone(),
+                nonce: consumed.nonce,
+                result_identity: identity.into(),
+                outcome: outcome.into(),
+            },
+            GrantPhase::Succeeded,
+        )
+    }
+    pub fn record_failure(
+        &mut self,
+        consumed: &ConsumedGrant,
+        identity: impl Into<String>,
+        outcome: impl Into<String>,
+    ) -> Result<(), GrantError> {
+        self.ledger.record(
+            GrantResult {
+                request_id: consumed.request_id.clone(),
+                nonce: consumed.nonce,
+                result_identity: identity.into(),
+                outcome: outcome.into(),
+            },
+            GrantPhase::Failed,
+        )
     }
     pub fn arm_effect(&mut self, consumed: &ConsumedGrant) -> Result<(), GrantError> {
         self.ledger.mark_outcome_unknown(consumed.nonce)

@@ -4,47 +4,8 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ferro_net::validate::validate_interface_name;
 use ipnet::IpNet;
-use prost::Message;
 
 use crate::protocol::{NetdRequest, RejectionCode, SignedEnvelope, MAX_PEERS, MAX_ROUTES};
-
-#[derive(Clone, Message)]
-pub(crate) struct WireDesiredState {
-    #[prost(string, tag = "1")]
-    pub(crate) cluster_id: String,
-    #[prost(uint64, tag = "2")]
-    pub(crate) cluster_epoch: u64,
-    #[prost(uint64, tag = "3")]
-    pub(crate) revision: u64,
-    #[prost(message, repeated, tag = "4")]
-    pub(crate) overlays: Vec<WireOverlay>,
-    #[prost(bytes, tag = "5")]
-    pub(crate) signature: Vec<u8>,
-    #[prost(int64, tag = "6")]
-    pub(crate) lease_expires_unix: i64,
-}
-
-#[derive(Clone, Message)]
-pub(crate) struct WireOverlay {
-    #[prost(string, tag = "1")]
-    pub(crate) overlay_id: String,
-    #[prost(string, repeated, tag = "2")]
-    pub(crate) routes: Vec<String>,
-    #[prost(message, repeated, tag = "3")]
-    pub(crate) peers: Vec<WirePeer>,
-}
-
-#[derive(Clone, Message)]
-pub(crate) struct WirePeer {
-    #[prost(string, tag = "1")]
-    pub(crate) node_id: String,
-    #[prost(bytes, tag = "2")]
-    pub(crate) public_key: Vec<u8>,
-    #[prost(string, tag = "3")]
-    pub(crate) endpoint: String,
-    #[prost(string, repeated, tag = "4")]
-    pub(crate) allowed_ips: Vec<String>,
-}
 
 pub struct Policy {
     cluster: String,
@@ -114,74 +75,12 @@ impl Policy {
         Ok(())
     }
 
-    pub(crate) fn validate_desired_state(
-        &mut self,
-        bytes: &[u8],
-        node_id: &str,
-        now: u64,
-    ) -> Result<WireDesiredState, RejectionCode> {
-        let state = WireDesiredState::decode(bytes).map_err(|_| RejectionCode::InvalidFrame)?;
-        if state.cluster_id != self.cluster || (!node_id.is_empty() && node_id != self.node) {
-            return Err(RejectionCode::PolicyViolation);
-        }
-        if state.lease_expires_unix <= now as i64 {
-            return Err(RejectionCode::ExpiredLease);
-        }
-        let mut unsigned = state.clone();
-        let signature = Signature::from_slice(&unsigned.signature)
-            .map_err(|_| RejectionCode::InvalidSignature)?;
-        unsigned.signature.clear();
-        self.key
-            .verify(&bytes_for_state(&unsigned), &signature)
-            .map_err(|_| RejectionCode::InvalidSignature)?;
-        if let Some((epoch, revision, lease)) = self.revisions.get("__desired_state") {
-            if state.cluster_epoch < *epoch
-                || (state.cluster_epoch == *epoch
-                    && (state.revision < *revision
-                        || (state.revision == *revision
-                            && state.lease_expires_unix as u64 <= *lease)))
-            {
-                return Err(RejectionCode::StaleRevision);
-            }
-        }
-        for overlay in &state.overlays {
-            validate_request(&NetdRequest::ApplyOverlay {
-                overlay_id: overlay.overlay_id.clone(),
-                peers: overlay
-                    .peers
-                    .iter()
-                    .map(|peer| crate::protocol::PeerSpec {
-                        node_id: peer.node_id.clone(),
-                        public_key: String::from_utf8_lossy(&peer.public_key).into_owned(),
-                        endpoint: peer.endpoint.clone(),
-                        allowed_ips: peer.allowed_ips.clone(),
-                    })
-                    .collect(),
-                routes: overlay.routes.clone(),
-                addresses: Vec::new(),
-            })?;
-        }
-        self.revisions.insert(
-            "__desired_state".into(),
-            (
-                state.cluster_epoch,
-                state.revision,
-                state.lease_expires_unix as u64,
-            ),
-        );
-        Ok(state)
-    }
-
     pub fn rollback(&mut self, scope: &str, epoch: u64, revision: u64) {
         if matches!(self.revisions.get(scope), Some((current_epoch, current_revision, _)) if *current_epoch == epoch && *current_revision == revision)
         {
             self.revisions.remove(scope);
         }
     }
-}
-
-fn bytes_for_state(state: &WireDesiredState) -> Vec<u8> {
-    state.encode_to_vec()
 }
 
 fn validate_request(request: &NetdRequest) -> Result<(), RejectionCode> {

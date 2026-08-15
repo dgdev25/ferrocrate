@@ -148,12 +148,23 @@ async fn run_control_stream(
         .tls_config(tls)?
         .connect()
         .await?;
-    let agent = Arc::new(Agent::new(
-        cluster_id,
-        verifying_key,
-        StateStore::new(state_path),
-        UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
-    )?);
+    let authorization_disabled =
+        std::env::var("FERROCRATE_AUTHORIZATION_MODE").as_deref() == Ok("disabled");
+    let agent = Arc::new(if authorization_disabled {
+        Agent::new(
+            cluster_id,
+            verifying_key,
+            StateStore::new(state_path),
+            UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
+        )?
+    } else {
+        Agent::new_enforcing(
+            cluster_id,
+            verifying_key,
+            StateStore::new(state_path),
+            UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
+        )?
+    });
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     sender
         .send(AgentMessage {
@@ -192,7 +203,16 @@ async fn run_control_stream(
             return Err(format!("manager control error: {}", message.error).into());
         }
         if let Some(desired) = message.desired_state {
-            match agent.reconcile(desired.clone(), now_unix()) {
+            let reconciliation = if authorization_disabled {
+                agent.reconcile(desired.clone(), now_unix())
+            } else {
+                agent.reconcile_with_bundle(
+                    desired.clone(),
+                    &message.desired_authorization_bundle,
+                    now_unix(),
+                )
+            };
+            match reconciliation {
                 Ok(revision) => {
                     local_api.renew_lease(runtime_uid, desired.lease_expires_unix)?;
                     sender

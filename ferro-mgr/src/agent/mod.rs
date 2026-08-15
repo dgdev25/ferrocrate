@@ -1,3 +1,4 @@
+pub mod desired_authorization;
 pub mod reconcile;
 pub mod state;
 pub mod ipam;

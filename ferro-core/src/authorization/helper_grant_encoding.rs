@@ -1,4 +1,13 @@
-use super::helper_grant::GrantClaims;
+use super::helper_grant::{GrantClaims, GrantParameters};
+
+impl GrantParameters {
+    pub(crate) fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
 
 pub fn signing_bytes(claims: &GrantClaims) -> Vec<u8> {
     let mut out = b"ferrocrate.helper-grant\0".to_vec();

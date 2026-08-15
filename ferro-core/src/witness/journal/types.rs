@@ -159,6 +159,7 @@ pub struct DurableIntent {
     pub(super) pending_generation: u64,
     pub(super) decision_id: [u8; 16],
     pub(super) decision_digest: [u8; 32],
+    pub(super) request_digest: [u8; 32],
 }
 
 impl DurableIntent {
@@ -174,5 +175,8 @@ impl DurableIntent {
     }
     pub(crate) const fn decision_digest(&self) -> [u8; 32] {
         self.decision_digest
+    }
+    pub(crate) const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
     }
 }

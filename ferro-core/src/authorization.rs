@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub mod gate;
 pub mod helper_grant;
 mod helper_grant_encoding;
+mod helper_grant_error;
 pub mod inventory;
 pub mod policy;
 #[cfg(target_os = "linux")]

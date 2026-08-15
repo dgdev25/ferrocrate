@@ -454,6 +454,7 @@ impl WitnessJournal {
             pending_generation: state.pending_generation,
             decision_id,
             decision_digest,
+            request_digest: state.request_digest,
         })
     }
 

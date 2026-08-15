@@ -1,11 +1,11 @@
 //! Signed, single-use capabilities for the privileged networking helper.
 
 use super::helper_grant_encoding::{is_uuid, push_text};
+pub use super::helper_grant_error::GrantBuildError;
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 
 use super::{gate::AuthorizedRequest, Action};
 use crate::witness::DurableIntent;
@@ -79,7 +79,7 @@ pub struct FdBinding {
 #[serde(deny_unknown_fields)]
 pub struct GrantParameters {
     operation: String,
-    fields: Vec<(String, String)>,
+    pub(super) fields: Vec<(String, String)>,
     fds: Vec<FdBinding>,
 }
 
@@ -275,15 +275,26 @@ impl GrantIssuer {
         path: &std::path::Path,
         expected_uid: u32,
     ) -> Result<Self, GrantBuildError> {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let metadata = std::fs::symlink_metadata(path).map_err(|_| GrantBuildError::KeyCustody)?;
+        use std::{
+            io::Read,
+            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| GrantBuildError::KeyCustody)?;
+        let metadata = file.metadata().map_err(|_| GrantBuildError::KeyCustody)?;
         if !metadata.file_type().is_file()
             || metadata.uid() != expected_uid
+            || metadata.nlink() != 1
             || metadata.permissions().mode() & 0o077 != 0
         {
             return Err(GrantBuildError::KeyCustody);
         }
-        let bytes = std::fs::read(path).map_err(|_| GrantBuildError::KeyCustody)?;
+        let mut bytes = Vec::with_capacity(32);
+        file.read_to_end(&mut bytes)
+            .map_err(|_| GrantBuildError::KeyCustody)?;
         let key: [u8; 32] = bytes.try_into().map_err(|_| GrantBuildError::KeyCustody)?;
         Ok(Self::new(key_id, SigningKey::from_bytes(&key)))
     }
@@ -309,18 +320,20 @@ impl GrantIssuer {
     ) -> Result<HelperGrant, GrantBuildError> {
         let action = GrantAction::from_authorization(proof.canonical().context().action())
             .ok_or(GrantBuildError::UnsupportedAction)?;
-        if intent.execution_generation() != proof.canonical().resource_generation() {
+        let request_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(proof.canonical().context())
+                .map_err(|_| GrantBuildError::InvalidClaims)?,
+        )
+        .into();
+        if intent.execution_generation() != proof.canonical().resource_generation()
+            || intent.request_digest() != request_digest
+        {
             return Err(GrantBuildError::IntentMismatch);
         }
         let resource = ResourceBinding::new(
             proof.canonical().resource_id(),
             proof.canonical().resource_generation(),
         )?;
-        let request_digest: [u8; 32] = Sha256::digest(
-            serde_json::to_vec(proof.canonical().context())
-                .map_err(|_| GrantBuildError::InvalidClaims)?,
-        )
-        .into();
         let mut claims = GrantClaims::new(
             proof.canonical().request_id(),
             action,
@@ -360,11 +373,27 @@ impl GrantIssuer {
                 GrantAction::NetworkAttach
             ) | (Action::ContainerDelete, GrantAction::NetworkDetach)
         );
-        if !allowed || intent.execution_generation() != proof.canonical().resource_generation() {
+        let request_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(proof.canonical().context())
+                .map_err(|_| GrantBuildError::InvalidClaims)?,
+        )
+        .into();
+        if !allowed
+            || intent.execution_generation() != proof.canonical().resource_generation()
+            || intent.request_digest() != request_digest
+        {
             return Err(GrantBuildError::IntentMismatch);
         }
-        if action == GrantAction::NetworkAttach
-            && proof.canonical().context().facts().network_ids().is_empty()
+        let overlay_id = parameters
+            .field("overlay_id")
+            .ok_or(GrantBuildError::IntentMismatch)?;
+        if !proof
+            .canonical()
+            .context()
+            .facts()
+            .network_ids()
+            .iter()
+            .any(|id| id == overlay_id)
         {
             return Err(GrantBuildError::IntentMismatch);
         }
@@ -372,11 +401,6 @@ impl GrantIssuer {
             proof.canonical().resource_id(),
             proof.canonical().resource_generation(),
         )?;
-        let request_digest: [u8; 32] = Sha256::digest(
-            serde_json::to_vec(proof.canonical().context())
-                .map_err(|_| GrantBuildError::InvalidClaims)?,
-        )
-        .into();
         let mut claims = GrantClaims::new(
             proof.canonical().request_id(),
             action,
@@ -472,21 +496,3 @@ impl GrantIssuer {
 }
 
 pub use super::helper_grant_encoding::signing_bytes;
-
-#[derive(Debug, Error, Eq, PartialEq)]
-pub enum GrantBuildError {
-    #[error("invalid resource binding")]
-    InvalidResource,
-    #[error("invalid normalized parameters")]
-    InvalidParameters,
-    #[error("invalid grant claims")]
-    InvalidClaims,
-    #[error("invalid cleanup provenance")]
-    InvalidCleanup,
-    #[error("action cannot be delegated to helper")]
-    UnsupportedAction,
-    #[error("durable intent does not bind the authorized resource generation")]
-    IntentMismatch,
-    #[error("helper grant signing key custody requirements were not met")]
-    KeyCustody,
-}

@@ -547,8 +547,11 @@ where
     let store = EmergencyStateStore::open(state_dir)?;
     let mut permit = EmergencyPermit(store.read().map_err(|e| format!("emergency state: {e}"))?);
     let state = &mut permit.0;
-    if state.boot_id != boot_id()? || uptime_ns()? >= state.deadline_uptime_ns {
-        return Err("emergency permit boot or monotonic deadline is invalid".into());
+    if state.boot_id != boot_id()? {
+        return Err(
+            "emergency recovery cannot cross a boot boundary; state remains fail-closed for offline forensic recovery"
+                .into(),
+        );
     }
     if state.action != action || state.resource != resource {
         return Err("emergency permit action/resource is out of scope or already consumed".into());
@@ -569,6 +572,21 @@ where
         let Some((sequence, event, succeeded)) =
             observe_terminal_event(state_dir, operation_id, action)?
         else {
+            let Some((sequence, event)) = observe_intent_event(state_dir, operation_id, action)?
+            else {
+                return Err("emergency effect cannot be classified: no exact main-journal intent or terminal exists".into());
+            };
+            state.main_witness_first = Some(sequence);
+            state.main_witness_last = Some(sequence);
+            state.terminal_event_id = Some(super::hex(&event));
+            let quarantine = canonical_transition(
+                state,
+                "quarantine",
+                state.operation_id.as_deref(),
+                state.terminal_event_id.as_deref(),
+                None,
+            )?;
+            append_selected_transition(state, sink, "quarantine", operation_id, &quarantine)?;
             state.status = EmergencyStatus::Quarantined;
             let expected = state.generation;
             store.write_cas(Some(expected), state)?;
@@ -600,6 +618,9 @@ where
     if state.status != EmergencyStatus::Activated {
         return Err("emergency permit action/resource is out of scope or already consumed".into());
     }
+    if uptime_ns()? >= state.deadline_uptime_ns {
+        return Err("emergency permit monotonic deadline is invalid".into());
+    }
     state.operation_id = Some(super::hex(&operation_id));
     let intent = canonical_transition(state, "intent", state.operation_id.as_deref(), None, None)?;
     append_selected_transition(state, sink, "intent", operation_id, &intent)?;
@@ -629,6 +650,12 @@ where
         state.main_witness_first = Some(before.saturating_add(1));
         state.main_witness_last = Some(after);
         state.terminal_event_id = Some(find_terminal_event(state_dir, operation_id, action)?);
+    } else {
+        // Isolated library tests may run without a configured main journal.
+        // Retain a deterministic correlation token so the sink record remains
+        // structurally canonical; production Required mode always takes the
+        // exact journal-event branch above.
+        state.terminal_event_id = Some(super::hex(&operation_id));
     }
     let outcome = canonical_transition(
         state,
@@ -710,6 +737,11 @@ fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), S
     let mut reader =
         ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
             .map_err(|e| e.to_string())?;
+    let expected_stage = if state.status == EmergencyStatus::Quarantined {
+        ferro_core::witness::WitnessStage::RequestReceived
+    } else {
+        ferro_core::witness::WitnessStage::Outcome
+    };
     let mut terminal = false;
     while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
         let record = ferro_core::witness::decode_record(&bytes).map_err(|e| e.to_string())?;
@@ -718,7 +750,7 @@ fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), S
             && record.action() == expected
             && record.request_id() == operation_id
             && record.event_id() == terminal_event_id
-            && record.stage() == ferro_core::witness::WitnessStage::Outcome;
+            && record.stage() == expected_stage;
     }
     reader.finish().map_err(|e| e.to_string())?;
     terminal.then_some(()).ok_or_else(|| {
@@ -786,6 +818,38 @@ fn observe_terminal_event(
     }
     reader.finish().map_err(|e| e.to_string())?;
     Ok(terminal)
+}
+
+fn observe_intent_event(
+    state_dir: &Path,
+    operation_id: [u8; 16],
+    action: &str,
+) -> Result<Option<(u64, [u8; 16])>, String> {
+    if !secure_exists(&state_dir.join("journal-id"))? {
+        return Ok(None);
+    }
+    let expected = emergency_witness_action(action)?;
+    let id_text = String::from_utf8(secure_read(&state_dir.join("journal-id"), 4096)?)
+        .map_err(|e| e.to_string())?;
+    let id = decode_hex::<16>(id_text.trim())?;
+    let mut reader =
+        ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
+            .map_err(|e| e.to_string())?;
+    let mut found = None;
+    while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
+        let record = ferro_core::witness::decode_record(&bytes).map_err(|e| e.to_string())?;
+        if record.request_id() == operation_id
+            && record.action() == expected
+            && record.stage() == ferro_core::witness::WitnessStage::RequestReceived
+        {
+            if found.is_some() {
+                return Err("multiple intent events exist for the emergency operation ID".into());
+            }
+            found = Some((record.sequence(), record.event_id()));
+        }
+    }
+    reader.finish().map_err(|e| e.to_string())?;
+    Ok(found)
 }
 
 fn emergency_witness_action(action: &str) -> Result<ferro_core::witness::WitnessAction, String> {
@@ -1623,8 +1687,8 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(error.contains("quarantined"));
+        assert!(error.contains("cannot be classified"));
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(store.read().unwrap().status, EmergencyStatus::Quarantined);
+        assert_eq!(store.read().unwrap().status, EmergencyStatus::IntentDurable);
     }
 }

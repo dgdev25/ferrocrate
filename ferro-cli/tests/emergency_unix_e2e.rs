@@ -201,7 +201,10 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
         .unwrap()
         .parse()
         .unwrap();
-    let deadline = (uptime * 1_000_000_000.0) as u64 + 60_000_000_000;
+    // The real stop waits ten seconds before SIGKILL. This deadline is valid
+    // before first execution and naturally expires after the effect, proving
+    // recovery does not re-apply admission freshness checks.
+    let deadline = (uptime * 1_000_000_000.0) as u64 + 5_000_000_000;
     let nonce = "process-e2e-0123456789";
     let payload = format!("FERROCRATE-EMERGENCY-APPROVAL-V1\n{boot}\ncontainer.stop\ncontainer:e2e\n{nonce}\n{deadline}\n");
     let approval = temp.path().join("approval.json");
@@ -314,7 +317,6 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
         !sleeper.wait().unwrap().success(),
         "real runtime stop must terminate the fixture process"
     );
-
     let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 1);
     wait_socket(&socket);
     let recovered = run(
@@ -345,6 +347,109 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
         ],
     );
     assert!(reconcile.status.success(), "{}", output_text(&reconcile));
+    assert!(server.wait().unwrap().success());
+    assert!(!auth.join("emergency-active.json").exists());
+
+    // A second production lifecycle reuses the authenticated durable sink
+    // head instead of incorrectly restarting the chain at sequence zero.
+    let mut second_sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let second_record: ferro_core::container_store::ContainerRecord =
+        serde_json::from_value(serde_json::json!({
+            "id": "e2e-second", "pid": second_sleeper.id(), "image": "fixture:latest",
+            "command": ["sleep", "60"], "created_at_unix": 2,
+            "stdout_path": temp.path().join("stdout-second").display().to_string(),
+            "stderr_path": temp.path().join("stderr-second").display().to_string(),
+            "status": "running", "mutation_generation": 1
+        }))
+        .unwrap();
+    ferro_core::container_store::LocalContainerStore::open(runtime.join("containers.db"))
+        .unwrap()
+        .put(&second_record)
+        .unwrap();
+    let second_uptime: f64 = fs::read_to_string("/proc/uptime")
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let second_deadline = (second_uptime * 1_000_000_000.0) as u64 + 30_000_000_000;
+    let second_nonce = "process-e2e-second-012345";
+    let second_payload = format!(
+        "FERROCRATE-EMERGENCY-APPROVAL-V1\n{boot}\ncontainer.kill\ncontainer:e2e-second\n{second_nonce}\n{second_deadline}\n"
+    );
+    let second_approval = temp.path().join("approval-second.json");
+    protected(
+        &second_approval,
+        &serde_json::to_vec(&serde_json::json!({
+            "payload": second_payload,
+            "signature": hex(&recovery.sign(second_payload.as_bytes()).to_bytes()),
+        }))
+        .unwrap(),
+    );
+    let second_activate = vec![
+        "emergency".into(),
+        "activate".into(),
+        "--origin".into(),
+        "test-console".into(),
+        "--sink-backend".into(),
+        "unix".into(),
+        "--sink".into(),
+        format!("unix:{}", socket.display()),
+        "--sink-receipt-key".into(),
+        receipt_public.display().to_string(),
+        "--sink-journal-id".into(),
+        journal.clone(),
+        "--sink-server-uid".into(),
+        nix::unistd::geteuid().as_raw().to_string(),
+        "--recovery-public-key".into(),
+        recovery_public.display().to_string(),
+        "--recovery-approval".into(),
+        second_approval.display().to_string(),
+        "--action".into(),
+        "container.kill".into(),
+        "--resource".into(),
+        "container:e2e-second".into(),
+        "--nonce".into(),
+        second_nonce.into(),
+        "--deadline-uptime-ns".into(),
+        second_deadline.to_string(),
+    ];
+    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 2);
+    wait_socket(&socket);
+    let output = run(&runtime, &second_activate);
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(server.wait().unwrap().success());
+    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 2);
+    wait_socket(&socket);
+    let output = run(
+        &runtime,
+        &[
+            "emergency".into(),
+            "execute".into(),
+            "--sink-backend".into(),
+            "unix".into(),
+            "--action".into(),
+            "container.kill".into(),
+            "--resource".into(),
+            "container:e2e-second".into(),
+        ],
+    );
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(server.wait().unwrap().success());
+    assert!(!second_sleeper.wait().unwrap().success());
+    let mut server = start_sink(&runtime, &socket, &store, &signing, &journal, 1);
+    wait_socket(&socket);
+    let output = run(
+        &runtime,
+        &[
+            "emergency".into(),
+            "reconcile".into(),
+            "--sink-backend".into(),
+            "unix".into(),
+        ],
+    );
+    assert!(output.status.success(), "{}", output_text(&output));
     assert!(server.wait().unwrap().success());
     assert!(!auth.join("emergency-active.json").exists());
 

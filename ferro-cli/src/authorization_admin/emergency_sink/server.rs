@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Seek, SeekFrom, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::UnixListener,
@@ -15,6 +15,7 @@ use std::{
 };
 
 const MAX_STORE_BYTES: u64 = 128 * 1024 * 1024;
+const FRAME_COMMIT: &[u8; 8] = b"FRCMT001";
 
 pub struct SinkServeConfig<'a> {
     pub socket: &'a Path,
@@ -31,10 +32,11 @@ pub struct UnixSinkStore {
     next_sequence: u64,
     head: [u8; 32],
     receipts: BTreeMap<String, SinkReceipt>,
+    lifecycles: BTreeMap<String, LifecycleState>,
     key: SigningKey,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredSinkEntry {
     version: u8,
@@ -58,11 +60,94 @@ struct CanonicalRecord {
     succeeded: Option<bool>,
 }
 
+#[derive(Clone)]
+struct LifecycleState {
+    boot_id: String,
+    deadline: u64,
+    action: String,
+    resource: String,
+    operation_id: Option<String>,
+    stage: String,
+}
+
+fn apply_lifecycle(
+    states: &mut BTreeMap<String, LifecycleState>,
+    record: &CanonicalRecord,
+) -> Result<(), String> {
+    match record.record_type.as_str() {
+        "activate"
+            if record.operation_id.is_none()
+                && record.terminal_event_id.is_none()
+                && record.succeeded.is_none() =>
+        {
+            if states.contains_key(&record.emergency_nonce) {
+                return Err("emergency nonce lifecycle fork".into());
+            }
+            states.insert(
+                record.emergency_nonce.clone(),
+                LifecycleState {
+                    boot_id: record.boot_id.clone(),
+                    deadline: record.deadline_uptime_ns,
+                    action: record.action.clone(),
+                    resource: record.resource.clone(),
+                    operation_id: None,
+                    stage: "activate".into(),
+                },
+            );
+        }
+        next => {
+            let state = states
+                .get_mut(&record.emergency_nonce)
+                .ok_or("emergency lifecycle lacks activation")?;
+            if state.boot_id != record.boot_id
+                || state.deadline != record.deadline_uptime_ns
+                || state.action != record.action
+                || state.resource != record.resource
+            {
+                return Err("emergency lifecycle immutable binding fork".into());
+            }
+            match (state.stage.as_str(), next) {
+                ("activate", "intent")
+                    if record.operation_id.is_some()
+                        && record.terminal_event_id.is_none()
+                        && record.succeeded.is_none() =>
+                {
+                    state.operation_id = record.operation_id.clone();
+                    state.stage = "intent".into();
+                }
+                ("intent", "outcome")
+                    if record.operation_id == state.operation_id
+                        && record.terminal_event_id.is_some()
+                        && record.succeeded.is_some() =>
+                {
+                    state.stage = "outcome".into()
+                }
+                ("intent", "quarantine")
+                    if record.operation_id == state.operation_id
+                        && record.terminal_event_id.is_some()
+                        && record.succeeded.is_none() =>
+                {
+                    state.stage = "quarantine".into()
+                }
+                ("outcome", "reconcile") | ("quarantine", "reconcile")
+                    if record.operation_id == state.operation_id
+                        && record.terminal_event_id.is_some()
+                        && record.succeeded.is_none() =>
+                {
+                    state.stage = "reconcile".into()
+                }
+                _ => return Err("emergency lifecycle transition fork".into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_canonical_record(
     bytes: &[u8],
     nonce: &str,
     sink_operation: [u8; 16],
-) -> Result<(), String> {
+) -> Result<CanonicalRecord, String> {
     let record: CanonicalRecord =
         serde_json::from_slice(bytes).map_err(|_| "invalid canonical emergency sink record")?;
     let mut base = [0; 16];
@@ -82,7 +167,7 @@ fn validate_canonical_record(
     if record.schema != 1
         || !matches!(
             record.record_type.as_str(),
-            "activate" | "intent" | "outcome" | "reconcile"
+            "activate" | "intent" | "outcome" | "quarantine" | "reconcile"
         )
         || record.emergency_nonce != nonce
         || record.action.is_empty()
@@ -94,7 +179,7 @@ fn validate_canonical_record(
     {
         return Err("invalid canonical emergency sink record binding".into());
     }
-    Ok(())
+    Ok(record)
 }
 
 impl UnixSinkStore {
@@ -102,39 +187,63 @@ impl UnixSinkStore {
         if file.metadata().map_err(|e| e.to_string())?.len() > MAX_STORE_BYTES {
             return Err("emergency sink store exceeds bounded restart size".into());
         }
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(MAX_STORE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > MAX_STORE_BYTES {
-            return Err("emergency sink store exceeds bounded restart size".into());
-        }
-        let mut offset = 0usize;
+        let mut reader = file.try_clone().map_err(|e| e.to_string())?;
+        reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        let mut offset = 0u64;
         let mut next_sequence = 0;
         let mut head = [0; 32];
         let mut receipts = BTreeMap::new();
-        while offset < bytes.len() {
-            if bytes.len() - offset < 4 {
-                return Err("truncated emergency sink store".into());
+        let mut lifecycles = BTreeMap::new();
+        loop {
+            let frame_start = offset;
+            let mut length_bytes = [0; 4];
+            match reader.read(&mut length_bytes[..1]) {
+                Ok(0) => break,
+                Ok(1) => {}
+                Ok(_) => unreachable!(),
+                Err(error) => return Err(error.to_string()),
             }
-            let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            offset += 4;
-            if length > super::protocol::MAX_FRAME_BYTES || bytes.len() - offset < length {
+            if let Err(error) = reader.read_exact(&mut length_bytes[1..]) {
+                if error.kind() != ErrorKind::UnexpectedEof {
+                    return Err(error.to_string());
+                }
+                file.set_len(frame_start)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|e| e.to_string())?;
+                break;
+            }
+            let length = u32::from_be_bytes(length_bytes) as usize;
+            if length > super::protocol::MAX_FRAME_BYTES {
                 return Err("invalid emergency sink store frame".into());
             }
-            let entry: StoredSinkEntry = serde_json::from_slice(&bytes[offset..offset + length])
-                .map_err(|e| e.to_string())?;
+            let mut body = vec![0; length];
+            let mut checksum = [0; 32];
+            let mut commit = [0; FRAME_COMMIT.len()];
+            let incomplete = reader.read_exact(&mut body).is_err()
+                || reader.read_exact(&mut checksum).is_err()
+                || reader.read_exact(&mut commit).is_err();
+            if incomplete {
+                file.set_len(frame_start)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|e| e.to_string())?;
+                break;
+            }
+            if checksum != Sha256::digest(&body)[..] || &commit != FRAME_COMMIT {
+                return Err("committed emergency sink frame checksum mismatch".into());
+            }
+            let entry: StoredSinkEntry =
+                serde_json::from_slice(&body).map_err(|e| e.to_string())?;
             if entry.version != 1
                 || Sha256::digest(&entry.record).as_slice() != entry.receipt.record_hash
             {
                 return Err("emergency sink stored record hash mismatch".into());
             }
-            validate_canonical_record(
+            let canonical = validate_canonical_record(
                 &entry.record,
                 &entry.receipt.emergency_nonce,
                 entry.receipt.operation_id,
             )?;
+            apply_lifecycle(&mut lifecycles, &canonical)?;
             let receipt = entry.receipt;
             receipt.verify(&key.verifying_key())?;
             if receipt.journal_id != journal_id || receipt.sequence != next_sequence {
@@ -158,14 +267,16 @@ impl UnixSinkStore {
             }
             head = receipt.head;
             next_sequence += 1;
-            offset += length;
+            offset += 4 + length as u64 + 32 + FRAME_COMMIT.len() as u64;
         }
+        file.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
         Ok(Self {
             file,
             journal_id,
             next_sequence,
             head,
             receipts,
+            lifecycles,
             key,
         })
     }
@@ -175,7 +286,7 @@ impl UnixSinkStore {
         if request.query_head {
             return Err("head query is not an append".into());
         }
-        validate_canonical_record(
+        let canonical = validate_canonical_record(
             &request.record,
             &request.emergency_nonce,
             request.operation_id,
@@ -195,6 +306,8 @@ impl UnixSinkStore {
         if request.expected_sequence != self.next_sequence || request.expected_head != self.head {
             return Err("sink sequence fork".into());
         }
+        let mut lifecycle = self.lifecycles.clone();
+        apply_lifecycle(&mut lifecycle, &canonical)?;
         let mut hash = Sha256::new();
         hash.update(self.head);
         hash.update(request.record_hash);
@@ -219,11 +332,14 @@ impl UnixSinkStore {
         self.file
             .write_all(&(durable.len() as u32).to_be_bytes())
             .and_then(|_| self.file.write_all(&durable))
+            .and_then(|_| self.file.write_all(&Sha256::digest(&durable)))
+            .and_then(|_| self.file.write_all(FRAME_COMMIT))
             .and_then(|_| self.file.sync_all())
             .map_err(|e| e.to_string())?;
         self.next_sequence += 1;
         self.head = head;
         self.receipts.insert(idempotency_key, receipt.clone());
+        self.lifecycles = lifecycle;
         Ok(receipt)
     }
 
@@ -350,9 +466,10 @@ mod tests {
     use sha2::Digest;
 
     fn request(nonce: &str, sequence: u64, body: &[u8]) -> SinkRequest {
+        let record_type = if sequence == 0 { "activate" } else { "intent" };
         let body = serde_json::to_vec(&CanonicalRecord {
             schema: 1,
-            record_type: "intent".into(),
+            record_type: record_type.into(),
             boot_id: "boot".into(),
             deadline_uptime_ns: 10,
             action: "container.stop".into(),
@@ -363,7 +480,8 @@ mod tests {
             succeeded: None,
         })
         .unwrap();
-        let operation_digest = Sha256::digest([&[0; 16][..], &[0], b"intent"].concat());
+        let operation_digest =
+            Sha256::digest([&[0; 16][..], &[0], record_type.as_bytes()].concat());
         let mut operation_id = [0; 16];
         operation_id.copy_from_slice(&operation_digest[..16]);
         SinkRequest {
@@ -392,7 +510,7 @@ mod tests {
         assert!(store
             .append(request("n", 1, b"different"))
             .unwrap_err()
-            .contains("replay fork"));
+            .contains("fork"));
         assert!(store
             .append(request("next", 9, b"outcome"))
             .unwrap_err()
@@ -424,6 +542,8 @@ mod tests {
         let body = serde_json::to_vec(&entry).unwrap();
         let mut corrupt = (body.len() as u32).to_be_bytes().to_vec();
         corrupt.extend_from_slice(&body);
+        corrupt.extend_from_slice(&Sha256::digest(&body));
+        corrupt.extend_from_slice(FRAME_COMMIT);
         std::fs::write(&path, corrupt).unwrap();
 
         let file = std::fs::OpenOptions::new()
@@ -449,6 +569,78 @@ mod tests {
         .err()
         .unwrap()
         .contains("bounded restart size"));
+    }
+
+    #[test]
+    fn restart_truncates_only_an_incomplete_uncommitted_tail() {
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let path = named.path().to_owned();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let mut store = UnixSinkStore::open(named.reopen().unwrap(), [1; 16], key.clone()).unwrap();
+        store.append(request("n", 0, b"resource")).unwrap();
+        drop(store);
+        let committed = std::fs::metadata(&path).unwrap().len();
+        let committed_bytes = std::fs::read(&path).unwrap();
+        for tail in [
+            vec![0, 0, 0],
+            [10_u32.to_be_bytes().as_slice(), b"short"].concat(),
+            [10_u32.to_be_bytes().as_slice(), b"0123456789", &[1; 12]].concat(),
+        ] {
+            let mut bytes = committed_bytes.clone();
+            bytes.extend_from_slice(&tail);
+            std::fs::write(&path, bytes).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            UnixSinkStore::open(file, [1; 16], key.clone()).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), committed);
+        }
+
+        let mut corrupt = committed_bytes;
+        *corrupt.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, corrupt).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        assert!(UnixSinkStore::open(file, [1; 16], key)
+            .err()
+            .unwrap()
+            .contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn lifecycle_rejects_cross_transition_binding_and_shape_forks() {
+        let mut states = BTreeMap::new();
+        let mut record = CanonicalRecord {
+            schema: 1,
+            record_type: "activate".into(),
+            boot_id: "boot".into(),
+            deadline_uptime_ns: 10,
+            action: "container.stop".into(),
+            resource: "container:x".into(),
+            emergency_nonce: "nonce".into(),
+            operation_id: None,
+            terminal_event_id: None,
+            succeeded: None,
+        };
+        apply_lifecycle(&mut states, &record).unwrap();
+        record.record_type = "intent".into();
+        record.operation_id = Some("11".repeat(16));
+        record.resource = "container:fork".into();
+        assert!(apply_lifecycle(&mut states, &record)
+            .unwrap_err()
+            .contains("immutable binding fork"));
+        record.resource = "container:x".into();
+        apply_lifecycle(&mut states, &record).unwrap();
+        record.record_type = "outcome".into();
+        record.succeeded = Some(true);
+        assert!(apply_lifecycle(&mut states, &record)
+            .unwrap_err()
+            .contains("transition fork"));
     }
 
     #[test]

@@ -113,8 +113,8 @@ mod tests {
                 UnixSinkStore::open(tempfile::tempfile().unwrap(), [3; 16], key).unwrap();
             serve_one(&listener, &mut store, uid).unwrap();
         });
-        let record = br#"{"schema":1,"type":"intent","boot_id":"boot","deadline_uptime_ns":10,"action":"container.stop","resource":"container:x","emergency_nonce":"nonce","operation_id":null,"terminal_event_id":null,"succeeded":null}"#.to_vec();
-        let operation_digest = Sha256::digest([&[0; 16][..], &[0], b"intent"].concat());
+        let record = br#"{"schema":1,"type":"activate","boot_id":"boot","deadline_uptime_ns":10,"action":"container.stop","resource":"container:x","emergency_nonce":"nonce","operation_id":null,"terminal_event_id":null,"succeeded":null}"#.to_vec();
+        let operation_digest = Sha256::digest([&[0; 16][..], &[0], b"activate"].concat());
         let mut operation_id = [0; 16];
         operation_id.copy_from_slice(&operation_digest[..16]);
         let request = SinkRequest {

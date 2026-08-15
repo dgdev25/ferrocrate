@@ -5,6 +5,22 @@ use std::{
 
 use super::Action;
 
+pub(crate) enum AdmissionAuthority<'a> {
+    UserMutation,
+    CheckpointRepair,
+    ReservedCleanup(&'a ReservedCleanupAuthority),
+}
+
+/// Opaque authority available only to lifecycle recovery code that already
+/// holds a durable operation/provenance reservation.
+pub(crate) struct ReservedCleanupAuthority(());
+
+impl ReservedCleanupAuthority {
+    pub(crate) const fn from_recovery_path() -> Self {
+        Self(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MutationAdmission {
     evidence: AdmissionEvidence,
@@ -57,15 +73,20 @@ impl MutationAdmission {
         }
     }
 
-    pub fn admit(&self, action: Action) -> Result<(), MutationAdmissionError> {
-        if matches!(
-            action,
-            Action::ContainerStop
-                | Action::ContainerDelete
-                | Action::CheckpointPublish
-                | Action::CheckpointRecover
-                | Action::KeyRotate
-        ) {
+    pub(crate) fn admit(
+        &self,
+        action: Action,
+        authority: AdmissionAuthority<'_>,
+    ) -> Result<(), MutationAdmissionError> {
+        if matches!(authority, AdmissionAuthority::CheckpointRepair)
+            && matches!(
+                action,
+                Action::CheckpointPublish | Action::CheckpointRecover | Action::KeyRotate
+            )
+        {
+            return Ok(());
+        }
+        if matches!(authority, AdmissionAuthority::ReservedCleanup(_)) {
             return Ok(());
         }
         let now = SystemTime::now()
@@ -202,16 +223,16 @@ mod tests {
             )
         };
         assert!(admission(key.verifying_key(), checkpoint.clone(), id)
-            .admit(Action::ContainerRun)
+            .admit(Action::ContainerRun, AdmissionAuthority::UserMutation)
             .is_ok());
 
         let wrong = SigningKey::from_bytes(&[0x53; 32]);
         assert!(admission(wrong.verifying_key(), checkpoint.clone(), id)
-            .admit(Action::ImagePull)
+            .admit(Action::ImagePull, AdmissionAuthority::UserMutation)
             .is_err());
         assert!(
             admission(key.verifying_key(), checkpoint.clone(), [0x54; 16])
-                .admit(Action::VolumeCreate)
+                .admit(Action::VolumeCreate, AdmissionAuthority::UserMutation)
                 .is_err()
         );
 
@@ -223,7 +244,7 @@ mod tests {
         )
         .unwrap();
         assert!(admission(key.verifying_key(), future, id)
-            .admit(Action::NetworkCreate)
+            .admit(Action::NetworkCreate, AdmissionAuthority::UserMutation)
             .is_err());
         let stale = Checkpoint::sign(
             FlushedHead::new(id, 1, 0, [0; 32]),
@@ -233,7 +254,7 @@ mod tests {
         )
         .unwrap();
         assert!(admission(key.verifying_key(), stale, id)
-            .admit(Action::PolicyReload)
+            .admit(Action::PolicyReload, AdmissionAuthority::UserMutation)
             .is_err());
     }
 
@@ -264,23 +285,34 @@ mod tests {
             Action::DeviceUse,
             Action::PolicyReload,
             Action::PolicyRollback,
+            Action::ContainerStop,
+            Action::ContainerDelete,
         ] {
             assert!(
-                admission.admit(action).is_err(),
+                admission
+                    .admit(action, AdmissionAuthority::UserMutation)
+                    .is_err(),
                 "{action:?} bypassed admission"
             );
         }
         for action in [
-            Action::ContainerStop,
-            Action::ContainerDelete,
             Action::CheckpointPublish,
             Action::CheckpointRecover,
             Action::KeyRotate,
         ] {
             assert!(
-                admission.admit(action).is_ok(),
+                admission
+                    .admit(action, AdmissionAuthority::CheckpointRepair)
+                    .is_ok(),
                 "{action:?} recovery path was blocked"
             );
         }
+        let authority = ReservedCleanupAuthority::from_recovery_path();
+        assert!(admission
+            .admit(
+                Action::ContainerDelete,
+                AdmissionAuthority::ReservedCleanup(&authority)
+            )
+            .is_ok());
     }
 }

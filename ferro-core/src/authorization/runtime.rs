@@ -758,7 +758,7 @@ mod recovery_tests {
     }
 
     #[test]
-    fn missing_or_stale_checkpoint_denies_user_mutation_but_preserves_cleanup() {
+    fn missing_or_stale_checkpoint_denies_user_cleanup_without_reserved_authority() {
         let root = tempfile::tempdir().unwrap();
         let gate = Arc::new(AuthorizationGate::with_admission(
             Arc::new(PolicyStore::compatibility_disabled()),
@@ -773,8 +773,13 @@ mod recovery_tests {
             gate.admit(Action::ContainerRun),
             Err(_)
         ));
-        assert!(gate.admit(Action::ContainerDelete).is_ok());
-        assert!(gate.admit(Action::ContainerStop).is_ok());
+        assert!(gate.admit(Action::ContainerDelete).is_err());
+        assert!(gate.admit(Action::ContainerStop).is_err());
+        let authority =
+            crate::authorization::admission::ReservedCleanupAuthority::from_recovery_path();
+        assert!(gate
+            .admit_reserved_cleanup(Action::ContainerDelete, &authority)
+            .is_ok());
     }
 }
 

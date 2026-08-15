@@ -408,7 +408,22 @@ impl AuthorizationGate {
     }
 
     pub(crate) fn admit(&self, action: super::Action) -> Result<(), super::admission::MutationAdmissionError> {
-        self.admission.as_ref().map_or(Ok(()), |admission| admission.admit(action))
+        let class = if matches!(action, super::Action::CheckpointPublish | super::Action::CheckpointRecover | super::Action::KeyRotate) {
+            super::admission::AdmissionAuthority::CheckpointRepair
+        } else {
+            super::admission::AdmissionAuthority::UserMutation
+        };
+        self.admission.as_ref().map_or(Ok(()), |admission| admission.admit(action, class))
+    }
+
+    pub(crate) fn admit_reserved_cleanup(
+        &self,
+        action: super::Action,
+        _authority: &super::admission::ReservedCleanupAuthority,
+    ) -> Result<(), super::admission::MutationAdmissionError> {
+        self.admission.as_ref().map_or(Ok(()), |admission| {
+            admission.admit(action, super::admission::AdmissionAuthority::ReservedCleanup(_authority))
+        })
     }
 
     /// Pin the active validated policy before canonicalization or request fan-out.

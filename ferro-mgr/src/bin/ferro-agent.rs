@@ -61,6 +61,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if verifying_key.len() != 32 {
         return Err("FERROCRATE_NETD_SIGNING_KEY must decode to 32 bytes".into());
     }
+    let mut controller_keys = vec![verifying_key.clone()];
+    if let Ok(encoded) = std::env::var("FERROCRATE_CONTROLLER_VERIFY_OVERLAP_KEYS_JSON") {
+        let overlap: Vec<String> = serde_json::from_str(&encoded)?;
+        if overlap.len() > 1 {
+            return Err("controller verification overlap permits at most one prior key".into());
+        }
+        for value in overlap {
+            let key = base64::engine::general_purpose::STANDARD.decode(value)?;
+            if key.len() != 32 {
+                return Err("controller overlap key must decode to 32 bytes".into());
+            }
+            controller_keys.push(key);
+        }
+    }
     let reserved = std::env::var("FERROCRATE_AGENT_IPV4_RESERVED")
         .unwrap_or_default()
         .split(',')
@@ -102,10 +116,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_sequence(netd_sequence.clone());
     let local_api = Arc::new(
-        LocalApi::new(runtime_uid, lease_expiry, ipam).with_delegation_bridge(
-            bridge,
-            UnixNetdClient::new(&netd_socket).with_node_id(node_id.clone()),
-        ),
+        LocalApi::new(runtime_uid, lease_expiry, ipam)
+            .with_runtime_executable(required("FERROCRATE_RUNTIME_EXE")?)
+            .with_delegation_bridge(
+                bridge,
+                UnixNetdClient::new(&netd_socket).with_node_id(node_id.clone()),
+            ),
     );
     for (overlay_id, config) in overlays {
         local_api.register_overlay(overlay_id, config)?;
@@ -115,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_control_stream(
         node_id,
         cluster_id,
-        verifying_key,
+        controller_keys,
         state_path,
         netd_socket,
         runtime_uid,
@@ -126,15 +142,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn read_private_key(path: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let metadata = std::fs::symlink_metadata(path)?;
+    use std::{
+        io::Read,
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
     if !metadata.file_type().is_file()
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.nlink() != 1
         || metadata.permissions().mode() & 0o077 != 0
     {
         return Err("netd envelope key must be an owned 0600 regular file".into());
     }
-    Ok(std::fs::read(path)?
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes
         .try_into()
         .map_err(|_| "netd envelope signing key must contain exactly 32 bytes")?)
 }
@@ -142,7 +168,7 @@ fn read_private_key(path: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> 
 async fn run_control_stream(
     node_id: String,
     cluster_id: String,
-    verifying_key: Vec<u8>,
+    verifying_keys: Vec<Vec<u8>>,
     state_path: PathBuf,
     netd_socket: String,
     runtime_uid: u32,
@@ -168,15 +194,15 @@ async fn run_control_stream(
     let agent = Arc::new(if authorization_disabled {
         Agent::new(
             cluster_id,
-            verifying_key,
+            verifying_keys[0].clone(),
             StateStore::new(state_path),
             UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
         )?
         .with_netd_sequence(netd_sequence.clone())
     } else {
-        Agent::new_enforcing(
+        Agent::new_enforcing_with_overlap(
             cluster_id,
-            verifying_key,
+            verifying_keys,
             StateStore::new(state_path),
             UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
         )?

@@ -108,7 +108,15 @@ impl ControllerGrantIssuer {
             .into_iter()
             .enumerate()
             .map(|(index, request)| {
-                self.issue_one(desired, node_id, request, index, now_monotonic_millis)
+                let prior_exists = current.contains(request_overlay(&request));
+                self.issue_one(
+                    desired,
+                    node_id,
+                    request,
+                    index,
+                    prior_exists,
+                    now_monotonic_millis,
+                )
             })
             .collect()
     }
@@ -119,6 +127,7 @@ impl ControllerGrantIssuer {
         node_id: &str,
         request: NetdRequest,
         index: usize,
+        prior_exists: bool,
         now_monotonic_millis: u64,
     ) -> Result<GrantedEnvelope, ControllerAuthorizationError> {
         let overlay_id = request_overlay(&request);
@@ -136,15 +145,31 @@ impl ControllerGrantIssuer {
         if nonce == [0; 16] {
             return Err(ControllerAuthorizationError::Random);
         }
-        let policy_digest = Sha256::digest(
-            serde_json::to_vec(&(
-                node_id,
-                desired.cluster_epoch,
-                desired.revision,
-                &resource,
-                &request,
-            ))
-            .map_err(|_| ControllerAuthorizationError::Encoding)?,
+        let canonical = serde_json::to_vec(&(
+            node_id,
+            desired.cluster_epoch,
+            desired.revision,
+            &resource,
+            &request,
+            prior_exists,
+        ))
+        .map_err(|_| ControllerAuthorizationError::Encoding)?;
+        let precondition_digest = Sha256::digest(
+            [
+                b"ferrocrate.controller-precondition.v1\0".as_slice(),
+                &canonical,
+            ]
+            .concat(),
+        )
+        .into();
+        let post_exists = matches!(request, NetdRequest::ApplyOverlay { .. });
+        let recovery_recipe_digest = Sha256::digest(
+            [
+                b"ferrocrate.controller-recovery.v1\0".as_slice(),
+                &canonical,
+                &[u8::from(post_exists)],
+            ]
+            .concat(),
         )
         .into();
         let request_id = format!(
@@ -168,7 +193,8 @@ impl ControllerGrantIssuer {
                 now_monotonic_millis.saturating_add(60_000),
                 nonce,
                 &self.issuer,
-                policy_digest,
+                precondition_digest,
+                recovery_recipe_digest,
             )
             .map_err(|_| ControllerAuthorizationError::Grant)?;
         let mut envelope = SignedEnvelope {

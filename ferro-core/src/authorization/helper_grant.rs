@@ -326,7 +326,8 @@ impl GrantIssuer {
         if !matches!(
             action,
             GrantAction::NetworkCreate | GrantAction::NetworkDelete
-        ) || precondition_digest == [0; 32] || recovery_recipe_digest == [0; 32]
+        ) || precondition_digest == [0; 32]
+            || recovery_recipe_digest == [0; 32]
         {
             return Err(GrantBuildError::UnsupportedAction);
         }

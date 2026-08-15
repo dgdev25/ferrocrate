@@ -244,6 +244,32 @@ impl ManagerStore {
         })
     }
 
+    pub fn next_revision(&self) -> Result<u64, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM desired_revisions",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn append_authorized_revision_at(
+        &self,
+        revision: u64,
+        overlay_id: &str,
+        node_id: &str,
+        payload: &[u8],
+        bundle: &[u8],
+    ) -> Result<(), StoreError> {
+        self.transact(|tx| {
+            let next: u64 = tx.query_row("SELECT COALESCE(MAX(revision), 0) + 1 FROM desired_revisions", [], |row| row.get(0))?;
+            if next != revision { return Err(StoreError::InvalidNetwork("revision allocation raced".into())); }
+            tx.execute("INSERT INTO desired_revisions (revision, overlay_id, payload) VALUES (?1, ?2, ?3)", params![revision, overlay_id, payload])?;
+            tx.execute("INSERT INTO desired_authorizations (revision, node_id, bundle) VALUES (?1, ?2, ?3)", params![revision, node_id, bundle])?;
+            Ok(())
+        })
+    }
+
     pub fn latest_authorized_revision(
         &self,
         node_id: &str,

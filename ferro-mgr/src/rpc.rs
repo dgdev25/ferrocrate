@@ -8,6 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::{
+    controller_authorization::{ControllerAuthorizationError, ControllerGrantIssuer},
     desired_state::DesiredStateBuilder,
     enrollment::EnrollmentService,
     pki::CertificateAuthority,
@@ -74,6 +75,7 @@ pub struct ControlServiceImpl {
     revision: u64,
     store: Arc<ManagerStore>,
     active_nodes: Arc<Mutex<HashSet<String>>>,
+    controller: Option<Arc<ControllerGrantIssuer>>,
 }
 impl ControlServiceImpl {
     pub fn new(
@@ -87,7 +89,62 @@ impl ControlServiceImpl {
             revision: 1,
             store,
             active_nodes: Arc::new(Mutex::new(HashSet::new())),
+            controller: None,
         }
+    }
+    pub fn new_authorized(
+        cluster_id: impl Into<String>,
+        epoch: u64,
+        signing_key: Vec<u8>,
+        store: Arc<ManagerStore>,
+        controller: ControllerGrantIssuer,
+    ) -> Self {
+        let mut service = Self::new(cluster_id, epoch, signing_key, store);
+        service.controller = Some(Arc::new(controller));
+        service
+    }
+    pub fn publish_desired(
+        &self,
+        node_id: &str,
+        overlays: Vec<crate::proto::OverlayState>,
+        current: &[String],
+        now_unix: i64,
+        now_monotonic_millis: u64,
+    ) -> Result<u64, String> {
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| "controller grant issuer is required".to_string())?;
+        let overlay_id = overlays
+            .first()
+            .map(|v| v.overlay_id.clone())
+            .ok_or_else(|| {
+                "empty desired updates require an explicit deletion resource".to_string()
+            })?;
+        let revision = self.store.next_revision().map_err(|e| e.to_string())?;
+        let desired = self.builder.snapshot(revision, overlays, now_unix);
+        let operations = controller
+            .issue_exact_diff(&desired, node_id, current, now_monotonic_millis)
+            .map_err(|e| match e {
+                ControllerAuthorizationError::Denied { resource } => {
+                    format!("controller policy denied {resource}")
+                }
+                other => other.to_string(),
+            })?;
+        let bundle = self
+            .builder
+            .authorization_bundle(&desired, node_id, operations)
+            .map_err(|e| e.to_string())?;
+        self.store
+            .append_authorized_revision_at(
+                revision,
+                &overlay_id,
+                node_id,
+                &desired.encode_to_vec(),
+                &bundle,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(revision)
     }
 }
 

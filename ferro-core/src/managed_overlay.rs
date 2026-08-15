@@ -27,11 +27,23 @@ pub enum ManagedOverlayError {
     Grant(#[from] GrantBuildError),
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct GrantedManagedOverlayRequest<'a> {
-    request: &'a ManagedOverlayRequest,
-    grant: HelperGrant,
+pub struct ManagedOverlayDelegation {
+    pub parent: HelperGrant,
+}
+
+impl ManagedOverlayDelegation {
+    pub fn new(parent: HelperGrant) -> Self {
+        Self { parent }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedManagedOverlayRequest {
+    pub request: ManagedOverlayRequest,
+    pub delegation: ManagedOverlayDelegation,
 }
 
 impl ManagedOverlayRef {
@@ -150,7 +162,10 @@ impl ManagedOverlayClient {
             nonce,
             "ferrocrate-runtime",
         )?;
-        self.send(&GrantedManagedOverlayRequest { request, grant })
+        self.send(&DelegatedManagedOverlayRequest {
+            request: request.clone(),
+            delegation: ManagedOverlayDelegation::new(grant),
+        })
     }
     fn send<T: Serialize + ?Sized>(
         &self,
@@ -188,7 +203,7 @@ impl ManagedOverlayClient {
     }
 }
 
-fn managed_parameters(
+pub fn managed_parameters(
     request: &ManagedOverlayRequest,
 ) -> Result<GrantParameters, ManagedOverlayError> {
     let (operation, fields) = match request {

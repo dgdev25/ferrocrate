@@ -9,6 +9,7 @@ build = "build.rs"
 workspace = true
 
 [dependencies]
+ferro-core = { path = "../ferro-core" }
 prost = "0.14"
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 tonic-prost = "0.14"

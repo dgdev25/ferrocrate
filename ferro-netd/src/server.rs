@@ -33,22 +33,14 @@ struct PersistedState {
 pub struct NetdServer {
     uid: u32,
     policy: Policy,
-    grants: Option<GrantVerifier>,
-    overlays: BTreeSet<String>,
-    endpoints: BTreeMap<String, String>,
-    routes: BTreeMap<String, Vec<String>>,
+    pub(crate) grants: Option<GrantVerifier>,
+    pub(crate) overlays: BTreeSet<String>,
+    pub(crate) endpoints: BTreeMap<String, String>,
+    pub(crate) routes: BTreeMap<String, Vec<String>>,
     journal: Option<PathBuf>,
-    kernel: Box<dyn NetKernelOps>,
+    pub(crate) kernel: Box<dyn NetKernelOps>,
     #[cfg(feature = "test-support")]
-    test_faults: crate::test_support::FaultHandle,
-}
-#[cfg(feature = "test-support")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetdTestSnapshot {
-    pub overlays: Vec<String>,
-    pub endpoints: BTreeMap<String, String>,
-    pub routes: BTreeMap<String, Vec<String>>,
-    pub receipts: Vec<crate::grants::GrantReceiptSummary>,
+    pub(crate) test_faults: crate::test_support::FaultHandle,
 }
 impl NetdServer {
     pub fn new(uid: u32, policy: Policy) -> Self {
@@ -68,40 +60,6 @@ impl NetdServer {
     pub fn with_grants(mut self, grants: GrantVerifier) -> Self {
         self.grants = Some(grants);
         self
-    }
-    #[cfg(feature = "test-support")]
-    pub fn deterministic(uid: u32, policy: Policy, kernel_state: PathBuf) -> Self {
-        Self::deterministic_with_faults(uid, policy, kernel_state, Default::default())
-    }
-    #[cfg(feature = "test-support")]
-    pub fn deterministic_with_faults(
-        uid: u32,
-        policy: Policy,
-        kernel_state: PathBuf,
-        faults: crate::test_support::FaultHandle,
-    ) -> Self {
-        let mut server = Self::new(uid, policy);
-        server.kernel = Box::new(
-            crate::kernel_ops::deterministic::PersistentKernelOps::with_faults(
-                kernel_state,
-                faults.clone(),
-            ),
-        );
-        server.test_faults = faults;
-        server
-    }
-    #[cfg(feature = "test-support")]
-    pub fn test_snapshot(&self) -> NetdTestSnapshot {
-        NetdTestSnapshot {
-            overlays: self.overlays.iter().cloned().collect(),
-            endpoints: self.endpoints.clone(),
-            routes: self.routes.clone(),
-            receipts: self
-                .grants
-                .as_ref()
-                .map(|v| v.receipt_summaries())
-                .unwrap_or_default(),
-        }
     }
     pub fn with_wireguard(
         uid: u32,

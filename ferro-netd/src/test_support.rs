@@ -1,4 +1,6 @@
 use crate::{
+    grants::{GrantPhase, GrantVerifier},
+    policy::Policy,
     protocol::{response_frame, MAX_FRAME_BYTES},
     server::NetdServer,
 };
@@ -6,10 +8,87 @@ use nix::sys::socket::{
     getsockopt, recvmsg, sockopt::PeerCredentials, ControlMessageOwned, MsgFlags,
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     io::Write,
     os::{fd::AsRawFd, unix::net::UnixListener},
+    path::PathBuf,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantReceiptSummary {
+    pub request_id: String,
+    pub nonce: [u8; 16],
+    pub result_identity: Option<String>,
+    pub outcome: Option<String>,
+    pub phase: String,
+}
+impl GrantVerifier {
+    pub fn receipt_summaries(&self) -> Vec<GrantReceiptSummary> {
+        self.ledger
+            .state
+            .consumed
+            .values()
+            .map(|operation| {
+                let result = self.ledger.state.results.get(&operation.claims.request_id);
+                GrantReceiptSummary {
+                    request_id: operation.claims.request_id.clone(),
+                    nonce: operation.claims.nonce,
+                    result_identity: result.map(|v| v.result_identity.clone()),
+                    outcome: result.map(|v| v.outcome.clone()),
+                    phase: match operation.phase {
+                        GrantPhase::Pending => "pending",
+                        GrantPhase::ConsumedBeforeEffect => "consumed-before-effect",
+                        GrantPhase::Succeeded => "succeeded",
+                        GrantPhase::Failed => "failed",
+                        GrantPhase::OutcomeUnknown => "outcome-unknown",
+                    }
+                    .into(),
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetdTestSnapshot {
+    pub overlays: Vec<String>,
+    pub endpoints: BTreeMap<String, String>,
+    pub routes: BTreeMap<String, Vec<String>>,
+    pub receipts: Vec<GrantReceiptSummary>,
+}
+impl NetdServer {
+    pub fn deterministic(uid: u32, policy: Policy, kernel_state: PathBuf) -> Self {
+        Self::deterministic_with_faults(uid, policy, kernel_state, Default::default())
+    }
+    pub fn deterministic_with_faults(
+        uid: u32,
+        policy: Policy,
+        kernel_state: PathBuf,
+        faults: FaultHandle,
+    ) -> Self {
+        let mut server = Self::new(uid, policy);
+        server.kernel = Box::new(
+            crate::kernel_ops::deterministic::PersistentKernelOps::with_faults(
+                kernel_state,
+                faults.clone(),
+            ),
+        );
+        server.test_faults = faults;
+        server
+    }
+    pub fn test_snapshot(&self) -> NetdTestSnapshot {
+        NetdTestSnapshot {
+            overlays: self.overlays.iter().cloned().collect(),
+            endpoints: self.endpoints.clone(),
+            routes: self.routes.clone(),
+            receipts: self
+                .grants
+                .as_ref()
+                .map(GrantVerifier::receipt_summaries)
+                .unwrap_or_default(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultPoint {

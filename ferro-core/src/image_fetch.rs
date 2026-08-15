@@ -155,15 +155,17 @@ pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, Image
 fn pull_image(
     runtime_dir: &Path,
     image: &str,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<ImageFetchResult, ImageFetchError> {
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
-    pull_image_with_store(runtime_dir, image, &store)
+    pull_image_with_store(runtime_dir, image, &store, authority)
 }
 
 pub(crate) fn pull_image_with_store(
     runtime_dir: &Path,
     image: &str,
     store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<ImageFetchResult, ImageFetchError> {
     parse_image_reference(image)?;
     let client = RegistryClient::new()?;
@@ -174,6 +176,7 @@ pub(crate) fn pull_image_with_store(
 
     let canonical = crate::image_tagging::canonicalize_reference(image)?;
     store.put_reference(
+        authority,
         &canonical,
         &manifest.config.digest,
         &manifest.media_type,
@@ -223,8 +226,9 @@ fn pull_planned_image_with_store(
     runtime_dir: &Path,
     plan: &ImageFetchPlan,
     store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<ImageFetchResult, ImageFetchError> {
-    pull_planned_image_with_store_mode(runtime_dir, plan, store, true)
+    pull_planned_image_with_store_mode(runtime_dir, plan, store, true, authority)
 }
 
 fn pull_planned_image_with_store_mode(
@@ -232,6 +236,7 @@ fn pull_planned_image_with_store_mode(
     plan: &ImageFetchPlan,
     store: &LocalImageStore,
     include_layers: bool,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<ImageFetchResult, ImageFetchError> {
     let client = RegistryClient::new()?;
     let auth = resolve_registry_auth(plan.canonical_reference())?;
@@ -288,6 +293,7 @@ fn pull_planned_image_with_store_mode(
     // Publication is the commit point. Until every selected object has been
     // fetched, verified, and durably synced, no reference is visible.
     store.put_reference(
+        authority,
         plan.canonical_reference(),
         plan.config_digest(),
         &manifest.media_type,
@@ -306,7 +312,8 @@ pub fn pull_manifest_only_with_store_authorized(
     permit: crate::authorization::surface::SurfacePermit,
 ) -> Result<String, ImageFetchError> {
     validate_fetch_plan_permit(plan, &permit)?;
-    match pull_planned_image_with_store_mode(runtime_dir, plan, store, false) {
+    let authority = permit.mutation_authority();
+    match pull_planned_image_with_store_mode(runtime_dir, plan, store, false, &authority) {
         Ok(result) => {
             permit
                 .finish(true)
@@ -357,7 +364,8 @@ pub fn pull_image_with_store_authorized(
             .map_err(|error| ImageFetchError::Integrity(error.to_string()))?;
         return Err(error);
     }
-    match pull_planned_image_with_store(runtime_dir, plan, store) {
+    let authority = permit.mutation_authority();
+    match pull_planned_image_with_store(runtime_dir, plan, store, &authority) {
         Ok(result) => {
             permit
                 .finish(true)
@@ -376,15 +384,17 @@ pub fn pull_image_with_store_authorized(
 fn pull_manifest_only(
     runtime_dir: &Path,
     image: &str,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<String, ImageFetchError> {
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
-    pull_manifest_only_with_store(runtime_dir, image, &store)
+    pull_manifest_only_with_store(runtime_dir, image, &store, authority)
 }
 
 fn pull_manifest_only_with_store(
     runtime_dir: &Path,
     image: &str,
     store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<String, ImageFetchError> {
     parse_image_reference(image)?;
     let client = RegistryClient::new()?;
@@ -395,6 +405,7 @@ fn pull_manifest_only_with_store(
 
     let canonical = crate::image_tagging::canonicalize_reference(image)?;
     store.put_reference(
+        authority,
         &canonical,
         &manifest.config.digest,
         &manifest.media_type,
@@ -652,7 +663,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalImageStore::open(temp.path().join("images")).unwrap();
 
-        let error = pull_planned_image_with_store(temp.path(), &plan, &store)
+        let error = pull_planned_image_with_store(temp.path(), &plan, &store, &crate::authorization::surface::SurfaceMutationAuthority::for_test())
             .expect_err("swapped manifest must fail closed");
 
         assert!(matches!(error, ImageFetchError::StaleBinding(_)));
@@ -684,7 +695,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalImageStore::open(temp.path().join("images")).unwrap();
 
-        pull_planned_image_with_store(temp.path(), &plan, &store)
+        pull_planned_image_with_store(temp.path(), &plan, &store, &crate::authorization::surface::SurfaceMutationAuthority::for_test())
             .expect_err("corrupt config must prevent publication");
         assert!(store.list_references().unwrap().is_empty());
         drop(store);
@@ -715,7 +726,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let image = format!("{}/library/alpine", server.addr());
-        let result = pull_image(temp.path(), &image).expect("pull image");
+        let result = pull_image(temp.path(), &image, &crate::authorization::surface::SurfaceMutationAuthority::for_test()).expect("pull image");
         assert_eq!(result.layer_paths.len(), 1);
         let content = fs::read_to_string(&result.layer_paths[0]).expect("blob content");
         assert_eq!(content, "TEST");
@@ -770,7 +781,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let image = format!("{}/library/busybox", server.addr());
-        pull_manifest_only(temp.path(), &image).expect("pull manifest only");
+        pull_manifest_only(temp.path(), &image, &crate::authorization::surface::SurfaceMutationAuthority::for_test()).expect("pull manifest only");
         let blob_root = temp.path().join("images").join("blobs");
         let layer_path = blob_root
             .join("sha256_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");

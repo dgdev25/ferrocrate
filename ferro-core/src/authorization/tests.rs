@@ -185,3 +185,20 @@ fn compose_down_digest_binds_exact_executor_snapshot() {
         super::compose_down_executor_digest(&record, Action::ContainerDelete)
     );
 }
+
+#[test]
+fn cross_module_raw_surface_helpers_require_sealed_authority() {
+    for (source, helper) in [
+        (include_str!("../image_store.rs"), "pub(crate) fn put_reference"),
+        (include_str!("../image_fetch.rs"), "pub(crate) fn pull_image_with_store"),
+        (include_str!("../dockerfile_build.rs"), "pub(crate) fn build_from_dockerfile_with_compression"),
+        (include_str!("../dockerfile_build.rs"), "pub(crate) fn build_from_dockerfile_with_store_and_compression"),
+    ] {
+        let start = source.find(helper).expect("inventoried helper exists");
+        let signature = &source[start..source[start..].find("{").map(|end| start + end).unwrap()];
+        assert!(
+            signature.contains("SurfaceMutationAuthority"),
+            "{helper} must require the sealed mutation authority"
+        );
+    }
+}

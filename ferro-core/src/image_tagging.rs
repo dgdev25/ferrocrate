@@ -79,6 +79,7 @@ pub fn resolve_reference(
 
 fn tag_image(
     store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
     source_reference: &str,
     target_reference: &str,
 ) -> Result<(), ImageTaggingError> {
@@ -90,6 +91,7 @@ fn tag_image(
         .ok_or_else(|| ImageTaggingError::SourceNotFound(source_canonical.clone()))?;
 
     store.put_reference(
+        authority,
         &target_canonical,
         &source.digest,
         &source.manifest_media_type,
@@ -134,7 +136,9 @@ pub fn execute_image_tag_authorized(
             "image tag source changed after authorization".to_string(),
         ));
     }
+    let authority = permit.mutation_authority();
     match store.put_reference(
+        &authority,
         &plan.target_reference,
         &source.digest,
         &source.manifest_media_type,
@@ -170,6 +174,7 @@ mod tests {
 
         store
             .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
                 "registry-1.docker.io/library/alpine:latest",
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "application/vnd.oci.image.manifest.v1+json",
@@ -177,7 +182,7 @@ mod tests {
             )
             .expect("seed source image");
 
-        tag_image(&store, "alpine", "ghcr.io/acme/alpine:stable").expect("tag image");
+        tag_image(&store, &crate::authorization::surface::SurfaceMutationAuthority::for_test(), "alpine", "ghcr.io/acme/alpine:stable").expect("tag image");
 
         let resolved = resolve_reference(&store, "ghcr.io/acme/alpine:stable")
             .expect("resolve should succeed")
@@ -194,7 +199,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("open store");
 
-        let err = tag_image(&store, "missing:latest", "acme/new:latest")
+        let err = tag_image(&store, &crate::authorization::surface::SurfaceMutationAuthority::for_test(), "missing:latest", "acme/new:latest")
             .expect_err("tagging should fail");
 
         assert!(err.to_string().contains("source image not found"));

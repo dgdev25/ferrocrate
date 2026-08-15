@@ -73,6 +73,30 @@ pub struct SurfacePermit {
     template: WitnessRecord,
 }
 
+/// Crate-internal capability proving a raw surface helper is nested beneath a
+/// live, non-clonable permit. Its field and constructor are private.
+///
+/// ```compile_fail
+/// use ferro_core::authorization::surface::SurfaceMutationAuthority;
+/// let _ = SurfaceMutationAuthority::default();
+/// ```
+pub(crate) struct SurfaceMutationAuthority<'a> {
+    _permit: std::marker::PhantomData<&'a mut SurfacePermit>,
+}
+
+impl SurfacePermit {
+    pub(crate) fn mutation_authority(&self) -> SurfaceMutationAuthority<'_> {
+        SurfaceMutationAuthority { _permit: std::marker::PhantomData }
+    }
+}
+
+#[cfg(test)]
+impl SurfaceMutationAuthority<'static> {
+    pub(crate) fn for_test() -> Self {
+        Self { _permit: std::marker::PhantomData }
+    }
+}
+
 enum SurfacePermitDurability {
     Disabled,
     Required {

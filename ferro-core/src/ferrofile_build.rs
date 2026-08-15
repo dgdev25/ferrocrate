@@ -41,8 +41,9 @@ fn build_from_ferrofile(
     ferrofile_path: &Path,
     runtime_dir: &Path,
     compression: CompressionFormat,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BuildResult, FerrofileBuildError> {
-    build_from_ferrofile_with_store(ferrofile_path, runtime_dir, compression, None)
+    build_from_ferrofile_with_store(ferrofile_path, runtime_dir, compression, None, authority)
 }
 
 fn build_from_ferrofile_with_store(
@@ -50,6 +51,7 @@ fn build_from_ferrofile_with_store(
     runtime_dir: &Path,
     compression: CompressionFormat,
     store: Option<&LocalImageStore>,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BuildResult, FerrofileBuildError> {
     if !ferrofile_path.exists() {
         return Err(FerrofileBuildError::Missing(
@@ -84,9 +86,10 @@ fn build_from_ferrofile_with_store(
             runtime_dir,
             compression,
             store,
+            authority,
         )
     } else {
-        build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression)
+        build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression, authority)
     };
     result.map_err(Into::into)
 }
@@ -166,6 +169,7 @@ tag = "local/ferrofile:latest"
             &temp.path().join("ferrofile.toml"),
             &runtime_dir,
             CompressionFormat::Gzip,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
         )
         .expect("build");
         assert_eq!(

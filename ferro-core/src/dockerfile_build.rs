@@ -171,12 +171,14 @@ fn build_from_dockerfile(
     dockerfile_path: &Path,
     tag: Option<&str>,
     runtime_dir: &Path,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BuildResult, DockerfileBuildError> {
     build_from_dockerfile_with_compression(
         dockerfile_path,
         tag,
         runtime_dir,
         CompressionFormat::Gzip,
+        authority,
     )
 }
 
@@ -185,6 +187,7 @@ pub(crate) fn build_from_dockerfile_with_compression(
     tag: Option<&str>,
     runtime_dir: &Path,
     compression: CompressionFormat,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BuildResult, DockerfileBuildError> {
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     build_from_dockerfile_with_store_and_compression(
@@ -193,6 +196,7 @@ pub(crate) fn build_from_dockerfile_with_compression(
         runtime_dir,
         compression,
         &store,
+        authority,
     )
 }
 
@@ -202,6 +206,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
     runtime_dir: &Path,
     compression: CompressionFormat,
     store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
@@ -217,7 +222,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
     let context_hash = hash_context_dir(context_dir, dockerfile_path)?;
     let mut base_infos = Vec::new();
     for stage in stages.iter() {
-        let base_info = resolve_base_image(store, runtime_dir, &stage.base)?;
+        let base_info = resolve_base_image(store, runtime_dir, &stage.base, authority)?;
         base_infos.push(base_info);
     }
     let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
@@ -228,6 +233,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
         if layer_path.exists() && config_path.exists() {
             let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
             store.put_reference(
+                authority,
                 &reference,
                 &entry.config_digest,
                 OCI_IMAGE_MANIFEST_MEDIA_TYPE,
@@ -367,6 +373,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
 
             let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
             store.put_reference(
+                authority,
                 &reference,
                 &config_digest,
                 OCI_IMAGE_MANIFEST_MEDIA_TYPE,
@@ -439,12 +446,14 @@ pub fn execute_dockerfile_build_authorized(
             "image build inputs changed after authorization".to_string(),
         ));
     }
+    let authority = permit.mutation_authority();
     match build_from_dockerfile_with_store_and_compression(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
         plan.compression,
         store,
+        &authority,
     ) {
         Ok(result) => {
             permit
@@ -1574,6 +1583,7 @@ fn resolve_base_image(
     store: &LocalImageStore,
     runtime_dir: &Path,
     base: &str,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BaseImageInfo, DockerfileBuildError> {
     if base.eq_ignore_ascii_case("scratch") {
         return Ok(BaseImageInfo {
@@ -1587,7 +1597,7 @@ fn resolve_base_image(
         .map_err(DockerfileBuildError::Reference)?
         .is_none()
     {
-        pull_image_with_store(runtime_dir, base, store)
+        pull_image_with_store(runtime_dir, base, store, authority)
             .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
     }
     let record = resolve_reference(store, base)
@@ -1787,6 +1797,7 @@ mod tests {
             &runtime_dir,
             CompressionFormat::Gzip,
             &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
         )
         .expect("build");
         let layers = resolve_layer_paths_with_store(&runtime_dir, &result.reference, &store)
@@ -1810,6 +1821,7 @@ mod tests {
             &runtime_dir,
             CompressionFormat::Gzip,
             &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
         )
         .expect("build");
 

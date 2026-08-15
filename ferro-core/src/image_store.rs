@@ -63,6 +63,7 @@ impl LocalImageStore {
 
     pub(crate) fn put_reference(
         &self,
+        _authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
         reference: &str,
         digest: &str,
         manifest_media_type: &str,
@@ -154,7 +155,9 @@ impl LocalImageStore {
                 "reference write plan does not match proof".to_string(),
             ));
         }
+        let authority = permit.mutation_authority();
         match self.put_reference(
+            &authority,
             &plan.canonical_reference,
             &plan.digest,
             &plan.manifest_media_type,
@@ -371,6 +374,7 @@ mod tests {
 
         store
             .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
                 "ghcr.io/acme/app:latest",
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "application/vnd.oci.image.manifest.v1+json",
@@ -397,10 +401,10 @@ mod tests {
         let old = format!("sha256:{}", "a".repeat(64));
         let new = format!("sha256:{}", "b".repeat(64));
         store
-            .put_reference("repo/app:latest", &old, "test", "{}")
+            .put_reference(&crate::authorization::surface::SurfaceMutationAuthority::for_test(), "repo/app:latest", &old, "test", "{}")
             .unwrap();
         store
-            .put_reference("repo/app:latest", &new, "test", "{}")
+            .put_reference(&crate::authorization::surface::SurfaceMutationAuthority::for_test(), "repo/app:latest", &new, "test", "{}")
             .unwrap();
         assert_eq!(
             store
@@ -427,6 +431,7 @@ mod tests {
 
         store
             .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
                 "docker.io/library/alpine:latest",
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "application/vnd.oci.image.manifest.v1+json",
@@ -436,6 +441,7 @@ mod tests {
 
         store
             .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
                 "ghcr.io/acme/app:v1",
                 "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "application/vnd.oci.image.manifest.v1+json",
@@ -463,6 +469,7 @@ mod tests {
 
         store
             .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
                 "docker.io/library/alpine:latest",
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "application/vnd.oci.image.manifest.v1+json",
@@ -472,6 +479,7 @@ mod tests {
 
         store
             .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
                 "ghcr.io/acme/app:v1",
                 "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "application/vnd.oci.image.manifest.v1+json",

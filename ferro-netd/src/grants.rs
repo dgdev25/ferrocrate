@@ -68,6 +68,7 @@ impl GrantLedger {
         let lock_path = path.with_extension("lock");
         let writer_lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)?;

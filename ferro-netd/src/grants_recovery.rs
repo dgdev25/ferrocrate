@@ -12,11 +12,11 @@ impl GrantLedger {
             .state
             .consumed
             .iter()
-            .filter_map(|(nonce, operation)| {
-                (matches!(operation.phase, GrantPhase::OutcomeUnknown)
-                    && operation.effect_identity.is_none())
-                .then(|| (nonce.clone(), operation.claims.clone()))
+            .filter(|(_, operation)| {
+                matches!(operation.phase, GrantPhase::OutcomeUnknown)
+                    && operation.effect_identity.is_none()
             })
+            .map(|(nonce, operation)| (nonce.clone(), operation.claims.clone()))
             .collect::<Vec<_>>();
         for (nonce, claims) in unknown {
             self.state
@@ -45,14 +45,13 @@ impl GrantLedger {
             .state
             .consumed
             .iter()
-            .filter_map(|(nonce, operation)| {
-                matches!(operation.phase, GrantPhase::OutcomeUnknown).then(|| {
-                    (
-                        nonce.clone(),
-                        operation.claims.clone(),
-                        operation.effect_identity.clone(),
-                    )
-                })
+            .filter(|(_, operation)| matches!(operation.phase, GrantPhase::OutcomeUnknown))
+            .map(|(nonce, operation)| {
+                (
+                    nonce.clone(),
+                    operation.claims.clone(),
+                    operation.effect_identity.clone(),
+                )
             })
             .collect::<Vec<_>>();
         for (nonce, claims, identity) in unknown {

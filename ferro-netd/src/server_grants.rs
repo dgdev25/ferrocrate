@@ -13,6 +13,7 @@ pub(crate) fn reject(code: RejectionCode, reason: &str) -> crate::protocol::Netd
 }
 
 impl NetdServer {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn consume_grant(
         &mut self,
         grant: &HelperGrant,

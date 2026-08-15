@@ -53,7 +53,7 @@ fn runtime_for(mode: &str) -> (tempfile::TempDir, ContainerRuntime) {
 }
 
 #[test]
-fn disabled_and_shadow_preserve_external_surface_success_with_attribution() {
+fn rollout_modes_use_the_real_runtime_surface_and_preserve_their_contracts() {
     let before = authorization_metrics_snapshot();
     for mode in ["disabled", "shadow"] {
         let (_root, runtime) = runtime_for(mode);
@@ -74,8 +74,31 @@ fn disabled_and_shadow_preserve_external_surface_success_with_attribution() {
             .complete(permit, true)
             .expect("complete admitted mutation");
     }
+    let (_root, runtime) = runtime_for("enforce");
+    let surface = runtime
+        .surface_authorization()
+        .expect("enforce surface authorization");
+    let origin = RequestOrigin::cli_current().expect("authenticated CLI origin");
+    match surface.authorize_named(
+        &origin,
+        Action::VolumeCreate,
+        ResourceKind::Volume,
+        "compatibility-volume",
+        1,
+    ) {
+        Ok(permit) => surface
+            .complete(permit, true)
+            .expect("complete enforcement admission"),
+        Err(error) => {
+            let error = error.to_string();
+            assert!(
+                error.starts_with("authorization denied for ") && error.ends_with(": PolicyDenied"),
+                "enforce denials retain the stable authorization error shape: {error}"
+            );
+        }
+    }
     let after = authorization_metrics_snapshot();
-    assert_eq!(after.attributed_total, before.attributed_total + 2);
+    assert_eq!(after.attributed_total, before.attributed_total + 3);
     assert_eq!(
         (after.attributed_total - before.attributed_total) * 100
             / ((after.attributed_total - before.attributed_total)

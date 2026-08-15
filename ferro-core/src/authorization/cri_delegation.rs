@@ -126,6 +126,15 @@ impl CriDelegationClaims {
     pub fn delegated_principal(&self) -> &str {
         &self.delegated_principal
     }
+
+    fn replay_key(&self) -> Vec<u8> {
+        let mut key = b"ferrocrate/cri-delegation-replay/v1\0".to_vec();
+        for value in [&self.issuer, &self.key_id, &self.nonce] {
+            key.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            key.extend_from_slice(value.as_bytes());
+        }
+        key
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,7 +249,7 @@ impl CriDelegationVerifier {
         {
             return Err(DelegationError::Scope);
         }
-        let replay_key = claims.signing_bytes();
+        let replay_key = claims.replay_key();
         if self
             .replay
             .compare_and_swap(replay_key, None as Option<&[u8]>, Some(&[1]))

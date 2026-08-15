@@ -132,6 +132,35 @@ fn verifier_rejects_context_mismatch_and_persists_replay_across_restart() {
             1_000,
         )
         .unwrap();
+    let reused_nonce = CriDelegationClaims::new(
+        "issuer-a",
+        "key-a",
+        "transport-a",
+        "ferro-cri",
+        "mallory",
+        vec![Action::ImageDelete],
+        vec!["image:other".into()],
+        "durable-nonce",
+        2_000,
+        "boot-a",
+        [7; 32],
+    )
+    .unwrap();
+    let reused_assertion = DelegationAssertion::new(
+        reused_nonce.clone(),
+        signing.sign(&reused_nonce.signing_bytes()).to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        verifier.verify(
+            &reused_assertion,
+            "transport-a",
+            Action::ImageDelete,
+            "image:other",
+            1_000
+        ),
+        Err(DelegationError::Replay),
+    );
     drop(verifier);
 
     let reopened = make_verifier();

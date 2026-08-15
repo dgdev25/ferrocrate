@@ -719,6 +719,42 @@ fn public_managed_overlay_disabled_compatibility_and_enforce_denial_are_stable()
         "stable enforce denial: {denied}"
     );
 
+    // Configure the real manager -> delegation bridge -> netd boundary in
+    // Enforce mode.  A policy-denied parent never reaches this socket, so the
+    // deterministic netd state is the pre-effect assertion (rather than the
+    // old disabled-protocol rejection at the local API).
+    let helper_key = SigningKey::from_bytes(&[0x76; 32]);
+    let envelope_key = SigningKey::from_bytes(&[0x77; 32]);
+    let key_path = enforce_dir.path().join("enforce-helper.key");
+    fs::write(&key_path, helper_key.to_bytes()).unwrap();
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let netd = Arc::new(Mutex::new(
+        NetdServer::deterministic_with_faults(
+            uid,
+            Policy::new(
+                "qualification-cluster".into(),
+                "qualification-node".into(),
+                &base64::engine::general_purpose::STANDARD
+                    .encode(envelope_key.verifying_key().to_bytes()),
+            )
+            .unwrap(),
+            enforce_dir.path().join("kernel.json"),
+            FaultHandle::default(),
+        )
+        .with_authorization_identity(
+            AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([9; 32])).unwrap(),
+            "qualification-enforce",
+        )
+        .with_grants(GrantVerifier::new(
+            helper_key.verifying_key(),
+            "runtime",
+            "key-1",
+            "qualification-enforce",
+            GrantLedger::open(enforce_dir.path().join("netd-grants.json")).unwrap(),
+        )),
+    ));
+    let netd_socket = enforce_dir.path().join("netd.sock");
+    let _netd_listener = std::os::unix::net::UnixListener::bind(&netd_socket).unwrap();
     let enforce = Arc::new(
         LocalApi::new(
             uid,
@@ -734,6 +770,26 @@ fn public_managed_overlay_disabled_compatibility_and_enforce_denial_are_stable()
         .with_authorization_identity(
             AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([9; 32])).unwrap(),
             "qualification-enforce",
+        )
+        .with_delegation_ledger(
+            DelegationBridge::new(
+                helper_key.verifying_key(),
+                "runtime",
+                "key-1",
+                "qualification-enforce",
+                issuer(&key_path, uid),
+                envelope_key,
+                "qualification-cluster",
+                "qualification-node",
+            ),
+            UnixNetdClient::new(&netd_socket)
+                .with_node_id("qualification-node")
+                .with_authorization_identity(
+                    AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([9; 32]))
+                        .unwrap(),
+                    "qualification-enforce",
+                ),
+            DelegationLedger::open(enforce_dir.path().join("manager-delegations.json")).unwrap(),
         ),
     );
     enforce
@@ -747,23 +803,13 @@ fn public_managed_overlay_disabled_compatibility_and_enforce_denial_are_stable()
             },
         )
         .unwrap();
-    let enforce_socket = enforce_dir.path().join("manager.sock");
-    let serving = Arc::clone(&enforce);
-    let socket = enforce_socket.clone();
-    std::thread::spawn(move || serving.serve_unix(socket).unwrap());
-    wait_for_socket(&enforce_socket);
-    let enforce_client = ManagedOverlayClient::new(&enforce_socket).with_authorization_identity(
-        AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([9; 32])).unwrap(),
-        "qualification-enforce",
-    );
-    assert!(matches!(
-        enforce_client.request_disabled_compatibility(&attach),
-        Err(ferro_core::managed_overlay::ManagedOverlayError::Grant(_))
-    ));
     assert!(
         enforce.inspect(uid, "wg0", 100).is_ok(),
         "enforce denial must not change overlay ownership"
     );
+    let snapshot = netd.lock().unwrap().test_snapshot();
+    assert!(snapshot.endpoints.is_empty(), "policy denial reached netd");
+    assert!(snapshot.receipts.is_empty(), "policy denial reached netd");
     ferro_core::observability::persist_authorization_fixture_evidence(
         "managed-overlay-enforce",
         before_enforce,

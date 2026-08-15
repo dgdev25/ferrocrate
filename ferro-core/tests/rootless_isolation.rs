@@ -43,7 +43,9 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
             };
             assert!(error.contains("PolicyDenied"), "stable enforce error: {error}");
         } else {
-            let permit = permit.expect("compatibility mode admits rootless mapping");
+            let permit = permit.unwrap_or_else(|error| {
+                panic!("{mode} compatibility mode admits rootless mapping: {error}")
+            });
             let config = RootlessConfig::from_system().expect("resolve production rootless config");
             let mut child = Command::new("unshare")
                 .args(["--user", "--fork", "sleep", "30"])

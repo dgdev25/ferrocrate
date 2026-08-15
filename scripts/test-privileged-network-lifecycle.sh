@@ -84,17 +84,44 @@ ip netns exec "$ns_name" ip link set lo up
 
 ferro_net network create --subnet "$subnet" "$net_name"
 
-link_json="$(ip -n "$ns_name" -j link show "$bridge_name")"
+# -d is required: plain `ip -j link` omits linkinfo.info_kind.
+link_json="$(ip -n "$ns_name" -j -d link show "$bridge_name")"
 addr_json="$(ip -n "$ns_name" -j addr show "$bridge_name")"
+
+link_diag="$(jq -c --arg name "$bridge_name" '
+  if type != "array" or length != 1 then
+    {error: "expected one-element array", raw: .}
+  else
+    {
+      ifname: .[0].ifname,
+      expected_ifname: $name,
+      ifindex: .[0].ifindex,
+      info_kind: .[0].linkinfo.info_kind,
+      flags: .[0].flags,
+      operstate: .[0].operstate
+    }
+  end
+' <<<"$link_json" 2>/dev/null || printf '%s' "$link_json")"
 
 jq -e --arg name "$bridge_name" '
   (type == "array") and (length == 1)
   and .[0].ifname == $name
-  and (. [0].ifindex | type == "number") and .[0].ifindex > 0
+  and (.[0].ifindex | type == "number") and .[0].ifindex > 0
   and .[0].linkinfo.info_kind == "bridge"
   and ((.[0].flags | index("UP")) != null)
 ' <<<"$link_json" >/dev/null \
-  || fail "bridge name/kind/ifindex/UP assertion failed for ${bridge_name}"
+  || fail "bridge name/kind/ifindex/UP assertion failed for ${bridge_name}: ${link_diag}"
+
+addr_diag="$(jq -c --arg cidr "$expected_cidr" '
+  if type != "array" or length != 1 then
+    {error: "expected one-element array", raw: .}
+  else
+    {
+      expected_cidr: $cidr,
+      inet: [.[0].addr_info[]? | select(.family == "inet") | "\(.local)/\(.prefixlen)"]
+    }
+  end
+' <<<"$addr_json" 2>/dev/null || printf '%s' "$addr_json")"
 
 jq -e --arg cidr "$expected_cidr" '
   (type == "array") and (length == 1)
@@ -104,7 +131,7 @@ jq -e --arg cidr "$expected_cidr" '
     | index($cidr)
   ) != null
 ' <<<"$addr_json" >/dev/null \
-  || fail "bridge CIDR assertion failed for ${bridge_name} expected ${expected_cidr}"
+  || fail "bridge CIDR assertion failed for ${bridge_name} expected ${expected_cidr}: ${addr_diag}"
 
 printf 'privileged network lifecycle: create observed %s cidr=%s\n' "$bridge_name" "$expected_cidr"
 

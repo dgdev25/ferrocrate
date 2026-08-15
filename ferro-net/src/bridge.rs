@@ -349,6 +349,9 @@ pub fn observe_bridge_identity(name: &str) -> Result<Option<BridgeObservation>, 
             }
             let cidr_str = format!("{}/{}", local, prefix);
             if family == "inet6" {
+                if is_ipv6_link_local_cidr(&cidr_str) {
+                    continue;
+                }
                 ipv6_cidr.get_or_insert(cidr_str);
             } else {
                 cidr.get_or_insert(cidr_str);
@@ -361,4 +364,28 @@ pub fn observe_bridge_identity(name: &str) -> Result<Option<BridgeObservation>, 
         cidr,
         ipv6_cidr,
     }))
+}
+
+/// Automatic Linux IPv6 link-local (`fe80::/10`) is not create identity.
+pub fn is_ipv6_link_local_cidr(cidr: &str) -> bool {
+    let addr = cidr.split_once('/').map(|(a, _)| a).unwrap_or(cidr);
+    addr.parse::<std::net::Ipv6Addr>()
+        .map(|ip| ip.is_unicast_link_local())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::is_ipv6_link_local_cidr;
+
+    #[test]
+    fn link_local_cidr_covers_fe80_prefix() {
+        assert!(is_ipv6_link_local_cidr("fe80::1/64"));
+        assert!(is_ipv6_link_local_cidr("FE80::ABCD/64"));
+        assert!(is_ipv6_link_local_cidr("fe80::42:c0ff:fea8:1/64"));
+        assert!(!is_ipv6_link_local_cidr("fd00::1/64"));
+        assert!(!is_ipv6_link_local_cidr("2001:db8::1/64"));
+        assert!(!is_ipv6_link_local_cidr("fec0::1/64"));
+        assert!(!is_ipv6_link_local_cidr("10.0.0.1/24"));
+    }
 }

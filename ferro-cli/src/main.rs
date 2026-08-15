@@ -2908,40 +2908,15 @@ fn handle_run(
     ai_model: Option<&str>,
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
 ) -> Result<(), String> {
-    let mut effective_network = network.to_string();
-    if effective_network == "encrypted" {
-        effective_network = "wireguard".to_string();
-    }
-    let mut resolved_bridge_cidr = bridge_cidr.map(|val| val.to_string());
-    let mut resolved_bridge_name = bridge_name.map(|val| val.to_string());
-    let selected_network_name = if let Some(managed) = effective_network.strip_prefix("managed:") {
-        ferro_core::managed_overlay::ManagedOverlayRef::parse(&effective_network)
-            .map_err(|error| format!("run: invalid managed overlay: {error}"))?;
-        Some(managed.to_string())
-    } else if is_builtin_network_mode(&effective_network) {
-        validate_network_mode(&effective_network)?;
-        if effective_network == "bridge" {
-            Some("bridge".to_string())
-        } else {
-            Some(effective_network.clone())
-        }
-    } else {
-        let named = resolve_named_network(runtime_dir, network)?;
-        effective_network = "bridge".to_string();
-        if resolved_bridge_cidr.is_none() {
-            resolved_bridge_cidr = Some(named.bridge_cidr.clone());
-        }
-        if resolved_bridge_name.is_none() {
-            resolved_bridge_name = Some(named.bridge_name.clone());
-        }
-        Some(named.name)
-    };
+    let binding = bind_run_network(runtime_dir, network, bridge_cidr, bridge_name)?;
+    let effective_network = binding.mode;
+    let selected_network_name = binding.association;
+    let resolved_bridge_cidr = binding.bridge_cidr;
+    let resolved_bridge_name = binding.bridge_name;
     let _bridge_cidr_guard =
         ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", resolved_bridge_cidr.as_deref());
     let _bridge_name_guard =
         ScopedEnv::set("FERROCRATE_BRIDGE_NAME", resolved_bridge_name.as_deref());
-    let _network_name_guard =
-        ScopedEnv::set("FERROCRATE_NETWORK_NAME", selected_network_name.as_deref());
     let _net_limit_guard = ScopedEnv::set("FERROCRATE_BANDWIDTH_LIMIT", net_limit);
     let configured_backend = configured_ai_backend();
     let _backend_guard = ScopedEnv::set("FERROCRATE_AI_BACKEND", configured_backend.as_deref());
@@ -3038,6 +3013,7 @@ fn handle_run(
             name,
             &port_mappings,
             &effective_network,
+            selected_network_name.as_deref(),
             effective_backend,
             effective_ai_config,
         )
@@ -4221,6 +4197,51 @@ fn create_network_record(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         generation: 1,
+    })
+}
+
+struct RunNetworkBinding {
+    mode: String,
+    association: Option<String>,
+    bridge_cidr: Option<String>,
+    bridge_name: Option<String>,
+}
+
+fn bind_run_network(
+    runtime_dir: &Path,
+    network: &str,
+    bridge_cidr: Option<&str>,
+    bridge_name: Option<&str>,
+) -> Result<RunNetworkBinding, String> {
+    let mut mode = network.to_string();
+    if mode == "encrypted" {
+        mode = "wireguard".to_string();
+    }
+    let mut resolved_bridge_cidr = bridge_cidr.map(|value| value.to_string());
+    let mut resolved_bridge_name = bridge_name.map(|value| value.to_string());
+    let association = if let Some(managed) = mode.strip_prefix("managed:") {
+        ferro_core::managed_overlay::ManagedOverlayRef::parse(&mode)
+            .map_err(|error| format!("run: invalid managed overlay: {error}"))?;
+        Some(managed.to_string())
+    } else if is_builtin_network_mode(&mode) {
+        validate_network_mode(&mode)?;
+        Some(mode.clone())
+    } else {
+        let named = resolve_named_network(runtime_dir, network)?;
+        mode = "bridge".to_string();
+        if resolved_bridge_cidr.is_none() {
+            resolved_bridge_cidr = Some(named.bridge_cidr.clone());
+        }
+        if resolved_bridge_name.is_none() {
+            resolved_bridge_name = Some(named.bridge_name.clone());
+        }
+        Some(named.name)
+    };
+    Ok(RunNetworkBinding {
+        mode,
+        association,
+        bridge_cidr: resolved_bridge_cidr,
+        bridge_name: resolved_bridge_name,
     })
 }
 
@@ -5636,7 +5657,6 @@ fn compose_service_execution_digest(
     } else {
         cmd
     };
-    let _network_name_guard = ScopedEnv::set("FERROCRATE_NETWORK_NAME", Some(network));
     let digest = runtime
         .normalized_run_execution_digest(
             store,
@@ -6754,9 +6774,9 @@ mod tests {
     use super::{
         build_health_config, build_limits, desktop_forward_enabled, dispatch, effective_readonly,
         handle_build, handle_containers, handle_exec, handle_image_prune, handle_images,
-        handle_inspect, handle_kill, handle_logs, handle_network, handle_pause, handle_pull,
-        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
+        bind_run_network, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
         read_http_request, should_desktop_forward, structured_desktop_error,
@@ -7254,6 +7274,32 @@ mod tests {
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn bind_run_network_named_keeps_bridge_mode_and_logical_association() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = super::create_network_record("app-net", Some("10.88.0.0/24"), None)
+            .expect("record");
+        super::save_networks(temp.path(), &[record.clone()]).expect("save");
+        let binding = bind_run_network(temp.path(), "app-net", None, None).expect("bind");
+        assert_eq!(binding.mode, "bridge");
+        assert_eq!(binding.association.as_deref(), Some("app-net"));
+        assert_eq!(binding.bridge_name.as_deref(), Some(record.bridge_name.as_str()));
+        assert_eq!(binding.bridge_cidr.as_deref(), Some(record.bridge_cidr.as_str()));
+    }
+
+    #[test]
+    fn bind_run_network_builtins_keep_mode_as_association() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for mode in ["bridge", "host", "none", "wireguard"] {
+            let binding = bind_run_network(temp.path(), mode, None, None).expect(mode);
+            assert_eq!(binding.mode, mode);
+            assert_eq!(binding.association.as_deref(), Some(mode));
+        }
+        let encrypted = bind_run_network(temp.path(), "encrypted", None, None).expect("encrypted");
+        assert_eq!(encrypted.mode, "wireguard");
+        assert_eq!(encrypted.association.as_deref(), Some("wireguard"));
     }
 
     #[test]

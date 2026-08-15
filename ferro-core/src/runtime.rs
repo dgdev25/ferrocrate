@@ -2107,6 +2107,7 @@ impl ContainerRuntime {
             name,
             port_mappings,
             network_mode,
+            None,
             network_backend,
             ai_config,
         )
@@ -2200,6 +2201,7 @@ impl ContainerRuntime {
         name: Option<&str>,
         port_mappings: &[crate::container_store::PortMappingRecord],
         network_mode: &str,
+        associated_network: Option<&str>,
         network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
@@ -2257,7 +2259,7 @@ impl ContainerRuntime {
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
         candidate.name = name.map(str::to_owned);
         candidate.capabilities = normalized.facts.capabilities.clone();
-        candidate.network_name = Some(network_mode.to_owned());
+        candidate.network_name = associated_network_name(associated_network, network_mode);
         let permit = self
             .authorization
             .authorize_run(&candidate, &normalized.facts)?;
@@ -2311,6 +2313,7 @@ impl ContainerRuntime {
             name,
             port_mappings,
             &normalized.network_mode,
+            associated_network,
             normalized.network_backend,
             ai_config,
         );
@@ -2363,6 +2366,7 @@ impl ContainerRuntime {
         name: Option<&str>,
         port_mappings: &[crate::container_store::PortMappingRecord],
         network_mode: &str,
+        associated_network: Option<&str>,
         network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
@@ -2738,7 +2742,7 @@ impl ContainerRuntime {
             stderr_path: stderr_path.display().to_string(),
             status: "running".to_string(),
             netns: netns_name.clone(),
-            network_name: selected_network_name(network_mode),
+            network_name: associated_network_name(associated_network, network_mode),
             ip_address: container_ip.clone(),
             ipv6_address: container_ipv6.clone(),
             ports: port_mappings
@@ -7954,12 +7958,9 @@ fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, Ru
     Ok(Ipv4Addr::from(octets).to_string())
 }
 
-fn selected_network_name(network_mode: &str) -> Option<String> {
-    if let Ok(name) = std::env::var("FERROCRATE_NETWORK_NAME") {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+fn associated_network_name(associated: Option<&str>, network_mode: &str) -> Option<String> {
+    if let Some(name) = associated.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(name.to_string());
     }
     match network_mode {
         "bridge" => Some("bridge".to_string()),
@@ -8826,9 +8827,9 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::{
-        BindMount, ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
-        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
-        TmpfsMount,
+        associated_network_name, BindMount, ContainerRuntime, KernelResourceOps,
+        LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend, NoopLifecyclePhaseHook,
+        ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -8851,6 +8852,39 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex};
+
+    #[test]
+    fn associated_network_name_persists_logical_name_without_changing_mode() {
+        assert_eq!(
+            associated_network_name(Some("app-net"), "bridge").as_deref(),
+            Some("app-net")
+        );
+        assert_eq!(
+            associated_network_name(None, "bridge").as_deref(),
+            Some("bridge")
+        );
+        assert_eq!(
+            associated_network_name(None, "host").as_deref(),
+            Some("host")
+        );
+        assert_eq!(
+            associated_network_name(None, "none").as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            associated_network_name(None, "wireguard").as_deref(),
+            Some("wireguard")
+        );
+        assert_eq!(
+            associated_network_name(Some("bridge"), "bridge").as_deref(),
+            Some("bridge")
+        );
+        assert_eq!(
+            associated_network_name(Some(""), "bridge").as_deref(),
+            Some("bridge")
+        );
+        assert_eq!(associated_network_name(None, "managed:x"), None);
+    }
 
     #[test]
     fn normalized_compose_run_digest_changes_with_executor_input() {
@@ -8973,6 +9007,7 @@ mod tests {
                 Some("web"),
                 &[],
                 "bridge",
+                None,
                 NetworkBackend::Ebpf,
                 None,
             )

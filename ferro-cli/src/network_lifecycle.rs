@@ -1040,8 +1040,20 @@ fn append_lifecycle_checkpoint(
 fn is_intended_create_observation(intended: &BridgeIdentity, observed: &BridgeIdentity) -> bool {
     observed.name == intended.name
         && observed.cidr == intended.cidr
-        && observed.ipv6_cidr == intended.ipv6_cidr
+        && ipv6_observation_matches_intent(intended.ipv6_cidr.as_deref(), observed.ipv6_cidr.as_deref())
         && observed.ifindex.is_some_and(|ifindex| ifindex != 0)
+}
+
+/// Create identity for IPv6: an unrequested address may still be Linux
+/// automatic link-local. Requested IPv6 must match exactly. Any other
+/// observed IPv6 is a mismatch.
+fn ipv6_observation_matches_intent(intended: Option<&str>, observed: Option<&str>) -> bool {
+    match (intended, observed) {
+        (None, None) => true,
+        (None, Some(observed)) => ferro_net::bridge::is_ipv6_link_local_cidr(observed),
+        (Some(intended), Some(observed)) => intended == observed,
+        (Some(_), None) => false,
+    }
 }
 
 pub(crate) fn run_network_create(
@@ -2145,6 +2157,89 @@ mod tests {
         ) -> Result<Option<BridgeIdentity>, NetworkKernelError> {
             Ok(Some(self.observed.clone()))
         }
+    }
+
+    #[test]
+    fn create_without_requested_ipv6_accepts_automatic_link_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = create_network_record("net0", Some("10.0.0.1/24"), None).unwrap();
+        assert_eq!(record.intended_identity().ipv6_cidr, None);
+        let observed = BridgeIdentity {
+            name: "net0".to_string(),
+            ifindex: Some(7),
+            cidr: Some("10.0.0.1/24".to_string()),
+            ipv6_cidr: Some("fe80::42:c0ff:fea8:1/64".to_string()),
+        };
+        let kernel = MisobservedAddressKernel {
+            observed: observed.clone(),
+        };
+
+        let result = run_network_create(dir.path(), &record, &kernel);
+        assert_eq!(result.unwrap(), observed);
+        let ops = read_operations(dir.path()).unwrap();
+        assert!(ops
+            .iter()
+            .any(|op| op.phase == NetworkLifecyclePhase::IdentityObserved
+                && op.observed.as_ref() == Some(&observed)));
+        assert!(!ops
+            .iter()
+            .any(|op| op.phase == NetworkLifecyclePhase::Quarantined));
+    }
+
+    #[test]
+    fn create_without_requested_ipv6_quarantines_unexpected_global_ipv6() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = create_network_record("net0", Some("10.0.0.1/24"), None).unwrap();
+        let observed = BridgeIdentity {
+            name: "net0".to_string(),
+            ifindex: Some(7),
+            cidr: Some("10.0.0.1/24".to_string()),
+            ipv6_cidr: Some("fd00::1/64".to_string()),
+        };
+        let kernel = MisobservedAddressKernel {
+            observed: observed.clone(),
+        };
+
+        let result = run_network_create(dir.path(), &record, &kernel);
+        assert!(matches!(result, Err(NetworkLifecycleError::Quarantined(_))));
+        let ops = read_operations(dir.path()).unwrap();
+        assert!(ops
+            .iter()
+            .any(|op| op.phase == NetworkLifecyclePhase::Quarantined
+                && op.observed.as_ref() == Some(&observed)));
+    }
+
+    #[test]
+    fn create_with_requested_ipv6_still_requires_exact_match() {
+        let intended = BridgeIdentity {
+            name: "net0".into(),
+            ifindex: None,
+            cidr: Some("10.0.0.1/24".into()),
+            ipv6_cidr: Some("fd00::1/64".into()),
+        };
+        let matching = BridgeIdentity {
+            name: "net0".into(),
+            ifindex: Some(3),
+            cidr: Some("10.0.0.1/24".into()),
+            ipv6_cidr: Some("fd00::1/64".into()),
+        };
+        assert!(is_intended_create_observation(&intended, &matching));
+
+        let dir = tempfile::tempdir().unwrap();
+        let record =
+            create_network_record("net0", Some("10.0.0.1/24"), Some("fd00::1/64")).unwrap();
+        let observed = BridgeIdentity {
+            name: "net0".to_string(),
+            ifindex: Some(7),
+            cidr: Some("10.0.0.1/24".to_string()),
+            ipv6_cidr: Some("fe80::1/64".to_string()),
+        };
+        let kernel = MisobservedAddressKernel { observed };
+        let result = run_network_create(dir.path(), &record, &kernel);
+        assert!(
+            matches!(result, Err(NetworkLifecycleError::Quarantined(_))),
+            "requested IPv6 must not match automatic link-local"
+        );
     }
 
     #[test]

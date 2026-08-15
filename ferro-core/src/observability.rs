@@ -4,7 +4,119 @@ use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// A closed, allocation-free authorization metric vocabulary. Callers cannot
+/// attach principal, resource, request, or policy values as labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionMetric {
+    WouldDeny,
+    EnforcedDenial,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalMetric {
+    AppendFailure,
+    FlushFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryMetric {
+    OutcomeUnknown,
+    Recovered,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizationMetric {
+    Attributed,
+    UnknownPrincipal,
+    Decision(DecisionMetric),
+    BypassDetected,
+    Journal(JournalMetric),
+    PendingIntent,
+    Recovery(RecoveryMetric),
+    VerificationFailure,
+}
+
+/// Process-local operational counters. Security decisions and witness writes
+/// never depend on this best-effort telemetry object.
+#[derive(Default)]
+pub struct AuthorizationMetrics {
+    attributed: AtomicU64,
+    unknown_principal: AtomicU64,
+    would_deny: AtomicU64,
+    enforced_denial: AtomicU64,
+    bypass_detected: AtomicU64,
+    append_failure: AtomicU64,
+    flush_failure: AtomicU64,
+    pending_intent: AtomicU64,
+    outcome_unknown: AtomicU64,
+    recovered: AtomicU64,
+    verification_failure: AtomicU64,
+    checkpoint_age_seconds: AtomicU64,
+}
+
+impl AuthorizationMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&self, metric: AuthorizationMetric) {
+        let counter = match metric {
+            AuthorizationMetric::Attributed => &self.attributed,
+            AuthorizationMetric::UnknownPrincipal => &self.unknown_principal,
+            AuthorizationMetric::Decision(DecisionMetric::WouldDeny) => &self.would_deny,
+            AuthorizationMetric::Decision(DecisionMetric::EnforcedDenial) => &self.enforced_denial,
+            AuthorizationMetric::BypassDetected => &self.bypass_detected,
+            AuthorizationMetric::Journal(JournalMetric::AppendFailure) => &self.append_failure,
+            AuthorizationMetric::Journal(JournalMetric::FlushFailure) => &self.flush_failure,
+            AuthorizationMetric::PendingIntent => &self.pending_intent,
+            AuthorizationMetric::Recovery(RecoveryMetric::OutcomeUnknown) => &self.outcome_unknown,
+            AuthorizationMetric::Recovery(RecoveryMetric::Recovered) => &self.recovered,
+            AuthorizationMetric::VerificationFailure => &self.verification_failure,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_checkpoint_age_seconds(&self, seconds: u64) {
+        self.checkpoint_age_seconds
+            .store(seconds, Ordering::Relaxed);
+    }
+
+    /// Renders a deliberately label-free Prometheus text snapshot.
+    pub fn render_prometheus(&self) -> String {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        format!(
+            concat!(
+                "ferro_authorization_attributed_total {}\n",
+                "ferro_authorization_unknown_principal_total {}\n",
+                "ferro_authorization_would_deny_total {}\n",
+                "ferro_authorization_enforced_denial_total {}\n",
+                "ferro_authorization_bypass_detected_total {}\n",
+                "ferro_witness_append_failure_total {}\n",
+                "ferro_witness_flush_failure_total {}\n",
+                "ferro_witness_pending_intent_total {}\n",
+                "ferro_witness_outcome_unknown_total {}\n",
+                "ferro_witness_recovered_total {}\n",
+                "ferro_witness_verification_failure_total {}\n",
+                "ferro_witness_checkpoint_age_seconds {}\n"
+            ),
+            load(&self.attributed),
+            load(&self.unknown_principal),
+            load(&self.would_deny),
+            load(&self.enforced_denial),
+            load(&self.bypass_detected),
+            load(&self.append_failure),
+            load(&self.flush_failure),
+            load(&self.pending_intent),
+            load(&self.outcome_unknown),
+            load(&self.recovered),
+            load(&self.verification_failure),
+            load(&self.checkpoint_age_seconds),
+        )
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct LogEvent<'a> {

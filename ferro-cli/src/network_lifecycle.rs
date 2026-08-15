@@ -970,50 +970,54 @@ pub(crate) fn run_network_create(
 
 /// Run the exact-identity delete lifecycle.
 ///
+/// Journal resource binding uses `logical_name` (`resource.name`,
+/// `stable_resource_uuid(logical_name)`, generation continuity). Kernel
+/// observe/destroy use `expected_bridge_identity.name`.
+///
 /// - absent bridge => idempotent success with a durable `Removed` checkpoint,
-/// - observed identity matches `expected` exactly (including observed
-///   ifindex) => durable delete intent, destroy, durable `Removed`,
+/// - observed identity matches `expected_bridge_identity` exactly (including
+///   observed ifindex) => durable delete intent, destroy, durable `Removed`,
 /// - any mismatch (including a recreated bridge with the same name/CIDRs but
 ///   a different ifindex) => durable `Quarantined` evidence and a
 ///   non-success result,
 /// - observation errors => durable `Quarantined` evidence and an error.
 pub(crate) fn run_network_delete(
     runtime_dir: &Path,
-    expected: &BridgeIdentity,
+    logical_name: &str,
+    expected_bridge_identity: &BridgeIdentity,
     kernel: &dyn NetworkKernel,
 ) -> Result<(), NetworkLifecycleError> {
-    let name = expected.name.clone();
-    let record = network_record_from_identity(expected);
+    let record = network_record_from_identity(logical_name, expected_bridge_identity);
     let snapshot = RecordSnapshot {
         record: record.clone(),
     };
-    match kernel.observe_bridge(&name) {
+    match kernel.observe_bridge(&expected_bridge_identity.name) {
         Ok(None) => {
             // Idempotent absence, with a durable Removed checkpoint.
             append_lifecycle_entry(
                 runtime_dir,
-                &name,
+                logical_name,
                 NetworkAction::Delete,
                 snapshot,
                 NetworkLifecyclePhase::Removed,
-                Some(expected.clone()),
+                Some(expected_bridge_identity.clone()),
                 None,
                 Some("already absent".to_string()),
             )?;
             Ok(())
         }
-        Ok(Some(observed)) if expected.matches_exactly(&observed) => {
+        Ok(Some(observed)) if expected_bridge_identity.matches_exactly(&observed) => {
             let intent = append_lifecycle_entry(
                 runtime_dir,
-                &name,
+                logical_name,
                 NetworkAction::Delete,
                 snapshot.clone(),
                 NetworkLifecyclePhase::DeleteIntentDurable,
-                Some(expected.clone()),
+                Some(expected_bridge_identity.clone()),
                 Some(observed.clone()),
                 None,
             )?;
-            match kernel.destroy_bridge(expected) {
+            match kernel.destroy_bridge(expected_bridge_identity) {
                 Ok(()) => {
                     append_lifecycle_checkpoint(
                         runtime_dir,
@@ -1051,15 +1055,15 @@ pub(crate) fn run_network_delete(
         Ok(Some(observed)) => {
             let detail = format!(
                 "identity mismatch: expected {:?}, observed {:?}; refusing inexact delete",
-                expected, observed
+                expected_bridge_identity, observed
             );
             let intent = append_lifecycle_entry(
                 runtime_dir,
-                &name,
+                logical_name,
                 NetworkAction::Delete,
                 snapshot,
                 NetworkLifecyclePhase::DeleteIntentDurable,
-                Some(expected.clone()),
+                Some(expected_bridge_identity.clone()),
                 Some(observed.clone()),
                 None,
             )?;
@@ -1076,11 +1080,11 @@ pub(crate) fn run_network_delete(
             let detail = format!("pre-delete observation failed: {}", e);
             let intent = append_lifecycle_entry(
                 runtime_dir,
-                &name,
+                logical_name,
                 NetworkAction::Delete,
                 snapshot,
                 NetworkLifecyclePhase::DeleteIntentDurable,
-                Some(expected.clone()),
+                Some(expected_bridge_identity.clone()),
                 None,
                 None,
             )?;
@@ -1137,15 +1141,18 @@ fn network_record_from_snapshot(snapshot: &RecordSnapshot) -> Result<NetworkReco
     Ok(snapshot.record.clone())
 }
 
-/// Build a minimal NetworkRecord for delete operations where we only have a BridgeIdentity.
-fn network_record_from_identity(identity: &BridgeIdentity) -> NetworkRecord {
+/// Build a minimal NetworkRecord for delete operations.
+///
+/// `logical_name` is the journal/store resource name. `identity.name` is the
+/// kernel bridge name. They may differ.
+fn network_record_from_identity(logical_name: &str, identity: &BridgeIdentity) -> NetworkRecord {
     let (subnet, gateway) = match identity.cidr.as_ref() {
         Some(cidr) if !cidr.is_empty() => (cidr.clone(), cidr.clone()),
         _ => ("0.0.0.0/0".to_string(), "0.0.0.0".to_string()),
     };
 
     NetworkRecord {
-        name: identity.name.clone(),
+        name: logical_name.to_string(),
         driver: "bridge".to_string(),
         subnet,
         gateway,
@@ -1857,7 +1864,7 @@ mod tests {
             .unwrap()
             .insert("net0".into(), bridge.clone());
 
-        run_network_delete(dir.path(), &bridge, &kernel).unwrap();
+        run_network_delete(dir.path(), "net0", &bridge, &kernel).unwrap();
         let ops = read_operations(dir.path()).unwrap();
         assert_eq!(ops.len(), 2, "delete has intent and removed checkpoints");
         let intent = &ops[0];
@@ -1877,7 +1884,7 @@ mod tests {
         let kernel = FakeKernel::new();
         let mut intended = expected_identity("net0");
         intended.ifindex = Some(5);
-        let record = network_record_from_identity(&intended);
+        let record = network_record_from_identity("net0", &intended);
         append_lifecycle_entry(
             dir.path(),
             "net0",
@@ -2118,7 +2125,7 @@ mod tests {
             .unwrap()
             .insert("net0".into(), recreated.clone());
 
-        let result = run_network_delete(dir.path(), &observed, &kernel);
+        let result = run_network_delete(dir.path(), "net0", &observed, &kernel);
         assert!(
             matches!(result, Err(NetworkLifecycleError::Quarantined(_))),
             "recreated bridge must not be deleted as the original"
@@ -2138,11 +2145,11 @@ mod tests {
         let record = create_network_record("net0", Some("10.0.0.1/24"), None).unwrap();
         let observed = run_network_create(dir.path(), &record, &kernel).unwrap();
 
-        run_network_delete(dir.path(), &observed, &kernel).unwrap();
+        run_network_delete(dir.path(), "net0", &observed, &kernel).unwrap();
         assert_eq!(kernel.observe_bridge("net0").unwrap(), None);
 
         // Second delete on absent bridge: idempotent, with a durable Removed.
-        run_network_delete(dir.path(), &observed, &kernel).unwrap();
+        run_network_delete(dir.path(), "net0", &observed, &kernel).unwrap();
         let ops = read_operations(dir.path()).unwrap();
         assert!(ops
             .iter()
@@ -2341,7 +2348,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert("net0".into(), recreated);
-        let record = network_record_from_identity(&intended);
+        let record = network_record_from_identity("net0", &intended);
         append_lifecycle_entry(
             dir.path(),
             "net0",
@@ -2377,12 +2384,15 @@ mod tests {
                 ipv6_cidr: None,
             },
         );
-        let record = network_record_from_identity(&BridgeIdentity {
-            name: "net0".into(),
-            ifindex: Some(3),
-            cidr: None,
-            ipv6_cidr: None,
-        });
+        let record = network_record_from_identity(
+            "net0",
+            &BridgeIdentity {
+                name: "net0".into(),
+                ifindex: Some(3),
+                cidr: None,
+                ipv6_cidr: None,
+            },
+        );
         append_lifecycle_entry(
             dir.path(),
             "net0",
@@ -2453,7 +2463,7 @@ mod tests {
         let kernel = FakeKernel::new();
         let mut intended = expected_identity("net0");
         intended.ifindex = Some(4);
-        let record = network_record_from_identity(&intended);
+        let record = network_record_from_identity("net0", &intended);
         append_lifecycle_entry(
             dir.path(),
             "net0",
@@ -2671,5 +2681,99 @@ mod tests {
         assert!(kernel.observe_bridge("blue-net").unwrap().is_some());
         assert!(load_networks(dir.path()).unwrap().is_empty());
         assert!(!read_pending_operations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_does_not_mistake_blue_net_decoy_for_fc_blue_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let expected = BridgeIdentity {
+            name: "fc-blue-012345".into(),
+            ifindex: Some(5),
+            cidr: Some("10.0.0.1/24".into()),
+            ipv6_cidr: None,
+        };
+        kernel
+            .state
+            .lock()
+            .unwrap()
+            .insert("fc-blue-012345".into(), expected.clone());
+        kernel.state.lock().unwrap().insert(
+            "blue-net".into(),
+            BridgeIdentity {
+                name: "blue-net".into(),
+                ifindex: Some(99),
+                cidr: Some("10.9.9.1/24".into()),
+                ipv6_cidr: None,
+            },
+        );
+
+        run_network_delete(dir.path(), "blue-net", &expected, &kernel).unwrap();
+
+        assert_eq!(kernel.destroy_call_count(), 1);
+        assert!(
+            kernel.observe_bridge("fc-blue-012345").unwrap().is_none(),
+            "delete must destroy the exact kernel bridge"
+        );
+        assert_eq!(
+            kernel.observe_bridge("blue-net").unwrap().unwrap().ifindex,
+            Some(99),
+            "a bridge named blue-net must not be mistaken for fc-blue-012345"
+        );
+    }
+
+    #[test]
+    fn delete_journals_logical_name_while_targeting_kernel_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let original = blue_net_record();
+        let create = NetworkCreateRecord::from_record(original.clone()).unwrap();
+        let observed = run_network_create(dir.path(), &create, &kernel).unwrap();
+        assert_eq!(observed.name, "fc-blue-012345");
+
+        kernel.state.lock().unwrap().insert(
+            "blue-net".into(),
+            BridgeIdentity {
+                name: "blue-net".into(),
+                ifindex: Some(99),
+                cidr: Some("10.9.9.1/24".into()),
+                ipv6_cidr: None,
+            },
+        );
+
+        run_network_delete(dir.path(), "blue-net", &observed, &kernel).unwrap();
+
+        assert!(kernel.observe_bridge("fc-blue-012345").unwrap().is_none());
+        assert!(
+            kernel.observe_bridge("blue-net").unwrap().is_some(),
+            "delete must target fc-blue-012345, not the logical-name decoy"
+        );
+
+        let ops = read_operations(dir.path()).unwrap();
+        let create_generation = ops
+            .iter()
+            .filter(|op| op.action == NetworkAction::Create)
+            .map(|op| op.resource.generation)
+            .max()
+            .expect("create journal entries");
+        let delete_ops: Vec<_> = ops
+            .iter()
+            .filter(|op| op.action == NetworkAction::Delete)
+            .collect();
+        assert!(!delete_ops.is_empty());
+        let delete_generations: std::collections::HashSet<_> =
+            delete_ops.iter().map(|op| op.resource.generation).collect();
+        assert_eq!(delete_generations.len(), 1);
+        assert!(delete_generations.iter().all(|g| *g > create_generation));
+        for op in delete_ops {
+            assert_eq!(op.resource.name, "blue-net");
+            assert_eq!(op.resource.uuid, stable_resource_uuid("blue-net"));
+            assert_eq!(op.record.record.name, "blue-net");
+            assert_eq!(op.record.record.bridge_name, "fc-blue-012345");
+            assert_eq!(
+                op.intended.as_ref().map(|i| i.name.as_str()),
+                Some("fc-blue-012345")
+            );
+        }
     }
 }

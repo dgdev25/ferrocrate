@@ -7,6 +7,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 prost = "0.14"
 ferro-net = { path = "../ferro-net" }

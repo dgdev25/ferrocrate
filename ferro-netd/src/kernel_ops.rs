@@ -1,9 +1,12 @@
+use crate::protocol::PeerSpec;
 use ferro_net::{
     bridge::{create_bridge, destroy_bridge, BridgeConfig},
     exec_cmd, exec_cmd_capture,
     netns::move_to_netns,
     veth::{create_veth_pair, destroy_veth_pair, VethConfig},
+    WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer,
 };
+use std::path::PathBuf;
 
 pub(crate) trait NetKernelOps: Send {
     fn observe_link(&self, name: &str) -> bool;
@@ -13,9 +16,30 @@ pub(crate) trait NetKernelOps: Send {
     fn attach_endpoint(&mut self, endpoint: &str, overlay: &str) -> Result<(), String>;
     fn move_endpoint(&mut self, endpoint: &str, netns: &str) -> Result<(), String>;
     fn remove_endpoint(&mut self, endpoint: &str) -> Result<(), String>;
+    fn apply_routes(&mut self, interface: &str, routes: &[String]) -> Result<(), String>;
+    fn remove_routes(&mut self, interface: &str, routes: &[String]) -> Result<(), String>;
+    fn apply_wireguard(
+        &mut self,
+        name: &str,
+        addresses: &[String],
+        peers: &[PeerSpec],
+    ) -> Result<(), String>;
+    fn remove_wireguard(&mut self, name: &str) -> Result<(), String>;
 }
 
-pub(crate) struct RealNetKernelOps;
+pub(crate) struct RealNetKernelOps {
+    wireguard: Option<(WireGuardManager, PathBuf, u16)>,
+}
+impl RealNetKernelOps {
+    pub(crate) fn new() -> Self {
+        Self { wireguard: None }
+    }
+    pub(crate) fn with_wireguard(path: PathBuf, port: u16) -> Self {
+        Self {
+            wireguard: Some((WireGuardManager::new(None), path, port)),
+        }
+    }
+}
 impl NetKernelOps for RealNetKernelOps {
     fn observe_link(&self, name: &str) -> bool {
         exec_cmd_capture(&vec![
@@ -52,9 +76,90 @@ impl NetKernelOps for RealNetKernelOps {
     fn remove_endpoint(&mut self, endpoint: &str) -> Result<(), String> {
         destroy_veth_pair(endpoint).map_err(|e| e.to_string())
     }
+    fn apply_routes(&mut self, interface: &str, routes: &[String]) -> Result<(), String> {
+        for route in routes {
+            exec_cmd(&vec![
+                "ip".into(),
+                "route".into(),
+                "replace".into(),
+                route.clone(),
+                "dev".into(),
+                interface.into(),
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+    fn remove_routes(&mut self, interface: &str, routes: &[String]) -> Result<(), String> {
+        for route in routes {
+            exec_cmd(&vec![
+                "ip".into(),
+                "route".into(),
+                "del".into(),
+                route.clone(),
+                "dev".into(),
+                interface.into(),
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+    fn apply_wireguard(
+        &mut self,
+        name: &str,
+        addresses: &[String],
+        peers: &[PeerSpec],
+    ) -> Result<(), String> {
+        let Some((manager, key, port)) = &self.wireguard else {
+            return Ok(());
+        };
+        let addresses = addresses
+            .iter()
+            .map(|v| v.parse().map_err(|e| format!("{e}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let peers = peers
+            .iter()
+            .map(|p| {
+                Ok(WireGuardPeer::new(
+                    p.node_id.clone(),
+                    p.public_key.clone(),
+                    p.endpoint.parse().map_err(|e| format!("{e}"))?,
+                    p.allowed_ips
+                        .iter()
+                        .map(|v| v.parse().map_err(|e| format!("{e}")))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        manager
+            .apply(
+                &WireGuardInterfaceConfig {
+                    name: name.into(),
+                    private_key_path: key.clone(),
+                    listen_port: *port,
+                    addresses,
+                },
+                &peers,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn remove_wireguard(&mut self, name: &str) -> Result<(), String> {
+        let Some((manager, key, port)) = &self.wireguard else {
+            return Ok(());
+        };
+        manager
+            .remove(&WireGuardInterfaceConfig {
+                name: name.into(),
+                private_key_path: key.clone(),
+                listen_port: *port,
+                addresses: vec![],
+            })
+            .map_err(|e| e.to_string())
+    }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod deterministic {
     use super::*;
     use std::{collections::BTreeSet, path::PathBuf};
@@ -103,6 +208,18 @@ pub(crate) mod deterministic {
         fn remove_endpoint(&mut self, endpoint: &str) -> Result<(), String> {
             self.links.remove(endpoint);
             self.save()
+        }
+        fn apply_routes(&mut self, _: &str, _: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove_routes(&mut self, _: &str, _: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        fn apply_wireguard(&mut self, _: &str, _: &[String], _: &[PeerSpec]) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove_wireguard(&mut self, _: &str) -> Result<(), String> {
+            Ok(())
         }
     }
 

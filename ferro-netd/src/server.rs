@@ -1,18 +1,17 @@
 use crate::kernel_ops::{NetKernelOps, RealNetKernelOps};
 use crate::policy::Policy;
+use crate::request_binding::{request_overlay_id, request_parameters};
 use crate::{
     grants::{GrantError, GrantVerifier},
     protocol::{
-        DesiredStateEnvelope, GrantedDesiredStateEnvelope, GrantedEnvelope, NetdRequest,
-        NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES,
+        GrantedDesiredStateEnvelope, GrantedEnvelope, NetdRequest, NetdResponse, RejectionCode,
+        SignedEnvelope, MAX_FRAME_BYTES,
     },
 };
 use ferro_core::authorization::helper_grant::{GrantAction, GrantParameters};
 use ferro_net::{
-    bridge::{build_ip_link_set_master_cmd, create_bridge, destroy_bridge, BridgeConfig},
-    exec_cmd,
-    veth::{destroy_veth_pair, VethConfig, VethPair},
-    WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer,
+    bridge::build_ip_link_set_master_cmd,
+    veth::{VethConfig, VethPair},
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -38,9 +37,15 @@ pub struct NetdServer {
     overlays: BTreeSet<String>,
     endpoints: BTreeMap<String, String>,
     routes: BTreeMap<String, Vec<String>>,
-    wireguard: Option<(WireGuardManager, PathBuf, u16)>,
     journal: Option<PathBuf>,
     kernel: Box<dyn NetKernelOps>,
+}
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetdTestSnapshot {
+    pub overlays: Vec<String>,
+    pub endpoints: BTreeMap<String, String>,
+    pub routes: BTreeMap<String, Vec<String>>,
 }
 impl NetdServer {
     pub fn new(uid: u32, policy: Policy) -> Self {
@@ -51,14 +56,29 @@ impl NetdServer {
             overlays: BTreeSet::new(),
             endpoints: BTreeMap::new(),
             routes: BTreeMap::new(),
-            wireguard: None,
             journal: None,
-            kernel: Box::new(RealNetKernelOps),
+            kernel: Box::new(RealNetKernelOps::new()),
         }
     }
     pub fn with_grants(mut self, grants: GrantVerifier) -> Self {
         self.grants = Some(grants);
         self
+    }
+    #[cfg(feature = "test-support")]
+    pub fn deterministic(uid: u32, policy: Policy, kernel_state: PathBuf) -> Self {
+        let mut server = Self::new(uid, policy);
+        server.kernel = Box::new(crate::kernel_ops::deterministic::PersistentKernelOps::open(
+            kernel_state,
+        ));
+        server
+    }
+    #[cfg(feature = "test-support")]
+    pub fn test_snapshot(&self) -> NetdTestSnapshot {
+        NetdTestSnapshot {
+            overlays: self.overlays.iter().cloned().collect(),
+            endpoints: self.endpoints.clone(),
+            routes: self.routes.clone(),
+        }
     }
     pub fn with_wireguard(
         uid: u32,
@@ -73,9 +93,11 @@ impl NetdServer {
             overlays: BTreeSet::new(),
             endpoints: BTreeMap::new(),
             routes: BTreeMap::new(),
-            wireguard: Some((WireGuardManager::new(None), private_key_path, listen_port)),
             journal: None,
-            kernel: Box::new(RealNetKernelOps),
+            kernel: Box::new(RealNetKernelOps::with_wireguard(
+                private_key_path,
+                listen_port,
+            )),
         }
     }
     pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
@@ -141,180 +163,6 @@ impl NetdServer {
                 "bulk desired-state grants are forbidden; submit one authorized mutation per resource",
             );
         }
-        if let Some(granted) = granted_desired {
-            let desired = granted.envelope;
-            let state = match self.policy.validate_desired_state(
-                &desired.desired_state,
-                &desired.node_id,
-                now,
-            ) {
-                Ok(state) => state,
-                Err(code) => return reject(code, "desired state rejected"),
-            };
-            let params = match desired_parameters(&desired) {
-                Ok(value) => value,
-                Err(code) => return reject(code, "invalid normalized parameters"),
-            };
-            if let Err(code) = self.consume_grant(
-                &granted.grant,
-                GrantAction::NetworkCreate,
-                &granted.resource_uuid,
-                granted.resource_generation,
-                &params,
-                now,
-            ) {
-                self.policy
-                    .rollback("__desired_state", state.cluster_epoch, state.revision);
-                return reject(code, "authorization grant rejected");
-            }
-            let desired_overlays: BTreeSet<String> = state
-                .overlays
-                .iter()
-                .map(|overlay| overlay.overlay_id.clone())
-                .collect();
-            for overlay in state.overlays {
-                let request = NetdRequest::ApplyOverlay {
-                    overlay_id: overlay.overlay_id,
-                    peers: overlay
-                        .peers
-                        .into_iter()
-                        .map(|peer| crate::protocol::PeerSpec {
-                            node_id: peer.node_id,
-                            public_key: base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                peer.public_key,
-                            ),
-                            endpoint: peer.endpoint,
-                            allowed_ips: peer.allowed_ips,
-                        })
-                        .collect(),
-                    routes: overlay.routes,
-                    addresses: Vec::new(),
-                };
-                let NetdRequest::ApplyOverlay {
-                    overlay_id,
-                    peers,
-                    routes,
-                    addresses,
-                } = request
-                else {
-                    unreachable!()
-                };
-                if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
-                    let peers = match peers
-                        .iter()
-                        .map(|peer| {
-                            let endpoint = peer.endpoint.parse().map_err(|_| ());
-                            let allowed_ips = peer
-                                .allowed_ips
-                                .iter()
-                                .map(|route| route.parse().map_err(|_| ()))
-                                .collect::<Result<Vec<_>, _>>();
-                            match (endpoint, allowed_ips) {
-                                (Ok(endpoint), Ok(allowed_ips)) => Ok(WireGuardPeer::new(
-                                    peer.node_id.clone(),
-                                    peer.public_key.clone(),
-                                    endpoint,
-                                    allowed_ips,
-                                )),
-                                _ => Err(()),
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                    {
-                        Ok(peers) => peers,
-                        Err(()) => {
-                            return reject(RejectionCode::PolicyViolation, "invalid WireGuard peer")
-                        }
-                    };
-                    let addresses = match addresses
-                        .iter()
-                        .map(|address| address.parse())
-                        .collect::<Result<Vec<_>, _>>()
-                    {
-                        Ok(addresses) => addresses,
-                        Err(_) => {
-                            return reject(
-                                RejectionCode::PolicyViolation,
-                                "invalid WireGuard interface address",
-                            )
-                        }
-                    };
-                    let config = WireGuardInterfaceConfig {
-                        name: overlay_id.clone(),
-                        private_key_path: private_key_path.clone(),
-                        listen_port: *listen_port,
-                        addresses,
-                    };
-                    if manager.apply(&config, &peers).is_err() {
-                        return reject(RejectionCode::Busy, "failed to apply WireGuard overlay");
-                    }
-                }
-                if !self.overlays.contains(&overlay_id)
-                    && self.kernel.create_overlay(&overlay_id).is_err()
-                {
-                    return reject(RejectionCode::Busy, "failed to create overlay bridge");
-                }
-                if apply_overlay_routes(&overlay_id, &routes).is_err() {
-                    self.policy
-                        .rollback("__desired_state", state.cluster_epoch, state.revision);
-                    return reject(RejectionCode::Busy, "failed to apply overlay routes");
-                }
-                self.overlays.insert(overlay_id.clone());
-                self.routes.insert(overlay_id.clone(), routes);
-            }
-            let stale: Vec<String> = self
-                .overlays
-                .difference(&desired_overlays)
-                .cloned()
-                .collect();
-            for overlay_id in stale {
-                if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
-                    let _ = manager.remove(&WireGuardInterfaceConfig {
-                        name: overlay_id.clone(),
-                        private_key_path: private_key_path.clone(),
-                        listen_port: *listen_port,
-                        addresses: Vec::new(),
-                    });
-                }
-                if let Some(routes) = self.routes.get(&overlay_id) {
-                    if remove_overlay_routes(&overlay_id, routes).is_err() {
-                        return reject(RejectionCode::Busy, "failed to remove overlay routes");
-                    }
-                }
-                self.routes.remove(&overlay_id);
-                self.overlays.remove(&overlay_id);
-                let endpoints: Vec<String> = self
-                    .endpoints
-                    .iter()
-                    .filter(|(_, overlay)| *overlay == &overlay_id)
-                    .map(|(endpoint, _)| endpoint.clone())
-                    .collect();
-                for endpoint in endpoints {
-                    self.endpoints.remove(&endpoint);
-                    let _ = destroy_veth_pair(&endpoint);
-                }
-                let _ = destroy_bridge(&overlay_id);
-            }
-            if self.persist().is_err() {
-                self.policy
-                    .rollback("__desired_state", state.cluster_epoch, state.revision);
-                return reject(RejectionCode::Busy, "failed to persist overlay ownership");
-            }
-            let response = NetdResponse::Applied;
-            if self
-                .record_grant_result(
-                    &granted.grant.claims.request_id,
-                    granted.grant.claims.nonce,
-                    format!("desired-state:{}", state.revision),
-                    "applied",
-                )
-                .is_err()
-            {
-                return reject(RejectionCode::Busy, "result witness unavailable");
-            }
-            return response;
-        }
         let granted: GrantedEnvelope = match serde_json::from_slice(&frame[4..]) {
             Ok(value) => value,
             Err(_) => {
@@ -374,67 +222,19 @@ impl NetdServer {
                 routes,
                 addresses,
             } => {
-                if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
-                    let addresses = match addresses
-                        .iter()
-                        .map(|address| address.parse())
-                        .collect::<Result<Vec<_>, _>>()
-                    {
-                        Ok(addresses) => addresses,
-                        Err(_) => {
-                            return reject(
-                                RejectionCode::PolicyViolation,
-                                "invalid WireGuard interface address",
-                            )
-                        }
-                    };
-                    let peers = match peers
-                        .iter()
-                        .map(|peer| {
-                            let endpoint = peer.endpoint.parse().map_err(|_| ());
-                            let allowed_ips = peer
-                                .allowed_ips
-                                .iter()
-                                .map(|route| route.parse().map_err(|_| ()))
-                                .collect::<Result<Vec<_>, _>>();
-                            match (endpoint, allowed_ips) {
-                                (Ok(endpoint), Ok(allowed_ips)) => Ok(WireGuardPeer::new(
-                                    peer.node_id.clone(),
-                                    peer.public_key.clone(),
-                                    endpoint,
-                                    allowed_ips,
-                                )),
-                                _ => Err(()),
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                    {
-                        Ok(peers) => peers,
-                        Err(()) => {
-                            return reject(RejectionCode::PolicyViolation, "invalid WireGuard peer")
-                        }
-                    };
-                    let config = WireGuardInterfaceConfig {
-                        name: overlay_id.clone(),
-                        private_key_path: private_key_path.clone(),
-                        listen_port: *listen_port,
-                        addresses,
-                    };
-                    if manager.apply(&config, &peers).is_err() {
-                        return reject(RejectionCode::Busy, "failed to apply WireGuard overlay");
-                    }
+                if self
+                    .kernel
+                    .apply_wireguard(&overlay_id, &addresses, &peers)
+                    .is_err()
+                {
+                    return reject(RejectionCode::Busy, "failed to apply WireGuard overlay");
                 }
                 if !self.overlays.contains(&overlay_id)
-                    && create_bridge(&BridgeConfig {
-                        name: overlay_id.clone(),
-                        cidr: String::new(),
-                        ipv6_cidr: None,
-                    })
-                    .is_err()
+                    && self.kernel.create_overlay(&overlay_id).is_err()
                 {
                     return reject(RejectionCode::Busy, "failed to create overlay bridge");
                 }
-                if apply_overlay_routes(&overlay_id, &routes).is_err() {
+                if self.kernel.apply_routes(&overlay_id, &routes).is_err() {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
                     return reject(RejectionCode::Busy, "failed to apply overlay routes");
@@ -462,17 +262,10 @@ impl NetdServer {
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
-                if let Some((manager, private_key_path, listen_port)) = &self.wireguard {
-                    let _ = manager.remove(&WireGuardInterfaceConfig {
-                        name: overlay_id.clone(),
-                        private_key_path: private_key_path.clone(),
-                        listen_port: *listen_port,
-                        addresses: Vec::new(),
-                    });
-                }
+                let _ = self.kernel.remove_wireguard(&overlay_id);
                 if self.overlays.contains(&overlay_id) {
                     if let Some(routes) = self.routes.get(&overlay_id) {
-                        if remove_overlay_routes(&overlay_id, routes).is_err() {
+                        if self.kernel.remove_routes(&overlay_id, routes).is_err() {
                             return reject(RejectionCode::Busy, "failed to remove overlay routes");
                         }
                     }
@@ -672,101 +465,6 @@ impl NetdServer {
         )
     }
 }
-
-fn request_parameters(
-    request: &NetdRequest,
-) -> Result<(GrantAction, GrantParameters), RejectionCode> {
-    let (action, operation, fields) = match request {
-        NetdRequest::ApplyOverlay {
-            overlay_id,
-            peers,
-            routes,
-            addresses,
-        } => (
-            GrantAction::NetworkCreate,
-            "overlay.apply",
-            vec![
-                ("overlay_id".into(), overlay_id.clone()),
-                (
-                    "peers".into(),
-                    serde_json::to_string(peers).map_err(|_| RejectionCode::InvalidFrame)?,
-                ),
-                (
-                    "routes".into(),
-                    serde_json::to_string(routes).map_err(|_| RejectionCode::InvalidFrame)?,
-                ),
-                (
-                    "addresses".into(),
-                    serde_json::to_string(addresses).map_err(|_| RejectionCode::InvalidFrame)?,
-                ),
-            ],
-        ),
-        NetdRequest::RemoveOverlay { overlay_id } => (
-            GrantAction::NetworkDelete,
-            "overlay.delete",
-            vec![("overlay_id".into(), overlay_id.clone())],
-        ),
-        NetdRequest::AttachEndpoint {
-            overlay_id,
-            endpoint_id,
-            netns,
-        } => (
-            GrantAction::NetworkAttach,
-            "endpoint.attach",
-            vec![
-                ("overlay_id".into(), overlay_id.clone()),
-                ("endpoint_id".into(), endpoint_id.clone()),
-                ("netns".into(), netns.clone().unwrap_or_default()),
-            ],
-        ),
-        NetdRequest::DetachEndpoint {
-            overlay_id,
-            endpoint_id,
-        } => (
-            GrantAction::NetworkDetach,
-            "endpoint.detach",
-            vec![
-                ("overlay_id".into(), overlay_id.clone()),
-                ("endpoint_id".into(), endpoint_id.clone()),
-            ],
-        ),
-        NetdRequest::Inspect { overlay_id } => (
-            GrantAction::NetworkInspect,
-            "overlay.inspect",
-            vec![("overlay_id".into(), overlay_id.clone())],
-        ),
-    };
-    GrantParameters::new(operation, fields, vec![])
-        .map(|p| (action, p))
-        .map_err(|_| RejectionCode::PolicyViolation)
-}
-fn request_overlay_id(request: &NetdRequest) -> &str {
-    match request {
-        NetdRequest::ApplyOverlay { overlay_id, .. }
-        | NetdRequest::RemoveOverlay { overlay_id }
-        | NetdRequest::AttachEndpoint { overlay_id, .. }
-        | NetdRequest::DetachEndpoint { overlay_id, .. }
-        | NetdRequest::Inspect { overlay_id } => overlay_id,
-    }
-}
-fn desired_parameters(desired: &DesiredStateEnvelope) -> Result<GrantParameters, RejectionCode> {
-    GrantParameters::new(
-        "desired-state.apply",
-        vec![
-            ("cluster_id".into(), desired.cluster_id.clone()),
-            ("node_id".into(), desired.node_id.clone()),
-            (
-                "desired_state".into(),
-                base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &desired.desired_state,
-                ),
-            ),
-        ],
-        vec![],
-    )
-    .map_err(|_| RejectionCode::PolicyViolation)
-}
 fn monotonic_millis() -> u64 {
     fs::read_to_string("/proc/uptime")
         .ok()
@@ -780,34 +478,6 @@ fn map_grant_error(error: GrantError) -> RejectionCode {
         GrantError::InvalidSignature => RejectionCode::InvalidSignature,
         _ => RejectionCode::InvalidGrant,
     }
-}
-fn apply_overlay_routes(interface: &str, routes: &[String]) -> Result<(), ()> {
-    for route in routes {
-        exec_cmd(&vec![
-            "ip".into(),
-            "route".into(),
-            "replace".into(),
-            route.clone(),
-            "dev".into(),
-            interface.to_string(),
-        ])
-        .map_err(|_| ())?;
-    }
-    Ok(())
-}
-fn remove_overlay_routes(interface: &str, routes: &[String]) -> Result<(), ()> {
-    for route in routes {
-        exec_cmd(&vec![
-            "ip".into(),
-            "route".into(),
-            "del".into(),
-            route.clone(),
-            "dev".into(),
-            interface.to_string(),
-        ])
-        .map_err(|_| ())?;
-    }
-    Ok(())
 }
 fn reject(code: RejectionCode, reason: &str) -> NetdResponse {
     NetdResponse::Rejected {

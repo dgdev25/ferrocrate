@@ -1,11 +1,4 @@
-#[path = "../src/grants.rs"]
-mod grants;
-#[path = "../src/policy.rs"]
-mod policy;
-#[path = "../src/protocol.rs"]
-mod protocol;
-#[path = "../src/server.rs"]
-mod server;
+use ferro_netd::{grants, policy, protocol, server};
 
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};

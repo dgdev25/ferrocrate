@@ -116,6 +116,7 @@ struct CreationRollback {
     defer_container_removal: bool,
     cleanup_quarantined: bool,
     creation_provenance: CreationProvenance,
+    kernel_ops: Arc<dyn KernelResourceOps>,
 }
 
 struct CleanupAuthority {
@@ -124,6 +125,85 @@ struct CleanupAuthority {
 }
 
 struct LegacyCleanupAuthority;
+
+trait KernelResourceOps: Send + Sync {
+    fn apply_bind(&self, rootfs: &Path, mount: &BindMount) -> Result<(), RuntimeError>;
+    fn apply_tmpfs(&self, rootfs: &Path, mount: &TmpfsMount) -> Result<(), RuntimeError>;
+    fn apply_readonly(&self, rootfs: &Path) -> Result<(), RuntimeError>;
+    fn identity(&self, path: &Path) -> Result<ResourceIdentity, RuntimeError>;
+    fn detach_owned(
+        &self,
+        rootfs: &Path,
+        target: &Path,
+        expected: &ResourceIdentity,
+    ) -> Result<(), RuntimeError>;
+    fn observe_unmarked(
+        &self,
+        rootfs: &Path,
+        target: &Path,
+        baseline: (u64, u64, Option<u64>),
+        source: Option<(u64, u64, Option<u64>)>,
+        fs_type: Option<&str>,
+    ) -> Result<Option<ResourceIdentity>, ()>;
+}
+
+struct ProductionKernelResourceOps;
+
+impl KernelResourceOps for ProductionKernelResourceOps {
+    fn apply_bind(&self, rootfs: &Path, mount: &BindMount) -> Result<(), RuntimeError> {
+        apply_authorized_bind_mounts(rootfs, std::slice::from_ref(mount)).map_err(Into::into)
+    }
+    fn apply_tmpfs(&self, rootfs: &Path, mount: &TmpfsMount) -> Result<(), RuntimeError> {
+        apply_tmpfs_mounts(rootfs, std::slice::from_ref(mount)).map_err(Into::into)
+    }
+    fn apply_readonly(&self, rootfs: &Path) -> Result<(), RuntimeError> {
+        apply_readonly_rootfs(rootfs).map_err(Into::into)
+    }
+    fn identity(&self, path: &Path) -> Result<ResourceIdentity, RuntimeError> {
+        path_resource_identity(path)
+    }
+    fn detach_owned(
+        &self,
+        rootfs: &Path,
+        target: &Path,
+        expected: &ResourceIdentity,
+    ) -> Result<(), RuntimeError> {
+        let absolute = if target == Path::new(".") {
+            rootfs.to_path_buf()
+        } else {
+            rootfs.join(target)
+        };
+        if &path_resource_identity(&absolute)? != expected {
+            return Err(RuntimeError::InvalidState(
+                "owned mount identity changed".into(),
+            ));
+        }
+        let handle = if target == Path::new(".") {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC)
+                .open(rootfs)
+                .map_err(MountError::from)?
+        } else {
+            open_existing_mount_target_beneath(rootfs, target)?
+        };
+        nix::mount::umount2(
+            Path::new(&format!("/proc/self/fd/{}", handle.as_raw_fd())),
+            nix::mount::MntFlags::MNT_DETACH,
+        )
+        .map_err(|error| RuntimeError::Network(error.to_string()))
+    }
+    fn observe_unmarked(
+        &self,
+        rootfs: &Path,
+        target: &Path,
+        baseline: (u64, u64, Option<u64>),
+        source: Option<(u64, u64, Option<u64>)>,
+        fs_type: Option<&str>,
+    ) -> Result<Option<ResourceIdentity>, ()> {
+        classify_unmarked_mount(Some(rootfs), target, baseline, source, fs_type)
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 enum ResourcePlan {
@@ -254,6 +334,7 @@ impl CreationRollback {
         container_id: &str,
         cgroup_root: PathBuf,
         creation_provenance: CreationProvenance,
+        kernel_ops: Arc<dyn KernelResourceOps>,
     ) -> Self {
         Self {
             container_id: container_id.to_string(),
@@ -283,6 +364,7 @@ impl CreationRollback {
             defer_container_removal: false,
             cleanup_quarantined: false,
             creation_provenance,
+            kernel_ops,
         }
     }
 
@@ -290,6 +372,7 @@ impl CreationRollback {
         container_dir: PathBuf,
         cgroup_root: PathBuf,
         pending: PendingNetworkCleanup,
+        kernel_ops: Arc<dyn KernelResourceOps>,
     ) -> Result<Self, RuntimeError> {
         if !matches!(pending.schema_version, 1 | 2) || pending.container_id.is_empty() {
             return Err(RuntimeError::Network(
@@ -332,6 +415,7 @@ impl CreationRollback {
             defer_container_removal: true,
             cleanup_quarantined: false,
             creation_provenance: pending.creation_provenance,
+            kernel_ops,
         })
     }
 
@@ -792,38 +876,44 @@ impl CreationRollback {
                     baseline_inode,
                     baseline_mount_id,
                     ..
-                } => classify_unmarked_mount(
-                    rootfs.as_deref(),
-                    target,
-                    (*baseline_device, *baseline_inode, *baseline_mount_id),
-                    Some((*source_device, *source_inode, None)),
-                    None,
-                ),
+                } => rootfs.as_deref().map_or(Err(()), |rootfs| {
+                    self.kernel_ops.observe_unmarked(
+                        rootfs,
+                        target,
+                        (*baseline_device, *baseline_inode, *baseline_mount_id),
+                        Some((*source_device, *source_inode, None)),
+                        None,
+                    )
+                }),
                 ResourcePlan::TmpfsMount {
                     target,
                     baseline_device,
                     baseline_inode,
                     baseline_mount_id,
                     ..
-                } => classify_unmarked_mount(
-                    rootfs.as_deref(),
-                    target,
-                    (*baseline_device, *baseline_inode, *baseline_mount_id),
-                    None,
-                    Some("tmpfs"),
-                ),
+                } => rootfs.as_deref().map_or(Err(()), |rootfs| {
+                    self.kernel_ops.observe_unmarked(
+                        rootfs,
+                        target,
+                        (*baseline_device, *baseline_inode, *baseline_mount_id),
+                        None,
+                        Some("tmpfs"),
+                    )
+                }),
                 ResourcePlan::RootfsReadonly {
                     baseline_device,
                     baseline_inode,
                     baseline_mount_id,
                     ..
-                } => classify_unmarked_mount(
-                    rootfs.as_deref(),
-                    Path::new("."),
-                    (*baseline_device, *baseline_inode, *baseline_mount_id),
-                    None,
-                    Some("readonly"),
-                ),
+                } => rootfs.as_deref().map_or(Err(()), |rootfs| {
+                    self.kernel_ops.observe_unmarked(
+                        rootfs,
+                        Path::new("."),
+                        (*baseline_device, *baseline_inode, *baseline_mount_id),
+                        None,
+                        Some("readonly"),
+                    )
+                }),
                 ResourcePlan::Cgroup { name, .. } => {
                     if self.cgroup_root.join(name).exists() {
                         Err(())
@@ -880,50 +970,22 @@ impl CreationRollback {
                         quarantine = true;
                         continue;
                     };
-                    let absolute = if matches!(plan, ResourcePlan::RootfsReadonly { .. }) {
-                        rootfs.to_path_buf()
-                    } else {
-                        rootfs.join(target)
+                    let expected = ResourceIdentity::Path {
+                        device: *device,
+                        inode: *inode,
+                        mount_id: *mount_id,
                     };
-                    let observed_mount = mount_id_for_path(&absolute).ok().flatten();
-                    if observed_mount.is_none() {
-                        continue;
-                    }
-                    let Ok(metadata) = fs::metadata(&absolute) else {
+                    if let Err(error) = self.kernel_ops.detach_owned(
+                        rootfs,
+                        if matches!(plan, ResourcePlan::RootfsReadonly { .. }) {
+                            Path::new(".")
+                        } else {
+                            target
+                        },
+                        &expected,
+                    ) {
                         quarantine = true;
-                        continue;
-                    };
-                    if metadata.dev() != *device
-                        || metadata.ino() != *inode
-                        || observed_mount != *mount_id
-                    {
-                        quarantine = true;
-                        continue;
-                    }
-                    let target_handle = if matches!(plan, ResourcePlan::RootfsReadonly { .. }) {
-                        OpenOptions::new()
-                            .read(true)
-                            .custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC)
-                            .open(rootfs)
-                            .map_err(MountError::from)
-                    } else {
-                        open_existing_mount_target_beneath(rootfs, target)
-                    };
-                    match target_handle {
-                        Ok(handle) => {
-                            let proc_fd =
-                                PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
-                            if let Err(error) =
-                                nix::mount::umount2(&proc_fd, nix::mount::MntFlags::MNT_DETACH)
-                            {
-                                quarantine = true;
-                                log::warn!("[rollback] owned mount detach failed: {error}");
-                            }
-                        }
-                        Err(error) => {
-                            quarantine = true;
-                            log::warn!("[rollback] mount target reopen failed: {error}");
-                        }
+                        log::warn!("[rollback] owned mount detach failed: {error}");
                     }
                 }
                 (ResourcePlan::Cgroup { name, .. }, ResourceIdentity::Cgroup { device, inode }) => {
@@ -995,6 +1057,7 @@ fn recover_pending_network_cleanups(
     store: &LocalContainerStore,
     cgroup_root: &Path,
     authorization: &RuntimeAuthorization,
+    kernel_ops: Arc<dyn KernelResourceOps>,
 ) -> Result<(), RuntimeError> {
     let containers = runtime_dir.join("containers");
     let entries = match fs::read_dir(&containers) {
@@ -1063,6 +1126,7 @@ fn recover_pending_network_cleanups(
             container_dir.clone(),
             cgroup_root.to_path_buf(),
             pending,
+            Arc::clone(&kernel_ops),
         )?;
         if let Some(authority) = witnessed_authority.as_ref() {
             rollback.rollback_with_authority(authority);
@@ -1282,6 +1346,7 @@ pub struct ContainerRuntime {
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
     authorization: RuntimeAuthorization,
     phase_hook: Arc<dyn LifecyclePhaseHook>,
+    kernel_ops: Arc<dyn KernelResourceOps>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1333,6 +1398,7 @@ impl ContainerRuntime {
             runtime_dir,
             RuntimeAuthorization::compatibility_with_id(runtime_id),
             Arc::new(NoopLifecyclePhaseHook),
+            Arc::new(ProductionKernelResourceOps),
         )
     }
 
@@ -1340,6 +1406,7 @@ impl ContainerRuntime {
         runtime_dir: &Path,
         authorization: RuntimeAuthorization,
         phase_hook: Arc<dyn LifecyclePhaseHook>,
+        kernel_ops: Arc<dyn KernelResourceOps>,
     ) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
         let store = LocalContainerStore::open(runtime_dir.join("containers.db"))?;
@@ -1354,12 +1421,14 @@ impl ContainerRuntime {
             resource_cancel: DashMap::new(),
             authorization,
             phase_hook,
+            kernel_ops: Arc::clone(&kernel_ops),
         };
         recover_pending_network_cleanups(
             runtime_dir,
             &runtime.store,
             &runtime.cgroup_root,
             &runtime.authorization,
+            kernel_ops,
         )?;
         runtime.reconcile_pending_mutations()?;
         runtime.reconcile_persisted_state()?;
@@ -1379,6 +1448,7 @@ impl ContainerRuntime {
             runtime_dir,
             RuntimeAuthorization::new_with_id(gate, journal, runtime_id),
             Arc::new(NoopLifecyclePhaseHook),
+            Arc::new(ProductionKernelResourceOps),
         )
     }
 
@@ -1394,6 +1464,25 @@ impl ContainerRuntime {
             runtime_dir,
             RuntimeAuthorization::new_with_id(gate, journal, runtime_id),
             phase_hook,
+            Arc::new(ProductionKernelResourceOps),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_test_kernel_ops(
+        runtime_dir: &Path,
+        gate: Arc<AuthorizationGate>,
+        journal: Option<Arc<crate::witness::WitnessJournal>>,
+        phase_hook: Arc<dyn LifecyclePhaseHook>,
+        kernel_ops: Arc<dyn KernelResourceOps>,
+    ) -> Result<Self, RuntimeError> {
+        fs::create_dir_all(runtime_dir)?;
+        let runtime_id = load_or_create_runtime_id(runtime_dir)?;
+        Self::initialize(
+            runtime_dir,
+            RuntimeAuthorization::new_with_id(gate, journal, runtime_id),
+            phase_hook,
+            kernel_ops,
         )
     }
 
@@ -2004,6 +2093,7 @@ impl ContainerRuntime {
             &container_id,
             self.cgroup_root.clone(),
             creation_provenance.clone(),
+            Arc::clone(&self.kernel_ops),
         );
 
         let exec_cmd = apply_apparmor_if_enabled(&self.runtime_dir, &container_id, &command)?;
@@ -2134,33 +2224,33 @@ impl ContainerRuntime {
         };
 
         for (index, mount) in mounts.iter().enumerate() {
-            apply_authorized_bind_mounts(&rootfs_dir, std::slice::from_ref(mount))?;
+            self.kernel_ops.apply_bind(&rootfs_dir, mount)?;
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::BindKernelEffect)?;
             {
                 rollback.mark_resource_applied(&format!("mount:{index}"), None)?;
                 rollback.mark_typed_resource(
                     bind_plans[index],
-                    path_resource_identity(&rootfs_dir.join(&mount.target))?,
+                    self.kernel_ops.identity(&rootfs_dir.join(&mount.target))?,
                 )?;
             }
         }
         for (index, mount) in tmpfs_mounts.iter().enumerate() {
-            apply_tmpfs_mounts(&rootfs_dir, std::slice::from_ref(mount))?;
+            self.kernel_ops.apply_tmpfs(&rootfs_dir, mount)?;
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::TmpfsKernelEffect)?;
             rollback.mark_typed_resource(
                 tmpfs_plans[index],
-                path_resource_identity(&rootfs_dir.join(&mount.target))?,
+                self.kernel_ops.identity(&rootfs_dir.join(&mount.target))?,
             )?;
         }
         if readonly_rootfs {
-            apply_readonly_rootfs(&rootfs_dir)?;
+            self.kernel_ops.apply_readonly(&rootfs_dir)?;
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::ReadonlyKernelEffect)?;
             rollback.mark_typed_resource(
                 readonly_plan.expect("readonly plan exists"),
-                path_resource_identity(&rootfs_dir)?,
+                self.kernel_ops.identity(&rootfs_dir)?,
             )?;
         }
 
@@ -8063,7 +8153,8 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::{
-        ContainerRuntime, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend, RuntimeError,
+        BindMount, ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
+        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, RuntimeError, TmpfsMount,
     };
     use crate::authorization::{gate::AuthorizationGate, policy::PolicyStore};
     use crate::cgroups::{CpuMax, ResourceLimits};
@@ -8075,9 +8166,95 @@ mod tests {
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
     use crate::witness::{decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+
+    struct DeterministicKernelResourceOps {
+        state: PathBuf,
+    }
+
+    impl DeterministicKernelResourceOps {
+        fn load(&self) -> BTreeMap<String, ResourceIdentity> {
+            std::fs::read(&self.state)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default()
+        }
+        fn save(&self, state: &BTreeMap<String, ResourceIdentity>) -> Result<(), RuntimeError> {
+            std::fs::write(&self.state, serde_json::to_vec(state).unwrap())?;
+            Ok(())
+        }
+        fn apply(&self, path: &Path) -> Result<(), RuntimeError> {
+            std::fs::create_dir_all(path)?;
+            let metadata = std::fs::metadata(path)?;
+            let mut state = self.load();
+            let mount_id = 10_000 + state.len() as u64;
+            state.insert(
+                path.display().to_string(),
+                ResourceIdentity::Path {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    mount_id: Some(mount_id),
+                },
+            );
+            self.save(&state)
+        }
+    }
+
+    impl KernelResourceOps for DeterministicKernelResourceOps {
+        fn apply_bind(&self, rootfs: &Path, mount: &BindMount) -> Result<(), RuntimeError> {
+            self.apply(&rootfs.join(&mount.target))
+        }
+        fn apply_tmpfs(&self, rootfs: &Path, mount: &TmpfsMount) -> Result<(), RuntimeError> {
+            self.apply(&rootfs.join(&mount.target))
+        }
+        fn apply_readonly(&self, rootfs: &Path) -> Result<(), RuntimeError> {
+            self.apply(rootfs)
+        }
+        fn identity(&self, path: &Path) -> Result<ResourceIdentity, RuntimeError> {
+            if let Some(identity) = self.load().get(&path.display().to_string()) {
+                return Ok(identity.clone());
+            }
+            super::path_resource_identity(path)
+        }
+        fn detach_owned(
+            &self,
+            rootfs: &Path,
+            target: &Path,
+            expected: &ResourceIdentity,
+        ) -> Result<(), RuntimeError> {
+            let path = if target == Path::new(".") {
+                rootfs.to_path_buf()
+            } else {
+                rootfs.join(target)
+            };
+            let mut state = self.load();
+            if state.get(&path.display().to_string()) != Some(expected) {
+                return Err(RuntimeError::InvalidState(
+                    "fake mount identity changed".into(),
+                ));
+            }
+            state.remove(&path.display().to_string());
+            self.save(&state)
+        }
+        fn observe_unmarked(
+            &self,
+            rootfs: &Path,
+            target: &Path,
+            _baseline: (u64, u64, Option<u64>),
+            _source: Option<(u64, u64, Option<u64>)>,
+            _fs_type: Option<&str>,
+        ) -> Result<Option<ResourceIdentity>, ()> {
+            let path = if target == Path::new(".") {
+                rootfs.to_path_buf()
+            } else {
+                rootfs.join(target)
+            };
+            Ok(self.load().get(&path.display().to_string()).cloned())
+        }
+    }
 
     static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
     static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -9020,8 +9197,14 @@ mod tests {
 
         let authorization =
             crate::authorization::runtime::RuntimeAuthorization::compatibility_with_id([1; 16]);
-        super::recover_pending_network_cleanups(temp.path(), &store, temp.path(), &authorization)
-            .unwrap();
+        super::recover_pending_network_cleanups(
+            temp.path(),
+            &store,
+            temp.path(),
+            &authorization,
+            std::sync::Arc::new(super::ProductionKernelResourceOps),
+        )
+        .unwrap();
         assert!(container_dir.exists());
     }
 
@@ -9039,8 +9222,12 @@ mod tests {
         let mut provenance = crate::container_store::CreationProvenance::default();
         provenance.creator_operation_id = Some([8; 16]);
         provenance.resource_generation = 1;
-        let mut rollback =
-            super::CreationRollback::new("mount-ledger", temp.path().into(), provenance);
+        let mut rollback = super::CreationRollback::new(
+            "mount-ledger",
+            temp.path().into(),
+            provenance,
+            std::sync::Arc::new(super::ProductionKernelResourceOps),
+        );
         rollback.track_container_dir(container_dir);
         let root_plan = rollback
             .plan_typed_resource(super::ResourcePlan::Rootfs {
@@ -10250,21 +10437,25 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let gate = std::sync::Arc::new(AuthorizationGate::new(std::sync::Arc::new(
             PolicyStore::load(&policy).unwrap(),
         )));
-        let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
+        let journal = Some(std::sync::Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                root.join("witness"),
+                [93; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        ));
+        let runtime = ContainerRuntime::new_with_test_kernel_ops(
             &root,
             gate,
-            Some(std::sync::Arc::new(
-                WitnessJournal::open(JournalConfig::new(
-                    root.join("witness"),
-                    [93; 16],
-                    JournalMode::Required,
-                ))
-                .unwrap(),
-            )),
+            journal,
             std::sync::Arc::new(ProcessBarrier {
                 action: action.clone(),
                 phase,
                 ready,
+            }),
+            std::sync::Arc::new(DeterministicKernelResourceOps {
+                state: root.join("fake-kernel.json"),
             }),
         )
         .unwrap();
@@ -10274,6 +10465,17 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 cpu_max: None,
                 pids_max: Some(8),
             };
+            let source = root.join("mount-source");
+            std::fs::create_dir_all(&source).unwrap();
+            let mounts = vec![BindMount {
+                source,
+                target: PathBuf::from("bind-target"),
+                read_only: false,
+            }];
+            let tmpfs = vec![TmpfsMount {
+                target: PathBuf::from("tmp-target"),
+                size: Some("1m".into()),
+            }];
             let _ = runtime.run(
                 "alpine:latest",
                 &["sh".into(), "-c".into(), format!("touch {marker}")],
@@ -10284,9 +10486,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 RestartPolicy::No,
                 &[],
                 Some(&limits),
-                &[],
-                &[],
-                false,
+                &mounts,
+                &tmpfs,
+                true,
                 false,
                 None,
                 None,
@@ -10325,6 +10527,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         for action in ["run", "restart"] {
             let phases: &[&str] = if action == "run" {
                 &[
+                    "bind-effect",
+                    "tmpfs-effect",
+                    "readonly-effect",
                     "network-effect",
                     "network",
                     "cgroup-effect",
@@ -10375,12 +10580,25 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                     ))
                     .unwrap(),
                 );
-                let reopened = ContainerRuntime::new_with_authorization(
+                let reopened = ContainerRuntime::new_with_test_kernel_ops(
                     root.path(),
                     gate,
                     Some(journal.clone()),
+                    std::sync::Arc::new(NoopLifecyclePhaseHook),
+                    std::sync::Arc::new(DeterministicKernelResourceOps {
+                        state: root.path().join("fake-kernel.json"),
+                    }),
                 )
                 .unwrap();
+                let fake_state: BTreeMap<String, ResourceIdentity> =
+                    std::fs::read(root.path().join("fake-kernel.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_default();
+                assert!(
+                    fake_state.is_empty(),
+                    "{action} {phase} leaked fake mount state"
+                );
                 assert!(!marker.exists(), "{action} {phase} replayed workload");
                 for record in reopened.list().unwrap() {
                     assert!(record.pending_mutation.is_none(), "{action} {phase}");

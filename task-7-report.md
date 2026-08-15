@@ -95,6 +95,13 @@ of performing an unsafe mutation. The public crash matrix now executes the real
 network-effect and cgroup-effect pre-marker barriers as well as applied, spawn,
 and identity-release boundaries.
 
+The public run path and startup rollback now share a private `KernelResourceOps`
+boundary. Production always installs the syscall-backed implementation; only
+crate tests can inject the durable deterministic backend. The SIGKILL matrix
+uses nonempty bind, tmpfs, and readonly requests and now proves all three
+post-kernel/pre-marker barriers fire, then reopens through the same recovery
+path and verifies the modeled mount table is empty without replay.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode

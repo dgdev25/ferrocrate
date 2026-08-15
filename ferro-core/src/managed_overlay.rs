@@ -239,13 +239,19 @@ impl ManagedOverlayClient {
         self.timeout = timeout;
         self
     }
-    pub(crate) fn request_legacy(
+
+    /// Submit a compatibility-protocol mutation to the local managed-overlay
+    /// agent. This protocol has no helper grant, so it is intentionally
+    /// available only when the resolved service identity is disabled.
+    ///
+    /// Enabled callers must use [`Self::request_authorized`]; accepting their
+    /// request here would silently bypass the managed-overlay delegation gate.
+    pub fn request_disabled_compatibility(
         &self,
-        _mode: &LegacyManagedOverlayMode,
         request: &ManagedOverlayRequest,
     ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
         let (mode, policy_digest, instance_boot) = self.wire_identity()?;
-        if mode != "disabled" {
+        if mode != "disabled" || policy_digest.is_some() {
             return Err(ManagedOverlayError::Grant(GrantBuildError::IntentMismatch));
         }
         self.send(&LegacyManagedOverlayRequest {
@@ -255,6 +261,14 @@ impl ManagedOverlayClient {
             instance_boot,
             request: request.clone(),
         })
+    }
+
+    pub(crate) fn request_legacy(
+        &self,
+        _mode: &LegacyManagedOverlayMode,
+        request: &ManagedOverlayRequest,
+    ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
+        self.request_disabled_compatibility(request)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn request_authorized(

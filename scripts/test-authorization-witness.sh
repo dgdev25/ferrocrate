@@ -50,6 +50,17 @@ run compose-attribution cargo test -p ferro-compose --test authorization_fanout
 run cri-attribution cargo test -p ferro-cri --test authorization_identity
 run managed-networking-attribution cargo test -p ferro-mgr --test authorization_cross_stack -- --test-threads=1
 
+# Public-channel mutation proof. These tests invoke the externally exposed
+# command, Unix socket, tonic UDS client, configured rootless mapping writer,
+# and managed-overlay client/server. They deliberately do not call a
+# test-only authorization adapter.
+run public-cli-mutation cargo test -p ferro-cli --test cli_integration public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts -- --exact
+run public-docker-mutation cargo test -p ferro-cli --test docker_compat_integration docker_compat_volume_create_delete_routes_are_mediated -- --exact
+run public-compose-mutation cargo test -p ferro-cli --test compose_down_integration compose_down_stops_then_deletes_using_post_stop_record -- --exact
+run public-cri-mutation cargo test -p ferro-cri --test socket_integration cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering -- --exact --test-threads=1
+run public-rootless-mutation cargo test -p ferro-core --test rootless_isolation rootless_configuration_mutates_the_configured_runtime_proc_view -- --exact
+run public-managed-overlay-mutation cargo test -p ferro-core --test managed_overlay_public_client -- --test-threads=1
+
 # Task 8 helper grants are intentionally tested in both the ordinary build and
 # the feature-gated adversarial/test-support configuration.
 run helper-grants cargo test -p ferro-netd --test authorization_grants -- --test-threads=1
@@ -116,9 +127,22 @@ jq -n --argjson total "$total" --argjson passed "$passed" \
 
 jq -e '.inventory_total == .inventory_passed and .attributed_percent == 100 and .successful_bypasses == 0' "$results_json" >/dev/null
 
+channel_e2e_json="$qualification_dir/channel-e2e.json"
+jq -n \
+  --arg cli "$(grep -q 'test result: ok' "$qualification_dir/public-cli-mutation.log" && echo pass || echo fail)" \
+  --arg docker "$(grep -q 'test result: ok' "$qualification_dir/public-docker-mutation.log" && echo pass || echo fail)" \
+  --arg compose "$(grep -q 'test result: ok' "$qualification_dir/public-compose-mutation.log" && echo pass || echo fail)" \
+  --arg cri "$(grep -q 'test result: ok' "$qualification_dir/public-cri-mutation.log" && echo pass || echo fail)" \
+  --arg rootless "$(grep -q 'test result: ok' "$qualification_dir/public-rootless-mutation.log" && echo pass || echo fail)" \
+  --arg managed_overlay "$(grep -q 'test result: ok' "$qualification_dir/public-managed-overlay-mutation.log" && echo pass || echo fail)" \
+  '{cli:$cli,docker:$docker,compose:$compose,cri:$cri,rootless:$rootless,managed_overlay:$managed_overlay}' \
+  > "$channel_e2e_json"
+jq -e 'all(.[]; . == "pass")' "$channel_e2e_json" >/dev/null
+
 if grep -R -a -Fq -- "$FERRO_AUTHORIZATION_QUALIFICATION_CANARY" "$qualification_dir"; then
   printf 'qualification failed: secret canary appeared in persisted witness/sled/mirror/JSON/log/error/metrics output\n' >&2
   exit 1
 fi
 
-printf 'authorization witness qualification passed: %s canaries=0\n' "$(jq -c . "$results_json")"
+printf 'authorization witness qualification passed: %s channels=%s canaries=0\n' \
+  "$(jq -c . "$results_json")" "$(jq -c . "$channel_e2e_json")"

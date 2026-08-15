@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "cli_integration.rs"]
+mod cli_fixture;
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -22,11 +25,19 @@ impl Drop for DaemonHarness {
 
 impl DaemonHarness {
     fn spawn() -> Self {
-        let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
+        Self::spawn_mode("disabled")
+    }
+
+    fn spawn_mode(mode: &str) -> Self {
+        let runtime_dir = cli_fixture::configured_runtime(mode);
         let socket_path = runtime_dir.path().join("docker.sock");
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env(
+                "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+                format!("docker-{mode}"),
+            )
             .args([
                 "daemon",
                 "--docker-compat",
@@ -183,4 +194,31 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 
     let (status, response) = harness.request("DELETE", "/v1.45/volumes/compat-volume");
     assert_eq!(status, 204, "delete body={response}");
+}
+
+#[test]
+fn docker_compat_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() {
+    for mode in ["disabled", "shadow"] {
+        let harness = DaemonHarness::spawn_mode(mode);
+        let body =
+            format!(r#"{{"Name":"{mode}-compat-volume","Driver":"local","DriverOpts":{{}}}}"#);
+        let request = format!(
+            "POST /v1.45/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let (status, response) = harness.request_raw(&request);
+        assert_eq!(status, 201, "{mode}: {response}");
+    }
+    let harness = DaemonHarness::spawn_mode("enforce");
+    let body = r#"{"Name":"enforce-compat-volume","Driver":"local","DriverOpts":{}}"#;
+    let request = format!(
+        "POST /v1.45/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 500, "stable enforce response: {response}");
+    assert!(
+        response.contains("PolicyDenied"),
+        "stable enforce response: {response}"
+    );
 }

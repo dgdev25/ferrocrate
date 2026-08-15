@@ -183,7 +183,7 @@ fn provision_admission(auth: &Path, id: [u8; 16]) {
 }
 
 #[cfg(target_os = "linux")]
-fn configured_runtime(mode: &str) -> tempfile::TempDir {
+pub fn configured_runtime(mode: &str) -> tempfile::TempDir {
     let runtime = tempfile::tempdir().expect("runtime directory");
     fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))
         .expect("protect runtime directory");

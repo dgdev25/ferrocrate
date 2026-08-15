@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 prost = "0.14"
 ferro-net = { path = "../ferro-net" }
+ferro-core = { path = "../ferro-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -18,3 +19,8 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] 
 ipnet = "2"
 nix = { workspace = true, features = ["socket"] }
 caps = { workspace = true }
+sha2 = "0.10"
+rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

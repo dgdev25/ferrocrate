@@ -1069,12 +1069,16 @@ dependencies = [
  "base64 0.22.1",
  "caps",
  "ed25519-dalek",
+ "ferro-core",
  "ferro-net",
  "ipnet",
  "nix",
  "prost 0.14.4",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

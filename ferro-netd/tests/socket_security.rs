@@ -1,5 +1,6 @@
 #[path = "../src/policy.rs"] mod policy;
 #[path = "../src/protocol.rs"] mod protocol;
+#[path = "../src/grants.rs"] mod grants;
 #[path = "../src/server.rs"] mod server;
 
 use base64::Engine;
@@ -33,6 +34,16 @@ fn rejects_invalid_signature() {
     let body = serde_json::to_vec(&request).unwrap();
     let mut frame = (body.len() as u32).to_be_bytes().to_vec(); frame.extend(body);
     assert_eq!(server.handle_peer(1001, &frame, 1).code(), Some(RejectionCode::InvalidSignature));
+}
+
+#[test]
+fn rejects_direct_peer_without_request_bound_grant() {
+    let signing = SigningKey::from_bytes(&[7; 32]);
+    let mut envelope = SignedEnvelope { cluster_id: "cluster".into(), node_id: "node".into(), epoch: 1, revision: 1, lease_expires_unix_secs: 20, request: NetdRequest::Inspect { overlay_id: "wg0".into() }, signature: String::new() };
+    envelope.signature = base64::engine::general_purpose::STANDARD.encode(ed25519_dalek::Signer::sign(&signing, &serde_json::to_vec(&envelope).unwrap()).to_bytes());
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let mut frame = (body.len() as u32).to_be_bytes().to_vec(); frame.extend(body);
+    assert_eq!(server().handle_peer(1001, &frame, 1).code(), Some(RejectionCode::MissingGrant));
 }
 
 #[test]

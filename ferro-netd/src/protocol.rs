@@ -1,3 +1,4 @@
+use ferro_core::authorization::helper_grant::HelperGrant;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -26,24 +27,91 @@ pub struct DesiredStateEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum NetdRequest {
-    ApplyOverlay { overlay_id: String, peers: Vec<PeerSpec>, routes: Vec<String>, #[serde(default)] addresses: Vec<String> },
-    RemoveOverlay { overlay_id: String },
-    AttachEndpoint { overlay_id: String, endpoint_id: String, #[serde(default)] netns: Option<String> },
-    DetachEndpoint { overlay_id: String, endpoint_id: String },
-    Inspect { overlay_id: String },
+#[serde(deny_unknown_fields)]
+pub struct GrantedEnvelope {
+    pub envelope: SignedEnvelope,
+    pub resource_uuid: String,
+    pub resource_generation: u64,
+    pub grant: HelperGrant,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PeerSpec { pub node_id: String, pub public_key: String, pub endpoint: String, pub allowed_ips: Vec<String> }
+#[serde(deny_unknown_fields)]
+pub struct GrantedDesiredStateEnvelope {
+    pub envelope: DesiredStateEnvelope,
+    pub resource_uuid: String,
+    pub resource_generation: u64,
+    pub grant: HelperGrant,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum RejectionCode { UnauthorizedPeer, OversizedFrame, InvalidFrame, InvalidSignature, ExpiredLease, StaleRevision, PolicyViolation, Busy }
+pub enum NetdRequest {
+    ApplyOverlay {
+        overlay_id: String,
+        peers: Vec<PeerSpec>,
+        routes: Vec<String>,
+        #[serde(default)]
+        addresses: Vec<String>,
+    },
+    RemoveOverlay {
+        overlay_id: String,
+    },
+    AttachEndpoint {
+        overlay_id: String,
+        endpoint_id: String,
+        #[serde(default)]
+        netns: Option<String>,
+    },
+    DetachEndpoint {
+        overlay_id: String,
+        endpoint_id: String,
+    },
+    Inspect {
+        overlay_id: String,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum NetdResponse { Applied, Removed, Attached, Detached, Snapshot { overlay_id: String, revision: u64 }, Rejected { code: RejectionCode, reason: String } }
+pub struct PeerSpec {
+    pub node_id: String,
+    pub public_key: String,
+    pub endpoint: String,
+    pub allowed_ips: Vec<String>,
+}
 
-impl NetdResponse { pub fn code(&self) -> Option<RejectionCode> { match self { Self::Rejected { code, .. } => Some(code.clone()), _ => None } } }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RejectionCode {
+    UnauthorizedPeer,
+    OversizedFrame,
+    InvalidFrame,
+    InvalidSignature,
+    MissingGrant,
+    InvalidGrant,
+    GrantReplay,
+    ExpiredLease,
+    StaleRevision,
+    PolicyViolation,
+    Busy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NetdResponse {
+    Applied,
+    Removed,
+    Attached,
+    Detached,
+    Snapshot { overlay_id: String, revision: u64 },
+    Rejected { code: RejectionCode, reason: String },
+}
+
+impl NetdResponse {
+    pub fn code(&self) -> Option<RejectionCode> {
+        match self {
+            Self::Rejected { code, .. } => Some(code.clone()),
+            _ => None,
+        }
+    }
+}
 
 pub fn frame(envelope: &SignedEnvelope) -> Result<Vec<u8>, serde_json::Error> {
     let body = serde_json::to_vec(envelope)?;

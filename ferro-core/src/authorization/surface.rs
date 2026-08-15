@@ -76,7 +76,7 @@ pub struct SurfacePermit {
 enum SurfacePermitDurability {
     Disabled,
     Required {
-        intent: DurableIntent,
+        intent: Box<DurableIntent>,
         journal: Arc<WitnessJournal>,
     },
 }
@@ -93,7 +93,7 @@ impl SurfacePermit {
     pub fn durable_intent(&self) -> Option<&DurableIntent> {
         match &self.durability {
             SurfacePermitDurability::Disabled => None,
-            SurfacePermitDurability::Required { intent, .. } => Some(intent),
+            SurfacePermitDurability::Required { intent, .. } => Some(intent.as_ref()),
         }
     }
 
@@ -303,7 +303,7 @@ impl SurfaceAuthorization {
                     decision.decision_id = Some(id);
                     decision.rule = Some(rule_summary(proof.decision().matched_rule.as_bytes()));
                     SurfacePermitDurability::Required {
-                        intent: journal.append_decision(operation, decision)?,
+                        intent: Box::new(journal.append_decision(operation, decision)?),
                         journal: Arc::clone(journal),
                     }
                 } else {
@@ -455,7 +455,7 @@ fn complete_permit(
             ) {
                 record.reason = Some(ReasonCode::ExecutionFailed);
             }
-            journal.complete(intent, record)?;
+            journal.complete(*intent, record)?;
         }
     }
     Ok(())

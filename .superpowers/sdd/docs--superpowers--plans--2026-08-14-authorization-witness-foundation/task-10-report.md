@@ -71,3 +71,5 @@ Admission evidence is described by a versioned `AdmissionSnapshotManifest` in a 
 Stale-checkpoint cleanup no longer depends on an action-name allowlist. Ordinary user stop and delete requests are denied like other mutations; checkpoint repair has a distinct authority class, and reserved cleanup requires an opaque internal `ReservedCleanupAuthority`.
 
 Emergency commands now use one `EmergencyStateStore` holding the retained secure-directory descriptor for the complete read/transition/write or unlink transaction. State carries a monotonic generation, and every transition performs a generation CAS before the dirfd-relative atomic replacement. A stale concurrent transition is rejected.
+
+Round-3 verification: admission and reserved-cleanup focused tests passed; emergency transaction tests passed 7/7; `witness_cli` passed 8/8 including atomic admission generation advancement; and the full runnable `ferro-cli` suite passed with `FERROCRATE_SKIP_ROOT_TESTS=1` (five privileged container E2E cases explicitly ignored).

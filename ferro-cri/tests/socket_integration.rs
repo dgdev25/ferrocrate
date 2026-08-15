@@ -23,6 +23,9 @@ use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
+#[path = "../../tests/support/qualification_fixture.rs"]
+mod qualification_fixture;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 async fn wait_for_socket(path: &std::path::Path) {
@@ -258,6 +261,105 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
         ferro_core::observability::authorization_metrics_snapshot(),
     )
     .expect("persist CRI qualification evidence");
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+    }
+}
+
+/// Exercises the public tonic-over-UDS CRI mutation path under every rollout
+/// mode.  This deliberately starts the production server and talks to it with
+/// the generated client; calling `SurfaceAuthorization` directly here would
+/// not establish a CRI compatibility claim.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+
+    for mode in ["disabled", "shadow", "enforce"] {
+        let before = ferro_core::observability::authorization_metrics_snapshot();
+        let runtime = qualification_fixture::configured_runtime(mode);
+        let socket = runtime.path().join(format!("cri-{mode}.sock"));
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+        }
+
+        let registry = Server::run();
+        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[]}"#;
+        registry.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/library/alpine/manifests/latest",
+            ))
+            .times(0..=1)
+            .respond_with(status_code(200).body(manifest)),
+        );
+        let manifest_digest =
+            "sha256:1b75874027e3aa933373ebaaa9720a85e38f14be533478e9c3cc9163ff021544";
+        registry.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/alpine/manifests/{manifest_digest}"),
+            ))
+            .times(0..=1)
+            .respond_with(status_code(200).body(manifest)),
+        );
+        registry.expect(Expectation::matching(request::method_path(
+            "GET",
+            "/v2/library/alpine/blobs/sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be",
+        )).times(0..=1).respond_with(status_code(200).body("{\"config\":{}}")));
+
+        let socket_for_server = socket.clone();
+        let server = tokio::spawn(async move {
+            let _ = ferro_cri::server::serve(socket_for_server).await;
+        });
+        wait_for_socket(&socket).await;
+
+        let image = format!("{}/library/alpine", registry.addr());
+        let mut client = ImageServiceClient::new(connect_channel(socket.clone()).await);
+        let result = client
+            .pull_image(PullImageRequest {
+                image: Some(ImageSpec {
+                    image: image.clone(),
+                }),
+                auth: Default::default(),
+                sandbox_config: String::new(),
+            })
+            .await;
+
+        let canonical = ferro_core::image_tagging::canonicalize_reference(&image)
+            .expect("canonical image reference");
+        if mode == "enforce" {
+            let error = result.expect_err("enforce must deny before CRI mutation");
+            assert_eq!(error.code(), tonic::Code::PermissionDenied);
+            assert!(error.message().contains("PolicyDenied"));
+        } else {
+            let response = result
+                .expect("disabled and shadow preserve CRI pull success")
+                .into_inner();
+            assert_eq!(response.image_ref, canonical);
+        }
+
+        drop(client);
+        server.abort();
+        let _ = server.await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let store = ferro_core::image_store::LocalImageStore::open(runtime.path().join("images"))
+            .expect("open production image store");
+        assert_eq!(
+            store
+                .resolve_reference(&canonical)
+                .expect("inspect image store")
+                .is_some(),
+            mode != "enforce",
+            "enforce must leave the public CRI image store unchanged"
+        );
+        ferro_core::observability::persist_authorization_fixture_evidence(
+            &format!("cri-{mode}"),
+            before,
+            ferro_core::observability::authorization_metrics_snapshot(),
+        )
+        .expect("persist per-mode CRI qualification evidence");
+    }
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }

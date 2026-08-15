@@ -45,6 +45,9 @@ use ferro_netd::{
     transport::serve_authenticated_one,
 };
 
+#[path = "../../tests/support/qualification_fixture.rs"]
+mod qualification_fixture;
+
 const RESOURCE: &str = "9e0c6a49-e01e-3e51-9a4f-5bb9663075b4";
 
 #[test]
@@ -522,10 +525,15 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         receipt.outcome.as_deref() == Some("recovered_after_unknown_effect")
             && receipt.phase == "succeeded"
     }));
+    let qualification_after = ferro_core::observability::authorization_metrics_snapshot();
+    assert!(
+        qualification_after.attributed_total > qualification_before.attributed_total,
+        "shadow managed-overlay mutations must retain authenticated attribution"
+    );
     ferro_core::observability::persist_authorization_fixture_evidence(
-        "managed-overlay",
+        "managed-overlay-shadow",
         qualification_before,
-        ferro_core::observability::authorization_metrics_snapshot(),
+        qualification_after,
     )
     .expect("persist managed-overlay qualification evidence");
 }
@@ -614,6 +622,154 @@ fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
     .unwrap();
     let mut response = [0_u8; 1];
     assert_eq!(stream.read(&mut response).unwrap(), 0);
+}
+
+/// Qualification uses the public manager socket client in disabled mode and
+/// deliberately proves that an enforce policy stops the request before either
+/// manager allocation or deterministic-netd execution.  Shadow's full
+/// controller→agent→manager→netd path is covered above; it requires a real
+/// parent grant and emits a would-deny decision.
+#[test]
+fn public_managed_overlay_disabled_compatibility_and_enforce_denial_are_stable() {
+    let uid = nix::unistd::geteuid().as_raw();
+
+    let before_disabled = ferro_core::observability::authorization_metrics_snapshot();
+    let disabled_dir = tempfile::tempdir().expect("disabled manager directory");
+    let disabled = Arc::new(
+        LocalApi::new(
+            uid,
+            1_000,
+            Ipam::new(
+                "10.24.0.0/29".parse().unwrap(),
+                "10.24.0.1".parse().unwrap(),
+                vec![],
+            )
+            .unwrap(),
+        )
+        .with_runtime_executable(std::env::current_exe().unwrap())
+        .with_authorization_identity(
+            AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+            "qualification-disabled",
+        ),
+    );
+    disabled
+        .register_overlay(
+            "wg0",
+            OverlayConfig {
+                bridge: "wg0".into(),
+                gateway: "10.24.0.1".parse().unwrap(),
+                prefix: 29,
+                mtu: 1400,
+            },
+        )
+        .unwrap();
+    let disabled_socket = disabled_dir.path().join("manager.sock");
+    let serving = Arc::clone(&disabled);
+    let socket = disabled_socket.clone();
+    std::thread::spawn(move || serving.serve_unix(socket).unwrap());
+    wait_for_socket(&disabled_socket);
+    let disabled_client = ManagedOverlayClient::new(&disabled_socket).with_authorization_identity(
+        AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+        "qualification-disabled",
+    );
+    let attach = ManagedOverlayRequest::AttachContainer {
+        overlay_id: "wg0".into(),
+        container_id: "compat-container".into(),
+        now_unix: 100,
+    };
+    assert!(matches!(
+        disabled_client.request_disabled_compatibility(&attach),
+        Ok(ManagedOverlayResponse::Attached(_))
+    ));
+    assert!(matches!(
+        disabled_client.request_disabled_compatibility(&ManagedOverlayRequest::DetachContainer {
+            overlay_id: "wg0".into(),
+            container_id: "compat-container".into(),
+            now_unix: 101,
+        }),
+        Ok(ManagedOverlayResponse::Detached { released: true })
+    ));
+    ferro_core::observability::persist_authorization_fixture_evidence(
+        "managed-overlay-disabled",
+        before_disabled,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    )
+    .expect("persist disabled manager qualification evidence");
+
+    let before_enforce = ferro_core::observability::authorization_metrics_snapshot();
+    let enforce_dir = qualification_fixture::configured_runtime("enforce");
+    let policy = enforce_dir.path().join("authorization/active-policy.toml");
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy).expect("load protected enforce policy"),
+    )));
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            enforce_dir.path().join("enforce-witness"),
+            [0x75; 16],
+            JournalMode::Required,
+        ))
+        .expect("open enforce witness"),
+    );
+    let denied = match authorize_attach(gate, journal, "denied-container", 7, "wg0") {
+        Ok(_) => panic!("enforce must deny managed-overlay parent authority"),
+        Err(error) => error,
+    };
+    assert!(
+        denied.contains("PolicyDenied"),
+        "stable enforce denial: {denied}"
+    );
+
+    let enforce = Arc::new(
+        LocalApi::new(
+            uid,
+            1_000,
+            Ipam::new(
+                "10.25.0.0/29".parse().unwrap(),
+                "10.25.0.1".parse().unwrap(),
+                vec![],
+            )
+            .unwrap(),
+        )
+        .with_runtime_executable(std::env::current_exe().unwrap())
+        .with_authorization_identity(
+            AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([9; 32])).unwrap(),
+            "qualification-enforce",
+        ),
+    );
+    enforce
+        .register_overlay(
+            "wg0",
+            OverlayConfig {
+                bridge: "wg0".into(),
+                gateway: "10.25.0.1".parse().unwrap(),
+                prefix: 29,
+                mtu: 1400,
+            },
+        )
+        .unwrap();
+    let enforce_socket = enforce_dir.path().join("manager.sock");
+    let serving = Arc::clone(&enforce);
+    let socket = enforce_socket.clone();
+    std::thread::spawn(move || serving.serve_unix(socket).unwrap());
+    wait_for_socket(&enforce_socket);
+    let enforce_client = ManagedOverlayClient::new(&enforce_socket).with_authorization_identity(
+        AuthorizationServiceMode::new(AuthorizationMode::Enforce, Some([9; 32])).unwrap(),
+        "qualification-enforce",
+    );
+    assert!(matches!(
+        enforce_client.request_disabled_compatibility(&attach),
+        Err(ferro_core::managed_overlay::ManagedOverlayError::Grant(_))
+    ));
+    assert!(
+        enforce.inspect(uid, "wg0", 100).is_ok(),
+        "enforce denial must not change overlay ownership"
+    );
+    ferro_core::observability::persist_authorization_fixture_evidence(
+        "managed-overlay-enforce",
+        before_enforce,
+        ferro_core::observability::authorization_metrics_snapshot(),
+    )
+    .expect("persist enforce manager qualification evidence");
 }
 
 fn issuer(path: &std::path::Path, uid: u32) -> GrantIssuer {

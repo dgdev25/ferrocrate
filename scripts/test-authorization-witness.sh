@@ -20,13 +20,20 @@ run() {
   "$@" 2>&1 | tee -a "$qualification_log"
 }
 
-verify_bypass_artifact() {
+verify_mode_artifact() {
+  local mode="$1"
+  local artifact="$2"
   jq -e '
     .classification == "actual-fixture"
-    and .attributed_delta > 0
-    and .unknown_principal_delta == 0
+    and ([.attributed_delta, .unknown_principal_delta, .would_deny_delta, .enforced_denial_delta, .bypass_probe_delta, .bypass_detected_delta, .successful_bypass_delta] | all(type == "number"))
     and .successful_bypass_delta == 0
-  ' "$1" >/dev/null
+  ' "$artifact" >/dev/null
+  case "$mode" in
+    shadow) jq -e '.attributed_delta > 0 and .unknown_principal_delta == 0' "$artifact" >/dev/null ;;
+    enforce) jq -e '.attributed_delta > 0 and .unknown_principal_delta == 0 and .enforced_denial_delta > 0' "$artifact" >/dev/null ;;
+    disabled) ;;
+    *) printf 'qualification failed: unknown rollout mode: %s\n' "$mode" >&2; exit 1 ;;
+  esac
 }
 
 run metrics-and-matrices cargo test -p ferro-core --test authorization_faults
@@ -55,11 +62,13 @@ run managed-networking-attribution cargo test -p ferro-mgr --test authorization_
 # and managed-overlay client/server. They deliberately do not call a
 # test-only authorization adapter.
 run public-cli-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=cli cargo test -p ferro-cli --test cli_integration public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts -- --exact
-run public-docker-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=docker cargo test -p ferro-cli --test docker_compat_integration docker_compat_volume_create_delete_routes_are_mediated -- --exact
-run public-compose-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=compose cargo test -p ferro-cli --test compose_down_integration compose_down_stops_then_deletes_using_post_stop_record -- --exact
-run public-cri-mutation cargo test -p ferro-cri --test socket_integration cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering -- --exact --test-threads=1
+run public-docker-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=docker cargo test -p ferro-cli --test docker_compat_integration docker_compat_volume_mutation_preserves_disabled_shadow_and_enforce_contracts -- --exact
+run public-compose-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=compose cargo test -p ferro-cli --test compose_down_integration public_compose_down_preserves_disabled_shadow_and_enforce_contracts -- --exact
+run public-cri-delegation cargo test -p ferro-cri --test socket_integration cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering -- --exact --test-threads=1
+run public-cri-mutation cargo test -p ferro-cri --test socket_integration public_cri_pull_preserves_disabled_shadow_and_enforce_contracts -- --exact --test-threads=1
 run public-rootless-mutation cargo test -p ferro-core --test rootless_isolation rootless_configuration_mutates_the_real_runtime_namespaces -- --exact
-run public-managed-overlay-mutation cargo test -p ferro-mgr --test authorization_cross_stack enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass -- --exact --test-threads=1
+run public-managed-overlay-shadow cargo test -p ferro-mgr --test authorization_cross_stack enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass -- --exact --test-threads=1
+run public-managed-overlay-disabled-enforce cargo test -p ferro-mgr --test authorization_cross_stack public_managed_overlay_disabled_compatibility_and_enforce_denial_are_stable -- --exact --test-threads=1
 
 # Task 8 helper grants are intentionally tested in both the ordinary build and
 # the feature-gated adversarial/test-support configuration.
@@ -104,22 +113,23 @@ if ! jq -e '
   exit 1
 fi
 
-fixture_artifacts=(
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-runtime-surface.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-compatibility.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-cli.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-docker.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-compose.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-cri.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-rootless.json"
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-managed-overlay.json"
-)
-for artifact in "${fixture_artifacts[@]}"; do
-  if [[ ! -f "$artifact" ]] || ! verify_bypass_artifact "$artifact"; then
-    printf 'qualification failed: actual fixture evidence is missing or unsafe: %s\n' "$artifact" >&2
-    exit 1
-  fi
+channels=(cli docker compose cri rootless managed-overlay)
+modes=(disabled shadow enforce)
+fixture_artifacts=()
+for channel in "${channels[@]}"; do
+  for mode in "${modes[@]}"; do
+    artifact="$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-${channel}-${mode}.json"
+    if [[ ! -f "$artifact" ]] || ! verify_mode_artifact "$mode" "$artifact"; then
+      printf 'qualification failed: channel×mode evidence is missing or unsafe: %s\n' "$artifact" >&2
+      exit 1
+    fi
+    fixture_artifacts+=("$artifact")
+  done
 done
+[[ "${#fixture_artifacts[@]}" -eq 18 ]] || {
+  printf 'qualification failed: expected exactly 18 channel×mode artifacts\n' >&2
+  exit 1
+}
 bypasses="$(jq -s '[.[].successful_bypass_delta] | add' "${fixture_artifacts[@]}")"
 probes="$(jq -s '[.[].bypass_probe_delta] | add' "${fixture_artifacts[@]}")"
 attributed="$(jq -s '[.[].attributed_delta] | add' "${fixture_artifacts[@]}")"
@@ -134,15 +144,9 @@ jq -n --argjson total "$total" --argjson passed "$passed" \
 jq -e '.inventory_total == .inventory_passed and .attributed_percent == 100 and .successful_bypasses == 0' "$results_json" >/dev/null
 
 channel_e2e_json="$qualification_dir/channel-e2e.json"
-jq -s '{fixtures: map({fixture,classification,attributed_delta,unknown_principal_delta,bypass_probe_delta,bypass_detected_delta,successful_bypass_delta})}' \
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-cli.json" \
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-docker.json" \
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-compose.json" \
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-cri.json" \
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-rootless.json" \
-  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-managed-overlay.json" \
-  > "$channel_e2e_json"
-jq -e '(.fixtures | length == 6) and all(.fixtures[]; .classification == "actual-fixture" and .attributed_delta > 0 and .unknown_principal_delta == 0 and .successful_bypass_delta == 0)' "$channel_e2e_json" >/dev/null
+jq -s '{fixtures: map({fixture,classification,attributed_delta,unknown_principal_delta,would_deny_delta,enforced_denial_delta,bypass_probe_delta,bypass_detected_delta,successful_bypass_delta})}' \
+  "${fixture_artifacts[@]}" > "$channel_e2e_json"
+jq -e '(.fixtures | length == 18) and all(.fixtures[]; .classification == "actual-fixture" and .successful_bypass_delta == 0) and ([.fixtures[] | select(.fixture | endswith("-shadow"))] | length == 6) and ([.fixtures[] | select(.fixture | endswith("-enforce"))] | length == 6)' "$channel_e2e_json" >/dev/null
 
 if grep -R -a -Fq -- "$FERRO_AUTHORIZATION_QUALIFICATION_CANARY" "$qualification_dir"; then
   printf 'qualification failed: secret canary appeared in persisted witness/sled/mirror/JSON/log/error/metrics output\n' >&2

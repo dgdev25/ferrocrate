@@ -20,6 +20,7 @@ tempfile = { workspace = true }
 tower = "0.4"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 httptest = "0.16"
+sha2 = "0.10"
 
 [build-dependencies]
 tonic-build = "0.11"

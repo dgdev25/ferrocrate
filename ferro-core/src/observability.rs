@@ -94,6 +94,8 @@ pub struct AuthorizationFixtureEvidence {
     pub classification: FixtureClassification,
     pub attributed_delta: u64,
     pub unknown_principal_delta: u64,
+    pub would_deny_delta: u64,
+    pub enforced_denial_delta: u64,
     pub bypass_probe_delta: u64,
     pub bypass_detected_delta: u64,
     pub successful_bypass_delta: u64,
@@ -115,6 +117,12 @@ impl AuthorizationFixtureEvidence {
             unknown_principal_delta: after
                 .unknown_principal_total
                 .saturating_sub(before.unknown_principal_total),
+            would_deny_delta: after
+                .would_deny_total
+                .saturating_sub(before.would_deny_total),
+            enforced_denial_delta: after
+                .enforced_denial_total
+                .saturating_sub(before.enforced_denial_total),
             bypass_probe_delta: after
                 .bypass_probe_total
                 .saturating_sub(before.bypass_probe_total),

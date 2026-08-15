@@ -51,3 +51,18 @@ Final adversarial coverage includes:
 - New modules are below 500 lines (`helper_grant.rs`: 303; `grants.rs`: 310).
 
 No new architecture decision was introduced beyond ADR-0008 through ADR-0011.
+
+## Review hardening rounds
+
+Round-two hardening added an exclusive, fsynced manager parent-delegation ledger. Parent request ID, operation ID, and nonce are consumed before IPAM or child minting; the proposed child identity is persisted first, completed responses survive restart, and in-progress replay cannot obtain a fresh nonce.
+
+Durable helper minting now verifies the journaled canonical request digest against the `AuthorizedRequest`, requires the exact requested overlay to be present in authorized network facts, and opens signing keys with `O_NOFOLLOW` before descriptor-based owner/mode/type/link-count checks.
+
+A controller-signed, revision-bound `DesiredAuthorizationBundle` transport and enforcing agent consumer were added. The agent verifies the desired-state digest and exact apply/remove transition, then forwards only the provided per-operation `GrantedEnvelope` values. Legacy reconciliation is available only through explicit disabled mode. Because the controller currently has neither a legitimate root per-overlay grant issuer nor persisted authorization bundles, non-empty production desired state fails closed instead of exercising ambient authority; completing that producer requires extending controller authorization and persistence.
+
+Additional verification:
+
+- `cargo test -p ferro-mgr --lib` — PASS (7 tests, including restart and separate-process ledger exclusion).
+- `cargo test -p ferro-core authorization:: --lib` — PASS (46 tests).
+- `cargo test -p ferro-core witness::journal --lib` — PASS.
+- `cargo check -p ferro-mgr --lib --bin ferro-agent` — PASS.

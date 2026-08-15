@@ -1,6 +1,7 @@
 use super::protocol::{read_frame, write_frame, SinkReceipt, SinkRequest};
 use ed25519_dalek::SigningKey;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -31,6 +32,14 @@ pub struct UnixSinkStore {
     key: SigningKey,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSinkEntry {
+    version: u8,
+    record: Vec<u8>,
+    receipt: SinkReceipt,
+}
+
 impl UnixSinkStore {
     pub fn open(mut file: File, journal_id: [u8; 16], key: SigningKey) -> Result<Self, String> {
         let mut bytes = Vec::new();
@@ -48,8 +57,14 @@ impl UnixSinkStore {
             if length > super::protocol::MAX_FRAME_BYTES || bytes.len() - offset < length {
                 return Err("invalid emergency sink store frame".into());
             }
-            let receipt: SinkReceipt = serde_json::from_slice(&bytes[offset..offset + length])
+            let entry: StoredSinkEntry = serde_json::from_slice(&bytes[offset..offset + length])
                 .map_err(|e| e.to_string())?;
+            if entry.version != 1
+                || Sha256::digest(&entry.record).as_slice() != entry.receipt.record_hash
+            {
+                return Err("emergency sink stored record hash mismatch".into());
+            }
+            let receipt = entry.receipt;
             receipt.verify(&key.verifying_key())?;
             if receipt.journal_id != journal_id || receipt.sequence != next_sequence {
                 return Err("emergency sink store chain mismatch".into());
@@ -116,7 +131,12 @@ impl UnixSinkStore {
             signature: Vec::new(),
         };
         receipt.sign(&self.key)?;
-        let durable = serde_json::to_vec(&receipt).map_err(|e| e.to_string())?;
+        let durable = serde_json::to_vec(&StoredSinkEntry {
+            version: 1,
+            record: request.record,
+            receipt: receipt.clone(),
+        })
+        .map_err(|e| e.to_string())?;
         self.file
             .write_all(&(durable.len() as u32).to_be_bytes())
             .and_then(|_| self.file.write_all(&durable))
@@ -265,5 +285,34 @@ mod tests {
         let mut restarted = UnixSinkStore::open(restart_file, [1; 16], key).unwrap();
         assert_eq!(restarted.append(request("n", 0, b"intent")).unwrap(), first);
         assert!(restarted.append(request("n", 1, b"different")).is_err());
+    }
+
+    #[test]
+    fn restart_rejects_a_stored_record_that_does_not_match_its_signed_receipt() {
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let path = named.path().to_owned();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let mut store = UnixSinkStore::open(named.reopen().unwrap(), [1; 16], key.clone()).unwrap();
+        store.append(request("n", 0, b"intent")).unwrap();
+        drop(store);
+
+        let bytes = std::fs::read(&path).unwrap();
+        let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let mut entry: StoredSinkEntry = serde_json::from_slice(&bytes[4..4 + length]).unwrap();
+        entry.record[0] ^= 1;
+        let body = serde_json::to_vec(&entry).unwrap();
+        let mut corrupt = (body.len() as u32).to_be_bytes().to_vec();
+        corrupt.extend_from_slice(&body);
+        std::fs::write(&path, corrupt).unwrap();
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        assert!(UnixSinkStore::open(file, [1; 16], key)
+            .err()
+            .unwrap()
+            .contains("stored record hash mismatch"));
     }
 }

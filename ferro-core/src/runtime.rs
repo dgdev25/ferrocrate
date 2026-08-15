@@ -145,6 +145,21 @@ trait KernelResourceOps: Send + Sync {
         source: Option<(u64, u64, Option<u64>)>,
         fs_type: Option<&str>,
     ) -> Result<Option<ResourceIdentity>, ()>;
+    fn setup_network(
+        &self,
+        container_id: &str,
+        ports: &[PortMappingRecord],
+        mode: &str,
+        backend: NetworkBackend,
+        rollback: &mut CreationRollback,
+        existing: &[ContainerRecord],
+    ) -> Result<NetworkSetup, RuntimeError>;
+    fn cleanup_test_network(
+        &self,
+        _rollback: &mut CreationRollback,
+    ) -> Option<Result<(), RuntimeError>> {
+        None
+    }
 }
 
 struct ProductionKernelResourceOps;
@@ -202,6 +217,17 @@ impl KernelResourceOps for ProductionKernelResourceOps {
         fs_type: Option<&str>,
     ) -> Result<Option<ResourceIdentity>, ()> {
         classify_unmarked_mount(Some(rootfs), target, baseline, source, fs_type)
+    }
+    fn setup_network(
+        &self,
+        container_id: &str,
+        ports: &[PortMappingRecord],
+        mode: &str,
+        backend: NetworkBackend,
+        rollback: &mut CreationRollback,
+        existing: &[ContainerRecord],
+    ) -> Result<NetworkSetup, RuntimeError> {
+        setup_network(container_id, ports, mode, backend, rollback, existing)
     }
 }
 
@@ -676,6 +702,17 @@ impl CreationRollback {
     /// Explicitly roll back all tracked resources.
     fn rollback(&mut self) {
         let typed_cleanup_failure = self.cleanup_typed_resources();
+        let kernel_ops = Arc::clone(&self.kernel_ops);
+        let test_network_cleanup = kernel_ops.cleanup_test_network(self);
+        let test_network_failure = matches!(test_network_cleanup, Some(Err(_)));
+        if test_network_cleanup.is_some() {
+            self.netns_name = None;
+            self.namespace_identity = None;
+            self.host_veth = None;
+            self.network_ownership = None;
+            self.network_backend = None;
+            self.pending_firewall_cleanup.clear();
+        }
         // Rollback cgroup - use configured cgroup_root, not hardcoded path
         if let Some(ref cgroup_name) = self.cgroup_name {
             let cgroup_path = self.cgroup_root.join(cgroup_name);
@@ -724,7 +761,8 @@ impl CreationRollback {
             (Some(name), _) => Some(name.as_str()),
             _ => None,
         };
-        let mut retain_container_dir = identity_cleanup_failure || typed_cleanup_failure;
+        let mut retain_container_dir =
+            identity_cleanup_failure || typed_cleanup_failure || test_network_failure;
         while let Some(command) = self.pending_firewall_cleanup.pop() {
             if let Err(error) = run_cmd_allow_missing(&command) {
                 retain_container_dir = true;
@@ -2258,7 +2296,8 @@ impl ContainerRuntime {
 
         let rootless = !nix::unistd::Uid::effective().is_root();
         let existing_records = self.store.list()?;
-        let mut network_setup = setup_network(
+        let kernel_ops = Arc::clone(&self.kernel_ops);
+        let mut network_setup = kernel_ops.setup_network(
             &container_id,
             port_mappings,
             network_mode,
@@ -8201,6 +8240,9 @@ mod tests {
             );
             self.save(&state)
         }
+        fn network_state_path(&self) -> PathBuf {
+            self.state.with_extension("network.json")
+        }
     }
 
     impl KernelResourceOps for DeterministicKernelResourceOps {
@@ -8253,6 +8295,81 @@ mod tests {
                 rootfs.join(target)
             };
             Ok(self.load().get(&path.display().to_string()).cloned())
+        }
+        fn setup_network(
+            &self,
+            container_id: &str,
+            _ports: &[PortMappingRecord],
+            mode: &str,
+            backend: NetworkBackend,
+            rollback: &mut super::CreationRollback,
+            _existing: &[ContainerRecord],
+        ) -> Result<super::NetworkSetup, RuntimeError> {
+            if !mode.starts_with("managed:") {
+                return super::setup_network(container_id, &[], mode, backend, rollback, &[]);
+            }
+            let identity = crate::container_store::KernelObjectIdentityRecord {
+                device: 77,
+                inode: 88,
+            };
+            let ownership: crate::container_store::NetworkOwnershipRecord =
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 2,
+                    "owner_id": container_id,
+                    "network_id": mode.strip_prefix("managed:"),
+                    "host_interface": format!("fake-{container_id}"),
+                    "host_ifindex": 42,
+                    "namespace_identity": { "device": 77, "inode": 88 },
+                    "firewall_id": format!("fw-{container_id}"),
+                    "firewall_marker": format!("ferrocrate:{container_id}")
+                }))
+                .unwrap();
+            std::fs::write(
+                self.network_state_path(),
+                serde_json::to_vec(&ownership).unwrap(),
+            )?;
+            rollback.netns_name = Some(format!("fake-{container_id}"));
+            rollback.namespace_identity = Some(identity);
+            rollback.network_backend = Some(backend);
+            rollback.network_ownership = Some(ownership.clone());
+            rollback.persist_cleanup_journal()?;
+            Ok(super::NetworkSetup {
+                netns_name: rollback.netns_name.clone(),
+                container_ip: Some("192.0.2.2".into()),
+                container_ipv6: None,
+                backend: Some(backend),
+                ownership: Some(ownership),
+                ebpf_network: None,
+                managed_overlay: Some("test".into()),
+                managed_host_veth: Some(format!("fake-{container_id}")),
+            })
+        }
+        fn cleanup_test_network(
+            &self,
+            rollback: &mut super::CreationRollback,
+        ) -> Option<Result<(), RuntimeError>> {
+            let path = self.network_state_path();
+            if !path.exists() {
+                return Some(Ok(()));
+            }
+            let observed: crate::container_store::NetworkOwnershipRecord =
+                match std::fs::read(&path)
+                    .map_err(RuntimeError::from)
+                    .and_then(|bytes| {
+                        serde_json::from_slice(&bytes)
+                            .map_err(|e| RuntimeError::Network(e.to_string()))
+                    }) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+            if observed.owner_id != rollback.container_id
+                || rollback.network_ownership.as_ref() != Some(&observed)
+            {
+                return Some(Err(RuntimeError::InvalidState(
+                    "fake network ownership changed".into(),
+                )));
+            }
+            Some(std::fs::remove_file(path).map_err(RuntimeError::from))
         }
     }
 
@@ -10397,6 +10514,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     fn phase_from_name(name: &str) -> LifecyclePhasePoint {
         match name {
+            "network-effect-repeat" => LifecyclePhasePoint::NetworkKernelEffect,
             "network" => LifecyclePhasePoint::NetworkApplied,
             "cgroup" => LifecyclePhasePoint::CgroupApplied,
             "old-stopped" => LifecyclePhasePoint::RestartOldStopped,
@@ -10476,7 +10594,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 target: PathBuf::from("tmp-target"),
                 size: Some("1m".into()),
             }];
-            let _ = runtime.run(
+            let result = runtime.run(
                 "alpine:latest",
                 &["sh".into(), "-c".into(), format!("touch {marker}")],
                 &[],
@@ -10494,10 +10612,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 None,
                 None,
                 &[],
-                "none",
+                "managed:test",
                 NetworkBackend::Iptables,
                 None,
             );
+            let _ = result;
         } else {
             let mut old = std::process::Command::new("sleep")
                 .arg("60")
@@ -10531,6 +10650,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                     "tmpfs-effect",
                     "readonly-effect",
                     "network-effect",
+                    "network-effect-repeat",
                     "network",
                     "cgroup-effect",
                     "cgroup",
@@ -10598,6 +10718,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 assert!(
                     fake_state.is_empty(),
                     "{action} {phase} leaked fake mount state"
+                );
+                assert!(
+                    !root.path().join("fake-kernel.network.json").exists(),
+                    "{action} {phase} leaked fake network state"
                 );
                 assert!(!marker.exists(), "{action} {phase} replayed workload");
                 for record in reopened.list().unwrap() {

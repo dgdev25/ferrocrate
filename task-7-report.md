@@ -102,6 +102,14 @@ uses nonempty bind, tmpfs, and readonly requests and now proves all three
 post-kernel/pre-marker barriers fire, then reopens through the same recovery
 path and verifies the modeled mount table is empty without replay.
 
+The same private backend now owns actual network setup and rollback selection.
+Its test implementation durably models namespace, veth, firewall marker, and
+ownership identity before `NetworkKernelEffect`; Required-mode reopen verifies
+and deletes that exact state. The subprocess matrix contains exactly fourteen
+crash cases: run bind, tmpfs, readonly, network pre-marker (repeated to prove
+durable reopen determinism), network applied, cgroup pre-marker, cgroup applied,
+spawn, and identity; plus restart network, old-stopped, spawn, and identity.
+
 Verification on 2026-08-15:
 
 - `runtime_authorization`: 24 passed, including separately named required-mode

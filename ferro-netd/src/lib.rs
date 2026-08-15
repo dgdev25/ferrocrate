@@ -11,6 +11,7 @@ mod request_binding;
 pub mod server;
 mod server_config;
 mod server_dispatch;
+mod server_endpoint;
 mod server_execute;
 mod server_grants;
 mod server_state;

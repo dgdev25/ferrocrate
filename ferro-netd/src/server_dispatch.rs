@@ -15,6 +15,46 @@ pub(crate) struct Dispatch {
 }
 
 impl NetdServer {
+    pub(crate) fn validate_frame(
+        &self,
+        uid: u32,
+        frame: &[u8],
+    ) -> Result<(), crate::protocol::NetdResponse> {
+        use crate::protocol::{RejectionCode, MAX_FRAME_BYTES};
+        if uid != self.uid {
+            return Err(crate::server_grants::reject(
+                RejectionCode::UnauthorizedPeer,
+                "unexpected Unix peer UID",
+            ));
+        }
+        if frame.len() < 4 || frame.len() > MAX_FRAME_BYTES + 4 {
+            return Err(crate::server_grants::reject(
+                RejectionCode::OversizedFrame,
+                "invalid frame length",
+            ));
+        }
+        let length = u32::from_be_bytes(frame[..4].try_into().expect("prefix")) as usize;
+        if length > MAX_FRAME_BYTES || length != frame.len() - 4 {
+            return Err(crate::server_grants::reject(
+                RejectionCode::OversizedFrame,
+                "invalid frame length",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_granted_handshake(
+        &self,
+        handshake: &crate::protocol::ServiceHandshake,
+    ) -> bool {
+        use ferro_core::authorization::AuthorizationServiceMode;
+        let Some((expected, boot)) = &self.authorization_identity else {
+            return true;
+        };
+        AuthorizationServiceMode::parse(&handshake.mode, handshake.policy_digest)
+            .is_ok_and(|peer| expected.require_match(peer).is_ok())
+            && handshake.instance_boot == *boot
+    }
     pub(crate) fn prepare_dispatch(
         &mut self,
         uid: u32,

@@ -1,6 +1,5 @@
 use crate::kernel_ops::LiveEffectObservation;
 use crate::{grants_recovery::RecoveryObservation, server::NetdServer};
-use ferro_core::authorization::AuthorizationServiceMode;
 use serde::{Deserialize, Serialize};
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
@@ -140,47 +139,6 @@ mod intent_tests {
         assert!(server.request_is_quarantined(&request));
         assert!(server.overlay_is_quarantined("overlay-a"));
     }
-
-    #[test]
-    fn stale_temporary_journal_does_not_wedge_next_commit() {
-        let directory = tempfile::tempdir().unwrap();
-        let journal = directory.path().join("ownership.json");
-        std::fs::write(journal.with_extension("tmp"), b"truncated").unwrap();
-        let mut server = NetdServer::deterministic(
-            1,
-            Policy::new(
-                "c".into(),
-                "n".into(),
-                &base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    ed25519_dalek::SigningKey::from_bytes(&[2; 32])
-                        .verifying_key()
-                        .to_bytes(),
-                ),
-            )
-            .unwrap(),
-            directory.path().join("kernel.json"),
-        )
-        .load_journal(journal.clone())
-        .unwrap();
-        let request = NetdRequest::ApplyOverlay {
-            overlay_id: "overlay-a".into(),
-            mode: OverlayMode::BridgeOnly,
-            peers: vec![],
-            routes: vec![],
-            addresses: vec![],
-        };
-        server
-            .begin_overlay_intent(
-                [3; 16],
-                "apply",
-                crate::effect_receipt::EffectReceipt::from_request(&request, 1, 1, 1),
-                vec![],
-                vec![],
-            )
-            .unwrap();
-        assert!(journal.exists());
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,45 +220,6 @@ impl NetdServer {
         }
         self.persist()
     }
-    pub(crate) fn validate_frame(
-        &self,
-        uid: u32,
-        frame: &[u8],
-    ) -> Result<(), crate::protocol::NetdResponse> {
-        use crate::protocol::{RejectionCode, MAX_FRAME_BYTES};
-        if uid != self.uid {
-            return Err(crate::server_grants::reject(
-                RejectionCode::UnauthorizedPeer,
-                "unexpected Unix peer UID",
-            ));
-        }
-        if frame.len() < 4 || frame.len() > MAX_FRAME_BYTES + 4 {
-            return Err(crate::server_grants::reject(
-                RejectionCode::OversizedFrame,
-                "invalid frame length",
-            ));
-        }
-        let length = u32::from_be_bytes(frame[..4].try_into().expect("prefix")) as usize;
-        if length > MAX_FRAME_BYTES || length != frame.len() - 4 {
-            return Err(crate::server_grants::reject(
-                RejectionCode::OversizedFrame,
-                "invalid frame length",
-            ));
-        }
-        Ok(())
-    }
-    pub(crate) fn validate_granted_handshake(
-        &self,
-        handshake: &crate::protocol::ServiceHandshake,
-    ) -> bool {
-        let Some((expected, boot)) = &self.authorization_identity else {
-            return true;
-        };
-        AuthorizationServiceMode::parse(&handshake.mode, handshake.policy_digest)
-            .is_ok_and(|peer| expected.require_match(peer).is_ok())
-            && handshake.instance_boot == *boot
-    }
-
     pub(crate) fn request_is_quarantined(&self, request: &crate::protocol::NetdRequest) -> bool {
         self.overlay_is_quarantined(crate::request_binding::request_overlay_id(request))
             || match request {

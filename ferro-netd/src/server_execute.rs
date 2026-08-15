@@ -482,60 +482,7 @@ impl NetdServer {
                 NetdResponse::Attached
             }
             NetdRequest::DetachEndpoint { endpoint_id, .. } => {
-                let identity = format!("endpoint:{endpoint_id}");
-                if self
-                    .begin_overlay_intent(
-                        operation_id,
-                        "detach",
-                        effect_receipt.clone(),
-                        vec![],
-                        vec![],
-                    )
-                    .is_err()
-                {
-                    reject_effect!(
-                        RejectionCode::Busy,
-                        "failed to persist endpoint deletion intent",
-                        identity.clone()
-                    );
-                }
-                if self.endpoints.contains_key(&endpoint_id) {
-                    effect_started = true;
-                    if self.kernel.remove_endpoint(&endpoint_id).is_err() {
-                        reject_effect!(
-                            RejectionCode::Busy,
-                            "failed to destroy endpoint veth",
-                            format!("endpoint:{endpoint_id}")
-                        );
-                    }
-                    checkpoint!(&identity, "endpoint_link_removed");
-                    self.endpoints.remove(&endpoint_id);
-                }
-                self.effect_receipts
-                    .remove(&format!("endpoint:{endpoint_id}"));
-                if let Some(intent) = self.overlay_intents.get_mut(&identity) {
-                    intent.phase = "succeeded".into();
-                }
-                if self.persist_ownership().is_err() {
-                    self.quarantined.insert(format!("ambiguous-{identity}"));
-                    reject_effect!(
-                        RejectionCode::Busy,
-                        "failed to persist endpoint deletion",
-                        format!("endpoint:{endpoint_id}")
-                    );
-                }
-                if self
-                    .record_grant_result(
-                        &request_id,
-                        nonce,
-                        format!("endpoint:{endpoint_id}"),
-                        "detached",
-                    )
-                    .is_err()
-                {
-                    return reject(RejectionCode::Busy, "result witness unavailable");
-                }
-                NetdResponse::Detached
+                self.execute_detach(request_id, operation_id, nonce, effect_receipt, endpoint_id)
             }
             NetdRequest::Inspect { overlay_id } => {
                 self.finish_inspect(&request_id, nonce, overlay_id, envelope.revision)

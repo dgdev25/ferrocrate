@@ -21,7 +21,12 @@ run() {
 }
 
 verify_bypass_artifact() {
-  jq -e '.bypass_probe_total > 0 and .successful_bypass_total == 0 and .bypass_detected_total > 0' "$1" >/dev/null
+  jq -e '
+    .classification == "actual-fixture"
+    and .attributed_delta > 0
+    and .unknown_principal_delta == 0
+    and .successful_bypass_delta == 0
+  ' "$1" >/dev/null
 }
 
 run metrics-and-matrices cargo test -p ferro-core --test authorization_faults
@@ -77,20 +82,36 @@ while IFS= read -r entry; do
   fi
 done < <(jq -c '.[]' "$inventory_json")
 
-metric_artifact="$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/metrics.json"
-bad_metric_artifact="$qualification_dir/intentionally-broken-bypass-metrics.json"
-jq '.successful_bypass_total = 1' "$metric_artifact" > "$bad_metric_artifact"
-if verify_bypass_artifact "$bad_metric_artifact"; then
-  printf 'qualification failed: quality gate accepted an intentional successful bypass artifact\n' >&2
+negative_control="$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-negative-control.json"
+if ! jq -e '
+  .fixture == "negative-control.broken-comparator"
+  and .classification == "expected-negative-control"
+  and .bypass_probe_delta > 0
+  and .successful_bypass_delta > 0
+' "$negative_control" >/dev/null; then
+  printf 'qualification failed: negative control did not record its expected successful bypass\n' >&2
   exit 1
 fi
-verify_bypass_artifact "$metric_artifact"
-bypasses="$(jq '.successful_bypass_total' "$metric_artifact")"
-probes="$(jq '.bypass_probe_total' "$metric_artifact")"
+
+fixture_artifacts=(
+  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-runtime-surface.json"
+  "$FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT/fixture-compatibility.json"
+)
+for artifact in "${fixture_artifacts[@]}"; do
+  if [[ ! -f "$artifact" ]] || ! verify_bypass_artifact "$artifact"; then
+    printf 'qualification failed: actual fixture evidence is missing or unsafe: %s\n' "$artifact" >&2
+    exit 1
+  fi
+done
+bypasses="$(jq -s '[.[].successful_bypass_delta] | add' "${fixture_artifacts[@]}")"
+probes="$(jq -s '[.[].bypass_probe_delta] | add' "${fixture_artifacts[@]}")"
+attributed="$(jq -s '[.[].attributed_delta] | add' "${fixture_artifacts[@]}")"
+unknown="$(jq -s '[.[].unknown_principal_delta] | add' "${fixture_artifacts[@]}")"
 jq -n --argjson total "$total" --argjson passed "$passed" \
   --argjson bypasses "$bypasses" --argjson probes "$probes" \
+  --argjson attributed "$attributed" --argjson unknown "$unknown" \
   --slurpfile surfaces "$surface_results" \
-  '{inventory_total:$total, inventory_passed:$passed, attributed_percent:(if $total == 0 then 0 else (($passed * 100) / $total) end), bypass_probes:$probes, successful_bypasses:$bypasses, surfaces:$surfaces}' \
+  '{inventory_total:$total, inventory_passed:$passed, attributed_mutations:$attributed, unknown_principals:$unknown, attributed_percent:(if ($attributed + $unknown) == 0 then 0 else (($attributed * 100) / ($attributed + $unknown)) end), bypass_probes:$probes, successful_bypasses:$bypasses, surfaces:$surfaces}' \
   > "$results_json"
 
 jq -e '.inventory_total == .inventory_passed and .attributed_percent == 100 and .successful_bypasses == 0' "$results_json" >/dev/null

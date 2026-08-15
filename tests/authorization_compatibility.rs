@@ -16,7 +16,9 @@ use ferro_core::authorization::{
     RequestOrigin, ResourceKind,
 };
 use ferro_core::managed_overlay::ManagedOverlayClient;
-use ferro_core::observability::authorization_metrics_snapshot;
+use ferro_core::observability::{
+    authorization_metrics_snapshot, AuthorizationFixtureEvidence, FixtureClassification,
+};
 use ferro_core::runtime::ContainerRuntime;
 use ferro_core::witness::{JournalConfig, JournalMode, WitnessJournal};
 
@@ -85,6 +87,19 @@ fn disabled_and_shadow_preserve_external_surface_success_with_attribution() {
         after.successful_bypass_total,
         before.successful_bypass_total
     );
+    if let Some(root) = std::env::var_os("FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT") {
+        let evidence = AuthorizationFixtureEvidence::new(
+            "compatibility.runtime-surface",
+            FixtureClassification::ActualFixture,
+            before,
+            after,
+        );
+        std::fs::write(
+            std::path::Path::new(&root).join("fixture-compatibility.json"),
+            serde_json::to_vec(&evidence).expect("serialize compatibility evidence"),
+        )
+        .expect("persist compatibility evidence");
+    }
 }
 
 #[test]

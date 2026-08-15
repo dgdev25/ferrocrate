@@ -1064,6 +1064,7 @@ mod tests {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| temporary.path().to_path_buf());
         std::fs::create_dir_all(&root).unwrap();
+        let metrics_before = crate::observability::authorization_metrics_snapshot();
         let journal = Arc::new(
             crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
                 root.join("journal"),
@@ -1101,6 +1102,17 @@ mod tests {
         crate::observability::authorization_metrics()
             .export_json(&root.join("metrics.json"))
             .unwrap();
+        let evidence = crate::observability::AuthorizationFixtureEvidence::new(
+            "runtime.surface.canary",
+            crate::observability::FixtureClassification::ActualFixture,
+            metrics_before,
+            crate::observability::authorization_metrics_snapshot(),
+        );
+        std::fs::write(
+            root.join("fixture-runtime-surface.json"),
+            serde_json::to_vec(&evidence).unwrap(),
+        )
+        .unwrap();
         crate::observability::log_event(
             &root,
             crate::observability::make_event(
@@ -1139,7 +1151,13 @@ mod tests {
     fn diagnostic_broken_comparator_records_a_successful_bypass() {
         let auth = SurfaceAuthorization::compatibility();
         let permit = auth
-            .authorize_named(&origin(), Action::VolumeCreate, ResourceKind::Volume, "data", 1)
+            .authorize_named(
+                &origin(),
+                Action::VolumeCreate,
+                ResourceKind::Volume,
+                "data",
+                1,
+            )
             .unwrap();
         let before = crate::observability::authorization_metrics_snapshot();
         let result = validate_execution_with_comparator(
@@ -1153,7 +1171,23 @@ mod tests {
         assert!(result.is_ok(), "fault seam intentionally accepts mismatch");
         let after = crate::observability::authorization_metrics_snapshot();
         assert_eq!(after.bypass_probe_total, before.bypass_probe_total + 1);
-        assert_eq!(after.successful_bypass_total, before.successful_bypass_total + 1);
+        assert_eq!(
+            after.successful_bypass_total,
+            before.successful_bypass_total + 1
+        );
+        if let Some(root) = std::env::var_os("FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT") {
+            let evidence = crate::observability::AuthorizationFixtureEvidence::new(
+                "negative-control.broken-comparator",
+                crate::observability::FixtureClassification::ExpectedNegativeControl,
+                before,
+                after,
+            );
+            std::fs::write(
+                std::path::Path::new(&root).join("fixture-negative-control.json"),
+                serde_json::to_vec(&evidence).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

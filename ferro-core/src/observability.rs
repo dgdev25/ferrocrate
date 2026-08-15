@@ -78,6 +78,74 @@ pub struct AuthorizationMetricsSnapshot {
     pub checkpoint_age_seconds: u64,
 }
 
+/// Classification prevents a deliberate fault-seam bypass from being
+/// aggregated as evidence about a production mutation fixture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FixtureClassification {
+    ActualFixture,
+    ExpectedNegativeControl,
+}
+
+/// Durable, machine-readable metric deltas for one qualification fixture.
+#[derive(Clone, Debug, Serialize)]
+pub struct AuthorizationFixtureEvidence {
+    pub fixture: String,
+    pub classification: FixtureClassification,
+    pub attributed_delta: u64,
+    pub unknown_principal_delta: u64,
+    pub bypass_probe_delta: u64,
+    pub bypass_detected_delta: u64,
+    pub successful_bypass_delta: u64,
+}
+
+impl AuthorizationFixtureEvidence {
+    pub fn new(
+        fixture: impl Into<String>,
+        classification: FixtureClassification,
+        before: AuthorizationMetricsSnapshot,
+        after: AuthorizationMetricsSnapshot,
+    ) -> Self {
+        Self {
+            fixture: fixture.into(),
+            classification,
+            attributed_delta: after
+                .attributed_total
+                .saturating_sub(before.attributed_total),
+            unknown_principal_delta: after
+                .unknown_principal_total
+                .saturating_sub(before.unknown_principal_total),
+            bypass_probe_delta: after
+                .bypass_probe_total
+                .saturating_sub(before.bypass_probe_total),
+            bypass_detected_delta: after
+                .bypass_detected_total
+                .saturating_sub(before.bypass_detected_total),
+            successful_bypass_delta: after
+                .successful_bypass_total
+                .saturating_sub(before.successful_bypass_total),
+        }
+    }
+
+    pub fn attributed_percent(&self) -> Option<u8> {
+        let total = self
+            .attributed_delta
+            .checked_add(self.unknown_principal_delta)?;
+        (total != 0).then(|| ((u128::from(self.attributed_delta) * 100) / u128::from(total)) as u8)
+    }
+
+    pub fn is_expected_negative_control(&self) -> bool {
+        self.classification == FixtureClassification::ExpectedNegativeControl
+            && self.successful_bypass_delta > 0
+    }
+
+    pub fn is_promotion_clean(&self) -> bool {
+        self.classification == FixtureClassification::ActualFixture
+            && self.attributed_percent() == Some(100)
+            && self.successful_bypass_delta == 0
+    }
+}
+
 impl AuthorizationMetricsSnapshot {
     /// Percentage of externally evaluated mutations that had an authenticated
     /// principal. `None` means this snapshot contains no external evaluations

@@ -1,7 +1,8 @@
 use ferro_core::authorization::inventory::MUTATION_INVENTORY;
 use ferro_core::observability::{
-    authorization_metrics, authorization_metrics_snapshot, AuthorizationMetric,
-    AuthorizationMetrics, DecisionMetric, JournalMetric, RecoveryMetric,
+    authorization_metrics, authorization_metrics_snapshot, AuthorizationFixtureEvidence,
+    AuthorizationMetric, AuthorizationMetrics, AuthorizationMetricsSnapshot, DecisionMetric,
+    FixtureClassification, JournalMetric, RecoveryMetric,
 };
 use ferro_core::witness::{FaultPoint, FlushBoundary};
 use sha2::{Digest, Sha256};
@@ -63,8 +64,40 @@ fn production_metrics_have_a_machine_readable_snapshot() {
         before.bypass_detected_total + 1
     );
     assert_eq!(after.bypass_probe_total, before.bypass_probe_total);
-    assert_eq!(after.successful_bypass_total, before.successful_bypass_total);
+    assert_eq!(
+        after.successful_bypass_total,
+        before.successful_bypass_total
+    );
     assert!(!serde_json::to_string(&after).unwrap().contains(SECRET));
+}
+
+#[test]
+fn qualification_evidence_requires_an_explicit_negative_control_classification() {
+    let before = AuthorizationMetricsSnapshot::default();
+    let control = AuthorizationFixtureEvidence::new(
+        "negative-control.broken-comparator",
+        FixtureClassification::ExpectedNegativeControl,
+        before,
+        AuthorizationMetricsSnapshot {
+            bypass_probe_total: 1,
+            successful_bypass_total: 1,
+            ..before
+        },
+    );
+    assert!(control.is_expected_negative_control());
+    assert!(!control.is_promotion_clean());
+    let actual = AuthorizationFixtureEvidence::new(
+        "runtime.surface",
+        FixtureClassification::ActualFixture,
+        before,
+        AuthorizationMetricsSnapshot {
+            attributed_total: 1,
+            bypass_probe_total: 1,
+            bypass_detected_total: 1,
+            ..before
+        },
+    );
+    assert!(actual.is_promotion_clean());
 }
 
 #[test]

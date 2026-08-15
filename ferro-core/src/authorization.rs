@@ -83,6 +83,89 @@ pub fn open_path_no_symlinks(
     // SAFETY: `fd` is a newly owned descriptor returned by openat2.
     Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
+
+#[cfg(target_os = "linux")]
+pub struct SecureDirectory {
+    directory: std::fs::File,
+}
+
+#[cfg(target_os = "linux")]
+impl SecureDirectory {
+    pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        let directory = open_path_no_symlinks(
+            path,
+            nix::libc::O_RDONLY | nix::libc::O_DIRECTORY,
+            0,
+        )?;
+        Ok(Self { directory })
+    }
+
+    fn name(name: &str) -> std::io::Result<std::ffi::CString> {
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid relative name"));
+        }
+        std::ffi::CString::new(name).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name contains NUL"))
+    }
+
+    pub fn open_file(&self, name: &str, flags: i32, mode: u32) -> std::io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let name = Self::name(name)?;
+        // SAFETY: name and dirfd remain valid; success returns a newly owned fd.
+        let fd = unsafe { nix::libc::openat(self.directory.as_raw_fd(), name.as_ptr(), flags | nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW, mode) };
+        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    pub fn read_bounded(&self, name: &str, maximum: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut file = self.open_file(name, nix::libc::O_RDONLY, 0)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > maximum { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "insecure or oversized file")); }
+        #[cfg(unix)] { use std::os::unix::fs::MetadataExt; if metadata.nlink() != 1 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "file has multiple links")); } }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn exists(&self, name: &str) -> std::io::Result<bool> {
+        match self.open_file(name, nix::libc::O_RDONLY, 0) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn write_atomic(&self, name: &str, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let target = Self::name(name)?;
+        let temporary_name = format!(".secure-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let temporary = Self::name(&temporary_name)?;
+        let mut file = self.open_file(&temporary_name, nix::libc::O_WRONLY | nix::libc::O_CREAT | nix::libc::O_EXCL, mode)?;
+        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) { let _ = self.unlink(&temporary_name); return Err(error); }
+        // SAFETY: both names are valid and resolved relative to the retained dirfd.
+        let result = unsafe { nix::libc::renameat(self.directory.as_raw_fd(), temporary.as_ptr(), self.directory.as_raw_fd(), target.as_ptr()) };
+        if result != 0 { let error = std::io::Error::last_os_error(); let _ = self.unlink(&temporary_name); return Err(error); }
+        self.directory.sync_all()
+    }
+
+    pub fn create_exclusive(&self, name: &str, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = self.open_file(name, nix::libc::O_WRONLY | nix::libc::O_CREAT | nix::libc::O_EXCL, mode)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        self.directory.sync_all()
+    }
+
+    pub fn unlink(&self, name: &str) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let name = Self::name(name)?;
+        let result = unsafe { nix::libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
+        if result != 0 { return Err(std::io::Error::last_os_error()); }
+        self.directory.sync_all()
+    }
+}
 #[cfg(feature = "test-support")]
 pub use runtime::test_support;
 

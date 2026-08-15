@@ -2,9 +2,9 @@ use super::{decode_hex, require_host_admin, secure_owner_file};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{IsTerminal, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -172,7 +172,7 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
     }
     prepare_state_dir(args.state_dir)?;
     let state_path = args.state_dir.join(STATE_FILE);
-    if state_path.exists() {
+    if secure_exists(&state_path)? {
         return Err("an emergency grant is already active or awaits reconciliation".into());
     }
     let boot_id = boot_id()?;
@@ -190,7 +190,7 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
     let (approval_signature, recovery_public_key) =
         verify_approval(args.recovery_public_key, args.recovery_approval, &payload)?;
     let nonce_marker = nonce_marker(args.state_dir, &boot_id, args.nonce);
-    if nonce_marker.exists() {
+    if secure_exists(&nonce_marker)? {
         return Err("emergency recovery approval nonce has already been consumed".into());
     }
     let sink =
@@ -245,9 +245,10 @@ pub fn reconcile_emergency(state_dir: &Path, sink: &Path) -> Result<String, Stri
 
 fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
     let path = state_dir.join(STATE_FILE);
-    let state: EmergencyState =
-        serde_json::from_slice(&fs::read(&path).map_err(|e| format!("emergency state: {e}"))?)
-            .map_err(|e| format!("emergency state: {e}"))?;
+    let state: EmergencyState = serde_json::from_slice(
+        &secure_read(&path, 1024 * 1024).map_err(|e| format!("emergency state: {e}"))?,
+    )
+    .map_err(|e| format!("emergency state: {e}"))?;
     if state.schema != 1 || state.boot_id != boot_id()? {
         return Err("emergency state is from another boot; operator recovery is required".into());
     }
@@ -271,10 +272,7 @@ fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
         &canonical_sink,
         &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
     )?;
-    fs::remove_file(&path).map_err(|e| e.to_string())?;
-    fs::File::open(state_dir)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
+    secure_unlink(&path)?;
     Ok("emergency reconciled receipt_persisted=true normal_operations_allowed=true".into())
 }
 
@@ -307,8 +305,10 @@ where
 {
     let path = state_dir.join(STATE_FILE);
     let mut permit = EmergencyPermit(
-        serde_json::from_slice(&fs::read(&path).map_err(|e| format!("emergency state: {e}"))?)
-            .map_err(|e| e.to_string())?,
+        serde_json::from_slice(
+            &secure_read(&path, 1024 * 1024).map_err(|e| format!("emergency state: {e}"))?,
+        )
+        .map_err(|e| e.to_string())?,
     );
     let state = &mut permit.0;
     if state.boot_id != boot_id()? || uptime_ns()? >= state.deadline_uptime_ns {
@@ -644,20 +644,10 @@ fn require_preprovisioned_state_dir(path: &Path) -> Result<(), String> {
 }
 
 fn write_state(path: &Path, state: &EmergencyState) -> Result<(), String> {
-    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     let bytes = serde_json::to_vec(state).map_err(|e| e.to_string())?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|e| e.to_string())?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| e.to_string())?;
-    fs::rename(&temp, path).map_err(|e| e.to_string())?;
-    fs::File::open(path.parent().ok_or("invalid state path")?)
-        .and_then(|f| f.sync_all())
+    let (directory, name) = secure_parent(path)?;
+    directory
+        .write_atomic(&name, &bytes, 0o600)
         .map_err(|e| e.to_string())
 }
 
@@ -667,24 +657,47 @@ fn nonce_marker(state_dir: &Path, boot_id: &str, nonce: &str) -> PathBuf {
 }
 
 fn persist_nonce(path: &Path) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+    let (directory, name) = secure_parent(path)?;
+    directory
+        .create_exclusive(&name, b"FERROCRATE-EMERGENCY-NONCE-V1\n", 0o600)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 "emergency recovery approval nonce has already been consumed".to_string()
             } else {
                 format!("cannot persist emergency nonce: {error}")
             }
-        })?;
-    file.write_all(b"FERROCRATE-EMERGENCY-NONCE-V1\n")
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("cannot persist emergency nonce: {error}"))?;
-    fs::File::open(path.parent().ok_or("invalid nonce path")?)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("cannot persist emergency nonce: {error}"))
+        })
+}
+
+fn secure_parent(
+    path: &Path,
+) -> Result<(ferro_core::authorization::SecureDirectory, String), String> {
+    let parent = path.parent().ok_or("secure path has no parent")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("secure path has invalid name")?;
+    Ok((
+        ferro_core::authorization::SecureDirectory::open(parent).map_err(|e| e.to_string())?,
+        name.to_owned(),
+    ))
+}
+
+fn secure_read(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
+    let (directory, name) = secure_parent(path)?;
+    directory
+        .read_bounded(&name, maximum)
+        .map_err(|e| e.to_string())
+}
+
+fn secure_exists(path: &Path) -> Result<bool, String> {
+    let (directory, name) = secure_parent(path)?;
+    directory.exists(&name).map_err(|e| e.to_string())
+}
+
+fn secure_unlink(path: &Path) -> Result<(), String> {
+    let (directory, name) = secure_parent(path)?;
+    directory.unlink(&name).map_err(|e| e.to_string())
 }
 
 fn require_console() -> Result<(), String> {
@@ -883,5 +896,25 @@ mod tests {
         let final_link = temp.path().join("key-link");
         std::os::unix::fs::symlink(&key, &final_link).unwrap();
         assert!(open_secure_owner_file(&final_link).is_err());
+    }
+
+    #[test]
+    fn retained_state_dirfd_survives_path_replacement_without_redirecting_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let attacker = temp.path().join("attacker");
+        fs::create_dir(&state).unwrap();
+        fs::create_dir(&attacker).unwrap();
+        let directory = ferro_core::authorization::SecureDirectory::open(&state).unwrap();
+        let retained = temp.path().join("retained");
+        fs::rename(&state, &retained).unwrap();
+        std::os::unix::fs::symlink(&attacker, &state).unwrap();
+
+        directory
+            .write_atomic("state.json", b"safe", 0o600)
+            .unwrap();
+
+        assert_eq!(fs::read(retained.join("state.json")).unwrap(), b"safe");
+        assert!(!attacker.join("state.json").exists());
     }
 }

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    agent::netd_client::{GrantedEnvelope, NetdRequest, SignedEnvelope},
+    agent::netd_client::{GrantedEnvelope, NetdRequest, ServiceHandshake, SignedEnvelope},
     proto::DesiredState,
 };
 
@@ -266,6 +266,11 @@ impl ControllerGrantIssuer {
                 .to_bytes(),
         );
         Ok(GrantedEnvelope {
+            handshake: ServiceHandshake {
+                mode: "enforce".into(),
+                policy_digest: Some([0; 32]),
+                instance_boot: self.boot_id.clone(),
+            },
             envelope,
             resource_uuid: resource.resource_uuid,
             resource_generation: resource.generation,

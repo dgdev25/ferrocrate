@@ -107,7 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_api = LocalApi::new(runtime_uid, lease_expiry, ipam)
         .with_runtime_executable(required("FERROCRATE_RUNTIME_EXE")?)
         .with_authorization_identity(service_mode, instance_boot.clone());
-    let mut netd_envelope_signer = None;
+    let envelope_key_bytes = read_private_key(&required(
+        "FERROCRATE_AGENT_NETD_ENVELOPE_SIGNING_KEY_FILE",
+    )?)?;
+    let netd_envelope_signer = Some(SigningKey::from_bytes(&envelope_key_bytes));
     let local_api =
         match service_mode.mode() {
             AuthorizationMode::Disabled => local_api,
@@ -123,10 +126,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::path::Path::new(&required("FERROCRATE_AGENT_GRANT_SIGNING_KEY_FILE")?),
                     nix::unistd::Uid::effective().as_raw(),
                 )?;
-                let envelope_key_bytes = read_private_key(&required(
-                    "FERROCRATE_AGENT_NETD_ENVELOPE_SIGNING_KEY_FILE",
-                )?)?;
-                netd_envelope_signer = Some(SigningKey::from_bytes(&envelope_key_bytes));
                 let bridge = DelegationBridge::new(
                     parent_key,
                     required("FERROCRATE_RUNTIME_GRANT_ISSUER")?,
@@ -140,7 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_sequence(netd_sequence.clone());
                 local_api.with_delegation_bridge(
                     bridge,
-                    UnixNetdClient::new(&netd_socket).with_node_id(node_id.clone()),
+                    UnixNetdClient::new(&netd_socket)
+                        .with_node_id(node_id.clone())
+                        .with_authorization_identity(service_mode, instance_boot.clone())
+                        .with_transport_signing_key(
+                            netd_envelope_signer.clone().expect("signer initialized"),
+                        ),
                 )
             }
         };
@@ -160,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_api,
         netd_sequence,
         service_mode,
+        instance_boot,
         netd_envelope_signer,
     )
     .await
@@ -223,6 +228,7 @@ async fn run_control_stream(
     local_api: Arc<LocalApi>,
     netd_sequence: NetdSequence,
     service_mode: AuthorizationServiceMode,
+    instance_boot: String,
     netd_envelope_signer: Option<SigningKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = required("FERROCRATE_CONTROL_ENDPOINT")?;
@@ -244,18 +250,34 @@ async fn run_control_stream(
             cluster_id,
             verifying_keys[0].clone(),
             StateStore::new(state_path),
-            UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
+            UnixNetdClient::new(netd_socket)
+                .with_node_id(node_id.clone())
+                .with_authorization_identity(service_mode, &instance_boot)
+                .with_transport_signing_key(
+                    netd_envelope_signer
+                        .clone()
+                        .ok_or("netd transport signer is required")?,
+                ),
         )?
         .with_netd_sequence(netd_sequence.clone())
         .with_netd_envelope_signer(
-            netd_envelope_signer.ok_or("enabled authorization requires netd envelope signer")?,
+            netd_envelope_signer
+                .clone()
+                .ok_or("netd transport signer is required")?,
         )
     } else {
         Agent::new_enforcing_with_overlap(
             cluster_id,
             verifying_keys,
             StateStore::new(state_path),
-            UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
+            UnixNetdClient::new(netd_socket)
+                .with_node_id(node_id.clone())
+                .with_authorization_identity(service_mode, &instance_boot)
+                .with_transport_signing_key(
+                    netd_envelope_signer
+                        .clone()
+                        .ok_or("netd transport signer is required")?,
+                ),
         )?
         .with_netd_sequence(netd_sequence.clone())
     });

@@ -12,6 +12,7 @@ use ferro_core::{
         GrantAction, GrantIssuer, GrantKind, GrantParameters, HelperGrant, ResourceBinding,
         VerifiedHelperGrant,
     },
+    authorization::{AuthorizationMode, AuthorizationServiceMode},
     managed_overlay::{managed_parameters, ManagedOverlayDelegation, ManagedOverlayRequest},
 };
 use prost::Message;
@@ -38,17 +39,42 @@ pub fn endpoint_live_identity_digest(endpoint_id: &str) -> [u8; 32] {
     .into()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceHandshake {
+    pub mode: String,
+    pub policy_digest: Option<[u8; 32]>,
+    pub instance_boot: String,
+}
+
+impl ServiceHandshake {
+    pub fn new(mode: AuthorizationServiceMode, instance_boot: impl Into<String>) -> Self {
+        Self {
+            mode: match mode.mode() {
+                AuthorizationMode::Enforce => "enforce",
+                AuthorizationMode::Shadow => "shadow",
+                AuthorizationMode::Disabled => "disabled",
+            }
+            .into(),
+            policy_digest: mode.policy_digest(),
+            instance_boot: instance_boot.into(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct DesiredStateEnvelope<'a> {
+    handshake: &'a ServiceHandshake,
     cluster_id: &'a str,
     node_id: &'a str,
     epoch: u64,
     revision: u64,
     lease_expires_unix_secs: u64,
     desired_state: Vec<u8>,
+    signature: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NetdResponse {
     Applied,
     Removed,
@@ -105,6 +131,7 @@ pub struct SignedEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GrantedEnvelope {
+    pub handshake: ServiceHandshake,
     pub envelope: SignedEnvelope,
     pub resource_uuid: String,
     pub resource_generation: u64,
@@ -335,6 +362,11 @@ impl DelegationBridge {
                 .to_bytes(),
         );
         Ok(GrantedEnvelope {
+            handshake: ServiceHandshake {
+                mode: "enforce".into(),
+                policy_digest: Some([0; 32]),
+                instance_boot: self.boot_id.clone(),
+            },
             envelope,
             resource_uuid: parent.claims.resource.resource_uuid.clone(),
             resource_generation: parent.claims.resource.generation,
@@ -433,6 +465,11 @@ impl DelegationBridge {
                 .to_bytes(),
         );
         Ok(GrantedEnvelope {
+            handshake: ServiceHandshake {
+                mode: "enforce".into(),
+                policy_digest: Some([0; 32]),
+                instance_boot: self.boot_id.clone(),
+            },
             envelope,
             resource_uuid: parent.claims.resource.resource_uuid.clone(),
             resource_generation: parent.claims.resource.generation,
@@ -455,14 +492,32 @@ pub enum NetdClientError {
 
 impl NetdClient for UnixNetdClient {
     fn apply(&self, desired_state: &DesiredState) -> Result<(), String> {
-        let request = DesiredStateEnvelope {
+        let handshake = self
+            .handshake
+            .as_ref()
+            .ok_or_else(|| "netd authorization identity is not configured".to_string())?;
+        if handshake.mode != "disabled" {
+            return Err("legacy desired state requires disabled authorization mode".into());
+        }
+        let signer = self
+            .transport_key
+            .as_ref()
+            .ok_or_else(|| "netd transport signing key is not configured".to_string())?;
+        let mut request = DesiredStateEnvelope {
+            handshake,
             cluster_id: &desired_state.cluster_id,
             node_id: &self.node_id,
             epoch: desired_state.cluster_epoch,
             revision: desired_state.revision,
             lease_expires_unix_secs: desired_state.lease_expires_unix as u64,
             desired_state: desired_state.encode_to_vec(),
+            signature: String::new(),
         };
+        request.signature = base64::engine::general_purpose::STANDARD.encode(
+            signer
+                .sign(&serde_json::to_vec(&request).map_err(|error| error.to_string())?)
+                .to_bytes(),
+        );
         let response: NetdResponse = self.request(&request).map_err(|error| error.to_string())?;
         match response {
             NetdResponse::Applied => Ok(()),
@@ -477,8 +532,16 @@ impl NetdClient for UnixNetdClient {
         bundle: &super::desired_authorization::DesiredAuthorizationBundle,
     ) -> Result<(), String> {
         for operation in &bundle.operations {
+            let mut operation = operation.clone();
+            operation.handshake = self
+                .handshake
+                .clone()
+                .ok_or_else(|| "netd authorization identity is not configured".to_string())?;
+            if operation.handshake.mode == "disabled" {
+                return Err("granted netd requests are unavailable in disabled mode".into());
+            }
             match self
-                .request_granted(operation)
+                .request_granted(&operation)
                 .map_err(|error| error.to_string())?
             {
                 NetdResponse::Applied | NetdResponse::Removed => {}
@@ -494,6 +557,8 @@ pub struct UnixNetdClient {
     socket: PathBuf,
     timeout: Duration,
     node_id: String,
+    handshake: Option<ServiceHandshake>,
+    transport_key: Option<SigningKey>,
 }
 
 impl UnixNetdClient {
@@ -502,6 +567,8 @@ impl UnixNetdClient {
             socket: socket.into(),
             timeout: Duration::from_secs(5),
             node_id: String::new(),
+            handshake: None,
+            transport_key: None,
         }
     }
 
@@ -512,6 +579,20 @@ impl UnixNetdClient {
 
     pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
         self.node_id = node_id.into();
+        self
+    }
+
+    pub fn with_authorization_identity(
+        mut self,
+        mode: AuthorizationServiceMode,
+        instance_boot: impl Into<String>,
+    ) -> Self {
+        self.handshake = Some(ServiceHandshake::new(mode, instance_boot));
+        self
+    }
+
+    pub fn with_transport_signing_key(mut self, key: SigningKey) -> Self {
+        self.transport_key = Some(key);
         self
     }
 
@@ -544,7 +625,15 @@ impl UnixNetdClient {
         &self,
         request: &GrantedEnvelope,
     ) -> Result<NetdResponse, NetdClientError> {
-        self.request(request)
+        let mut request = request.clone();
+        request.handshake = self
+            .handshake
+            .clone()
+            .ok_or(NetdClientError::InvalidFrame)?;
+        if request.handshake.mode == "disabled" {
+            return Err(NetdClientError::InvalidFrame);
+        }
+        self.request(&request)
     }
 }
 
@@ -561,6 +650,7 @@ mod tests {
     };
     use ferro_core::managed_overlay::{ManagedOverlayDelegation, ManagedOverlayRequest};
     use serde::{Deserialize, Serialize};
+    use std::io::{Read, Write};
 
     #[derive(Serialize)]
     struct Request {
@@ -580,6 +670,57 @@ mod tests {
         assert_eq!(client.node_id, "node-a");
         let _ = Request { value: 1 };
         let _ = std::marker::PhantomData::<Response>;
+    }
+
+    #[test]
+    fn disabled_client_sends_signed_identity_bound_exact_desired_state() {
+        use crate::{agent::NetdClient, desired_state::DesiredStateBuilder, proto::OverlayState};
+        use ferro_core::authorization::{AuthorizationMode, AuthorizationServiceMode};
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("netd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let server_capture = captured.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut prefix = [0; 4];
+            stream.read_exact(&mut prefix).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+            stream.read_exact(&mut body).unwrap();
+            *server_capture.lock().unwrap() =
+                Some(serde_json::from_slice::<serde_json::Value>(&body).unwrap());
+            let response = serde_json::to_vec(&super::NetdResponse::Applied).unwrap();
+            stream
+                .write_all(&(response.len() as u32).to_be_bytes())
+                .unwrap();
+            stream.write_all(&response).unwrap();
+        });
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let client = UnixNetdClient::new(&socket)
+            .with_node_id("node-a")
+            .with_authorization_identity(
+                AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+                "boot-a",
+            )
+            .with_transport_signing_key(key);
+        let desired = DesiredStateBuilder::new("cluster-a", 2, vec![4; 32]).snapshot(
+            7,
+            vec![OverlayState {
+                overlay_id: "wg0".into(),
+                routes: vec!["10.0.0.0/24".into()],
+                peers: vec![],
+            }],
+            100,
+        );
+
+        client.apply(&desired).unwrap();
+        let frame = captured.lock().unwrap().take().unwrap();
+        assert_eq!(frame["handshake"]["mode"], "disabled");
+        assert_eq!(frame["handshake"]["instance_boot"], "boot-a");
+        assert_eq!(frame["handshake"]["policy_digest"], serde_json::Value::Null);
+        assert!(!frame["signature"].as_str().unwrap().is_empty());
+        assert!(!frame["desired_state"].as_array().unwrap().is_empty());
     }
 
     #[test]

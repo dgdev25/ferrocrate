@@ -96,6 +96,10 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         directory.path().join("kernel.json"),
         faults.clone(),
     )
+    .with_authorization_identity(
+        AuthorizationServiceMode::new(AuthorizationMode::Shadow, Some([9; 32])).unwrap(),
+        "boot-a",
+    )
     .with_grants(verifier)
     .load_journal(directory.path().join("netd-state.json"))
     .unwrap();
@@ -141,7 +145,13 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         "cluster-a",
         desired_key.verifying_key().to_bytes().to_vec(),
         StateStore::new(directory.path().join("agent-state.json")),
-        UnixNetdClient::new(&netd_socket).with_node_id("node-a"),
+        UnixNetdClient::new(&netd_socket)
+            .with_node_id("node-a")
+            .with_authorization_identity(
+                AuthorizationServiceMode::new(AuthorizationMode::Shadow, Some([9; 32])).unwrap(),
+                "boot-a",
+            )
+            .with_transport_signing_key(envelope_key.clone()),
     )
     .unwrap()
     .with_netd_sequence(sequence.clone())
@@ -188,7 +198,10 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
             "node-a",
         )
         .with_sequence(sequence.clone()),
-        UnixNetdClient::new(&netd_socket).with_node_id("node-a"),
+        UnixNetdClient::new(&netd_socket)
+            .with_node_id("node-a")
+            .with_authorization_identity(service_mode, "boot-a")
+            .with_transport_signing_key(envelope_key.clone()),
         DelegationLedger::open(ledger_path.clone()).unwrap(),
     );
     local
@@ -240,7 +253,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         )
         .unwrap();
     let ManagedOverlayResponse::Attached(attachment) = attach_response else {
-        panic!("attach rejected")
+        panic!("attach rejected: {attach_response:?}")
     };
     let cleanup_token = attachment
         .cleanup_provenance

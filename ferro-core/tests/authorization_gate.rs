@@ -53,6 +53,7 @@ fn authorization_gate_inventory_has_stable_unique_surface_ids() {
             "mutation.images",
             "mutation.volumes",
             "mutation.networks",
+            "mutation.rootless-mapping",
             "mutation.helper-calls",
         ]
     );

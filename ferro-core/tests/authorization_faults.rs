@@ -123,7 +123,7 @@ fn qualification_matrices_are_complete_and_inventory_has_no_bypass_slot() {
         FaultPoint::CheckpointBindingRejected,
     ]);
     assert_eq!(sites.len(), 22, "every documented journal kill point");
-    assert_eq!(MUTATION_INVENTORY.len(), 17);
+    assert_eq!(MUTATION_INVENTORY.len(), 18);
     assert!(MUTATION_INVENTORY.iter().all(|entry| {
         entry.id.starts_with("mutation.")
             && !entry.executor.is_empty()

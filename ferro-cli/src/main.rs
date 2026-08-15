@@ -9,13 +9,17 @@ use ferro_compose::compose::{
 };
 #[cfg(target_os = "linux")]
 use ferro_compose::{
-    Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
-    Environment as ComposeEnvironment, FanoutAction, FanoutPlan, Service as ComposeService,
-    ServiceMutation,
+    execute_fanout, Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
+    Environment as ComposeEnvironment, FanoutAction, FanoutExecutionError, FanoutOutcome,
+    FanoutPlan, FanoutReplayStore, Service as ComposeService, ServiceMutation,
 };
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 use ferro_core::docker_auth::resolve_registry_auth;
+#[cfg(target_os = "linux")]
+use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, ResourceKind};
+#[cfg(target_os = "linux")]
+use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
@@ -1438,6 +1442,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         let runtime = ContainerRuntime::new(&runtime_dir)
             .map_err(|err| err.to_string())?
             .with_request_origin(ferro_core::authorization::RequestOrigin::cli_current().map_err(|error| format!("CLI identity resolution failed: {error}"))?);
+        let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
         let image_store =
             LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
@@ -1541,11 +1546,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 embed_model.as_deref(),
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
-            Commands::Rmi { image } => handle_rmi(&image_store, &image),
-            Commands::ImagePrune => handle_image_prune(&image_store),
-            Commands::Volume { command } => handle_volume(&runtime_dir, command),
+            Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
+            Commands::ImagePrune => handle_image_prune(&image_store, &surface_authorization),
+            Commands::Volume { command } => handle_volume(&runtime_dir, command, &surface_authorization),
             #[cfg(target_os = "linux")]
-            Commands::Network { command } => handle_network(&runtime_dir, &runtime, command),
+            Commands::Network { command } => handle_network(&runtime_dir, &runtime, command, &surface_authorization),
             #[cfg(target_os = "linux")]
             Commands::Containers { format } => handle_containers(&runtime, &format),
             #[cfg(target_os = "linux")]
@@ -1572,10 +1577,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }
             #[cfg(target_os = "linux")]
             Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
-            Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
+            Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy, &surface_authorization),
             Commands::Push { image } => handle_push(&image_store, &image),
             #[cfg(target_os = "linux")]
-            Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner),
+            Commands::Scan { image, scanner } => handle_scan(&image_store, &image, &scanner, &surface_authorization),
             #[cfg(target_os = "linux")]
             Commands::Compose { file, command } => {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
@@ -2328,7 +2333,10 @@ fn handle_run(
             image
         ));
     }
-    ensure_image_present(store, image)?;
+    parse_image_reference(image).map_err(|error| error.to_string())?;
+    let origin = runtime.request_origin().ok_or_else(|| "run: authenticated request origin unavailable".to_string())?;
+    let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
+    ensure_image_present(store, image, &origin, &surface_authorization)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
     let volume_mounts = parse_volume_mounts(volume_store, volumes)?;
@@ -2845,17 +2853,14 @@ fn parse_tmpfs_mounts(
     Ok(out)
 }
 
-fn ensure_image_present(store: &LocalImageStore, image: &str) -> Result<(), String> {
+fn ensure_image_present(store: &LocalImageStore, image: &str, origin: &RequestOrigin, authorization: &SurfaceAuthorization) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
     let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
     let existing = resolve_reference(store, &canonical).map_err(|err| err.to_string())?;
     if existing.is_some() {
         return Ok(());
     }
-    let runtime_dir = runtime_dir();
-    ferro_core::image_fetch::pull_image_with_store(&runtime_dir, &canonical, store)
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    handle_pull_authorized(store, &canonical, false, origin, authorization)
 }
 
 fn build_limits(
@@ -3077,21 +3082,64 @@ fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_rmi(store: &LocalImageStore, image: &str) -> Result<(), String> {
+fn handle_rmi(store: &LocalImageStore, image: &str, authorization: &SurfaceAuthorization) -> Result<(), String> {
     parse_image_reference(image).map_err(|err| err.to_string())?;
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    handle_rmi_authorized(store, image, &origin, authorization)
+}
+
+fn handle_rmi_authorized(
+    store: &LocalImageStore,
+    image: &str,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
+    let record = resolve_reference(store, &canonical)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("rmi: not found {canonical}"))?;
+    let proof = authorization
+        .authorize_image_binding(origin, AuthorizationAction::ImageDelete, &canonical, &record.digest, 1)
+        .map_err(|error| error.to_string())?;
+    execute_image_delete(store, &canonical, &record.digest, proof)
+}
+
+fn execute_image_delete(
+    store: &LocalImageStore,
+    canonical: &str,
+    digest: &str,
+    permit: SurfacePermit,
+) -> Result<(), String> {
     let removed = store
-        .remove_reference(image)
+        .remove_reference_authorized(canonical, digest, permit)
         .map_err(|err| err.to_string())?;
     if removed {
-        println!("rmi: removed {image}");
+        println!("rmi: removed {canonical}");
     } else {
-        println!("rmi: not found {image}");
+        println!("rmi: not found {canonical}");
     }
     Ok(())
 }
 
-fn handle_image_prune(store: &LocalImageStore) -> Result<(), String> {
-    let removed = store.prune_references().map_err(|err| err.to_string())?;
+fn handle_image_prune(store: &LocalImageStore, authorization: &SurfaceAuthorization) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let records = store.list_references().map_err(|error| error.to_string())?;
+    let permits = records
+        .iter()
+        .map(|record| {
+            authorization.authorize_image_binding(
+                &origin,
+                AuthorizationAction::ImageDelete,
+                &record.reference,
+                &record.digest,
+                1,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let removed = store
+        .prune_references_authorized(permits)
+        .map_err(|err| err.to_string())?;
     println!("image prune: removed={removed}");
     Ok(())
 }
@@ -3269,15 +3317,26 @@ fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> 
     Ok(())
 }
 
-fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), String> {
+fn handle_volume(runtime_dir: &Path, command: VolumeCommands, authorization: &SurfaceAuthorization) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    handle_volume_authorized(runtime_dir, command, &origin, authorization)
+}
+
+fn handle_volume_authorized(
+    runtime_dir: &Path,
+    command: VolumeCommands,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
     let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
         .map_err(|err| err.to_string())?;
     match command {
         VolumeCommands::Create { name, driver, opts } => {
             let driver_opts = parse_driver_opts(&opts)?;
-            let record = store
-                .create_with_driver(&name, &driver, driver_opts)
-                .map_err(|err| err.to_string())?;
+            let proof = authorization
+                .authorize_named(origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, &name, 1)
+                .map_err(|error| error.to_string())?;
+            let record = execute_volume_create(&store, &name, &driver, driver_opts, proof)?;
             println!("volume create: {} {}", record.name, record.path);
         }
         VolumeCommands::Backup { name, path } => {
@@ -3286,9 +3345,16 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
         }
         VolumeCommands::Restore { name, path } => {
             if store.get(&name).map_err(|err| err.to_string())?.is_none() {
-                store.create(&name).map_err(|err| err.to_string())?;
+                let permit = authorization
+                    .authorize_named(origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, &name, 1)
+                    .map_err(|error| error.to_string())?;
+                store.create_with_driver_authorized(&name, "local", BTreeMap::new(), permit)
+                    .map_err(|err| err.to_string())?;
             }
-            store.restore(&name, &path).map_err(|err| err.to_string())?;
+            let permit = authorization
+                .authorize_named(origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, &name, 1)
+                .map_err(|error| error.to_string())?;
+            store.restore_authorized(&name, &path, permit).map_err(|err| err.to_string())?;
             println!("volume restore: {name} <- {path}");
         }
         VolumeCommands::Ls => {
@@ -3302,7 +3368,10 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
             }
         }
         VolumeCommands::Rm { name } => {
-            let removed = store.remove(&name).map_err(|err| err.to_string())?;
+            let proof = authorization
+                .authorize_named(origin, AuthorizationAction::VolumeDelete, ResourceKind::Volume, &name, 1)
+                .map_err(|error| error.to_string())?;
+            let removed = execute_volume_remove(&store, &name, proof)?;
             if removed {
                 println!("volume rm: {name}");
             } else {
@@ -3311,6 +3380,24 @@ fn handle_volume(runtime_dir: &Path, command: VolumeCommands) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+fn execute_volume_create(
+    store: &LocalVolumeStore,
+    name: &str,
+    driver: &str,
+    driver_opts: BTreeMap<String, String>,
+    permit: SurfacePermit,
+) -> Result<ferro_core::volume_store::VolumeRecord, String> {
+    store.create_with_driver_authorized(name, driver, driver_opts, permit).map_err(|error| error.to_string())
+}
+
+fn execute_volume_remove(
+    store: &LocalVolumeStore,
+    name: &str,
+    permit: SurfacePermit,
+) -> Result<bool, String> {
+    store.remove_authorized(name, permit).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3322,7 +3409,11 @@ struct NetworkRecord {
     bridge_name: String,
     bridge_cidr: String,
     created_at_unix: u64,
+    #[serde(default = "default_resource_generation")]
+    generation: u64,
 }
+
+fn default_resource_generation() -> u64 { 1 }
 
 fn is_builtin_network_mode(value: &str) -> bool {
     matches!(value, "bridge" | "host" | "none" | "wireguard")
@@ -3454,6 +3545,7 @@ fn create_network_record(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        generation: 1,
     })
 }
 
@@ -3470,6 +3562,19 @@ fn handle_network(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
     command: NetworkCommands,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    handle_network_authorized(runtime_dir, runtime, command, &origin, authorization)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_network_authorized(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    command: NetworkCommands,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
     match command {
         NetworkCommands::Create {
@@ -3485,9 +3590,10 @@ fn handle_network(
                 return Err(format!("network: already exists {name}"));
             }
             let record = create_network_record(&name, subnet.as_deref(), gateway.as_deref())?;
-            records.push(record.clone());
-            records.sort_by(|a, b| a.name.cmp(&b.name));
-            save_networks(runtime_dir, &records)?;
+            let proof = authorization
+                .authorize_named(origin, AuthorizationAction::NetworkCreate, ResourceKind::Network, &name, record.generation)
+                .map_err(|error| error.to_string())?;
+            execute_network_create(runtime_dir, &mut records, &record, proof)?;
             println!(
                 "network create: name={} driver={} subnet={} gateway={}",
                 record.name, record.driver, record.subnet, record.gateway
@@ -3515,16 +3621,50 @@ fn handle_network(
                 return Err(format!("network: in use by running containers {name}"));
             }
             let mut records = load_networks(runtime_dir)?;
-            let before = records.len();
-            records.retain(|record| record.name != name);
-            if records.len() == before {
-                return Err(format!("network: not found {name}"));
-            }
-            save_networks(runtime_dir, &records)?;
+            let generation = records.iter().find(|record| record.name == name)
+                .map(|record| record.generation).ok_or_else(|| format!("network: not found {name}"))?;
+            let proof = authorization
+                .authorize_named(origin, AuthorizationAction::NetworkDelete, ResourceKind::Network, &name, generation)
+                .map_err(|error| error.to_string())?;
+            execute_network_remove(runtime_dir, &mut records, &name, generation, proof)?;
             println!("network rm: {name}");
         }
     }
     Ok(())
+}
+
+fn execute_network_create(
+    runtime_dir: &Path,
+    records: &mut Vec<NetworkRecord>,
+    record: &NetworkRecord,
+    permit: SurfacePermit,
+) -> Result<(), String> {
+    SurfaceAuthorization::validate_execution(&permit, AuthorizationAction::NetworkCreate, ResourceKind::Network, &record.name, record.generation)
+        .map_err(|error| error.to_string())?;
+    records.push(record.clone());
+    records.sort_by(|a, b| a.name.cmp(&b.name));
+    let result = save_networks(runtime_dir, records);
+    permit.finish(result.is_ok()).map_err(|error| error.to_string())?;
+    result
+}
+
+fn execute_network_remove(
+    runtime_dir: &Path,
+    records: &mut Vec<NetworkRecord>,
+    name: &str,
+    generation: u64,
+    permit: SurfacePermit,
+) -> Result<(), String> {
+    SurfaceAuthorization::validate_execution(&permit, AuthorizationAction::NetworkDelete, ResourceKind::Network, name, generation)
+        .map_err(|error| error.to_string())?;
+    let before = records.len();
+    records.retain(|record| record.name != name);
+    if records.len() == before {
+        return Err(format!("network: not found {name}"));
+    }
+    let result = save_networks(runtime_dir, records);
+    permit.finish(result.is_ok()).map_err(|error| error.to_string())?;
+    result
 }
 
 fn parse_driver_opts(opts: &[String]) -> Result<BTreeMap<String, String>, String> {
@@ -3685,17 +3825,56 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
     }
 }
 
-fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool) -> Result<(), String> {
+fn handle_pull(store: &LocalImageStore, image: &str, lazy: bool, authorization: &SurfaceAuthorization) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    handle_pull_authorized(store, image, lazy, &origin, authorization)
+}
+
+fn handle_pull_authorized(
+    store: &LocalImageStore,
+    image: &str,
+    lazy: bool,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    let binding = ferro_core::image_fetch::inspect_image_binding(image)
+        .map_err(|error| error.to_string())?;
+    let proof = authorization
+        .authorize_image_binding(
+            origin,
+            AuthorizationAction::ImagePull,
+            &binding.reference,
+            &binding.digest,
+            1,
+        )
+        .map_err(|error| error.to_string())?;
+    execute_image_pull(store, image, lazy, &binding.reference, &binding.digest, proof)
+}
+
+fn execute_image_pull(
+    store: &LocalImageStore,
+    image: &str,
+    lazy: bool,
+    canonical: &str,
+    digest: &str,
+    permit: SurfacePermit,
+) -> Result<(), String> {
     if lazy {
+        SurfaceAuthorization::validate_execution(&permit, AuthorizationAction::ImagePull, ResourceKind::Image, canonical, 1)
+            .map_err(|error| error.to_string())?;
+        if permit.proof().canonical().image_digest() != Some(digest) { return Err("image authorization digest does not match executor".to_string()); }
         let runtime_dir = runtime_dir();
         let canonical =
             ferro_core::image_fetch::pull_manifest_only_with_store(&runtime_dir, image, store)
                 .map_err(|err| err.to_string())?;
+        permit.finish(true).map_err(|error| error.to_string())?;
         println!("pull: manifest-only image={canonical}");
         return Ok(());
     }
-    ensure_image_present(store, image)?;
-    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
+    let runtime_dir = runtime_dir();
+    ferro_core::image_fetch::pull_image_with_store_authorized(
+        &runtime_dir, image, canonical, digest, store, permit,
+    ).map_err(|error| error.to_string())?;
     println!("pull: image={canonical}");
     Ok(())
 }
@@ -3748,8 +3927,9 @@ fn handle_push(store: &LocalImageStore, image: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn handle_scan(store: &LocalImageStore, image: &str, scanner: &str) -> Result<(), String> {
-    ensure_image_present(store, image)?;
+fn handle_scan(store: &LocalImageStore, image: &str, scanner: &str, authorization: &SurfaceAuthorization) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    ensure_image_present(store, image, &origin, authorization)?;
     let runtime_dir = runtime_dir();
     let layer_paths = resolve_layer_paths_with_store(&runtime_dir, image, store)
         .map_err(|err| format!("scan: missing image layers: {err}"))?;
@@ -3816,6 +3996,7 @@ fn handle_compose(
 ) -> Result<(), String> {
     let path = find_compose_file(file).map_err(|err| err.to_string())?;
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
+    let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     match command {
         ComposeCommands::Up { profile } => {
@@ -3869,21 +4050,28 @@ fn handle_compose(
                 .as_millis()
                 .saturating_add(300_000)
                 .min(u64::MAX as u128) as u64;
-            let mutations = selected.iter().map(|(name, instance)| {
-                let service = project
-                    .compose
-                    .services
-                    .get(name)
-                    .expect("validated compose service");
-                let mut canonical =
-                    serde_json::to_vec(service).expect("serializable canonical service");
-                canonical.extend_from_slice(&(instance.len() as u64).to_be_bytes());
-                canonical.extend_from_slice(instance.as_bytes());
-                ServiceMutation::new(
-                    instance,
-                    FanoutAction::ContainerRun,
-                    Sha256::digest(canonical).into(),
-                )
+            let prepared: Vec<_> = selected
+                .into_iter()
+                .map(|(name, instance)| {
+                    let service = project
+                        .compose
+                        .services
+                        .get(&name)
+                        .ok_or_else(|| format!("compose: missing service {name}"))?;
+                    let (image, digest) = compose_service_execution_digest(
+                        runtime,
+                        store,
+                        volume_store,
+                        project_dir,
+                        &name,
+                        service,
+                        &instance,
+                    )?;
+                    Ok::<_, String>((name, instance, image, digest))
+                })
+                .collect::<Result<_, _>>()?;
+            let mutations = prepared.iter().map(|(_, instance, _, digest)| {
+                ServiceMutation::new(instance, FanoutAction::ContainerRun, *digest)
             });
             let fanout = FanoutPlan::derive(
                 parent_id,
@@ -3894,54 +4082,49 @@ fn handle_compose(
                 mutations,
             )
             .map_err(|error| error.to_string())?;
-            let mut failures = Vec::new();
-            for ((name, instance), child) in selected.into_iter().zip(fanout.children()) {
+            let result = execute_fanout(&fanout, &replay_store, current_unix_ms, |child| {
+                let (name, instance, image, _) = prepared
+                    .get(child.ordinal() as usize)
+                    .ok_or_else(|| FanoutExecutionError::Failed("compose child ordinal is invalid".into()))?;
                 let service = project
                     .compose
-                    .services
-                    .get(&name)
-                    .ok_or_else(|| format!("compose: missing service {name}"))?;
+                    .services.get(name)
+                    .ok_or_else(|| FanoutExecutionError::Failed(format!("compose: missing service {name}")))?;
                 if let Some(depends_on) = service.depends_on.as_ref() {
-                    if let Err(error) = wait_for_compose_dependencies(runtime, depends_on) {
-                        failures.push(format!("{name}: {error}"));
-                        continue;
-                    }
+                    wait_for_compose_dependencies(runtime, depends_on)
+                        .map_err(FanoutExecutionError::Failed)?;
                 }
-                fanout
-                    .verify_child(
-                        child,
-                        SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis()
-                            .min(u64::MAX as u128) as u64,
-                    )
-                    .map_err(|error| error.to_string())?;
-                runtime.set_request_origin(ferro_core::authorization::RequestOrigin::compose_child(
+                let child_runtime = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(
                     &parent_origin,
                     *child.child_id(),
                     parent_id,
                     *child.idempotency_key(),
                     ferro_core::authorization::Action::ContainerRun,
-                    instance.clone(),
+                    instance,
                     *child.request_digest(),
                     child.deadline_unix_ms(),
                     child.policy_generation(),
                     *child.policy_digest(),
                     child.attempt(),
+                    child.ordinal(),
+                    *child.plan_digest(),
                 ));
-                if let Err(error) = run_compose_service(
-                    runtime,
+                run_compose_service(
+                    &child_runtime,
                     store,
                     volume_store,
                     project_dir,
-                    &name,
+                    name,
                     service,
-                    Some(&instance),
-                ) {
-                    failures.push(format!("{instance}: {error}"));
-                }
-            }
+                    Some(instance),
+                    Some(image),
+                ).map_err(classify_compose_execution_error)
+            });
+            let failures: Vec<_> = result.statuses().iter().filter_map(|status| match status.outcome() {
+                FanoutOutcome::Succeeded => None,
+                FanoutOutcome::Denied(reason) => Some(format!("{}: denied: {reason}", hex_id(status.child_id()))),
+                FanoutOutcome::Failed(reason) => Some(format!("{}: failed: {reason}", hex_id(status.child_id()))),
+            }).collect();
             if !failures.is_empty() {
                 return Err(format!("compose partial result: {}", failures.join("; ")));
             }
@@ -3972,16 +4155,61 @@ fn handle_compose(
         ComposeCommands::Down => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
             let containers = runtime.list().map_err(|err| err.to_string())?;
-            for name in order {
-                for record in containers.iter().filter(|rec| {
+            let selected: Vec<_> = order.into_iter().flat_map(|name| {
+                containers.iter().filter(move |rec| {
                     rec.name
                         .as_deref()
                         .map(|val| val == name || val.starts_with(&format!("{name}-")))
                         .unwrap_or(false)
-                }) {
-                    let _ = runtime.stop(&record.id, std::time::Duration::from_secs(5));
-                    let _ = runtime.remove(&record.id);
-                }
+                }).cloned().collect::<Vec<_>>()
+            }).collect();
+            let parent_origin = ferro_core::authorization::RequestOrigin::cli_current()
+                .map_err(|error| format!("compose identity resolution failed: {error}"))?;
+            let mut parent_hasher = Sha256::new();
+            parent_hasher.update(b"ferrocrate/compose-down-parent/v1");
+            parent_hasher.update(SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_be_bytes());
+            let parent_hash: [u8;32] = parent_hasher.finalize().into();
+            let mut parent_id=[0;16]; parent_id.copy_from_slice(&parent_hash[..16]);
+            let (generation, policy_digest) = runtime.policy_binding();
+            let deadline = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().saturating_add(300_000).min(u64::MAX as u128) as u64;
+            let mutations = selected.iter().flat_map(|record| {
+                [FanoutAction::ContainerStop, FanoutAction::ContainerDelete].into_iter().map(move |action| {
+                    let runtime_action = match action {
+                        FanoutAction::ContainerStop => ferro_core::authorization::Action::ContainerStop,
+                        FanoutAction::ContainerDelete => ferro_core::authorization::Action::ContainerDelete,
+                        FanoutAction::ContainerRun => unreachable!(),
+                    };
+                    ServiceMutation::new(
+                        record.name.clone().unwrap_or_else(|| record.id.clone()),
+                        action,
+                        ferro_core::authorization::compose_down_executor_digest(record, runtime_action),
+                    )
+                })
+            });
+            let fanout = FanoutPlan::derive(parent_id, generation, policy_digest, deadline, 0, mutations).map_err(|error| error.to_string())?;
+            let result = execute_fanout(&fanout, &replay_store, current_unix_ms, |child| {
+                    let record = selected.get(child.ordinal() as usize / 2)
+                        .ok_or_else(|| FanoutExecutionError::Failed("compose down child ordinal is invalid".into()))?;
+                    let action = match child.action() {
+                        FanoutAction::ContainerStop => ferro_core::authorization::Action::ContainerStop,
+                        FanoutAction::ContainerDelete => ferro_core::authorization::Action::ContainerDelete,
+                        FanoutAction::ContainerRun => return Err(FanoutExecutionError::Failed("compose down contains run child".into())),
+                    };
+                    let resource = record.name.clone().unwrap_or_else(|| record.id.clone());
+                    let scoped = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(&parent_origin, *child.child_id(), parent_id, *child.idempotency_key(), action, resource, *child.request_digest(), child.deadline_unix_ms(), child.policy_generation(), *child.policy_digest(), child.attempt(), child.ordinal(), *child.plan_digest()));
+                    match action {
+                        ferro_core::authorization::Action::ContainerStop => scoped.stop(&record.id, std::time::Duration::from_secs(5)),
+                        ferro_core::authorization::Action::ContainerDelete => scoped.remove(&record.id),
+                        _ => unreachable!(),
+                    }.map(|_| ()).map_err(|error| classify_compose_execution_error(error.to_string()))
+            });
+            let failures: Vec<_> = result.statuses().iter().filter_map(|status| match status.outcome() {
+                FanoutOutcome::Succeeded => None,
+                FanoutOutcome::Denied(reason) => Some(format!("{}: denied: {reason}", hex_id(status.child_id()))),
+                FanoutOutcome::Failed(reason) => Some(format!("{}: failed: {reason}", hex_id(status.child_id()))),
+            }).collect();
+            if !failures.is_empty() {
+                return Err(format!("compose down partial result: {}", failures.join("; ")));
             }
         }
         ComposeCommands::Ps => {
@@ -4087,6 +4315,31 @@ fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<
 }
 
 #[cfg(target_os = "linux")]
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+#[cfg(target_os = "linux")]
+fn classify_compose_execution_error(error: String) -> FanoutExecutionError {
+    if error.to_ascii_lowercase().contains("denied")
+        || error.to_ascii_lowercase().contains("authorization")
+    {
+        FanoutExecutionError::Denied(error)
+    } else {
+        FanoutExecutionError::Failed(error)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn hex_id(id: &[u8; 16]) -> String {
+    id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(target_os = "linux")]
 fn run_compose_service(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
@@ -4095,8 +4348,11 @@ fn run_compose_service(
     name: &str,
     service: &ComposeService,
     instance_override: Option<&str>,
+    prepared_image: Option<&str>,
 ) -> Result<(), String> {
-    let image = if service.image.is_some() || service.build.is_some() {
+    let image = if let Some(image) = prepared_image {
+        image.to_owned()
+    } else if service.image.is_some() || service.build.is_some() {
         build_compose_image(store, project_dir, name, service)?
     } else {
         return Err(format!("compose: service {name} missing image or build"));
@@ -4186,6 +4442,73 @@ fn run_compose_service(
         )?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn compose_service_execution_digest(
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
+    project_dir: &Path,
+    name: &str,
+    service: &ComposeService,
+    instance: &str,
+) -> Result<(String, [u8; 32]), String> {
+    let image = build_compose_image(store, project_dir, name, service)?;
+    let origin = runtime
+        .request_origin()
+        .ok_or_else(|| "compose: authenticated request origin unavailable".to_string())?;
+    let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
+    ensure_image_present(store, &image, &origin, &surface_authorization)?;
+    let cmd = compose_service_command(service);
+    let env_entries = compose_service_env(project_dir, service)?;
+    let env = parse_env_entries(&env_entries)?;
+    let label_entries = compose_service_labels(service);
+    let labels = parse_key_values("label", &label_entries)?;
+    let publish = compose_service_ports(service);
+    let ports = parse_publish(&publish)?;
+    let mount_entries = compose_service_mounts(volume_store, service)?;
+    let mounts = parse_bind_mounts(&mount_entries)?;
+    let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
+    let network = match service.network_mode.as_deref() {
+        None | Some("bridge") => "bridge",
+        Some("host") => "host",
+        Some("none") => "none",
+        Some(other) => return Err(format!("compose: unsupported network_mode {other} for service {name}")),
+    };
+    let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
+        let mut value = parse_entrypoint(entrypoint)?;
+        value.extend_from_slice(&cmd);
+        value
+    } else {
+        cmd
+    };
+    let _network_name_guard = ScopedEnv::set("FERROCRATE_NETWORK_NAME", Some(network));
+    let digest = runtime
+        .normalized_run_execution_digest(
+            store,
+            &image,
+            &effective_cmd,
+            &env,
+            &labels,
+            &HashMap::new(),
+            None,
+            &restart,
+            &[],
+            None,
+            &mounts,
+            &[],
+            false,
+            false,
+            None,
+            None,
+            Some(instance),
+            &ports,
+            network,
+            NetworkBackend::Ebpf,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok((image, digest))
 }
 
 #[cfg(target_os = "linux")]
@@ -4566,16 +4889,18 @@ fn handle_docker_compat_connection(
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
     let response_result: Result<Vec<u8>, String> = (|| {
-        // Kernel authentication deliberately precedes HTTP/body decoding.
-        let peer = ferro_cli::authorization_surfaces::authenticate_docker_peer(
-            &stream,
-            ferro_cli::authorization_surfaces::DockerTelemetry::new(),
-        )
-        .map_err(|error| format!("docker peer authentication failed: {error}"))?;
-        let request = read_http_request(&mut stream)?;
+        let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
+            ferro_cli::authorization_surfaces::authenticate_docker_peer(
+                socket,
+                ferro_cli::authorization_surfaces::DockerTelemetry::new(),
+            )
+            .map(|peer| peer.request_origin())
+            .map_err(|error| format!("docker peer authentication failed: {error}"))
+        })?;
         let runtime = ContainerRuntime::new(&runtime_dir)
             .map_err(|err| err.to_string())?
-            .with_request_origin(peer.request_origin());
+            .with_request_origin(origin.clone());
+        let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
 
         let (path, query) = split_path_query(&request.path);
         let path = normalize_docker_api_path(&path);
@@ -4853,7 +5178,7 @@ fn handle_docker_compat_connection(
                     .as_ref()
                     .and_then(|ipam| ipam.config.first())
                     .and_then(|cfg| cfg.gateway.clone());
-                handle_network(
+                handle_network_authorized(
                     runtime_dir.as_ref(),
                     &runtime,
                     NetworkCommands::Create {
@@ -4861,18 +5186,22 @@ fn handle_docker_compat_connection(
                         subnet,
                         gateway,
                     },
+                    &origin,
+                    &surface_authorization,
                 )?;
                 let body = serde_json::json!({ "Id": spec.name, "Warning": "" });
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("DELETE", path) if path.starts_with("/networks/") => {
                 let id = path.trim_start_matches("/networks/");
-                handle_network(
+                handle_network_authorized(
                     runtime_dir.as_ref(),
                     &runtime,
                     NetworkCommands::Rm {
                         name: id.to_string(),
                     },
+                    &origin,
+                    &surface_authorization,
                 )?;
                 http_response(204, &[], "text/plain")
             }
@@ -4901,8 +5230,40 @@ fn handle_docker_compat_connection(
                 } else {
                     from_image.to_string()
                 };
-                ensure_image_present(&store, &reference)?;
+                handle_pull_authorized(&store, &reference, false, &origin, &surface_authorization)?;
                 http_response(200, b"{}", "application/json")
+            }
+            ("DELETE", path) if path.starts_with("/images/") => {
+                let reference = path.trim_start_matches("/images/");
+                handle_rmi_authorized(&store, reference, &origin, &surface_authorization)?;
+                http_response(200, b"[]", "application/json")
+            }
+            ("POST", "/volumes/create") => {
+                let body: serde_json::Value = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("docker: invalid volume create payload: {error}"))?;
+                let name = body.get("Name").and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "docker: volume Name is required".to_string())?;
+                let driver = body.get("Driver").and_then(serde_json::Value::as_str).unwrap_or("local");
+                let opts: Vec<String> = body.get("DriverOpts").and_then(serde_json::Value::as_object)
+                    .map(|map| map.iter().map(|(key, value)| format!("{key}={}", value.as_str().unwrap_or_default())).collect())
+                    .unwrap_or_default();
+                let driver_opts = parse_driver_opts(&opts)?;
+                let proof = surface_authorization
+                    .authorize_named(&origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, name, 1)
+                    .map_err(|error| error.to_string())?;
+                execute_volume_create(&volume_store, name, driver, driver_opts, proof)?;
+                let record = volume_store.get(name).map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("docker: volume not found after create: {name}"))?;
+                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
+                http_response(201, body.to_string().as_bytes(), "application/json")
+            }
+            ("DELETE", path) if path.starts_with("/volumes/") => {
+                let name = path.trim_start_matches("/volumes/");
+                let proof = surface_authorization
+                    .authorize_named(&origin, AuthorizationAction::VolumeDelete, ResourceKind::Volume, name, 1)
+                    .map_err(|error| error.to_string())?;
+                execute_volume_remove(&volume_store, name, proof)?;
+                http_response(204, &[], "text/plain")
             }
             _ => docker_error_response(404, "not found"),
         };
@@ -4916,6 +5277,16 @@ fn handle_docker_compat_connection(
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_docker_request_after_auth(
+    stream: &mut UnixStream,
+    authenticate: impl FnOnce(&UnixStream) -> Result<ferro_core::authorization::RequestOrigin, String>,
+) -> Result<(HttpRequest, ferro_core::authorization::RequestOrigin), String> {
+    let origin = authenticate(stream)?;
+    let request = read_http_request(stream)?;
+    Ok((request, origin))
 }
 
 #[cfg(target_os = "linux")]
@@ -5218,6 +5589,7 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use std::io::Read;
     use std::sync::Mutex;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -5229,13 +5601,21 @@ mod tests {
         handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
         handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_http_request, should_desktop_forward,
+        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, should_desktop_forward,
         structured_desktop_error, top_level_command_name, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
+    use ferro_core::authorization::surface::SurfaceAuthorization;
     use ferro_core::image_store::LocalImageStore;
+
+    fn test_surface_authorization(path: &std::path::Path) -> SurfaceAuthorization {
+        ContainerRuntime::new(path)
+            .expect("test runtime")
+            .surface_authorization()
+            .expect("surface authorization")
+    }
     use ferro_core::runtime::{ContainerRuntime, NetworkBackend};
     use ferro_core::volume_store::LocalVolumeStore;
     use std::io::Write;
@@ -5409,7 +5789,8 @@ mod tests {
     fn rmi_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_rmi(&store, "").expect_err("invalid image");
+        let authorization = test_surface_authorization(temp.path());
+        let err = handle_rmi(&store, "", &authorization).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
 
@@ -5417,7 +5798,8 @@ mod tests {
     fn image_prune_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        handle_image_prune(&store).expect("prune");
+        let authorization = test_surface_authorization(temp.path());
+        handle_image_prune(&store, &authorization).expect("prune");
     }
 
     #[test]
@@ -5560,6 +5942,21 @@ mod tests {
         drop(writer);
         let err = read_http_request(&mut reader).expect_err("invalid content-length");
         assert!(err.contains("invalid content-length"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unauthorized_docker_peer_leaves_oversized_body_unread() {
+        use std::os::unix::net::UnixStream;
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let payload = vec![b'x'; 128 * 1024];
+        client.write_all(&payload).unwrap();
+        let error = read_docker_request_after_auth(&mut server, |_| Err("unauthorized".into()))
+            .expect_err("authentication must fail before decoding");
+        assert_eq!(error, "unauthorized");
+        let mut first = [0u8; 1];
+        server.read_exact(&mut first).unwrap();
+        assert_eq!(first[0], b'x');
     }
 
     #[test]
@@ -5750,6 +6147,7 @@ mod tests {
     fn volume_handlers_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime_dir = temp.path().to_path_buf();
+        let authorization = test_surface_authorization(&runtime_dir);
 
         handle_volume(
             &runtime_dir,
@@ -5758,6 +6156,7 @@ mod tests {
                 driver: "local".to_string(),
                 opts: Vec::new(),
             },
+            &authorization,
         )
         .expect("create volume");
         let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
@@ -5777,6 +6176,7 @@ mod tests {
                 name: "data".to_string(),
                 path: archive.display().to_string(),
             },
+            &authorization,
         )
         .expect("backup volume");
 
@@ -5785,6 +6185,7 @@ mod tests {
             VolumeCommands::Rm {
                 name: "data".to_string(),
             },
+            &authorization,
         )
         .expect("rm volume");
 
@@ -5794,14 +6195,16 @@ mod tests {
                 name: "data".to_string(),
                 path: archive.display().to_string(),
             },
+            &authorization,
         )
         .expect("restore volume");
-        handle_volume(&runtime_dir, VolumeCommands::Ls).expect("ls volumes");
+        handle_volume(&runtime_dir, VolumeCommands::Ls, &authorization).expect("ls volumes");
         handle_volume(
             &runtime_dir,
             VolumeCommands::Rm {
                 name: "data".to_string(),
             },
+            &authorization,
         )
         .expect("rm volume");
     }
@@ -5810,6 +6213,7 @@ mod tests {
     fn network_handlers_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime.surface_authorization().expect("surface authorization");
         handle_network(
             temp.path(),
             &runtime,
@@ -5818,15 +6222,18 @@ mod tests {
                 subnet: Some("172.30.0.0/16".to_string()),
                 gateway: Some("172.30.0.1".to_string()),
             },
+            &authorization,
         )
         .expect("create network");
-        handle_network(temp.path(), &runtime, NetworkCommands::Ls).expect("ls networks");
+        handle_network(temp.path(), &runtime, NetworkCommands::Ls, &authorization)
+            .expect("ls networks");
         handle_network(
             temp.path(),
             &runtime,
             NetworkCommands::Rm {
                 name: "test-net".to_string(),
             },
+            &authorization,
         )
         .expect("rm network");
     }
@@ -6098,7 +6505,8 @@ mod tests {
     fn pull_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_pull(&store, "", false).expect_err("invalid image");
+        let authorization = test_surface_authorization(temp.path());
+        let err = handle_pull(&store, "", false, &authorization).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
 

@@ -71,7 +71,7 @@ fn assert_abort_reopen_matrix(action: &str) {
         let policy_path = root.path().join("policy.toml");
         std::fs::write(
             &policy_path,
-            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+            "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -280,7 +280,7 @@ fn assert_post_effect_unknown_reconciles(action: &str) {
     let policy_path = root.path().join("policy.toml");
     std::fs::write(
         &policy_path,
-        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -389,7 +389,7 @@ fn exec_exposes_every_durable_crash_boundary_in_order() {
     let policy_path = root.path().join("policy.toml");
     std::fs::write(
         &policy_path,
-        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -441,7 +441,7 @@ fn failed_witnessed_run_leaves_no_phantom_candidate() {
     let policy_path = root.path().join("policy.toml");
     std::fs::write(
         &policy_path,
-        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -701,7 +701,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
         let policy_path = root.path().join("policy.toml");
         std::fs::write(
             &policy_path,
-            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+            "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -866,7 +866,7 @@ named_required_success!(required_restart_success_is_witnessed);
 named_required_success!(required_remove_success_is_witnessed);
 
 #[test]
-fn disabled_journal_is_exactly_compatibility_absent() {
+fn disabled_mode_rejects_any_journal_and_uses_explicit_compatibility_path() {
     let _guard = runtime_test_guard();
     let root = tempfile::tempdir().unwrap();
     let policy_path = root.path().join("policy.toml");
@@ -896,13 +896,10 @@ fn disabled_journal_is_exactly_compatibility_absent() {
         ))
         .unwrap(),
     );
-    let runtime =
-        ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone())).unwrap();
-    let result = runtime.exec(&record.id, &["true".into()]);
-    assert!(!result
-        .as_ref()
+    let error = ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
         .err()
-        .is_some_and(|error| error.to_string().contains("journal is disabled")));
+        .expect("disabled mode must reject journal configuration");
+    assert!(error.to_string().contains("disabled authorization cannot use"));
     assert!(journal.records().unwrap().is_empty());
 }
 

@@ -1429,6 +1429,28 @@ pub trait LifecyclePhaseHook: Send + Sync {
     fn reached(&self, action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError>;
 }
 
+fn require_authorization_journal(
+    gate: &AuthorizationGate,
+    journal: Option<&crate::witness::WitnessJournal>,
+) -> Result<(), RuntimeError> {
+    match gate.mode() {
+        crate::authorization::AuthorizationMode::Disabled if journal.is_none() => Ok(()),
+        crate::authorization::AuthorizationMode::Disabled => Err(RuntimeError::Authorization(
+            "disabled authorization cannot use the required witness journal".to_string(),
+        )),
+        crate::authorization::AuthorizationMode::Shadow
+        | crate::authorization::AuthorizationMode::Enforce
+            if journal
+                .is_some_and(|journal| journal.mode() == crate::witness::JournalMode::Required) =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::Authorization(
+            "enabled authorization requires the shared required witness journal".to_string(),
+        )),
+    }
+}
+
 struct NoopLifecyclePhaseHook;
 impl LifecyclePhaseHook for NoopLifecyclePhaseHook {
     fn reached(&self, _action: &str, _phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
@@ -1446,7 +1468,88 @@ struct NormalizedRunRequest {
     _bind_handles: Vec<std::fs::File>,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_execution_digest(
+    pinned_image: &str,
+    cmd: &[String],
+    env: &[String],
+    labels: &HashMap<String, String>,
+    annotations: &HashMap<String, String>,
+    health: Option<&HealthConfig>,
+    restart_policy: &RestartPolicy,
+    limits: Option<&ResourceLimits>,
+    workdir: Option<&str>,
+    user: Option<&str>,
+    name: Option<&str>,
+    port_mappings: &[PortMappingRecord],
+    normalized: &NormalizedRunRequest,
+) -> [u8; 32] {
+    let labels: BTreeMap<_, _> = labels.iter().collect();
+    let annotations: BTreeMap<_, _> = annotations.iter().collect();
+    let mut env = env.to_vec();
+    env.sort();
+    let mounts: Vec<_> = normalized
+        .facts
+        .mounts
+        .iter()
+        .map(|mount| {
+            serde_json::json!({
+                "class": format!("{:?}", mount.class),
+                "mount_id": mount.mount_id,
+                "device_id": mount.device_id,
+                "inode": mount.inode,
+                "open_flags": mount.open_flags,
+                "target_digest": mount.target_digest,
+            })
+        })
+        .collect();
+    let limits = limits.map(|limits| {
+        serde_json::json!({
+            "memory_max": limits.memory_max,
+            "cpu_max": limits.cpu_max.as_ref().map(|cpu| (cpu.quota, cpu.period)),
+            "pids_max": limits.pids_max,
+        })
+    });
+    let value = serde_json::json!({
+        "domain": "ferrocrate/compose-run-executor/v1",
+        "image": pinned_image,
+        "cmd": cmd,
+        "env": env,
+        "labels": labels,
+        "annotations": annotations,
+        "health": health,
+        "restart_policy": restart_policy,
+        "capabilities": normalized.facts.capabilities,
+        "network_ids": normalized.facts.network_ids,
+        "network_mode": normalized.network_mode,
+        "network_backend": format!("{:?}", normalized.network_backend),
+        "mounts": mounts,
+        "privileged": normalized.facts.privileged,
+        "readonly_rootfs": normalized.facts.readonly_rootfs,
+        "no_new_privileges": normalized.facts.no_new_privileges,
+        "mount_sources_approved": normalized.facts.mount_sources_approved,
+        "limits": limits,
+        "workdir": workdir,
+        "user": user,
+        "name": name,
+        "ports": port_mappings,
+    });
+    sha2::Sha256::digest(
+        serde_json::to_vec(&value).expect("canonical run execution request is serializable"),
+    )
+    .into()
+}
+
 impl ContainerRuntime {
+    /// Derive the non-container mutation coordinator from this runtime's
+    /// authoritative policy and shared journal configuration.
+    pub fn surface_authorization(
+        &self,
+    ) -> Result<crate::authorization::surface::SurfaceAuthorization, RuntimeError> {
+        self.authorization
+            .surface_authorization()
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))
+    }
     pub fn new(runtime_dir: &Path) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
         let runtime_id = load_or_create_runtime_id(runtime_dir)?;
@@ -1461,15 +1564,32 @@ impl ContainerRuntime {
     /// Bind an entry-point authenticated caller to all subsequent mutations
     /// performed by this request-scoped runtime value.
     pub fn with_request_origin(self, origin: crate::authorization::RequestOrigin) -> Self {
-        self.authorization.set_origin(origin);
-        self
+        Self {
+            authorization: self.authorization.with_origin(origin),
+            ..self
+        }
     }
 
-    pub fn set_request_origin(&self, origin: crate::authorization::RequestOrigin) {
-        self.authorization.set_origin(origin);
+    pub fn request_origin(&self) -> Option<crate::authorization::RequestOrigin> {
+        self.authorization.request_origin()
     }
 
-    pub fn policy_binding(&self) -> (u64, [u8;32]) { self.authorization.policy_binding() }
+    pub fn request_scoped(&self, origin: crate::authorization::RequestOrigin) -> Self {
+        Self {
+            store: self.store.clone(),
+            runtime_dir: self.runtime_dir.clone(),
+            cgroup_root: self.cgroup_root.clone(),
+            health_cancel: DashMap::new(),
+            resource_cancel: DashMap::new(),
+            authorization: self.authorization.with_origin(origin),
+            phase_hook: Arc::clone(&self.phase_hook),
+            kernel_ops: Arc::clone(&self.kernel_ops),
+        }
+    }
+
+    pub fn policy_binding(&self) -> (u64, [u8; 32]) {
+        self.authorization.policy_binding()
+    }
 
     fn initialize(
         runtime_dir: &Path,
@@ -1511,6 +1631,7 @@ impl ContainerRuntime {
         gate: Arc<AuthorizationGate>,
         journal: Option<Arc<crate::witness::WitnessJournal>>,
     ) -> Result<Self, RuntimeError> {
+        require_authorization_journal(&gate, journal.as_deref())?;
         fs::create_dir_all(runtime_dir)?;
         let runtime_id = load_or_create_runtime_id(runtime_dir)?;
         Self::initialize(
@@ -1527,6 +1648,7 @@ impl ContainerRuntime {
         journal: Option<Arc<crate::witness::WitnessJournal>>,
         phase_hook: Arc<dyn LifecyclePhaseHook>,
     ) -> Result<Self, RuntimeError> {
+        require_authorization_journal(&gate, journal.as_deref())?;
         fs::create_dir_all(runtime_dir)?;
         let runtime_id = load_or_create_runtime_id(runtime_dir)?;
         Self::initialize(
@@ -1953,6 +2075,72 @@ impl ContainerRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn normalized_run_execution_digest(
+        &self,
+        store: &LocalImageStore,
+        image: &str,
+        cmd: &[String],
+        env: &[String],
+        labels: &HashMap<String, String>,
+        annotations: &HashMap<String, String>,
+        health: Option<&HealthConfig>,
+        restart_policy: &RestartPolicy,
+        capabilities: &[caps::Capability],
+        limits: Option<&ResourceLimits>,
+        mounts: &[BindMount],
+        tmpfs_mounts: &[TmpfsMount],
+        readonly_rootfs: bool,
+        no_new_privs: bool,
+        workdir: Option<&str>,
+        user: Option<&str>,
+        name: Option<&str>,
+        port_mappings: &[crate::container_store::PortMappingRecord],
+        network_mode: &str,
+        network_backend: NetworkBackend,
+    ) -> Result<[u8; 32], RuntimeError> {
+        let pinned_image = store.resolve_reference(image)?.map_or_else(
+            || image.to_owned(),
+            |record| {
+                format!(
+                    "{}@{}",
+                    record
+                        .reference
+                        .split('@')
+                        .next()
+                        .unwrap_or(&record.reference),
+                    record.digest
+                )
+            },
+        );
+        let normalized = normalize_run_request(
+            capabilities,
+            mounts,
+            tmpfs_mounts,
+            readonly_rootfs,
+            no_new_privs,
+            network_mode,
+            network_backend,
+            port_mappings,
+            self.authorization.authorization_mode(),
+        )?;
+        Ok(run_execution_digest(
+            &pinned_image,
+            cmd,
+            env,
+            labels,
+            annotations,
+            health,
+            restart_policy,
+            limits,
+            workdir,
+            user,
+            name,
+            port_mappings,
+            &normalized,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn run_with_store(
         &self,
         store: &LocalImageStore,
@@ -2003,6 +2191,30 @@ impl ContainerRuntime {
             port_mappings,
             self.authorization.authorization_mode(),
         )?;
+        let execution_digest = run_execution_digest(
+            &pinned_image,
+            cmd,
+            env,
+            labels,
+            annotations,
+            health.as_ref(),
+            &restart_policy,
+            limits,
+            workdir,
+            user,
+            name,
+            port_mappings,
+            &normalized,
+        );
+        if self
+            .authorization
+            .request_origin()
+            .is_some_and(|origin| !origin.fanout_request_digest_matches(&execution_digest))
+        {
+            return Err(RuntimeError::Authorization(
+                "compose execution request digest does not match authorized child".into(),
+            ));
+        }
         let mut candidate =
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
         candidate.name = name.map(str::to_owned);
@@ -8339,6 +8551,7 @@ mod tests {
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
         policy::PolicyStore,
+        Action, RequestOrigin,
     };
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{
@@ -8349,10 +8562,139 @@ mod tests {
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
     use crate::witness::{decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage};
+    use sha2::Digest as _;
     use std::collections::{BTreeMap, HashMap};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+
+    #[test]
+    fn normalized_compose_run_digest_changes_with_executor_input() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(root.path()).unwrap();
+        let images = LocalImageStore::open(root.path().join("images")).unwrap();
+        let labels = HashMap::new();
+        let annotations = HashMap::new();
+        let first = runtime
+            .normalized_run_execution_digest(
+                &images,
+                "example/app:latest",
+                &["sleep".into(), "1".into()],
+                &["MODE=prod".into()],
+                &labels,
+                &annotations,
+                None,
+                &RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                true,
+                None,
+                None,
+                Some("web"),
+                &[],
+                "bridge",
+                NetworkBackend::Ebpf,
+            )
+            .unwrap();
+        let changed = runtime
+            .normalized_run_execution_digest(
+                &images,
+                "example/app:latest",
+                &["sleep".into(), "2".into()],
+                &["MODE=prod".into()],
+                &labels,
+                &annotations,
+                None,
+                &RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                true,
+                None,
+                None,
+                Some("web"),
+                &[],
+                "bridge",
+                NetworkBackend::Ebpf,
+            )
+            .unwrap();
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn compose_run_executor_rejects_a_mismatched_normalized_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(root.path()).unwrap();
+        let images = LocalImageStore::open(root.path().join("images")).unwrap();
+        let parent = RequestOrigin::cli_current().unwrap();
+        let parent_id = [7; 16];
+        let plan_digest = [8; 32];
+        let request_digest = [9; 32];
+        let mut idem = sha2::Sha256::new();
+        idem.update(b"ferrocrate/compose-idempotency/v1");
+        idem.update(parent_id);
+        idem.update(plan_digest);
+        idem.update(0u32.to_be_bytes());
+        idem.update([1]);
+        idem.update(3u64.to_be_bytes());
+        idem.update(b"web");
+        idem.update(request_digest);
+        let idempotency_key: [u8; 32] = idem.finalize().into();
+        let mut child = sha2::Sha256::new();
+        child.update(b"ferrocrate/compose-child/v1");
+        child.update(idempotency_key);
+        child.update(0u32.to_be_bytes());
+        let child_hash: [u8; 32] = child.finalize().into();
+        let mut child_id = [0; 16];
+        child_id.copy_from_slice(&child_hash[..16]);
+        let (generation, policy_digest) = runtime.policy_binding();
+        let scoped = runtime.request_scoped(RequestOrigin::compose_child(
+            &parent,
+            child_id,
+            parent_id,
+            idempotency_key,
+            Action::ContainerRun,
+            "web",
+            request_digest,
+            u64::MAX,
+            generation,
+            policy_digest,
+            0,
+            0,
+            plan_digest,
+        ));
+        let error = scoped
+            .run_with_store(
+                &images,
+                "example/app:latest",
+                &["true".into()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                true,
+                None,
+                None,
+                Some("web"),
+                &[],
+                "bridge",
+                NetworkBackend::Ebpf,
+                None,
+            )
+            .expect_err("substituted executor input must fail before effect");
+        assert!(matches!(error, RuntimeError::Authorization(_)));
+    }
 
     struct DeterministicKernelResourceOps {
         state: PathBuf,

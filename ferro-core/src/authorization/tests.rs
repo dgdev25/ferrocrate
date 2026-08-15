@@ -163,3 +163,25 @@ fn shadow_mode_allows_but_reports_the_hypothetical_denial() {
         Some(ReasonCode::PrivilegedContainerDenied)
     );
 }
+
+#[test]
+fn compose_down_digest_binds_exact_executor_snapshot() {
+    let mut record = crate::container_store::ContainerRecord::authorization_candidate(
+        "00112233445566778899aabbccddeeff".into(),
+        "registry.example/app@sha256:deadbeef".into(),
+    );
+    record.status = "running".into();
+    record.mutation_generation = 7;
+    let stop = super::compose_down_executor_digest(&record, Action::ContainerStop);
+
+    record.mutation_generation = 8;
+    assert_ne!(
+        stop,
+        super::compose_down_executor_digest(&record, Action::ContainerStop)
+    );
+    record.mutation_generation = 7;
+    assert_ne!(
+        stop,
+        super::compose_down_executor_digest(&record, Action::ContainerDelete)
+    );
+}

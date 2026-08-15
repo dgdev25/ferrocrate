@@ -418,5 +418,6 @@ services:
 }
 mod fanout;
 pub use fanout::{
-    FanoutAction, FanoutChild, FanoutError, FanoutPlan, FanoutResult, FanoutStatus, ServiceMutation,
+    execute_fanout, FanoutAction, FanoutChild, FanoutError, FanoutExecutionError, FanoutPlan,
+    FanoutOutcome, FanoutReplayStore, FanoutResult, FanoutStatus, ServiceMutation,
 };

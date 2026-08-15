@@ -1,9 +1,111 @@
 use ferro_compose::{
-    FanoutAction, FanoutError, FanoutPlan, FanoutResult, FanoutStatus, ServiceMutation,
+    execute_fanout, FanoutAction, FanoutError, FanoutExecutionError, FanoutPlan,
+    FanoutReplayStore, FanoutResult, FanoutStatus, ServiceMutation,
 };
 
 fn mutation(name: &str, digest: u8) -> ServiceMutation {
     ServiceMutation::new(name, FanoutAction::ContainerRun, [digest; 32])
+}
+
+#[test]
+fn command_path_preserves_success_denial_and_failure_for_every_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let plan = FanoutPlan::derive(
+        [4; 16],
+        1,
+        [5; 32],
+        10_000,
+        0,
+        [mutation("ok", 1), mutation("denied", 2), mutation("failed", 3)],
+    )
+    .unwrap();
+    let replay = FanoutReplayStore::open(temp.path()).unwrap();
+    let result = execute_fanout(&plan, &replay, || 9_000, |child| match child.service() {
+        "ok" => Ok(()),
+        "denied" => Err(FanoutExecutionError::Denied("policy-denied".into())),
+        _ => Err(FanoutExecutionError::Failed("executor-failed".into())),
+    });
+
+    assert_eq!(result.statuses().len(), 3);
+    assert_eq!(result.denied(), 1);
+    assert_eq!(result.failed(), 1);
+    assert!(result.is_partial());
+}
+
+#[test]
+fn command_path_rejects_restart_replay_and_executes_attempt_scoped_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = FanoutPlan::derive([6; 16], 2, [7; 32], 10_000, 0, [mutation("web", 1)]).unwrap();
+    let retry = FanoutPlan::derive([6; 16], 2, [7; 32], 10_000, 1, [mutation("web", 1)]).unwrap();
+    let store = FanoutReplayStore::open(temp.path()).unwrap();
+    assert_eq!(execute_fanout(&first, &store, || 9_000, |_| Ok(())).failed(), 0);
+    drop(store);
+
+    let reopened = FanoutReplayStore::open(temp.path()).unwrap();
+    let mut replay_executed = false;
+    let replay = execute_fanout(&first, &reopened, || 9_000, |_| {
+        replay_executed = true;
+        Ok(())
+    });
+    assert_eq!(replay.failed(), 1);
+    assert!(!replay_executed);
+
+    let mut retry_executed = false;
+    let retried = execute_fanout(&retry, &reopened, || 9_000, |_| {
+        retry_executed = true;
+        Ok(())
+    });
+    assert_eq!(retried.failed(), 0);
+    assert!(retry_executed);
+}
+
+#[test]
+fn replay_claims_are_durable_and_attempt_scoped() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = FanoutPlan::derive([1; 16], 7, [2; 32], 10_000, 0, [mutation("web", 4)]).unwrap();
+    let retry = FanoutPlan::derive([1; 16], 7, [2; 32], 10_000, 1, [mutation("web", 4)]).unwrap();
+    let store = FanoutReplayStore::open(temp.path()).unwrap();
+    store.claim(&first.children()[0]).unwrap();
+    assert!(matches!(
+        store.claim(&first.children()[0]),
+        Err(FanoutError::Replay)
+    ));
+    store.claim(&retry.children()[0]).unwrap();
+    drop(store);
+    let reopened = FanoutReplayStore::open(temp.path()).unwrap();
+    assert!(matches!(
+        reopened.claim(&retry.children()[0]),
+        Err(FanoutError::Replay)
+    ));
+}
+
+#[test]
+fn concurrent_children_cannot_claim_each_others_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let plan = FanoutPlan::derive(
+        [9; 16],
+        1,
+        [8; 32],
+        10_000,
+        0,
+        [mutation("a", 1), mutation("b", 2)],
+    )
+    .unwrap();
+    let store = std::sync::Arc::new(FanoutReplayStore::open(temp.path()).unwrap());
+    let children = plan.children().to_vec();
+    let joins: Vec<_> = children
+        .into_iter()
+        .map(|child| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.claim(&child).unwrap();
+                *child.child_id()
+            })
+        })
+        .collect();
+    let ids: std::collections::HashSet<_> =
+        joins.into_iter().map(|join| join.join().unwrap()).collect();
+    assert_eq!(ids.len(), 2);
 }
 
 #[test]

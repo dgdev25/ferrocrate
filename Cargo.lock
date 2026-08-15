@@ -925,6 +925,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "sha2",
+ "sled",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -965,7 +966,9 @@ dependencies = [
 name = "ferro-cri"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "ferro-core",
+ "httptest",
  "prost 0.12.6",
  "prost-types 0.12.6",
  "protoc-bin-vendored",

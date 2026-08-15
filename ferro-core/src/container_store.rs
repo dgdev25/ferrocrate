@@ -324,6 +324,7 @@ pub enum ContainerStoreError {
     MutationConflict,
 }
 
+#[derive(Clone)]
 pub struct LocalContainerStore {
     db: sled::Db,
 }

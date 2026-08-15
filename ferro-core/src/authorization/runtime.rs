@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
@@ -39,7 +38,7 @@ pub(crate) struct RuntimeAuthorization {
     runtime_id: [u8; 16],
     boot_id: [u8; 16],
     pseudonym_key: [u8; 32],
-    origin: RwLock<Option<RequestOrigin>>,
+    origin: Option<RequestOrigin>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +94,21 @@ impl MutationPermit {
 }
 
 impl RuntimeAuthorization {
+    pub(crate) fn surface_authorization(
+        &self,
+    ) -> Result<super::surface::SurfaceAuthorization, super::surface::SurfaceAuthorizationError>
+    {
+        super::surface::SurfaceAuthorization::from_runtime(
+            Arc::clone(&self.gate),
+            self.journal.clone(),
+            self.runtime_id,
+            self.boot_id,
+            self.pseudonym_key,
+        )
+    }
+    pub(crate) fn request_origin(&self) -> Option<RequestOrigin> {
+        self.origin.clone()
+    }
     pub(crate) fn begin_internal_network_recovery(
         &self,
         container_id: &str,
@@ -238,18 +252,19 @@ impl RuntimeAuthorization {
             runtime_id,
             boot_id: read_boot_id().unwrap_or_else(|| rng.random()),
             pseudonym_key: rng.random(),
-            origin: RwLock::new(None),
+            origin: None,
         }
     }
 
-    pub(crate) fn set_origin(&self, origin: RequestOrigin) {
-        if let Ok(mut current) = self.origin.write() {
-            *current = Some(origin);
+    pub(crate) fn with_origin(&self, origin: RequestOrigin) -> Self {
+        Self {
+            gate: Arc::clone(&self.gate),
+            journal: self.journal.clone(),
+            runtime_id: self.runtime_id,
+            boot_id: self.boot_id,
+            pseudonym_key: self.pseudonym_key,
+            origin: Some(origin),
         }
-    }
-
-    fn origin(&self) -> Option<RequestOrigin> {
-        self.origin.read().ok().and_then(|origin| origin.clone())
     }
 
     pub(crate) fn requires_provenance(&self) -> bool {
@@ -352,8 +367,14 @@ impl RuntimeAuthorization {
         });
         let pin = self.gate.pin();
         let operation = OperationId::from_bytes(rand::rng().random());
-        let origin = self.origin();
-        if let Some(fanout) = origin.as_ref().and_then(RequestOrigin::fanout) {
+        let origin = self.origin.as_ref();
+        if origin.is_some_and(|origin| origin.revalidate_transport().is_err()) {
+            return Err(MediationError::Identity);
+        }
+        if origin.is_some_and(|origin| !origin.fanout_integrity_valid()) {
+            return Err(MediationError::Identity);
+        }
+        if let Some(fanout) = origin.and_then(RequestOrigin::fanout) {
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -367,10 +388,18 @@ impl RuntimeAuthorization {
             {
                 return Err(MediationError::Stale);
             }
+            if matches!(action, Action::ContainerStop | Action::ContainerDelete)
+                && !origin.is_some_and(|origin| {
+                    origin.fanout_request_digest_matches(&super::compose_down_executor_digest(
+                        record, action,
+                    ))
+                })
+            {
+                return Err(MediationError::Stale);
+            }
         }
         let request_id = uuid_from_bytes(
             origin
-                .as_ref()
                 .and_then(RequestOrigin::request_id)
                 .unwrap_or(*operation.as_bytes()),
         );
@@ -409,12 +438,12 @@ impl RuntimeAuthorization {
         );
         let mut context = RequestContext::resolved(
             request_id,
-            origin.as_ref().map(|origin| origin.principal().clone()),
+            origin.map(|origin| origin.principal().clone()),
             action,
             resource,
             facts,
         );
-        context.attach_fanout(origin.as_ref().and_then(RequestOrigin::fanout).cloned());
+        context.attach_fanout(origin.and_then(RequestOrigin::fanout).cloned());
         let image_binding = image.map(|(reference, digest)| ImageBinding::new(reference, digest));
         let bindings =
             ExecutionBindings::new(image_binding, generation, Some(state), None, mount_handles);
@@ -551,8 +580,8 @@ impl RuntimeAuthorization {
         let resource =
             ResourceSummary::pseudonymize(&self.pseudonym_key, request.resource_id().as_bytes())
                 .map_err(|_| MediationError::Identity)?;
-        let origin = self.origin();
-        let principal_bytes = origin
+        let principal_bytes = self
+            .origin
             .as_ref()
             .map_or(b"local-unresolved".as_slice(), |origin| {
                 origin.principal().id().as_str().as_bytes()
@@ -571,7 +600,8 @@ impl RuntimeAuthorization {
             runtime_instance_id: self.runtime_id,
             boot_id: self.boot_id,
             principal,
-            invocation: origin
+            invocation: self
+                .origin
                 .as_ref()
                 .map_or(Invocation::Cli, RequestOrigin::invocation),
             action: witness_action(action),

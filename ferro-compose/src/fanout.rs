@@ -81,6 +81,12 @@ impl FanoutChild {
     pub fn attempt(&self) -> u32 {
         self.attempt
     }
+    pub fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        &self.plan_digest
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +95,7 @@ pub struct FanoutPlan {
     children: Vec<FanoutChild>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FanoutError {
     #[error("fan-out context replay or substitution")]
     Replay,
@@ -97,6 +103,38 @@ pub enum FanoutError {
     Expired,
     #[error("fan-out contains too many children")]
     TooManyChildren,
+    #[error("fan-out replay store failed: {0}")]
+    Storage(String),
+}
+
+pub struct FanoutReplayStore {
+    db: sled::Db,
+}
+impl FanoutReplayStore {
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, FanoutError> {
+        sled::open(path.as_ref().join("compose-replay.db"))
+            .map(|db| Self { db })
+            .map_err(|error| FanoutError::Storage(error.to_string()))
+    }
+    pub fn claim(&self, child: &FanoutChild) -> Result<(), FanoutError> {
+        let mut value = Vec::with_capacity(96);
+        value.extend_from_slice(&child.idempotency_key);
+        value.extend_from_slice(&child.plan_digest);
+        value.extend_from_slice(&child.request_digest);
+        match self
+            .db
+            .compare_and_swap(child.child_id, None as Option<&[u8]>, Some(value))
+            .map_err(|error| FanoutError::Storage(error.to_string()))?
+        {
+            Ok(()) => {
+                self.db
+                    .flush()
+                    .map_err(|error| FanoutError::Storage(error.to_string()))?;
+                Ok(())
+            }
+            Err(_) => Err(FanoutError::Replay),
+        }
+    }
 }
 
 impl FanoutPlan {
@@ -138,6 +176,9 @@ impl FanoutPlan {
                 idem.update(parent);
                 idem.update(digest);
                 idem.update((ordinal as u32).to_be_bytes());
+                idem.update([mutation.action.code()]);
+                idem.update((mutation.service.len() as u64).to_be_bytes());
+                idem.update(mutation.service.as_bytes());
                 idem.update(mutation.request_digest);
                 let idempotency_key: [u8; 32] = idem.finalize().into();
                 let mut id = Sha256::new();
@@ -189,6 +230,12 @@ pub enum FanoutOutcome {
     Denied(String),
     Failed(String),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FanoutExecutionError {
+    Denied(String),
+    Failed(String),
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FanoutStatus {
     child_id: [u8; 16],
@@ -215,6 +262,9 @@ impl FanoutStatus {
     }
     pub fn child_id(&self) -> &[u8; 16] {
         &self.child_id
+    }
+    pub fn outcome(&self) -> &FanoutOutcome {
+        &self.outcome
     }
 }
 pub struct FanoutResult {
@@ -247,4 +297,39 @@ impl FanoutResult {
             .count();
         ok > 0 && ok < self.statuses.len()
     }
+}
+
+
+/// Execute every child through the same verified, durably claimed command
+/// path. A denial or failure is recorded per child and never aborts or erases
+/// the remaining child results.
+pub fn execute_fanout<F, N>(
+    plan: &FanoutPlan,
+    replay: &FanoutReplayStore,
+    mut now_unix_ms: N,
+    mut execute: F,
+) -> FanoutResult
+where
+    F: FnMut(&FanoutChild) -> Result<(), FanoutExecutionError>,
+    N: FnMut() -> u64,
+{
+    let statuses = plan
+        .children()
+        .iter()
+        .map(|child| {
+            let id = *child.child_id();
+            if let Err(error) = plan.verify_child(child, now_unix_ms()) {
+                return FanoutStatus::failed(id, error.to_string());
+            }
+            if let Err(error) = replay.claim(child) {
+                return FanoutStatus::failed(id, error.to_string());
+            }
+            match execute(child) {
+                Ok(()) => FanoutStatus::succeeded(id),
+                Err(FanoutExecutionError::Denied(reason)) => FanoutStatus::denied(id, reason),
+                Err(FanoutExecutionError::Failed(reason)) => FanoutStatus::failed(id, reason),
+            }
+        })
+        .collect();
+    FanoutResult::new(statuses)
 }

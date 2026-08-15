@@ -1,6 +1,7 @@
 //! Typed authorization requests and native policy decisions.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub mod gate;
 #[cfg(target_os = "linux")]
@@ -51,6 +52,8 @@ pub struct FanoutContext {
     policy_generation: u64,
     policy_digest: [u8; 32],
     attempt: u32,
+    ordinal: u32,
+    plan_digest: [u8; 32],
 }
 
 impl FanoutContext {
@@ -77,6 +80,39 @@ impl FanoutContext {
     }
     pub fn attempt(&self) -> u32 {
         self.attempt
+    }
+    pub fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        &self.plan_digest
+    }
+    fn integrity_valid(&self) -> bool {
+        let mut idem = Sha256::new();
+        idem.update(b"ferrocrate/compose-idempotency/v1");
+        idem.update(self.parent_request_id);
+        idem.update(self.plan_digest);
+        idem.update(self.ordinal.to_be_bytes());
+        idem.update([fanout_action_code(self.expected_action)]);
+        idem.update((self.expected_resource.len() as u64).to_be_bytes());
+        idem.update(self.expected_resource.as_bytes());
+        idem.update(self.request_digest);
+        let expected: [u8; 32] = idem.finalize().into();
+        let mut child = Sha256::new();
+        child.update(b"ferrocrate/compose-child/v1");
+        child.update(expected);
+        child.update(self.attempt.to_be_bytes());
+        let hash: [u8; 32] = child.finalize().into();
+        expected == self.idempotency_key && hash[..16] == self.child_id
+    }
+}
+
+fn fanout_action_code(action: Action) -> u8 {
+    match action {
+        Action::ContainerRun => 1,
+        Action::ContainerStop => 2,
+        Action::ContainerDelete => 3,
+        _ => 0,
     }
 }
 
@@ -178,6 +214,8 @@ impl RequestOrigin {
         policy_generation: u64,
         policy_digest: [u8; 32],
         attempt: u32,
+        ordinal: u32,
+        plan_digest: [u8; 32],
     ) -> Self {
         let fanout = FanoutContext {
             parent_request_id: parent_id,
@@ -190,6 +228,8 @@ impl RequestOrigin {
             policy_generation,
             policy_digest,
             attempt,
+            ordinal,
+            plan_digest,
         };
         Self {
             principal: parent.principal.clone(),
@@ -205,6 +245,19 @@ impl RequestOrigin {
         self.transport
             .as_ref()
             .map_or(Ok(()), TransportPrincipal::revalidate_for_execution)
+    }
+    pub(crate) fn fanout_integrity_valid(&self) -> bool {
+        self.fanout.as_ref().is_none_or(|fanout| {
+            fanout.integrity_valid()
+                && self.request_id == Some(fanout.child_id)
+                && self.parent_request_id == Some(fanout.parent_request_id)
+                && self.attempt == fanout.attempt
+        })
+    }
+    pub(crate) fn fanout_request_digest_matches(&self, actual: &[u8; 32]) -> bool {
+        self.fanout
+            .as_ref()
+            .is_none_or(|fanout| &fanout.request_digest == actual)
     }
     pub fn principal(&self) -> &ResolvedPrincipal {
         &self.principal
@@ -224,6 +277,28 @@ impl RequestOrigin {
     pub fn fanout(&self) -> Option<&FanoutContext> {
         self.fanout.as_ref()
     }
+}
+
+/// Canonical digest of the exact container snapshot consumed by a Compose
+/// stop/delete executor. Both the fan-out planner and runtime use this helper,
+/// preventing caller-chosen serialization from becoming an authority binding.
+pub fn compose_down_executor_digest(
+    record: &crate::container_store::ContainerRecord,
+    action: Action,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ferrocrate/compose-down-executor/v1");
+    digest.update([match action {
+        Action::ContainerStop => 1,
+        Action::ContainerDelete => 2,
+        _ => 0,
+    }]);
+    for value in [record.id.as_str(), record.status.as_str()] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(record.mutation_generation.max(1).to_be_bytes());
+    digest.finalize().into()
 }
 
 #[cfg(test)]

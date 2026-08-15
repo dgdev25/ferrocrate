@@ -393,7 +393,11 @@ impl NetdServer {
                 }
                 if build_ip_link_set_master_cmd(&endpoint_id, &overlay_id).is_err() {
                     let _ = self.kernel.remove_endpoint(&endpoint_id);
-                    return reject(RejectionCode::PolicyViolation, "invalid endpoint interface");
+                    reject_effect!(
+                        RejectionCode::PolicyViolation,
+                        "invalid endpoint interface",
+                        format!("endpoint:{endpoint_id}")
+                    );
                 }
                 if self
                     .kernel

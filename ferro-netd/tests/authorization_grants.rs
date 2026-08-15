@@ -130,6 +130,45 @@ fn grant_ledger_has_exactly_one_process_writer() {
 }
 
 #[test]
+fn restart_quarantines_an_armed_unknown_effect_without_replay() {
+    let (key, claims, params) = fixture();
+    let grant = sign(&key, claims);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("grants.json");
+    let mut verifier = GrantVerifier::new(
+        key.verifying_key(),
+        "runtime",
+        "key-1",
+        "boot-a",
+        GrantLedger::open(path.clone()).unwrap(),
+    );
+    let consumed = verifier
+        .verify_and_consume(
+            &grant,
+            GrantAction::NetworkCreate,
+            "123e4567-e89b-12d3-a456-426614174000",
+            7,
+            &params,
+            100,
+            9_000,
+        )
+        .unwrap();
+    verifier.arm_effect(&consumed).unwrap();
+    drop(verifier);
+
+    let reopened = GrantVerifier::new(
+        key.verifying_key(),
+        "runtime",
+        "key-1",
+        "boot-a",
+        GrantLedger::open(path).unwrap(),
+    );
+    let result = reopened.result("req-1").unwrap();
+    assert_eq!(result.outcome, "quarantined_after_unknown_effect");
+    assert!(result.result_identity.contains("NetworkCreate"));
+}
+
+#[test]
 fn rejects_substitution_generation_boot_and_expiry() {
     let (key, claims, params) = fixture();
     let grant = sign(&key, claims);

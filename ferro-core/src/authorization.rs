@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod gate;
 pub mod helper_grant;
+mod helper_grant_delegation;
 mod helper_grant_encoding;
 mod helper_grant_error;
 pub mod inventory;

@@ -77,11 +77,13 @@ impl GrantLedger {
         } else {
             LedgerState::default()
         };
-        Ok(Self {
+        let mut ledger = Self {
             path: Some(path),
             _writer_lock: Some(writer_lock),
             state,
-        })
+        };
+        ledger.quarantine_unknown_after_restart()?;
+        Ok(ledger)
     }
     fn consume(&mut self, grant: &HelperGrant) -> Result<(), GrantError> {
         let nonce = hex(&grant.claims.nonce);
@@ -171,6 +173,38 @@ impl GrantLedger {
             .get_mut(&hex(&nonce))
             .ok_or(GrantError::NotConsumed)?;
         operation.phase = GrantPhase::OutcomeUnknown;
+        self.persist()
+    }
+    fn quarantine_unknown_after_restart(&mut self) -> Result<(), GrantError> {
+        let unknown = self
+            .state
+            .consumed
+            .iter()
+            .filter_map(|(nonce, operation)| {
+                matches!(operation.phase, GrantPhase::OutcomeUnknown)
+                    .then(|| (nonce.clone(), operation.claims.clone()))
+            })
+            .collect::<Vec<_>>();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        for (nonce, claims) in unknown {
+            self.state
+                .results
+                .entry(claims.request_id.clone())
+                .or_insert(GrantResult {
+                    request_id: claims.request_id,
+                    nonce: claims.nonce,
+                    result_identity: format!(
+                        "quarantine:{}:{:?}",
+                        claims.resource.resource_uuid, claims.action
+                    ),
+                    outcome: "quarantined_after_unknown_effect".into(),
+                });
+            if let Some(operation) = self.state.consumed.get_mut(&nonce) {
+                operation.phase = GrantPhase::Failed;
+            }
+        }
         self.persist()
     }
     fn persist(&self) -> Result<(), GrantError> {

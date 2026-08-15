@@ -9,9 +9,15 @@ use ferro_core::seccomp::{apply_seccomp_profile, default_seccomp_profile, parse_
 #[test]
 fn parses_default_seccomp_profile() {
     let profile = default_seccomp_profile().expect("default profile should parse");
-    assert_eq!(profile.default_action, "SCMP_ACT_ERRNO");
+    // The shipped default is a Docker-style denylist: ordinary container
+    // syscalls remain allowed while explicitly dangerous syscalls are denied.
+    assert_eq!(profile.default_action, "SCMP_ACT_ALLOW");
     assert!(!profile.architectures.is_empty());
     assert!(!profile.syscalls.is_empty());
+    assert!(profile
+        .syscalls
+        .iter()
+        .any(|rule| rule.action == "SCMP_ACT_ERRNO"));
 }
 
 #[test]

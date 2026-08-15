@@ -26,7 +26,9 @@ use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
 use crate::mac_profiles::generate_apparmor_profile;
 #[cfg(target_os = "linux")]
-use crate::managed_overlay::{ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse};
+use crate::managed_overlay::{
+    LegacyManagedOverlayMode, ManagedOverlayClient, ManagedOverlayRequest, ManagedOverlayResponse,
+};
 use crate::mounts::{
     apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts,
     normalize_mount_target, open_existing_mount_target_beneath, open_mount_source_beneath,
@@ -147,6 +149,8 @@ trait KernelResourceOps: Send + Sync {
     ) -> Result<Option<ResourceIdentity>, ()>;
     fn setup_network(
         &self,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         container_id: &str,
         ports: &[PortMappingRecord],
         mode: &str,
@@ -221,6 +225,8 @@ impl KernelResourceOps for ProductionKernelResourceOps {
     }
     fn setup_network(
         &self,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         container_id: &str,
         ports: &[PortMappingRecord],
         mode: &str,
@@ -229,7 +235,16 @@ impl KernelResourceOps for ProductionKernelResourceOps {
         existing: &[ContainerRecord],
         _phase_hook: &dyn LifecyclePhaseHook,
     ) -> Result<NetworkSetup, RuntimeError> {
-        setup_network(container_id, ports, mode, backend, rollback, existing)
+        setup_network(
+            proof,
+            intent,
+            container_id,
+            ports,
+            mode,
+            backend,
+            rollback,
+            existing,
+        )
     }
 }
 
@@ -2061,8 +2076,8 @@ impl ContainerRuntime {
     #[allow(clippy::too_many_arguments)]
     fn run_with_store_authorized(
         &self,
-        _proof: &AuthorizedRequest,
-        _intent: Option<&crate::witness::DurableIntent>,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
         creation_provenance: crate::container_store::CreationProvenance,
         container_id: String,
         store: &LocalImageStore,
@@ -2301,6 +2316,8 @@ impl ContainerRuntime {
         let existing_records = self.store.list()?;
         let kernel_ops = Arc::clone(&self.kernel_ops);
         let mut network_setup = kernel_ops.setup_network(
+            proof,
+            intent,
             &container_id,
             port_mappings,
             network_mode,
@@ -3020,7 +3037,7 @@ impl ContainerRuntime {
             )));
         }
         let records = self.store.list()?;
-        cleanup_network(&record, &records)?;
+        cleanup_network(Some((_proof, intent)), &record, &records)?;
         let container_dir = self.runtime_dir.join("containers").join(id);
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
@@ -4341,6 +4358,8 @@ impl NetworkSetup {
 }
 
 fn setup_network(
+    proof: &AuthorizedRequest,
+    intent: Option<&crate::witness::DurableIntent>,
     container_id: &str,
     port_mappings: &[crate::container_store::PortMappingRecord],
     network_mode: &str,
@@ -4349,7 +4368,14 @@ fn setup_network(
     existing_records: &[ContainerRecord],
 ) -> Result<NetworkSetup, RuntimeError> {
     if let Some(overlay_id) = network_mode.strip_prefix("managed:") {
-        return setup_managed_network(container_id, overlay_id, network_backend, rollback);
+        return setup_managed_network(
+            proof,
+            intent,
+            container_id,
+            overlay_id,
+            network_backend,
+            rollback,
+        );
     }
     match network_mode {
         "host" => {
@@ -4644,6 +4670,8 @@ fn setup_network(
 
 #[cfg(target_os = "linux")]
 fn setup_managed_network(
+    proof: &AuthorizedRequest,
+    intent: Option<&crate::witness::DurableIntent>,
     container_id: &str,
     overlay_id: &str,
     _network_backend: NetworkBackend,
@@ -4661,11 +4689,20 @@ fn setup_managed_network(
         container_id: container_id.to_string(),
         now_unix: crate::container_store::now_unix() as i64,
     };
-    let response = ManagedOverlayClient::new(socket)
-        .request(&request)
-        .map_err(|error| {
-            RuntimeError::Network(format!("managed overlay agent unavailable: {error}"))
+    let client = ManagedOverlayClient::new(socket);
+    let response = if let Some(intent) = intent {
+        managed_overlay_authorized_request(&client, &request, proof, intent)?
+    } else {
+        let legacy_mode = LegacyManagedOverlayMode::disabled_only().map_err(|_| {
+            RuntimeError::Authorization(
+                "managed overlay delegation is required while authorization is enabled".into(),
+            )
         })?;
+        client.request_legacy(&legacy_mode, &request)
+    }
+    .map_err(|error| {
+        RuntimeError::Network(format!("managed overlay agent unavailable: {error}"))
+    })?;
     let ManagedOverlayResponse::Attached(attachment) = response else {
         return Err(RuntimeError::Network(
             "managed overlay agent rejected attachment".to_string(),
@@ -4735,6 +4772,50 @@ fn setup_managed_network(
     setup.managed_overlay = Some(overlay_id.to_string());
     setup.managed_host_veth = Some(host_veth);
     Ok(setup)
+}
+
+#[cfg(target_os = "linux")]
+fn managed_overlay_authorized_request(
+    client: &ManagedOverlayClient,
+    request: &ManagedOverlayRequest,
+    proof: &AuthorizedRequest,
+    intent: &crate::witness::DurableIntent,
+) -> Result<Result<ManagedOverlayResponse, crate::managed_overlay::ManagedOverlayError>, RuntimeError>
+{
+    let key_path = std::env::var("FERROCRATE_RUNTIME_GRANT_SIGNING_KEY_FILE").map_err(|_| {
+        RuntimeError::Authorization("runtime helper-grant signing key is required".into())
+    })?;
+    let key_id = std::env::var("FERROCRATE_RUNTIME_GRANT_KEY_ID").map_err(|_| {
+        RuntimeError::Authorization("runtime helper-grant key ID is required".into())
+    })?;
+    let issuer_name = std::env::var("FERROCRATE_RUNTIME_GRANT_ISSUER")
+        .unwrap_or_else(|_| "ferrocrate-runtime".into());
+    let issuer = crate::authorization::helper_grant::GrantIssuer::from_key_file(
+        &key_id,
+        Path::new(&key_path),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    let now = crate::container_store::now_unix();
+    let monotonic = fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|value| value.split('.').next()?.parse::<u64>().ok())
+        .unwrap_or(u64::MAX / 1000)
+        .saturating_mul(1000);
+    let nonce: [u8; 16] = rand::random();
+    Ok(client.request_authorized(
+        request,
+        proof,
+        intent,
+        &issuer,
+        boot_id.trim(),
+        now.saturating_add(30),
+        monotonic.saturating_add(30_000),
+        nonce,
+        &issuer_name,
+    ))
 }
 
 fn build_network_plan(
@@ -6215,6 +6296,7 @@ fn cleanup_proven_legacy_rules(
 }
 
 fn cleanup_network(
+    authority: Option<(&AuthorizedRequest, Option<&crate::witness::DurableIntent>)>,
     record: &ContainerRecord,
     all_records: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
@@ -6222,11 +6304,18 @@ fn cleanup_network(
         let socket = std::env::var("FERROCRATE_AGENT_SOCKET")
             .unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
         let request = ManagedOverlayRequest::DetachContainer {
+            overlay_id: overlay_id.to_string(),
             container_id: record.id.clone(),
             now_unix: crate::container_store::now_unix() as i64,
         };
-        let response = ManagedOverlayClient::new(socket)
-            .request(&request)
+        let client = ManagedOverlayClient::new(socket);
+        let response = match authority {
+            Some((proof, Some(intent))) => managed_overlay_authorized_request(&client, &request, proof, intent)?,
+            _ => {
+                let legacy_mode = LegacyManagedOverlayMode::disabled_only().map_err(|_| RuntimeError::Authorization("managed overlay cleanup delegation is required while authorization is enabled".into()))?;
+                client.request_legacy(&legacy_mode, &request)
+            }
+        }
             .map_err(|error| {
                 RuntimeError::Network(format!(
                     "managed overlay detach unavailable for {overlay_id}: {error}"
@@ -8200,7 +8289,10 @@ mod tests {
         NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
         TmpfsMount,
     };
-    use crate::authorization::{gate::AuthorizationGate, policy::PolicyStore};
+    use crate::authorization::{
+        gate::{AuthorizationGate, AuthorizedRequest},
+        policy::PolicyStore,
+    };
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{
         now_unix, ContainerRecord, LocalContainerStore, MutationReservation, PortMappingRecord,
@@ -8303,6 +8395,8 @@ mod tests {
         }
         fn setup_network(
             &self,
+            proof: &AuthorizedRequest,
+            intent: Option<&crate::witness::DurableIntent>,
             container_id: &str,
             _ports: &[PortMappingRecord],
             mode: &str,
@@ -8312,7 +8406,16 @@ mod tests {
             phase_hook: &dyn LifecyclePhaseHook,
         ) -> Result<super::NetworkSetup, RuntimeError> {
             if !mode.starts_with("managed:") {
-                return super::setup_network(container_id, &[], mode, backend, rollback, &[]);
+                return super::setup_network(
+                    proof,
+                    intent,
+                    container_id,
+                    &[],
+                    mode,
+                    backend,
+                    rollback,
+                    &[],
+                );
             }
             let identity = crate::container_store::KernelObjectIdentityRecord {
                 device: 77,
@@ -9541,7 +9644,8 @@ mod tests {
         record.network_name = Some("none".to_string());
         record.netns = Some("must-not-delete-by-name".to_string());
 
-        let error = super::cleanup_network(&record, std::slice::from_ref(&record)).unwrap_err();
+        let error =
+            super::cleanup_network(None, &record, std::slice::from_ref(&record)).unwrap_err();
         assert!(error.to_string().contains("no kernel identity"));
         assert_eq!(record.netns.as_deref(), Some("must-not-delete-by-name"));
     }

@@ -21,6 +21,7 @@ nix = { workspace = true, features = ["socket"] }
 caps = { workspace = true }
 sha2 = "0.10"
 rustix = { version = "1", features = ["process"] }
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }

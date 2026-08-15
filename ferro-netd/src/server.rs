@@ -148,6 +148,12 @@ impl NetdServer {
         }
         let granted_desired =
             serde_json::from_slice::<GrantedDesiredStateEnvelope>(&frame[4..]).ok();
+        if granted_desired.is_some() {
+            return reject(
+                RejectionCode::PolicyViolation,
+                "bulk desired-state grants are forbidden; submit one authorized mutation per resource",
+            );
+        }
         if let Some(granted) = granted_desired {
             let desired = granted.envelope;
             let state = match self.policy.validate_desired_state(
@@ -605,7 +611,7 @@ impl NetdServer {
         now: u64,
     ) -> Result<(), RejectionCode> {
         let verifier = self.grants.as_mut().ok_or(RejectionCode::MissingGrant)?;
-        verifier
+        let consumed = verifier
             .verify_and_consume(
                 grant,
                 action,
@@ -615,8 +621,8 @@ impl NetdServer {
                 now,
                 monotonic_millis(),
             )
-            .map(|_| ())
-            .map_err(map_grant_error)
+            .map_err(map_grant_error)?;
+        verifier.arm_effect(&consumed).map_err(map_grant_error)
     }
     fn record_grant_result(
         &mut self,

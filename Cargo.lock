@@ -1072,6 +1072,7 @@ dependencies = [
  "ed25519-dalek",
  "ferro-core",
  "ferro-net",
+ "fs2",
  "ipnet",
  "nix",
  "prost 0.14.4",

@@ -88,6 +88,7 @@ pub enum ManagedOverlayRequest {
         now_unix: i64,
     },
     DetachContainer {
+        overlay_id: String,
         container_id: String,
         now_unix: i64,
     },
@@ -121,6 +122,18 @@ pub struct ManagedOverlayClient {
     timeout: Duration,
 }
 
+/// Explicit compatibility authority for the pre-authorization agent protocol.
+pub(crate) struct LegacyManagedOverlayMode(());
+
+impl LegacyManagedOverlayMode {
+    pub(crate) fn disabled_only() -> Result<Self, ManagedOverlayError> {
+        match std::env::var("FERROCRATE_AUTHORIZATION_MODE").as_deref() {
+            Ok("disabled") => Ok(Self(())),
+            _ => Err(ManagedOverlayError::Grant(GrantBuildError::IntentMismatch)),
+        }
+    }
+}
+
 #[cfg(unix)]
 impl ManagedOverlayClient {
     pub fn new(socket: impl Into<std::path::PathBuf>) -> Self {
@@ -133,8 +146,9 @@ impl ManagedOverlayClient {
         self.timeout = timeout;
         self
     }
-    pub fn request(
+    pub(crate) fn request_legacy(
         &self,
+        _mode: &LegacyManagedOverlayMode,
         request: &ManagedOverlayRequest,
     ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
         self.send(request)
@@ -150,17 +164,32 @@ impl ManagedOverlayClient {
         wall_deadline_secs: u64,
         monotonic_deadline_millis: u64,
         nonce: [u8; 16],
+        issuer_name: &str,
     ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
         let parameters = managed_parameters(request)?;
-        let grant = issuer.for_authorized(
+        let action = match request {
+            ManagedOverlayRequest::AttachContainer { .. } => {
+                crate::authorization::helper_grant::GrantAction::NetworkAttach
+            }
+            ManagedOverlayRequest::DetachContainer { .. } => {
+                crate::authorization::helper_grant::GrantAction::NetworkDetach
+            }
+            ManagedOverlayRequest::InspectOverlay { .. } => {
+                return Err(ManagedOverlayError::Grant(
+                    GrantBuildError::UnsupportedAction,
+                ))
+            }
+        };
+        let grant = issuer.for_managed_overlay_parent(
             proof,
             intent,
+            action,
             &parameters,
             boot_id,
             wall_deadline_secs,
             monotonic_deadline_millis,
             nonce,
-            "ferrocrate-runtime",
+            issuer_name,
         )?;
         self.send(&DelegatedManagedOverlayRequest {
             request: request.clone(),

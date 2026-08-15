@@ -172,4 +172,7 @@ impl DurableIntent {
     pub const fn execution_generation(&self) -> u64 {
         self.execution_generation
     }
+    pub(crate) const fn decision_digest(&self) -> [u8; 32] {
+        self.decision_digest
+    }
 }

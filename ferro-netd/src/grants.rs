@@ -12,7 +12,9 @@ use ferro_core::authorization::helper_grant::{
     signing_bytes, GrantAction, GrantClaims, GrantKind, GrantParameters, HelperGrant,
     GRANT_SCHEMA_VERSION, MAX_GRANT_BYTES,
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,22 +27,51 @@ pub struct GrantResult {
 
 #[derive(Default, Deserialize, Serialize)]
 struct LedgerState {
-    consumed: BTreeMap<String, GrantClaims>,
+    consumed: BTreeMap<String, GrantOperation>,
     results: BTreeMap<String, GrantResult>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+enum GrantPhase {
+    Pending,
+    ConsumedBeforeEffect,
+    Succeeded,
+    Failed,
+    OutcomeUnknown,
+}
+
+#[derive(Deserialize, Serialize)]
+struct GrantOperation {
+    claims: GrantClaims,
+    phase: GrantPhase,
 }
 
 pub struct GrantLedger {
     path: Option<PathBuf>,
+    _writer_lock: Option<std::fs::File>,
     state: LedgerState,
 }
 impl GrantLedger {
     pub fn memory() -> Self {
         Self {
             path: None,
+            _writer_lock: None,
             state: LedgerState::default(),
         }
     }
     pub fn open(path: PathBuf) -> Result<Self, GrantError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock_path = path.with_extension("lock");
+        let writer_lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        writer_lock
+            .try_lock_exclusive()
+            .map_err(|_| GrantError::Locked)?;
         let state = if path.exists() {
             serde_json::from_slice(&fs::read(&path)?)?
         } else {
@@ -48,6 +79,7 @@ impl GrantLedger {
         };
         Ok(Self {
             path: Some(path),
+            _writer_lock: Some(writer_lock),
             state,
         })
     }
@@ -56,7 +88,19 @@ impl GrantLedger {
         if self.state.consumed.contains_key(&nonce) {
             return Err(GrantError::Replay);
         }
-        self.state.consumed.insert(nonce, grant.claims.clone());
+        self.state.consumed.insert(
+            nonce.clone(),
+            GrantOperation {
+                claims: grant.claims.clone(),
+                phase: GrantPhase::Pending,
+            },
+        );
+        self.persist()?;
+        self.state
+            .consumed
+            .get_mut(&nonce)
+            .expect("inserted nonce")
+            .phase = GrantPhase::ConsumedBeforeEffect;
         self.persist()
     }
     fn result(&self, request_id: &str) -> Option<&GrantResult> {
@@ -67,7 +111,7 @@ impl GrantLedger {
             .state
             .consumed
             .get(&hex(&result.nonce))
-            .map(|claims| claims.request_id.as_str())
+            .map(|operation| operation.claims.request_id.as_str())
             != Some(result.request_id.as_str())
         {
             return Err(GrantError::NotConsumed);
@@ -79,7 +123,54 @@ impl GrantLedger {
                 Err(GrantError::ResultConflict)
             };
         }
+        let nonce = hex(&result.nonce);
         self.state.results.insert(result.request_id.clone(), result);
+        self.state
+            .consumed
+            .get_mut(&nonce)
+            .expect("validated nonce")
+            .phase = GrantPhase::Succeeded;
+        self.persist()
+    }
+    fn validates_cleanup(&self, grant: &HelperGrant) -> bool {
+        let Some(origin) = grant.claims.origin_request_id.as_deref() else {
+            return false;
+        };
+        let Some(result) = self.state.results.get(origin) else {
+            return false;
+        };
+        let source = self
+            .state
+            .consumed
+            .values()
+            .find(|operation| operation.claims.request_id == origin)
+            .map(|operation| &operation.claims);
+        let Some(source) = source else {
+            return false;
+        };
+        let live: [u8; 32] = Sha256::digest(
+            [
+                b"ferrocrate.helper-live-identity.v1\0".as_slice(),
+                result.result_identity.as_bytes(),
+            ]
+            .concat(),
+        )
+        .into();
+        source.boot_id == grant.claims.boot_id
+            && source.resource == grant.claims.resource
+            && matches!(
+                source.action,
+                GrantAction::NetworkCreate | GrantAction::NetworkAttach
+            )
+            && grant.claims.live_identity_digest == Some(live)
+    }
+    fn mark_outcome_unknown(&mut self, nonce: [u8; 16]) -> Result<(), GrantError> {
+        let operation = self
+            .state
+            .consumed
+            .get_mut(&hex(&nonce))
+            .ok_or(GrantError::NotConsumed)?;
+        operation.phase = GrantPhase::OutcomeUnknown;
         self.persist()
     }
     fn persist(&self) -> Result<(), GrantError> {
@@ -125,14 +216,53 @@ impl ConsumedGrant {
     }
 }
 
+pub struct GrantKeyring {
+    active: BTreeMap<String, VerifyingKey>,
+}
+impl GrantKeyring {
+    pub fn new(key_id: impl Into<String>, key: VerifyingKey) -> Self {
+        Self {
+            active: BTreeMap::from([(key_id.into(), key)]),
+        }
+    }
+    pub fn add_overlap(
+        &mut self,
+        key_id: impl Into<String>,
+        key: VerifyingKey,
+    ) -> Result<(), GrantError> {
+        if self.active.insert(key_id.into(), key).is_some() {
+            return Err(GrantError::WrongIssuer);
+        }
+        Ok(())
+    }
+    pub fn retire(&mut self, key_id: &str) -> Result<(), GrantError> {
+        self.active
+            .remove(key_id)
+            .map(|_| ())
+            .ok_or(GrantError::WrongIssuer)
+    }
+    fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
+        self.active.get(key_id)
+    }
+}
+
 pub struct GrantVerifier {
-    key: VerifyingKey,
+    keys: GrantKeyring,
     issuer: String,
-    key_id: String,
     boot_id: String,
     ledger: GrantLedger,
 }
 impl GrantVerifier {
+    pub fn add_verification_key(
+        &mut self,
+        key_id: impl Into<String>,
+        key: VerifyingKey,
+    ) -> Result<(), GrantError> {
+        self.keys.add_overlap(key_id, key)
+    }
+    pub fn retire_verification_key(&mut self, key_id: &str) -> Result<(), GrantError> {
+        self.keys.retire(key_id)
+    }
     pub fn new(
         key: VerifyingKey,
         issuer: impl Into<String>,
@@ -141,9 +271,8 @@ impl GrantVerifier {
         ledger: GrantLedger,
     ) -> Self {
         Self {
-            key,
+            keys: GrantKeyring::new(key_id, key),
             issuer: issuer.into(),
-            key_id: key_id.into(),
             boot_id: boot_id.into(),
             ledger,
         }
@@ -169,16 +298,16 @@ impl GrantVerifier {
         if serde_json::to_vec(grant)?.len() > MAX_GRANT_BYTES {
             return Err(GrantError::Oversized);
         }
-        if grant.claims.schema_version != GRANT_SCHEMA_VERSION
-            || grant.claims.issuer != self.issuer
-            || grant.claims.key_id != self.key_id
+        if grant.claims.schema_version != GRANT_SCHEMA_VERSION || grant.claims.issuer != self.issuer
         {
             return Err(GrantError::WrongIssuer);
         }
         let signature = base64::engine::general_purpose::STANDARD
             .decode(&grant.signature)
             .map_err(|_| GrantError::InvalidSignature)?;
-        self.key
+        self.keys
+            .get(&grant.claims.key_id)
+            .ok_or(GrantError::WrongIssuer)?
             .verify(
                 &signing_bytes(&grant.claims),
                 &Signature::from_slice(&signature).map_err(|_| GrantError::InvalidSignature)?,
@@ -217,6 +346,9 @@ impl GrantVerifier {
                     .live_identity_digest
                     .is_none_or(|v| v == [0; 32]))
         {
+            return Err(GrantError::CleanupProvenance);
+        }
+        if grant.claims.kind == GrantKind::Cleanup && !self.ledger.validates_cleanup(grant) {
             return Err(GrantError::CleanupProvenance);
         }
         Ok(())
@@ -260,6 +392,9 @@ impl GrantVerifier {
             outcome: outcome.into(),
         })
     }
+    pub fn arm_effect(&mut self, consumed: &ConsumedGrant) -> Result<(), GrantError> {
+        self.ledger.mark_outcome_unknown(consumed.nonce)
+    }
     pub fn result(&self, request_id: &str) -> Option<&GrantResult> {
         self.ledger.result(request_id)
     }
@@ -267,6 +402,8 @@ impl GrantVerifier {
 
 #[derive(Debug, Error)]
 pub enum GrantError {
+    #[error("grant ledger already has a writer")]
+    Locked,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("wrong issuer or schema")]

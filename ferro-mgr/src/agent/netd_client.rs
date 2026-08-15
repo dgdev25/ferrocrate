@@ -247,6 +247,100 @@ impl DelegationBridge {
             grant,
         })
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn delegate_detach(
+        &mut self,
+        request: &ManagedOverlayRequest,
+        delegation: &ManagedOverlayDelegation,
+        endpoint_id: &str,
+        now_unix: u64,
+        now_monotonic_millis: u64,
+    ) -> Result<GrantedEnvelope, DelegationError> {
+        let ManagedOverlayRequest::DetachContainer { overlay_id, .. } = request else {
+            return Err(DelegationError::Unsupported);
+        };
+        let parent = &delegation.parent;
+        let verified = VerifiedHelperGrant::verify(
+            parent.clone(),
+            &self.parent_key,
+            &self.parent_issuer,
+            &self.boot_id,
+        )
+        .map_err(|_| DelegationError::InvalidSignature)?;
+        if parent.claims.key_id != self.parent_key_id
+            || parent.claims.action != GrantAction::NetworkDetach
+            || parent.claims.kind != GrantKind::Mutation
+            || parent.claims.parameter_digest
+                != managed_parameters(request)
+                    .map_err(|_| DelegationError::Binding)?
+                    .digest()
+            || now_unix > parent.claims.wall_deadline_secs
+            || now_monotonic_millis > parent.claims.monotonic_deadline_millis
+        {
+            return Err(DelegationError::Binding);
+        }
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).map_err(|_| DelegationError::Random)?;
+        if nonce == [0; 16] || nonce == parent.claims.nonce {
+            return Err(DelegationError::Random);
+        }
+        let child_request = NetdRequest::DetachEndpoint {
+            overlay_id: overlay_id.clone(),
+            endpoint_id: endpoint_id.into(),
+        };
+        let parameters = GrantParameters::new(
+            "endpoint.detach",
+            vec![
+                ("overlay_id".into(), overlay_id.clone()),
+                ("endpoint_id".into(), endpoint_id.into()),
+            ],
+            vec![],
+        )
+        .map_err(|_| DelegationError::Binding)?;
+        let child_request_id = format!("{}:child:{}", parent.claims.request_id, hex_nonce(&nonce));
+        let grant = self
+            .child_issuer
+            .delegate_child(
+                &verified,
+                &child_request_id,
+                GrantAction::NetworkDetach,
+                ResourceBinding::new(
+                    parent.claims.resource.resource_uuid.clone(),
+                    parent.claims.resource.generation,
+                )
+                .map_err(|_| DelegationError::Binding)?,
+                &parameters,
+                parent.claims.wall_deadline_secs,
+                parent.claims.monotonic_deadline_millis,
+                nonce,
+            )
+            .map_err(|_| DelegationError::Binding)?;
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(DelegationError::Binding)?;
+        let mut envelope = SignedEnvelope {
+            cluster_id: self.cluster_id.clone(),
+            node_id: self.node_id.clone(),
+            epoch: 1,
+            revision: self.revision,
+            lease_expires_unix_secs: parent.claims.wall_deadline_secs,
+            request: child_request,
+            signature: String::new(),
+        };
+        envelope.signature = base64::engine::general_purpose::STANDARD.encode(
+            self.envelope_key
+                .sign(&serde_json::to_vec(&envelope).map_err(|_| DelegationError::Binding)?)
+                .to_bytes(),
+        );
+        Ok(GrantedEnvelope {
+            envelope,
+            resource_uuid: parent.claims.resource.resource_uuid.clone(),
+            resource_generation: parent.claims.resource.generation,
+            grant,
+        })
+    }
 }
 
 fn hex_nonce(value: &[u8; 16]) -> String {

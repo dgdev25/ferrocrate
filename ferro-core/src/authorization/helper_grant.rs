@@ -1,7 +1,8 @@
 //! Signed, single-use capabilities for the privileged networking helper.
 
+use super::helper_grant_encoding::{is_uuid, push_text};
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -14,6 +15,7 @@ pub const MAX_GRANT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[repr(u8)]
 pub enum GrantAction {
     NetworkCreate,
     NetworkDelete,
@@ -39,6 +41,7 @@ impl GrantAction {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[repr(u8)]
 pub enum GrantKind {
     Mutation,
     Cleanup,
@@ -87,7 +90,7 @@ impl GrantParameters {
         mut fds: Vec<(u16, u64, u64)>,
     ) -> Result<Self, GrantBuildError> {
         let operation = operation.into();
-        if operation.is_empty() || operation.len() > 64 || fields.len() > 128 || fds.len() > 32 {
+        if operation.is_empty() || operation.len() > 64 || fields.len() > 128 || !fds.is_empty() {
             return Err(GrantBuildError::InvalidParameters);
         }
         fields.sort();
@@ -99,9 +102,6 @@ impl GrantParameters {
             return Err(GrantBuildError::InvalidParameters);
         }
         fds.sort();
-        if fds.windows(2).any(|v| v[0].0 == v[1].0) {
-            return Err(GrantBuildError::InvalidParameters);
-        }
         Ok(Self {
             operation,
             fields,
@@ -116,7 +116,14 @@ impl GrantParameters {
         })
     }
     pub fn digest(&self) -> [u8; 32] {
-        let bytes = serde_json::to_vec(self).expect("bounded grant parameters serialize");
+        let mut bytes = Vec::new();
+        push_text(&mut bytes, &self.operation);
+        bytes.extend_from_slice(&(self.fields.len() as u16).to_be_bytes());
+        for (key, value) in &self.fields {
+            push_text(&mut bytes, key);
+            push_text(&mut bytes, value);
+        }
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
         Sha256::digest([b"ferrocrate.helper-parameters.v1\0".as_slice(), &bytes].concat()).into()
     }
 }
@@ -133,6 +140,10 @@ pub struct GrantClaims {
     pub wall_deadline_secs: u64,
     pub monotonic_deadline_millis: u64,
     pub nonce: [u8; 16],
+    pub operation_id: [u8; 16],
+    pub request_digest: [u8; 32],
+    pub precondition_digest: [u8; 32],
+    pub recovery_recipe_digest: [u8; 32],
     pub issuer: String,
     pub key_id: String,
     pub kind: GrantKind,
@@ -142,7 +153,7 @@ pub struct GrantClaims {
 
 impl GrantClaims {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         request_id: impl Into<String>,
         action: GrantAction,
         resource: ResourceBinding,
@@ -165,6 +176,10 @@ impl GrantClaims {
             wall_deadline_secs,
             monotonic_deadline_millis,
             nonce,
+            operation_id: nonce,
+            request_digest: parameter_digest,
+            precondition_digest: parameter_digest,
+            recovery_recipe_digest: parameter_digest,
             issuer: issuer.into(),
             key_id: key_id.into(),
             kind,
@@ -182,7 +197,7 @@ impl GrantClaims {
         }
         Ok(value)
     }
-    pub fn cleanup(
+    pub(crate) fn cleanup(
         mut self,
         origin_request_id: impl Into<String>,
         live_identity_digest: [u8; 32],
@@ -204,6 +219,35 @@ pub struct HelperGrant {
     pub signature: String,
 }
 
+pub struct VerifiedHelperGrant(HelperGrant);
+impl VerifiedHelperGrant {
+    pub fn verify(
+        grant: HelperGrant,
+        key: &VerifyingKey,
+        issuer: &str,
+        boot_id: &str,
+    ) -> Result<Self, GrantBuildError> {
+        if grant.claims.schema_version != GRANT_SCHEMA_VERSION
+            || grant.claims.issuer != issuer
+            || grant.claims.boot_id != boot_id
+        {
+            return Err(GrantBuildError::InvalidClaims);
+        }
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(&grant.signature)
+            .map_err(|_| GrantBuildError::InvalidClaims)?;
+        key.verify(
+            &signing_bytes(&grant.claims),
+            &Signature::from_slice(&signature).map_err(|_| GrantBuildError::InvalidClaims)?,
+        )
+        .map_err(|_| GrantBuildError::InvalidClaims)?;
+        Ok(Self(grant))
+    }
+    pub fn claims(&self) -> &GrantClaims {
+        &self.0.claims
+    }
+}
+
 impl std::fmt::Debug for HelperGrant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HelperGrant")
@@ -219,13 +263,31 @@ pub struct GrantIssuer {
     key: SigningKey,
 }
 impl GrantIssuer {
-    pub fn new(key_id: impl Into<String>, key: SigningKey) -> Self {
+    pub(crate) fn new(key_id: impl Into<String>, key: SigningKey) -> Self {
         Self {
             key_id: key_id.into(),
             key,
         }
     }
-    pub fn sign(&self, mut claims: GrantClaims) -> HelperGrant {
+    #[cfg(unix)]
+    pub fn from_key_file(
+        key_id: impl Into<String>,
+        path: &std::path::Path,
+        expected_uid: u32,
+    ) -> Result<Self, GrantBuildError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| GrantBuildError::KeyCustody)?;
+        if !metadata.file_type().is_file()
+            || metadata.uid() != expected_uid
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(GrantBuildError::KeyCustody);
+        }
+        let bytes = std::fs::read(path).map_err(|_| GrantBuildError::KeyCustody)?;
+        let key: [u8; 32] = bytes.try_into().map_err(|_| GrantBuildError::KeyCustody)?;
+        Ok(Self::new(key_id, SigningKey::from_bytes(&key)))
+    }
+    pub(crate) fn sign(&self, mut claims: GrantClaims) -> HelperGrant {
         claims.key_id.clone_from(&self.key_id);
         let signature = self.key.sign(&signing_bytes(&claims));
         HelperGrant {
@@ -247,11 +309,19 @@ impl GrantIssuer {
     ) -> Result<HelperGrant, GrantBuildError> {
         let action = GrantAction::from_authorization(proof.canonical().context().action())
             .ok_or(GrantBuildError::UnsupportedAction)?;
+        if intent.execution_generation() != proof.canonical().resource_generation() {
+            return Err(GrantBuildError::IntentMismatch);
+        }
         let resource = ResourceBinding::new(
             proof.canonical().resource_id(),
-            intent.execution_generation(),
+            proof.canonical().resource_generation(),
         )?;
-        Ok(self.sign(GrantClaims::new(
+        let request_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(proof.canonical().context())
+                .map_err(|_| GrantBuildError::InvalidClaims)?,
+        )
+        .into();
+        let mut claims = GrantClaims::new(
             proof.canonical().request_id(),
             action,
             resource,
@@ -263,19 +333,145 @@ impl GrantIssuer {
             issuer,
             &self.key_id,
             GrantKind::Mutation,
-        )?))
+        )?;
+        claims.operation_id = *intent.operation_id().as_bytes();
+        claims.request_digest = request_digest;
+        claims.precondition_digest = request_digest;
+        claims.recovery_recipe_digest = intent.decision_digest();
+        Ok(self.sign(claims))
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_managed_overlay_parent(
+        &self,
+        proof: &AuthorizedRequest,
+        intent: &DurableIntent,
+        action: GrantAction,
+        parameters: &GrantParameters,
+        boot_id: &str,
+        wall_deadline_secs: u64,
+        monotonic_deadline_millis: u64,
+        nonce: [u8; 16],
+        issuer: &str,
+    ) -> Result<HelperGrant, GrantBuildError> {
+        let allowed = matches!(
+            (proof.canonical().context().action(), action),
+            (
+                Action::ContainerCreate | Action::ContainerRun,
+                GrantAction::NetworkAttach
+            ) | (Action::ContainerDelete, GrantAction::NetworkDetach)
+        );
+        if !allowed || intent.execution_generation() != proof.canonical().resource_generation() {
+            return Err(GrantBuildError::IntentMismatch);
+        }
+        if action == GrantAction::NetworkAttach
+            && proof.canonical().context().facts().network_ids().is_empty()
+        {
+            return Err(GrantBuildError::IntentMismatch);
+        }
+        let resource = ResourceBinding::new(
+            proof.canonical().resource_id(),
+            proof.canonical().resource_generation(),
+        )?;
+        let request_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(proof.canonical().context())
+                .map_err(|_| GrantBuildError::InvalidClaims)?,
+        )
+        .into();
+        let mut claims = GrantClaims::new(
+            proof.canonical().request_id(),
+            action,
+            resource,
+            parameters.digest(),
+            boot_id,
+            wall_deadline_secs,
+            monotonic_deadline_millis,
+            nonce,
+            issuer,
+            &self.key_id,
+            GrantKind::Mutation,
+        )?;
+        claims.operation_id = *intent.operation_id().as_bytes();
+        claims.request_digest = request_digest;
+        claims.precondition_digest = request_digest;
+        claims.recovery_recipe_digest = intent.decision_digest();
+        Ok(self.sign(claims))
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn delegate_child(
+        &self,
+        parent: &VerifiedHelperGrant,
+        child_request_id: &str,
+        action: GrantAction,
+        resource: ResourceBinding,
+        parameters: &GrantParameters,
+        wall_deadline_secs: u64,
+        monotonic_deadline_millis: u64,
+        nonce: [u8; 16],
+    ) -> Result<HelperGrant, GrantBuildError> {
+        let parent_claims = parent.claims();
+        if parent_claims.kind != GrantKind::Mutation
+            || parent_claims.action != action
+            || resource.resource_uuid != parent_claims.resource.resource_uuid
+            || resource.generation != parent_claims.resource.generation
+            || wall_deadline_secs > parent_claims.wall_deadline_secs
+            || monotonic_deadline_millis > parent_claims.monotonic_deadline_millis
+        {
+            return Err(GrantBuildError::IntentMismatch);
+        }
+        let mut claims = GrantClaims::new(
+            child_request_id,
+            action,
+            resource,
+            parameters.digest(),
+            &parent_claims.boot_id,
+            wall_deadline_secs,
+            monotonic_deadline_millis,
+            nonce,
+            &parent_claims.issuer,
+            &self.key_id,
+            GrantKind::Mutation,
+        )?;
+        claims.operation_id = parent_claims.operation_id;
+        claims.request_digest = parent_claims.request_digest;
+        claims.precondition_digest = parent_claims.precondition_digest;
+        claims.recovery_recipe_digest = parent_claims.recovery_recipe_digest;
+        Ok(self.sign(claims))
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn delegate_cleanup(
+        &self,
+        parent: &VerifiedHelperGrant,
+        child_request_id: &str,
+        action: GrantAction,
+        resource: ResourceBinding,
+        parameters: &GrantParameters,
+        origin_request_id: &str,
+        live_identity_digest: [u8; 32],
+        wall_deadline_secs: u64,
+        monotonic_deadline_millis: u64,
+        nonce: [u8; 16],
+    ) -> Result<HelperGrant, GrantBuildError> {
+        if !action.is_cleanup() || parent.claims().action != action {
+            return Err(GrantBuildError::InvalidCleanup);
+        }
+        let mut child = self.delegate_child(
+            parent,
+            child_request_id,
+            action,
+            resource,
+            parameters,
+            wall_deadline_secs,
+            monotonic_deadline_millis,
+            nonce,
+        )?;
+        child.claims = child
+            .claims
+            .cleanup(origin_request_id, live_identity_digest)?;
+        Ok(self.sign(child.claims))
     }
 }
 
-pub fn signing_bytes(claims: &GrantClaims) -> Vec<u8> {
-    [
-        b"ferrocrate.helper-grant.v1\0".as_slice(),
-        serde_json::to_vec(claims)
-            .expect("grant claims serialize")
-            .as_slice(),
-    ]
-    .concat()
-}
+pub use super::helper_grant_encoding::signing_bytes;
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum GrantBuildError {
@@ -289,15 +485,8 @@ pub enum GrantBuildError {
     InvalidCleanup,
     #[error("action cannot be delegated to helper")]
     UnsupportedAction,
-}
-
-fn is_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        })
+    #[error("durable intent does not bind the authorized resource generation")]
+    IntentMismatch,
+    #[error("helper grant signing key custody requirements were not met")]
+    KeyCustody,
 }

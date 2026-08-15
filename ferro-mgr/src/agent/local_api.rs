@@ -253,11 +253,69 @@ impl LocalApi {
                     &delegated.delegation,
                 )
                 .map(LocalApiResponse::Attached),
+            ferro_core::managed_overlay::ManagedOverlayRequest::DetachContainer {
+                overlay_id,
+                container_id,
+                now_unix,
+            } => self
+                .detach_delegated(
+                    caller_uid,
+                    overlay_id,
+                    container_id,
+                    now_unix,
+                    now_monotonic_millis,
+                    &delegated.delegation,
+                )
+                .map(|released| LocalApiResponse::Detached { released }),
             _ => Err(LocalApiError::InvalidDelegation),
         };
         result.unwrap_or_else(|error| LocalApiResponse::Rejected {
             reason: error.to_string(),
         })
+    }
+
+    fn detach_delegated(
+        &self,
+        caller_uid: u32,
+        overlay_id: String,
+        container_id: String,
+        now_unix: i64,
+        now_monotonic_millis: u64,
+        delegation: &ManagedOverlayDelegation,
+    ) -> Result<bool, LocalApiError> {
+        self.authorize(caller_uid, now_unix)?;
+        let request = ferro_core::managed_overlay::ManagedOverlayRequest::DetachContainer {
+            overlay_id,
+            container_id: container_id.clone(),
+            now_unix,
+        };
+        let mut configured = self
+            .delegated_netd
+            .lock()
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        let delegated = configured
+            .as_mut()
+            .ok_or(LocalApiError::MissingDelegation)?;
+        let envelope = delegated
+            .bridge
+            .delegate_detach(
+                &request,
+                delegation,
+                &container_id,
+                now_unix
+                    .try_into()
+                    .map_err(|_| LocalApiError::InvalidDelegation)?,
+                now_monotonic_millis,
+            )
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        match delegated
+            .client
+            .request_granted(&envelope)
+            .map_err(|_| LocalApiError::NetdRejected)?
+        {
+            NetdResponse::Detached => Ok(self.ipam.release(&container_id)?.is_some()),
+            _ => Err(LocalApiError::NetdRejected),
+        }
     }
 
     fn attach_delegated(

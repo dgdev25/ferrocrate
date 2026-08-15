@@ -153,6 +153,7 @@ trait KernelResourceOps: Send + Sync {
         backend: NetworkBackend,
         rollback: &mut CreationRollback,
         existing: &[ContainerRecord],
+        phase_hook: &dyn LifecyclePhaseHook,
     ) -> Result<NetworkSetup, RuntimeError>;
     fn cleanup_test_network(
         &self,
@@ -226,6 +227,7 @@ impl KernelResourceOps for ProductionKernelResourceOps {
         backend: NetworkBackend,
         rollback: &mut CreationRollback,
         existing: &[ContainerRecord],
+        _phase_hook: &dyn LifecyclePhaseHook,
     ) -> Result<NetworkSetup, RuntimeError> {
         setup_network(container_id, ports, mode, backend, rollback, existing)
     }
@@ -1398,6 +1400,7 @@ pub enum LifecyclePhasePoint {
     TmpfsKernelEffect,
     ReadonlyKernelEffect,
     NetworkKernelEffect,
+    NetworkResourcesCreatedBeforeOwnership,
     CgroupKernelEffect,
     SpawnPrepared,
     LaunchIdentityDurable,
@@ -2304,6 +2307,7 @@ impl ContainerRuntime {
             network_backend,
             &mut rollback,
             &existing_records,
+            self.phase_hook.as_ref(),
         )?;
         self.phase_hook
             .reached("run", LifecyclePhasePoint::NetworkKernelEffect)?;
@@ -8193,7 +8197,8 @@ fn run_resource_monitor(
 mod tests {
     use super::{
         BindMount, ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
-        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, RuntimeError, TmpfsMount,
+        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
+        TmpfsMount,
     };
     use crate::authorization::{gate::AuthorizationGate, policy::PolicyStore};
     use crate::cgroups::{CpuMax, ResourceLimits};
@@ -8304,6 +8309,7 @@ mod tests {
             backend: NetworkBackend,
             rollback: &mut super::CreationRollback,
             _existing: &[ContainerRecord],
+            phase_hook: &dyn LifecyclePhaseHook,
         ) -> Result<super::NetworkSetup, RuntimeError> {
             if !mode.starts_with("managed:") {
                 return super::setup_network(container_id, &[], mode, backend, rollback, &[]);
@@ -8328,11 +8334,16 @@ mod tests {
                 self.network_state_path(),
                 serde_json::to_vec(&ownership).unwrap(),
             )?;
+            phase_hook.reached(
+                "run",
+                LifecyclePhasePoint::NetworkResourcesCreatedBeforeOwnership,
+            )?;
             rollback.netns_name = Some(format!("fake-{container_id}"));
             rollback.namespace_identity = Some(identity);
             rollback.network_backend = Some(backend);
             rollback.network_ownership = Some(ownership.clone());
             rollback.persist_cleanup_journal()?;
+            std::fs::write(self.state.with_extension("network-owned"), b"owned")?;
             Ok(super::NetworkSetup {
                 netns_name: rollback.netns_name.clone(),
                 container_ip: Some("192.0.2.2".into()),
@@ -8362,14 +8373,24 @@ mod tests {
                     Ok(value) => value,
                     Err(error) => return Some(Err(error)),
                 };
+            let planned = rollback.resource_plans.iter().any(|plan| {
+                matches!(
+                    plan,
+                    ResourcePlan::NetworkAllocation { canonical, operation_id, .. }
+                        if canonical == "managed:test:iptables"
+                            && *operation_id == rollback.operation_id
+                )
+            });
             if observed.owner_id != rollback.container_id
-                || rollback.network_ownership.as_ref() != Some(&observed)
+                || (!planned && rollback.network_ownership.as_ref() != Some(&observed))
             {
                 return Some(Err(RuntimeError::InvalidState(
                     "fake network ownership changed".into(),
                 )));
             }
-            Some(std::fs::remove_file(path).map_err(RuntimeError::from))
+            let result = std::fs::remove_file(path).map_err(RuntimeError::from);
+            let _ = std::fs::remove_file(self.state.with_extension("network-owned"));
+            Some(result)
         }
     }
 
@@ -10514,7 +10535,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     fn phase_from_name(name: &str) -> LifecyclePhasePoint {
         match name {
-            "network-effect-repeat" => LifecyclePhasePoint::NetworkKernelEffect,
+            "network-resources-before-ownership" => {
+                LifecyclePhasePoint::NetworkResourcesCreatedBeforeOwnership
+            }
             "network" => LifecyclePhasePoint::NetworkApplied,
             "cgroup" => LifecyclePhasePoint::CgroupApplied,
             "old-stopped" => LifecyclePhasePoint::RestartOldStopped,
@@ -10650,7 +10673,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                     "tmpfs-effect",
                     "readonly-effect",
                     "network-effect",
-                    "network-effect-repeat",
+                    "network-resources-before-ownership",
                     "network",
                     "cgroup-effect",
                     "cgroup",
@@ -10688,6 +10711,23 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 )
                 .unwrap();
                 let _ = daemon.wait();
+                let ownership_published = root.path().join("fake-kernel.network-owned").exists();
+                if action == "run" && *phase == "network-resources-before-ownership" {
+                    assert!(
+                        !ownership_published,
+                        "inner barrier published ownership early"
+                    );
+                    assert!(
+                        root.path().join("fake-kernel.network.json").exists(),
+                        "inner barrier did not create network resources"
+                    );
+                }
+                if action == "run" && *phase == "network-effect" {
+                    assert!(
+                        ownership_published,
+                        "outer barrier lacked durable ownership"
+                    );
+                }
                 let policy = root.path().join("policy.toml");
                 let gate = std::sync::Arc::new(AuthorizationGate::new(std::sync::Arc::new(
                     PolicyStore::load(&policy).unwrap(),

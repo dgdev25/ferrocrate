@@ -106,9 +106,12 @@ The same private backend now owns actual network setup and rollback selection.
 Its test implementation durably models namespace, veth, firewall marker, and
 ownership identity before `NetworkKernelEffect`; Required-mode reopen verifies
 and deletes that exact state. The subprocess matrix contains exactly fourteen
-crash cases: run bind, tmpfs, readonly, network pre-marker (repeated to prove
-durable reopen determinism), network applied, cgroup pre-marker, cgroup applied,
-spawn, and identity; plus restart network, old-stopped, spawn, and identity.
+crash cases: run bind, tmpfs, readonly, network resources-created-before-
+ownership, network ownership-before-applied-marker, network applied, cgroup
+pre-marker, cgroup applied, spawn, and identity; plus restart network,
+old-stopped, spawn, and identity. The two network cases assert different
+pre-crash ownership-publication state before reopening and cleaning the same
+uniquely planned resources.
 
 Verification on 2026-08-15:
 

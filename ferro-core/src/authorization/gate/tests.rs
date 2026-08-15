@@ -31,6 +31,19 @@ impl Fixture {
         }
     }
 
+    fn new_with_metrics(
+        mode: AuthorizationMode,
+        metrics: Arc<crate::observability::AuthorizationMetrics>,
+    ) -> Self {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_policy(&dir, "policy.toml", 7, mode);
+        let store = Arc::new(PolicyStore::load(path).expect("load policy"));
+        Self {
+            _dir: dir,
+            gate: AuthorizationGate::new_with_metrics(store, metrics),
+        }
+    }
+
     fn request(
         &self,
         role: Option<Role>,
@@ -452,8 +465,9 @@ fn authorization_gate_proof_binds_every_executor_safe_identity() {
 
 #[test]
 fn production_gate_updates_bounded_attribution_and_denial_metrics() {
-    let before = crate::observability::authorization_metrics_snapshot();
-    let fixture = Fixture::new(AuthorizationMode::Enforce);
+    let metrics = Arc::new(crate::observability::AuthorizationMetrics::new());
+    let before = metrics.snapshot();
+    let fixture = Fixture::new_with_metrics(AuthorizationMode::Enforce, Arc::clone(&metrics));
     fixture
         .gate
         .authorize(fixture.request(None, false, &format!("registry/app@{IMAGE_DIGEST}")))
@@ -466,7 +480,7 @@ fn production_gate_updates_bounded_attribution_and_denial_metrics() {
             &format!("registry/app@{IMAGE_DIGEST}"),
         ))
         .expect_err("privileged developer denied");
-    let after = crate::observability::authorization_metrics_snapshot();
+    let after = metrics.snapshot();
     assert_eq!(
         after.unknown_principal_total,
         before.unknown_principal_total + 1

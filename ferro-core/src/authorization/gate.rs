@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use super::policy::{PolicySnapshot, PolicyStore};
 use super::{Decision, MountClass, ReasonCode, RequestContext, ResourceKind, ResourceState};
-use crate::observability::{authorization_metrics, AuthorizationMetric, DecisionMetric};
+use crate::observability::{
+    authorization_metrics, AuthorizationMetric, AuthorizationMetrics, DecisionMetric,
+};
 
 /// A policy snapshot pinned before request fan-out.
 #[derive(Clone, Debug)]
@@ -397,6 +399,22 @@ impl AuthorizedRequest {
 pub struct AuthorizationGate {
     policies: Arc<PolicyStore>,
     admission: Option<super::admission::MutationAdmission>,
+    metrics: GateMetrics,
+}
+
+#[derive(Debug)]
+enum GateMetrics {
+    Global,
+    Isolated(Arc<AuthorizationMetrics>),
+}
+
+impl GateMetrics {
+    fn record(&self, metric: AuthorizationMetric) {
+        match self {
+            Self::Global => authorization_metrics().record(metric),
+            Self::Isolated(metrics) => metrics.record(metric),
+        }
+    }
 }
 
 impl AuthorizationGate {
@@ -404,6 +422,7 @@ impl AuthorizationGate {
         Self {
             policies,
             admission: None,
+            metrics: GateMetrics::Global,
         }
     }
 
@@ -414,6 +433,19 @@ impl AuthorizationGate {
         Self {
             policies,
             admission: Some(admission),
+            metrics: GateMetrics::Global,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_metrics(
+        policies: Arc<PolicyStore>,
+        metrics: Arc<AuthorizationMetrics>,
+    ) -> Self {
+        Self {
+            policies,
+            admission: None,
+            metrics: GateMetrics::Isolated(metrics),
         }
     }
 
@@ -483,16 +515,16 @@ impl AuthorizationGate {
     /// Validate immutable bindings, evaluate the pinned policy, and mint a proof.
     pub fn authorize(&self, request: CanonicalRequest) -> Result<AuthorizedRequest, Denial> {
         if request.context().principal().is_some() {
-            authorization_metrics().record(AuthorizationMetric::Attributed);
+            self.metrics.record(AuthorizationMetric::Attributed);
         } else {
-            authorization_metrics().record(AuthorizationMetric::UnknownPrincipal);
+            self.metrics.record(AuthorizationMetric::UnknownPrincipal);
         }
         validate_policy_binding(&request)?;
         validate_canonical_bindings(&request)?;
 
         let decision = request.policy.snapshot.document.evaluate(&request.context);
         if !decision.allowed {
-            authorization_metrics().record(AuthorizationMetric::Decision(
+            self.metrics.record(AuthorizationMetric::Decision(
                 DecisionMetric::EnforcedDenial,
             ));
             return Err(Denial::policy(&request, &decision));
@@ -510,7 +542,7 @@ impl AuthorizationGate {
             .evaluate(&request.context)
             .allowed;
         if denied {
-            authorization_metrics()
+            self.metrics
                 .record(AuthorizationMetric::Decision(DecisionMetric::WouldDeny));
         }
         Ok(denied)

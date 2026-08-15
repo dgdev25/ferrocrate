@@ -42,7 +42,7 @@ pub enum AuthorizationMetric {
 
 /// Process-local operational counters. Security decisions and witness writes
 /// never depend on this best-effort telemetry object.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct AuthorizationMetrics {
     attributed: AtomicU64,
     unknown_principal: AtomicU64,

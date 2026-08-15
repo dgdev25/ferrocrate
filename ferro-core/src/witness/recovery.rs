@@ -260,6 +260,7 @@ impl RecoveryRecipe {
             15 => WitnessAction::VolumeUnmount,
             17 => WitnessAction::NetworkDelete,
             19 => WitnessAction::NetworkDetach,
+            29 => WitnessAction::RootlessMapping,
             _ => return None,
         };
         let truth_strategy = truth_strategy_from(bytes[12])?;

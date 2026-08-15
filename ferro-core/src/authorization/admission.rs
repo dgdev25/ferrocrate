@@ -5,6 +5,27 @@ use std::{
 
 use super::Action;
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionSnapshotManifest {
+    pub schema: u32,
+    pub generation: u64,
+    pub journal_id: String,
+    pub trust_bundle: AdmissionArtifact,
+    pub minimum_checkpoint: AdmissionArtifact,
+    pub checkpoint_chain: Vec<AdmissionArtifact>,
+    pub trust_key_ids: Vec<String>,
+    pub latest_checkpoint: String,
+    pub latest_created_at_secs: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionArtifact {
+    pub file: String,
+    pub sha256: String,
+}
+
 pub(crate) enum AdmissionAuthority<'a> {
     UserMutation,
     CheckpointRepair,

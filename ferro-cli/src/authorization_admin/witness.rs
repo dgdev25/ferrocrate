@@ -175,6 +175,7 @@ pub fn checkpoint_on(args: CheckpointArgs<'_>, journal: &WitnessJournal) -> Resu
         coordinator
             .reconcile_pending(journal)
             .map_err(|e| e.to_string())?;
+        publish_admission_artifact(args.artifact)?;
         return Ok("checkpoint pending binding reconciled=true".into());
     }
     let key_dir = args
@@ -196,6 +197,7 @@ pub fn checkpoint_on(args: CheckpointArgs<'_>, journal: &WitnessJournal) -> Resu
             publication_record,
         )
         .map_err(|e| e.to_string())?;
+    publish_admission_artifact(args.artifact)?;
     Ok(publication_output(outcome))
 }
 
@@ -227,11 +229,62 @@ pub fn rotate_key_on(args: RotateArgs<'_>, journal: &WitnessJournal) -> Result<S
             publication_record,
         )
         .map_err(|e| e.to_string())?;
+    publish_admission_artifact(args.artifact)?;
     Ok(format!(
         "{} new_key_id={}",
         publication_output(outcome),
         hex(&(new.key_id().0))
     ))
+}
+
+fn publish_admission_artifact(artifact: &Path) -> Result<(), String> {
+    use sha2::Digest;
+    let root = artifact
+        .parent()
+        .ok_or("checkpoint artifact has no authorization root")?;
+    let directory = ferro_core::authorization::SecureDirectory::open(&root.join("admission"))
+        .map_err(|e| format!("admission directory: {e}"))?;
+    let manifest_bytes = directory
+        .read_bounded("manifest.json", 1024 * 1024)
+        .map_err(|e| format!("admission manifest: {e}"))?;
+    let mut manifest: ferro_core::authorization::admission::AdmissionSnapshotManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|e| format!("admission manifest: {e}"))?;
+    let checkpoint_bytes = secure_read(artifact, 16 * 1024 * 1024)?;
+    let checkpoint = Checkpoint::decode(&checkpoint_bytes).map_err(|e| e.to_string())?;
+    let digest = sha2::Sha256::digest(&checkpoint_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if manifest
+        .checkpoint_chain
+        .last()
+        .is_some_and(|entry| entry.sha256 == digest)
+    {
+        return Ok(());
+    }
+    manifest.generation = manifest
+        .generation
+        .checked_add(1)
+        .ok_or("admission generation overflow")?;
+    let name = format!("checkpoint-{:020}.bin", manifest.generation);
+    directory
+        .write_atomic(&name, &checkpoint_bytes, 0o600)
+        .map_err(|e| e.to_string())?;
+    manifest
+        .checkpoint_chain
+        .push(ferro_core::authorization::admission::AdmissionArtifact {
+            file: name.clone(),
+            sha256: digest,
+        });
+    manifest.latest_checkpoint = name;
+    manifest.latest_created_at_secs = checkpoint.created_at_secs;
+    directory
+        .write_atomic(
+            "manifest.json",
+            &serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+            0o600,
+        )
+        .map_err(|e| e.to_string())
 }
 
 fn publication_output(outcome: PublicationOutcome) -> String {

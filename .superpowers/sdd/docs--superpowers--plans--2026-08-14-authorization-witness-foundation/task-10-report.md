@@ -63,3 +63,9 @@ The sink path now uses an explicit `AppendOnlySink` capability interface. `FsApp
 Emergency state and nonce persistence use a retained `SecureDirectory` descriptor. Reads are bounded `openat(O_NOFOLLOW)` operations; nonce creation is `O_EXCL`; state replacement is a same-dirfd temporary write, file `fsync`, `renameat`, and directory `fsync`; reconciliation uses `unlinkat` and directory `fsync`. A directory-replacement regression proves writes remain attached to the originally validated directory inode rather than a subsequently substituted path.
 
 Final verification: `cargo check -p ferro-cli` passed; emergency hardening tests passed 6/6; `witness_cli` passed 8/8; and `FERROCRATE_SKIP_ROOT_TESTS=1 cargo test -p ferro-cli` passed all runnable CLI unit, integration, property, security, and documentation tests (five explicitly privileged container E2E cases remained ignored).
+
+## Review hardening round 3
+
+Admission evidence is described by a versioned `AdmissionSnapshotManifest` in a retained secure directory. It binds the generation, journal, exact trust/minimum/ordered-chain artifact names and SHA-256 digests, trust key IDs, and latest checkpoint time. The runtime performs bounded dirfd-relative reads and confirms the manifest bytes and generation did not change during loading. Checkpoint publication, pending-binding reconciliation, and key rotation append the newly bound checkpoint artifact and atomically advance the manifest.
+
+Stale-checkpoint cleanup no longer depends on an action-name allowlist. Ordinary user stop and delete requests are denied like other mutations; checkpoint repair has a distinct authority class, and reserved cleanup requires an opaque internal `ReservedCleanupAuthority`.

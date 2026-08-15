@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::process::Command;
-use std::{fs, os::unix::fs::PermissionsExt};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, os::unix::fs::PermissionsExt};
 
 fn cli(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
@@ -56,23 +56,78 @@ fn protected_write(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
 
 fn provision_admission(auth_dir: &std::path::Path, id: [u8; 16]) {
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    provision_admission_with_key(auth_dir, id, &key);
+}
+
+fn provision_admission_with_key(
+    auth_dir: &std::path::Path,
+    id: [u8; 16],
+    key: &ed25519_dalek::SigningKey,
+) {
+    use sha2::Digest;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let checkpoint = ferro_core::witness::Checkpoint::sign(
         ferro_core::witness::FlushedHead::new(id, 1, 0, [0; 32]),
         now,
         &key,
         ferro_core::witness::CheckpointKind::Periodic,
-    ).unwrap();
-    protected_write(&auth_dir.join("minimum-checkpoint.bin"), checkpoint.encode());
-    let chain = auth_dir.join("checkpoint-chain");
-    fs::create_dir(&chain).unwrap();
-    fs::set_permissions(&chain, fs::Permissions::from_mode(0o700)).unwrap();
-    protected_write(&chain.join("00000000000000000000.bin"), checkpoint.encode());
-    let id_hex = id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    let public = key.verifying_key().to_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    protected_write(&auth_dir.join("trust-bundle.json"), serde_json::to_vec(&serde_json::json!({
+    )
+    .unwrap();
+    let admission = auth_dir.join("admission");
+    fs::create_dir(&admission).unwrap();
+    fs::set_permissions(&admission, fs::Permissions::from_mode(0o700)).unwrap();
+    let checkpoint_bytes = checkpoint.encode();
+    protected_write(&admission.join("minimum.bin"), &checkpoint_bytes);
+    protected_write(&admission.join("checkpoint-0001.bin"), &checkpoint_bytes);
+    let id_hex = id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let public = key
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let trust = serde_json::to_vec(&serde_json::json!({
         "schema": 1, "journal_id": id_hex, "initial_public_key": public, "starting_epoch": 1
-    })).unwrap());
+    }))
+    .unwrap();
+    protected_write(&admission.join("trust.json"), &trust);
+    let digest = |bytes: &[u8]| {
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let key_id = digest(key.verifying_key().as_bytes());
+    let manifest = ferro_core::authorization::admission::AdmissionSnapshotManifest {
+        schema: 1,
+        generation: 1,
+        journal_id: id.iter().map(|byte| format!("{byte:02x}")).collect(),
+        trust_bundle: ferro_core::authorization::admission::AdmissionArtifact {
+            file: "trust.json".into(),
+            sha256: digest(&trust),
+        },
+        minimum_checkpoint: ferro_core::authorization::admission::AdmissionArtifact {
+            file: "minimum.bin".into(),
+            sha256: digest(&checkpoint_bytes),
+        },
+        checkpoint_chain: vec![ferro_core::authorization::admission::AdmissionArtifact {
+            file: "checkpoint-0001.bin".into(),
+            sha256: digest(&checkpoint_bytes),
+        }],
+        trust_key_ids: vec![key_id],
+        latest_checkpoint: "checkpoint-0001.bin".into(),
+        latest_created_at_secs: now,
+    };
+    protected_write(
+        &admission.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    );
 }
 
 #[test]
@@ -253,6 +308,7 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
     let key = ferro_core::witness::KeyStore::new(&key_dir)
         .create("active")
         .unwrap();
+    provision_admission_with_key(&auth_dir, id, key.signing_key());
     let public = key
         .verifying_key()
         .to_bytes()
@@ -283,6 +339,15 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("checkpoint bound"));
+    let published_manifest: ferro_core::authorization::admission::AdmissionSnapshotManifest =
+        serde_json::from_slice(&fs::read(auth_dir.join("admission/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(published_manifest.generation, 2);
+    assert_eq!(published_manifest.checkpoint_chain.len(), 2);
+    assert_eq!(
+        published_manifest.latest_checkpoint,
+        "checkpoint-00000000000000000002.bin"
+    );
 
     let live_writer =
         ferro_core::witness::WitnessJournal::open(ferro_core::witness::JournalConfig::new(

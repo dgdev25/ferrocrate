@@ -3569,13 +3569,35 @@ fn load_mutation_admission(
     root: &Path,
     journal_id: [u8; 16],
 ) -> Result<crate::authorization::admission::MutationAdmission, RuntimeError> {
-    let trust_path = root.join("trust-bundle.json");
-    let trust_value: serde_json::Value = serde_json::from_slice(&fs::read(&trust_path).map_err(|error| {
-        RuntimeError::Authorization(format!("enabled authorization requires explicit trust bundle: {error}"))
-    })?).map_err(|error| RuntimeError::Authorization(format!("invalid trust bundle: {error}")))?;
+    use sha2::Digest;
+    let directory = crate::authorization::SecureDirectory::open(&root.join("admission"))
+        .map_err(|error| RuntimeError::Authorization(format!("admission directory unavailable: {error}")))?;
+    let manifest_bytes = directory.read_bounded("manifest.json", 1024 * 1024)
+        .map_err(|error| RuntimeError::Authorization(format!("admission manifest unavailable: {error}")))?;
+    let manifest: crate::authorization::admission::AdmissionSnapshotManifest =
+        serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| RuntimeError::Authorization(format!("invalid admission manifest: {error}")))?;
+    if manifest.schema != 1 || manifest.generation == 0 {
+        return Err(RuntimeError::Authorization("unsupported admission manifest".into()));
+    }
+    let expected_id = journal_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    if manifest.journal_id != expected_id || manifest.checkpoint_chain.is_empty() {
+        return Err(RuntimeError::Authorization("admission manifest journal/chain mismatch".into()));
+    }
+    let read_artifact = |artifact: &crate::authorization::admission::AdmissionArtifact, maximum| {
+        let bytes = directory.read_bounded(&artifact.file, maximum)
+            .map_err(|error| RuntimeError::Authorization(format!("admission artifact unavailable: {error}")))?;
+        let digest = sha2::Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        if digest != artifact.sha256 {
+            return Err(RuntimeError::Authorization("admission artifact digest mismatch".into()));
+        }
+        Ok(bytes)
+    };
+    let trust_bytes = read_artifact(&manifest.trust_bundle, 1024 * 1024)?;
+    let trust_value: serde_json::Value = serde_json::from_slice(&trust_bytes)
+        .map_err(|error| RuntimeError::Authorization(format!("invalid trust bundle: {error}")))?;
     let pinned_id = trust_value.get("journal_id").and_then(serde_json::Value::as_str)
         .ok_or_else(|| RuntimeError::Authorization("trust bundle lacks journal_id".into()))?;
-    let expected_id = journal_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     if pinned_id != expected_id {
         return Err(RuntimeError::Authorization("trust bundle journal ID mismatch".into()));
     }
@@ -3584,25 +3606,19 @@ fn load_mutation_admission(
     let public = decode_fixed_hex::<32>(public)?;
     let key = ed25519_dalek::VerifyingKey::from_bytes(&public)
         .map_err(|_| RuntimeError::Authorization("trust bundle public key is invalid".into()))?;
-    let minimum = crate::witness::Checkpoint::decode(&fs::read(root.join("minimum-checkpoint.bin"))
-        .map_err(|error| RuntimeError::Authorization(format!("minimum checkpoint unavailable: {error}")))?)
+    let minimum = crate::witness::Checkpoint::decode(&read_artifact(&manifest.minimum_checkpoint, 16 * 1024 * 1024)?)
         .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
-    let chain_root = root.join("checkpoint-chain");
-    let mut entries = fs::read_dir(&chain_root)
-        .map_err(|error| RuntimeError::Authorization(format!("checkpoint chain unavailable: {error}")))?
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    let mut checkpoints = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let metadata = entry.metadata()?;
-        if !metadata.is_file() || metadata.len() > 1024 {
-            return Err(RuntimeError::Authorization("checkpoint chain entry is invalid".into()));
-        }
-        checkpoints.push(crate::witness::Checkpoint::decode(&fs::read(entry.path())?)
+    let mut checkpoints = Vec::with_capacity(manifest.checkpoint_chain.len());
+    for artifact in &manifest.checkpoint_chain {
+        checkpoints.push(crate::witness::Checkpoint::decode(&read_artifact(artifact, 16 * 1024 * 1024)?)
             .map_err(|error| RuntimeError::Authorization(error.to_string()))?);
     }
-    if checkpoints.is_empty() {
-        return Err(RuntimeError::Authorization("checkpoint chain is empty".into()));
+    let confirmation = directory.read_bounded("manifest.json", 1024 * 1024)
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    let confirmed: crate::authorization::admission::AdmissionSnapshotManifest = serde_json::from_slice(&confirmation)
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    if confirmed.generation != manifest.generation || confirmation != manifest_bytes {
+        return Err(RuntimeError::Authorization("admission manifest changed during load".into()));
     }
     Ok(crate::authorization::admission::MutationAdmission::verified(
         root.join("witness-journal"), journal_id,

@@ -5,7 +5,9 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ferro_net::validate::validate_interface_name;
 use ipnet::IpNet;
 
-use crate::protocol::{NetdRequest, RejectionCode, SignedEnvelope, MAX_PEERS, MAX_ROUTES};
+use crate::protocol::{
+    DesiredStateEnvelope, NetdRequest, RejectionCode, SignedEnvelope, MAX_PEERS, MAX_ROUTES,
+};
 
 pub struct Policy {
     cluster: String,
@@ -15,6 +17,49 @@ pub struct Policy {
 }
 
 impl Policy {
+    pub fn validate_desired(
+        &mut self,
+        envelope: &DesiredStateEnvelope,
+        now: u64,
+    ) -> Result<(), RejectionCode> {
+        if envelope.cluster_id != self.cluster || envelope.node_id != self.node {
+            return Err(RejectionCode::PolicyViolation);
+        }
+        if envelope.lease_expires_unix_secs <= now {
+            return Err(RejectionCode::ExpiredLease);
+        }
+        let mut unsigned = envelope.clone();
+        unsigned.signature.clear();
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(&envelope.signature)
+            .map_err(|_| RejectionCode::InvalidSignature)?;
+        self.key
+            .verify(
+                &serde_json::to_vec(&unsigned).map_err(|_| RejectionCode::InvalidFrame)?,
+                &Signature::from_slice(&signature).map_err(|_| RejectionCode::InvalidSignature)?,
+            )
+            .map_err(|_| RejectionCode::InvalidSignature)?;
+        let scope = "__desired__".to_string();
+        if let Some((epoch, revision, lease)) = self.revisions.get(&scope) {
+            if envelope.epoch < *epoch
+                || (envelope.epoch == *epoch
+                    && (envelope.revision < *revision
+                        || (envelope.revision == *revision
+                            && envelope.lease_expires_unix_secs <= *lease)))
+            {
+                return Err(RejectionCode::StaleRevision);
+            }
+        }
+        self.revisions.insert(
+            scope,
+            (
+                envelope.epoch,
+                envelope.revision,
+                envelope.lease_expires_unix_secs,
+            ),
+        );
+        Ok(())
+    }
     pub fn new(cluster: String, node: String, key: &str) -> Result<Self, RejectionCode> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(key)

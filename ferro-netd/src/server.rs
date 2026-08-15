@@ -5,10 +5,11 @@ use crate::server_grants::reject;
 use crate::{
     grants::GrantVerifier,
     protocol::{
-        GrantedDesiredStateEnvelope, GrantedEnvelope, NetdRequest, NetdResponse, RejectionCode,
-        SignedEnvelope, MAX_FRAME_BYTES,
+        DesiredStateEnvelope, GrantedDesiredStateEnvelope, GrantedEnvelope, NetdRequest,
+        NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES,
     },
 };
+use ferro_core::authorization::AuthorizationServiceMode;
 use ferro_net::{
     bridge::build_ip_link_set_master_cmd,
     veth::{VethConfig, VethPair},
@@ -24,6 +25,7 @@ pub struct NetdServer {
     pub(crate) endpoints: BTreeMap<String, String>,
     pub(crate) routes: BTreeMap<String, Vec<String>>,
     pub(crate) effect_receipts: BTreeMap<String, crate::effect_receipt::EffectReceipt>,
+    authorization_identity: Option<(AuthorizationServiceMode, String)>,
     pub(crate) journal: Option<PathBuf>,
     pub(crate) kernel: Box<dyn NetKernelOps>,
     #[cfg(any(test, feature = "test-support"))]
@@ -39,6 +41,7 @@ impl NetdServer {
             endpoints: BTreeMap::new(),
             routes: BTreeMap::new(),
             effect_receipts: BTreeMap::new(),
+            authorization_identity: None,
             journal: None,
             kernel: Box::new(RealNetKernelOps::new()),
             #[cfg(any(test, feature = "test-support"))]
@@ -63,6 +66,7 @@ impl NetdServer {
             endpoints: BTreeMap::new(),
             routes: BTreeMap::new(),
             effect_receipts: BTreeMap::new(),
+            authorization_identity: None,
             journal: None,
             kernel: Box::new(RealNetKernelOps::with_wireguard(
                 private_key_path,
@@ -71,6 +75,14 @@ impl NetdServer {
             #[cfg(any(test, feature = "test-support"))]
             test_faults: Default::default(),
         }
+    }
+    pub fn with_authorization_identity(
+        mut self,
+        mode: AuthorizationServiceMode,
+        instance_boot: impl Into<String>,
+    ) -> Self {
+        self.authorization_identity = Some((mode, instance_boot.into()));
+        self
     }
     pub fn handle_peer(&mut self, uid: u32, frame: &[u8], now: u64) -> NetdResponse {
         if uid != self.uid {
@@ -94,6 +106,36 @@ impl NetdServer {
                 "bulk desired-state grants are forbidden; submit one authorized mutation per resource",
             );
         }
+        if let Ok(desired) = serde_json::from_slice::<DesiredStateEnvelope>(&frame[4..]) {
+            let Some((expected, boot)) = &self.authorization_identity else {
+                return reject(
+                    RejectionCode::PolicyViolation,
+                    "service mode is not configured",
+                );
+            };
+            let peer = match AuthorizationServiceMode::parse(
+                &desired.handshake.mode,
+                desired.handshake.policy_digest,
+            ) {
+                Ok(value) => value,
+                Err(_) => return reject(RejectionCode::PolicyViolation, "invalid service mode"),
+            };
+            if expected.mode() != ferro_core::authorization::AuthorizationMode::Disabled
+                || expected.require_match(peer).is_err()
+                || desired.handshake.instance_boot != *boot
+            {
+                return reject(
+                    RejectionCode::PolicyViolation,
+                    "legacy desired state is available only on matching disabled service",
+                );
+            }
+            if let Err(code) = self.policy.validate_desired(&desired, now) {
+                return reject(code, "legacy desired signature or revision rejected");
+            }
+            return self
+                .apply_legacy_desired(&desired)
+                .unwrap_or_else(|code| reject(code, "legacy desired mutation failed"));
+        }
         let granted: GrantedEnvelope = match serde_json::from_slice(&frame[4..]) {
             Ok(value) => value,
             Err(_) => {
@@ -110,6 +152,21 @@ impl NetdServer {
                 );
             }
         };
+        if let Some((expected, boot)) = &self.authorization_identity {
+            let peer = match AuthorizationServiceMode::parse(
+                &granted.handshake.mode,
+                granted.handshake.policy_digest,
+            ) {
+                Ok(value) => value,
+                Err(_) => return reject(RejectionCode::PolicyViolation, "invalid service mode"),
+            };
+            if expected.require_match(peer).is_err() || granted.handshake.instance_boot != *boot {
+                return reject(
+                    RejectionCode::PolicyViolation,
+                    "authorization service identity mismatch",
+                );
+            }
+        }
         let envelope = granted.envelope;
         if let Err(code) = self.policy.validate(&envelope, now) {
             return reject(code, "policy rejected request");

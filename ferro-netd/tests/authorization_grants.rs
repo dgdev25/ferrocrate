@@ -307,6 +307,11 @@ fn granted_wire_reaches_the_real_server_without_ambient_authority() {
     claims.wall_deadline_secs = 200;
     claims.monotonic_deadline_millis = u64::MAX;
     let request = protocol::GrantedEnvelope {
+        handshake: protocol::ServiceHandshake {
+            mode: "enforce".into(),
+            policy_digest: Some([7; 32]),
+            instance_boot: "boot-a".into(),
+        },
         envelope,
         resource_uuid: claims.resource.resource_uuid.clone(),
         resource_generation: claims.resource.generation,

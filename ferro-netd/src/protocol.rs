@@ -6,6 +6,14 @@ pub const MAX_PEERS: usize = 255;
 pub const MAX_ROUTES: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceHandshake {
+    pub mode: String,
+    pub policy_digest: Option<[u8; 32]>,
+    pub instance_boot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignedEnvelope {
     pub cluster_id: String,
     pub node_id: String,
@@ -18,17 +26,20 @@ pub struct SignedEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DesiredStateEnvelope {
+    pub handshake: ServiceHandshake,
     pub cluster_id: String,
     pub node_id: String,
     pub epoch: u64,
     pub revision: u64,
     pub lease_expires_unix_secs: u64,
     pub desired_state: Vec<u8>,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GrantedEnvelope {
+    pub handshake: ServiceHandshake,
     pub envelope: SignedEnvelope,
     pub resource_uuid: String,
     pub resource_generation: u64,

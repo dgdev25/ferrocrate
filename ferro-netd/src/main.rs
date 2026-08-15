@@ -43,6 +43,7 @@ fn main() {
         .expect("kernel boot ID is required")
         .trim()
         .to_owned();
+    server = server.with_authorization_identity(service_mode, boot_id.clone());
     let grant_journal = std::env::var("FERROCRATE_NETD_GRANT_JOURNAL")
         .unwrap_or_else(|_| "/var/lib/ferrocrate/netd-grants.json".into());
     let grant_issuer = std::env::var("FERROCRATE_NETD_GRANT_ISSUER")

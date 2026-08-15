@@ -9,10 +9,13 @@ cd "$repo_root"
 
 cargo test -p ferro-mgr --tests
 cargo test -p ferro-netd
+cargo test -p ferro-netd --test transaction_fault_matrix
+cargo test -p ferro-netd --test authorization_grants key_rotation_accepts_overlap_then_rejects_retired_key
 cargo test -p ferro-core managed_overlay
 cargo test -p ferro-core network_backend
 cargo test -p ferro-cli managed_overlay
 cargo test -p ferro-cli network_backend
+cargo test -p ferro-mgr --test agent_reconcile equal_revision_without_lease_extension_is_stale
 
 if [[ "${FERROCRATE_RUN_PRIVILEGED_TESTS:-0}" != "1" ]]; then
   echo "privileged managed-overlay gate skipped; set FERROCRATE_RUN_PRIVILEGED_TESTS=1 to enable" >&2

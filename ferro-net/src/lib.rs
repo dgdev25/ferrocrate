@@ -28,7 +28,7 @@ pub use backend::{BackendError, BackendProbe, NetworkBackend};
 pub use validate::ValidationError;
 
 // Re-export bridge execution functions
-pub use bridge::{create_bridge, destroy_bridge, BridgeConfig};
+pub use bridge::{create_bridge, destroy_bridge, observe_bridge_identity, BridgeConfig, BridgeObservation};
 pub use observability::{format_backend_metrics, BackendMetrics};
 
 // Re-export eBPF execution functions

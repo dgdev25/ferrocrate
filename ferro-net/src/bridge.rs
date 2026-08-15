@@ -269,3 +269,96 @@ mod tests {
         assert_eq!(cfg.ipv6_cidr.as_deref(), Some("fd00::1/64"));
     }
 }
+
+// ============================================================================
+// Read-only bridge observation (FCNET-101)
+// ============================================================================
+
+/// Read-only observed identity of an existing bridge. `ifindex` is the
+/// kernel interface index, which changes when a bridge is recreated even
+/// under an identical name/address configuration, so it is the anchor for
+/// exact-identity lifecycle decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeObservation {
+    pub name: String,
+    pub ifindex: u32,
+    pub cidr: Option<String>,
+    pub ipv6_cidr: Option<String>,
+}
+
+/// Observe a bridge via `ip -j addr show dev <name>`.
+///
+/// Returns `Ok(None)` when the bridge does not exist. This function never
+/// mutates kernel state.
+pub fn observe_bridge_identity(name: &str) -> Result<Option<BridgeObservation>, ExecError> {
+    validate_interface_name(name).map_err(|e| ExecError::CommandFailed {
+        cmd: format!("bridge observation validation: {}", e),
+        stderr: String::new(),
+    })?;
+    let output = match crate::executor::exec_cmd_capture(&[
+        "ip".to_string(),
+        "-j".to_string(),
+        "addr".to_string(),
+        "show".to_string(),
+        "dev".to_string(),
+        name.to_string(),
+    ]) {
+        Ok(out) => out,
+        // `ip` reports a missing device as a command failure; map that to
+        // absence rather than an error.
+        Err(e) if e.to_string().contains("does not exist") => return Ok(None),
+        Err(e) => {
+            return Err(e);
+        }
+    };
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(None);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+        ExecError::CommandFailed {
+            cmd: "parse `ip -j` output".to_string(),
+            stderr: e.to_string(),
+        }
+    })?;
+    let entries = parsed
+        .as_array()
+        .ok_or_else(|| ExecError::CommandFailed {
+            cmd: "expected array from `ip -j`".to_string(),
+            stderr: String::new(),
+        })?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let ifindex = entries[0]
+        .get("ifindex")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| ExecError::CommandFailed {
+            cmd: "missing ifindex from `ip -j`".to_string(),
+            stderr: String::new(),
+        })? as u32;
+    let mut cidr = None;
+    let mut ipv6_cidr = None;
+    if let Some(addr_info) = entries[0].get("addr_info").and_then(|v| v.as_array()) {
+        for addr in addr_info {
+            let family = addr.get("family").and_then(|f| f.as_str()).unwrap_or("");
+            let local = addr.get("local").and_then(|l| l.as_str()).unwrap_or("");
+            let prefix = addr.get("prefixlen").and_then(|p| p.as_u64()).unwrap_or(0);
+            if local.is_empty() || prefix == 0 {
+                continue;
+            }
+            let cidr_str = format!("{}/{}", local, prefix);
+            if family == "inet6" {
+                ipv6_cidr.get_or_insert(cidr_str);
+            } else {
+                cidr.get_or_insert(cidr_str);
+            }
+        }
+    }
+    Ok(Some(BridgeObservation {
+        name: name.to_string(),
+        ifindex,
+        cidr,
+        ipv6_cidr,
+    }))
+}

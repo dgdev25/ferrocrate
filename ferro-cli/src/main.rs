@@ -1,6 +1,7 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(missing_docs)]
 
+use crate::network_lifecycle::NetworkRecord;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 #[cfg(target_os = "linux")]
@@ -4102,48 +4103,20 @@ fn execute_volume_remove(
         .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct NetworkRecord {
-    name: String,
-    driver: String,
-    subnet: String,
-    gateway: String,
-    bridge_name: String,
-    bridge_cidr: String,
-    created_at_unix: u64,
-    #[serde(default = "default_resource_generation")]
-    generation: u64,
-}
-
-fn default_resource_generation() -> u64 {
-    1
-}
-
 fn is_builtin_network_mode(value: &str) -> bool {
     matches!(value, "bridge" | "host" | "none" | "wireguard")
 }
 
 fn network_store_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("networks").join("networks.json")
+    crate::network_lifecycle::network_store_path(runtime_dir)
 }
 
 fn load_networks(runtime_dir: &Path) -> Result<Vec<NetworkRecord>, String> {
-    let path = network_store_path(runtime_dir);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|err| format!("network: failed to read {}: {err}", path.display()))?;
-    serde_json::from_str::<Vec<NetworkRecord>>(&content)
-        .map_err(|err| format!("network: failed to parse {}: {err}", path.display()))
+    crate::network_lifecycle::load_networks(runtime_dir)
 }
 
 fn save_networks(runtime_dir: &Path, records: &[NetworkRecord]) -> Result<(), String> {
-    let path = network_store_path(runtime_dir);
-    let payload = serde_json::to_string_pretty(records)
-        .map_err(|err| format!("network: failed to encode store: {err}"))?;
-    ferro_core::fs_atomic::write_atomic(&path, payload.as_bytes())
-        .map_err(|err| format!("network: failed to write {}: {err}", path.display()))
+    crate::network_lifecycle::save_networks(runtime_dir, records)
 }
 
 fn validate_network_name(name: &str) -> Result<(), String> {
@@ -6719,6 +6692,8 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
     }
     Ok(env)
 }
+
+mod network_lifecycle;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {

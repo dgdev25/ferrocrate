@@ -67,11 +67,11 @@ fn main() {
             );
         }
     }
-    if let Ok(path) = std::env::var("FERROCRATE_NETD_STATE") {
-        server = server
-            .load_journal(path.into())
-            .expect("invalid netd ownership journal");
-    }
+    let state_path = std::env::var("FERROCRATE_NETD_STATE")
+        .expect("FERROCRATE_NETD_STATE is required for durable revision replay protection");
+    server = server
+        .load_journal(state_path.into())
+        .expect("invalid netd ownership journal");
     let path = std::env::var("FERROCRATE_NETD_SOCKET")
         .unwrap_or_else(|_| "/run/ferrocrate/netd.sock".to_string());
     if let Some(parent) = std::path::Path::new(&path).parent() {

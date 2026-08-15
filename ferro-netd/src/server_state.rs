@@ -310,6 +310,7 @@ impl NetdServer {
             self.effect_receipts = state.effect_receipts;
             self.quarantined = state.quarantined;
             self.overlay_intents = state.overlay_intents;
+            self.policy.restore_revision_floors(state.revision_floors);
         }
         self.journal = Some(path);
         self.overlays.retain(|overlay| {
@@ -470,6 +471,7 @@ impl NetdServer {
                 effect_receipts: self.effect_receipts.clone(),
                 quarantined: self.quarantined.clone(),
                 overlay_intents: self.overlay_intents.clone(),
+                revision_floors: self.policy.revision_floors(),
             },
             |phase| {
                 #[cfg(any(test, feature = "test-support"))]

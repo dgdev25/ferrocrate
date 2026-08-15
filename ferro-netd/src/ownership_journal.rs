@@ -29,6 +29,8 @@ pub(crate) struct PersistedState {
     pub(crate) quarantined: BTreeSet<String>,
     #[serde(default)]
     pub(crate) overlay_intents: BTreeMap<String, OverlayMutationIntent>,
+    #[serde(default)]
+    pub(crate) revision_floors: BTreeMap<String, crate::policy::RevisionFloor>,
 }
 
 pub(crate) struct LoadedJournal {

@@ -123,6 +123,29 @@ impl NetdServer {
             );
             reject(code, "authorization grant rejected")
         })?;
+        if self.persist().is_err() {
+            self.policy.rollback(
+                request_overlay_id(&envelope.request),
+                envelope.epoch,
+                envelope.revision,
+            );
+            let _ = self.record_grant_failure(
+                &granted.grant.claims.request_id,
+                granted.grant.claims.nonce,
+                EffectReceipt::from_request(
+                    &envelope.request,
+                    granted.resource_generation,
+                    envelope.epoch,
+                    envelope.revision,
+                )
+                .identity(),
+                "failed to persist revision floor",
+            );
+            return Err(reject(
+                RejectionCode::Busy,
+                "failed to persist revision floor",
+            ));
+        }
         Ok(Dispatch {
             envelope,
             receipt,

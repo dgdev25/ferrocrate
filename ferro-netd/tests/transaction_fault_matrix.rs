@@ -9,7 +9,8 @@ use ferro_netd::{
     grants::{GrantLedger, GrantVerifier},
     policy::Policy,
     protocol::{
-        GrantedEnvelope, NetdRequest, NetdResponse, OverlayMode, ServiceHandshake, SignedEnvelope,
+        GrantedEnvelope, NetdRequest, NetdResponse, OverlayMode, RejectionCode, ServiceHandshake,
+        SignedEnvelope,
     },
     server::NetdServer,
     test_support::{normalized_request_parameters, FaultHandle, FaultPoint},
@@ -345,4 +346,40 @@ fn granted_transaction_fault_matrix_reopens_without_false_failure_or_replay() {
             );
         }
     }
+}
+
+#[test]
+fn granted_restart_rejects_unexpired_lower_revision_before_kernel_effect() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = Keys {
+        manager: SigningKey::from_bytes(&[73; 32]),
+        helper: SigningKey::from_bytes(&[74; 32]),
+    };
+    let mut server = open_server(directory.path(), &keys, Default::default());
+    assert_eq!(
+        server.handle_peer(
+            1001,
+            &frame(&keys, bridge("10.2.0.1/24", "10.2.0.0/16"), 2, None),
+            100
+        ),
+        NetdResponse::Applied
+    );
+    drop(server);
+
+    let mut restarted = open_server(directory.path(), &keys, Default::default());
+    assert_eq!(
+        restarted.handle_peer(
+            1001,
+            &frame(&keys, bridge("10.1.0.1/24", "10.1.0.0/16"), 1, None),
+            100
+        ),
+        NetdResponse::Rejected {
+            code: RejectionCode::StaleRevision,
+            reason: "policy rejected request".into(),
+        }
+    );
+    assert_eq!(
+        restarted.test_snapshot().routes.get("matrix-overlay"),
+        Some(&vec!["10.2.0.0/16".into()])
+    );
 }

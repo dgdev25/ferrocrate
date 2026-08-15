@@ -82,6 +82,14 @@ impl NetdServer {
                 "legacy desired signature or revision rejected",
             ));
         }
+        if self.persist().is_err() {
+            self.policy
+                .rollback("__desired__", desired.epoch, desired.revision);
+            return Some(crate::server_grants::reject(
+                RejectionCode::Busy,
+                "failed to persist desired revision floor",
+            ));
+        }
         Some(match self.apply_legacy_desired(&desired) {
             Ok(response) => response,
             Err(code) => {
@@ -436,6 +444,65 @@ mod tests {
     }
 
     #[test]
+    fn disabled_restart_rejects_unexpired_stale_desired_without_rolling_back_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[47; 32]);
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let kernel_path = directory.path().join("kernel.json");
+        let journal_path = directory.path().join("ownership.json");
+        let make_server = || {
+            NetdServer::deterministic(
+                1001,
+                Policy::new("cluster".into(), "node".into(), &public).unwrap(),
+                kernel_path.clone(),
+            )
+            .with_authorization_identity(
+                AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+                "boot-a",
+            )
+            .load_journal(journal_path.clone())
+            .unwrap()
+        };
+        let desired = |revision, route: &str| DesiredState {
+            cluster_id: "cluster".into(),
+            cluster_epoch: 1,
+            revision,
+            overlays: vec![OverlayState {
+                overlay_id: "replay-overlay".into(),
+                routes: vec![route.into()],
+                peers: vec![],
+                wireguard: Some(false),
+                addresses: vec![],
+            }],
+            signature: vec![],
+            lease_expires_unix: 500,
+        };
+        let stale = desired(1, "10.1.0.0/16");
+        let current = desired(2, "10.2.0.0/16");
+        let mut server = make_server();
+        assert_eq!(
+            send(&mut server, &key, stale.clone()),
+            NetdResponse::Applied
+        );
+        assert_eq!(send(&mut server, &key, current), NetdResponse::Applied);
+        drop(server);
+
+        let mut restarted = make_server();
+        assert_eq!(
+            send(&mut restarted, &key, stale),
+            NetdResponse::Rejected {
+                code: RejectionCode::StaleRevision,
+                reason: "legacy desired signature or revision rejected".into(),
+            }
+        );
+        assert_eq!(
+            restarted.routes.get("replay-overlay"),
+            Some(&vec!["10.2.0.0/16".into()])
+        );
+    }
+
+    #[test]
     fn actual_legacy_overlay_phase_fault_matrix_reopens_safely() {
         #[derive(Clone)]
         struct Case {
@@ -607,7 +674,15 @@ mod tests {
             );
             let replay = send(&mut reopened, &key, target);
             assert!(
-                quarantined || matches!(replay, NetdResponse::Applied),
+                quarantined
+                    || matches!(
+                        replay,
+                        NetdResponse::Applied
+                            | NetdResponse::Rejected {
+                                code: RejectionCode::StaleRevision,
+                                ..
+                            }
+                    ),
                 "{}:{} replay wedged: {replay:?}",
                 case.name,
                 case.phase

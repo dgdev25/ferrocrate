@@ -9,11 +9,18 @@ use crate::protocol::{
     DesiredStateEnvelope, NetdRequest, RejectionCode, SignedEnvelope, MAX_PEERS, MAX_ROUTES,
 };
 
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct RevisionFloor {
+    pub(crate) epoch: u64,
+    pub(crate) revision: u64,
+    pub(crate) lease_expires_unix_secs: u64,
+}
+
 pub struct Policy {
     cluster: String,
     node: String,
     key: VerifyingKey,
-    revisions: BTreeMap<String, (u64, u64, u64)>,
+    revisions: BTreeMap<String, RevisionFloor>,
 }
 
 impl Policy {
@@ -40,23 +47,23 @@ impl Policy {
             )
             .map_err(|_| RejectionCode::InvalidSignature)?;
         let scope = "__desired__".to_string();
-        if let Some((epoch, revision, lease)) = self.revisions.get(&scope) {
-            if envelope.epoch < *epoch
-                || (envelope.epoch == *epoch
-                    && (envelope.revision < *revision
-                        || (envelope.revision == *revision
-                            && envelope.lease_expires_unix_secs <= *lease)))
+        if let Some(floor) = self.revisions.get(&scope) {
+            if envelope.epoch < floor.epoch
+                || (envelope.epoch == floor.epoch
+                    && (envelope.revision < floor.revision
+                        || (envelope.revision == floor.revision
+                            && envelope.lease_expires_unix_secs <= floor.lease_expires_unix_secs)))
             {
                 return Err(RejectionCode::StaleRevision);
             }
         }
         self.revisions.insert(
             scope,
-            (
-                envelope.epoch,
-                envelope.revision,
-                envelope.lease_expires_unix_secs,
-            ),
+            RevisionFloor {
+                epoch: envelope.epoch,
+                revision: envelope.revision,
+                lease_expires_unix_secs: envelope.lease_expires_unix_secs,
+            },
         );
         Ok(())
     }
@@ -99,32 +106,40 @@ impl Policy {
             .map_err(|_| RejectionCode::InvalidSignature)?;
         validate_request(&envelope.request)?;
         let overlay = overlay_id(&envelope.request).to_string();
-        if let Some((epoch, revision, lease)) = self.revisions.get(&overlay) {
-            if envelope.epoch < *epoch
-                || (envelope.epoch == *epoch
-                    && (envelope.revision < *revision
-                        || (envelope.revision == *revision
-                            && envelope.lease_expires_unix_secs <= *lease)))
+        if let Some(floor) = self.revisions.get(&overlay) {
+            if envelope.epoch < floor.epoch
+                || (envelope.epoch == floor.epoch
+                    && (envelope.revision < floor.revision
+                        || (envelope.revision == floor.revision
+                            && envelope.lease_expires_unix_secs <= floor.lease_expires_unix_secs)))
             {
                 return Err(RejectionCode::StaleRevision);
             }
         }
         self.revisions.insert(
             overlay,
-            (
-                envelope.epoch,
-                envelope.revision,
-                envelope.lease_expires_unix_secs,
-            ),
+            RevisionFloor {
+                epoch: envelope.epoch,
+                revision: envelope.revision,
+                lease_expires_unix_secs: envelope.lease_expires_unix_secs,
+            },
         );
         Ok(())
     }
 
     pub fn rollback(&mut self, scope: &str, epoch: u64, revision: u64) {
-        if matches!(self.revisions.get(scope), Some((current_epoch, current_revision, _)) if *current_epoch == epoch && *current_revision == revision)
+        if matches!(self.revisions.get(scope), Some(floor) if floor.epoch == epoch && floor.revision == revision)
         {
             self.revisions.remove(scope);
         }
+    }
+
+    pub(crate) fn revision_floors(&self) -> BTreeMap<String, RevisionFloor> {
+        self.revisions.clone()
+    }
+
+    pub(crate) fn restore_revision_floors(&mut self, floors: BTreeMap<String, RevisionFloor>) {
+        self.revisions = floors;
     }
 }
 

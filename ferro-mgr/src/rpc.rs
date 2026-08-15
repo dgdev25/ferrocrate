@@ -123,8 +123,16 @@ impl ControlServiceImpl {
             })?;
         let revision = self.store.next_revision().map_err(|e| e.to_string())?;
         let desired = self.builder.snapshot(revision, overlays, now_unix);
+        let prior = self
+            .store
+            .latest_authorized_revision(node_id)
+            .map_err(|e| e.to_string())?
+            .and_then(|(_, payload, _)| DesiredState::decode(payload.as_slice()).ok());
+        if prior.is_none() && !current.is_empty() {
+            return Err("prior authorized desired state is unavailable".into());
+        }
         let operations = controller
-            .issue_exact_diff(&desired, node_id, current, now_monotonic_millis)
+            .issue_exact_diff_from_state(&desired, node_id, prior.as_ref(), now_monotonic_millis)
             .map_err(|e| match e {
                 ControllerAuthorizationError::Denied { resource } => {
                     format!("controller policy denied {resource}")

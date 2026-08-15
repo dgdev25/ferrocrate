@@ -369,6 +369,19 @@ impl GrantVerifier {
         if grant.claims.parameter_digest != parameters.digest() {
             return Err(GrantError::ParameterMismatch);
         }
+        let controller_overlay_action = matches!(
+            grant.claims.action,
+            GrantAction::NetworkCreate | GrantAction::NetworkDelete
+        );
+        if controller_overlay_action
+            && (grant.claims.precondition_digest == [0; 32]
+                || grant.claims.recovery_recipe_digest == [0; 32]
+                || grant.claims.precondition_digest == grant.claims.parameter_digest
+                || grant.claims.recovery_recipe_digest == grant.claims.parameter_digest
+                || grant.claims.precondition_digest == grant.claims.recovery_recipe_digest)
+        {
+            return Err(GrantError::ParameterMismatch);
+        }
         if grant.claims.kind == GrantKind::Cleanup
             && (grant
                 .claims

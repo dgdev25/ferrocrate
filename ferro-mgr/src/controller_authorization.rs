@@ -63,6 +63,31 @@ impl ControllerGrantIssuer {
         current: &[String],
         now_monotonic_millis: u64,
     ) -> Result<Vec<GrantedEnvelope>, ControllerAuthorizationError> {
+        let prior = DesiredState {
+            cluster_id: desired.cluster_id.clone(),
+            cluster_epoch: desired.cluster_epoch,
+            revision: desired.revision.saturating_sub(1),
+            overlays: current
+                .iter()
+                .map(|overlay_id| crate::proto::OverlayState {
+                    overlay_id: overlay_id.clone(),
+                    routes: vec![],
+                    peers: vec![],
+                })
+                .collect(),
+            signature: vec![],
+            lease_expires_unix: desired.lease_expires_unix,
+        };
+        self.issue_exact_diff_from_state(desired, node_id, Some(&prior), now_monotonic_millis)
+    }
+
+    pub fn issue_exact_diff_from_state(
+        &self,
+        desired: &DesiredState,
+        node_id: &str,
+        prior: Option<&DesiredState>,
+        now_monotonic_millis: u64,
+    ) -> Result<Vec<GrantedEnvelope>, ControllerAuthorizationError> {
         if !self.policy.allowed_nodes.contains(node_id) {
             return Err(ControllerAuthorizationError::Denied {
                 resource: node_id.into(),
@@ -73,7 +98,11 @@ impl ControllerGrantIssuer {
             .iter()
             .map(|o| o.overlay_id.as_str())
             .collect();
-        let current: BTreeSet<_> = current.iter().map(String::as_str).collect();
+        let current: BTreeSet<_> = prior
+            .into_iter()
+            .flat_map(|v| &v.overlays)
+            .map(|v| v.overlay_id.as_str())
+            .collect();
         let mut requests = Vec::new();
         for overlay in &desired.overlays {
             let peers = overlay.peers.iter().map(|peer| serde_json::json!({
@@ -108,13 +137,18 @@ impl ControllerGrantIssuer {
             .into_iter()
             .enumerate()
             .map(|(index, request)| {
-                let prior_exists = current.contains(request_overlay(&request));
+                let prior_overlay = prior.and_then(|state| {
+                    state
+                        .overlays
+                        .iter()
+                        .find(|overlay| overlay.overlay_id == request_overlay(&request))
+                });
                 self.issue_one(
                     desired,
                     node_id,
                     request,
                     index,
-                    prior_exists,
+                    prior_overlay,
                     now_monotonic_millis,
                 )
             })
@@ -127,7 +161,7 @@ impl ControllerGrantIssuer {
         node_id: &str,
         request: NetdRequest,
         index: usize,
-        prior_exists: bool,
+        prior_overlay: Option<&crate::proto::OverlayState>,
         now_monotonic_millis: u64,
     ) -> Result<GrantedEnvelope, ControllerAuthorizationError> {
         let overlay_id = request_overlay(&request);
@@ -145,13 +179,24 @@ impl ControllerGrantIssuer {
         if nonce == [0; 16] {
             return Err(ControllerAuthorizationError::Random);
         }
+        let prior_canonical = prior_overlay.map(|overlay| serde_json::json!({
+            "overlay_id": overlay.overlay_id,
+            "routes": overlay.routes,
+            "peers": overlay.peers.iter().map(|peer| serde_json::json!({
+                "node_id": peer.node_id,
+                "public_key": base64::engine::general_purpose::STANDARD.encode(&peer.public_key),
+                "endpoint": peer.endpoint,
+                "allowed_ips": peer.allowed_ips,
+            })).collect::<Vec<_>>(),
+            "addresses": Vec::<String>::new()
+        }));
         let canonical = serde_json::to_vec(&(
             node_id,
             desired.cluster_epoch,
             desired.revision,
             &resource,
             &request,
-            prior_exists,
+            &prior_canonical,
         ))
         .map_err(|_| ControllerAuthorizationError::Encoding)?;
         let precondition_digest = Sha256::digest(
@@ -163,11 +208,17 @@ impl ControllerGrantIssuer {
         )
         .into();
         let post_exists = matches!(request, NetdRequest::ApplyOverlay { .. });
+        let inverse = if post_exists {
+            "remove-overlay"
+        } else {
+            "restore-overlay"
+        };
         let recovery_recipe_digest = Sha256::digest(
             [
                 b"ferrocrate.controller-recovery.v1\0".as_slice(),
                 &canonical,
                 &[u8::from(post_exists)],
+                inverse.as_bytes(),
             ]
             .concat(),
         )

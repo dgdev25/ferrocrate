@@ -161,4 +161,49 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn controller_local_controller_local_sequence_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sequence.json");
+        let sequence = NetdSequence::open(
+            path.clone(),
+            SequenceValue {
+                epoch: 3,
+                revision: 0,
+            },
+        )
+        .unwrap();
+        sequence
+            .advance_controller(SequenceValue {
+                epoch: 3,
+                revision: 1,
+            })
+            .unwrap();
+        assert_eq!(sequence.reserve_child().unwrap().revision, 2);
+        sequence
+            .advance_controller(SequenceValue {
+                epoch: 3,
+                revision: 3,
+            })
+            .unwrap();
+        assert_eq!(sequence.reserve_child().unwrap().revision, 4);
+        drop(sequence);
+        let restarted = NetdSequence::open(
+            path,
+            SequenceValue {
+                epoch: 3,
+                revision: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restarted.current().unwrap(),
+            SequenceValue {
+                epoch: 3,
+                revision: 4
+            }
+        );
+        assert_eq!(restarted.reserve_child().unwrap().revision, 5);
+    }
 }

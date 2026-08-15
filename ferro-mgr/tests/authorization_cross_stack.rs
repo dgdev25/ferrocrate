@@ -105,8 +105,9 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     let bundle = builder
         .authorization_bundle(&desired, "node-a", operations)
         .unwrap();
+    let sequence_path = directory.path().join("sequence.json");
     let sequence = NetdSequence::open(
-        directory.path().join("sequence.json"),
+        sequence_path.clone(),
         SequenceValue {
             epoch: 0,
             revision: 0,
@@ -123,7 +124,9 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     .unwrap()
     .with_netd_sequence(sequence.clone());
     assert_eq!(
-        agent.reconcile_with_bundle(desired, &bundle, 101).unwrap(),
+        agent
+            .reconcile_with_bundle(desired.clone(), &bundle, 101)
+            .unwrap(),
         1
     );
     assert_eq!(
@@ -154,7 +157,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
             "key-1",
             "boot-a",
             issuer(&key_path, uid),
-            envelope_key,
+            envelope_key.clone(),
             "cluster-a",
             "node-a",
         )
@@ -254,6 +257,61 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         send(&local_socket, &bypass),
         LocalApiResponse::Rejected { .. }
     ));
+
+    // A second controller publication follows local child work in the same durable
+    // revision domain, and another local mutation remains monotonic across restart.
+    let desired2 = builder.snapshot(
+        4,
+        vec![OverlayState {
+            overlay_id: "wg0".into(),
+            routes: vec!["10.30.0.0/24".into()],
+            peers: vec![],
+        }],
+        200,
+    );
+    let operations2 = controller
+        .issue_exact_diff_from_state(&desired2, "node-a", Some(&desired), u64::MAX - 60_000)
+        .unwrap();
+    let bundle2 = builder
+        .authorization_bundle(&desired2, "node-a", operations2)
+        .unwrap();
+    serve_next(listener.try_clone().unwrap(), server.clone(), uid, 201);
+    assert_eq!(
+        agent
+            .reconcile_with_bundle(desired2, &bundle2, 201)
+            .unwrap(),
+        4
+    );
+    assert_eq!(sequence.current().unwrap().revision, 4);
+
+    let attach2 = delegated(
+        &helper_key,
+        ManagedOverlayRequest::AttachContainer {
+            overlay_id: "wg0".into(),
+            container_id: "container-c".into(),
+            now_unix: 202,
+        },
+        "attach-parent-2",
+        [4; 16],
+        false,
+        None,
+    );
+    serve_next(listener.try_clone().unwrap(), server.clone(), uid, 203);
+    assert!(matches!(
+        send(&local_socket, &attach2),
+        LocalApiResponse::Attached(_)
+    ));
+    assert_eq!(sequence.current().unwrap().revision, 5);
+    let restarted = NetdSequence::open(
+        sequence_path,
+        SequenceValue {
+            epoch: 2,
+            revision: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(restarted.current().unwrap().revision, 5);
+    assert_eq!(restarted.reserve_child().unwrap().revision, 6);
 
     // A failure between kernel effect and ownership persistence is witnessed and never
     // leaves an endpoint that a retry could silently adopt.

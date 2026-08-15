@@ -1023,6 +1023,25 @@ fn append_lifecycle_checkpoint(
     write_operations_durable(runtime_dir, &ops)
 }
 
+/// Test-only process fault injection. It is inert unless the explicit enable
+/// gate and a matching checkpoint name are both present in the environment.
+fn maybe_kill_after_checkpoint(phase: NetworkLifecyclePhase) {
+    if std::env::var("FERROCRATE_ENABLE_TEST_FAULTS").as_deref() != Ok("1") {
+        return;
+    }
+    let requested = match std::env::var("FERROCRATE_NETWORK_KILL_AT") {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    if requested != format!("{phase:?}") {
+        return;
+    }
+    eprintln!("test fault injection: killing after {phase:?}");
+    unsafe {
+        nix::libc::kill(nix::libc::getpid(), nix::libc::SIGKILL);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Create lifecycle
 // ---------------------------------------------------------------------------
@@ -1077,6 +1096,7 @@ pub(crate) fn run_network_create(
         None,
         None,
     )?;
+    maybe_kill_after_checkpoint(NetworkLifecyclePhase::IntentDurable);
 
     if let Err(create_error) = kernel.create_bridge(&record.config) {
         let observed = kernel.observe_bridge(&bridge_name);
@@ -1109,6 +1129,7 @@ pub(crate) fn run_network_create(
                     Some(observed.clone()),
                     None,
                 )?;
+                maybe_kill_after_checkpoint(NetworkLifecyclePhase::IdentityObserved);
                 Ok(observed)
             } else {
                 let detail = format!(
@@ -1213,6 +1234,7 @@ pub(crate) fn run_network_delete(
                         None,
                         None,
                     )?;
+                    maybe_kill_after_checkpoint(NetworkLifecyclePhase::Removed);
                     Ok(())
                 }
                 // Absent at destroy time: idempotent, still durable.
@@ -1224,6 +1246,7 @@ pub(crate) fn run_network_delete(
                         None,
                         Some("absent at destroy time".to_string()),
                     )?;
+                    maybe_kill_after_checkpoint(NetworkLifecyclePhase::Removed);
                     Ok(())
                 }
                 Err(e) => {
@@ -1432,6 +1455,7 @@ fn run_network_create_and_publish(
         Some(observed.clone()),
         None,
     )?;
+    maybe_kill_after_checkpoint(NetworkLifecyclePhase::StoreCommitted);
     Ok(observed)
 }
 

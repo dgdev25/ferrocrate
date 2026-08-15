@@ -42,6 +42,7 @@ veth_host="vh${if_id}"
 veth_ep="ve${if_id}"
 runtime_dir="$(mktemp -d "/tmp/${prefix}-runtime.XXXXXX")"
 net_name="${prefix}-net"
+test_image="${FERROCRATE_NETWORK_TEST_IMAGE:-alpine:3.19}"
 subnet="172.30.203.0/24"
 expected_cidr="172.30.203.1/24"
 endpoint_cidr="172.30.203.2/24"
@@ -79,8 +80,70 @@ ferro_net() {
     "$ferro_cli" "$@"
 }
 
+# Pull the fixture before entering the isolated namespace; the namespace has
+# no external route, while the image store is shared with the public run path.
+env FERROCRATE_RUNTIME_DIR="$runtime_dir" HOME="$runtime_dir" \
+  "$ferro_cli" pull "$test_image" >/dev/null \
+  || fail "unable to prepare test image ${test_image}"
+
 ip netns add "$ns_name"
 ip netns exec "$ns_name" ip link set lo up
+
+run_killed_create() {
+  local phase="$1"
+  local fault_runtime fault_name fault_bridge journal pid deadline recovery
+  fault_runtime="$(mktemp -d "/tmp/${prefix}-${phase}.runtime.XXXXXX")"
+  fault_name="${net_name}-${phase,,}"
+  fault_bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$fault_name" | sha256sum | awk '{print substr($1,1,12)}')"
+  fault_bridge="fc-${fault_bridge_suffix}"
+  journal="$fault_runtime/network-operations.journal"
+
+  ip netns exec "$ns_name" env \
+    FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+    FERROCRATE_ENABLE_TEST_FAULTS=1 FERROCRATE_NETWORK_KILL_AT="$phase" \
+    "$ferro_cli" network create --subnet "$subnet" "$fault_name" \
+    >"$fault_runtime/create.log" 2>&1 &
+  pid=$!
+  deadline=$((SECONDS + 10))
+  while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+    if [[ -f "$journal" ]] && grep -aFq "\"phase\":\"$phase\"" "$journal"; then
+      kill -KILL "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.01
+  done
+  if ! grep -aFq "\"phase\":\"$phase\"" "$journal" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "did not observe ${phase} checkpoint for ${fault_name}"
+  fi
+  wait "$pid" 2>/dev/null || true
+
+  recovery="$(ip netns exec "$ns_name" env \
+    FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+    "$ferro_cli" network ls 2>&1)" \
+    || fail "fresh runtime could not inspect ${phase} recovery"
+  case "$phase" in
+    IntentDurable)
+      grep -F "$fault_name" <<<"$recovery" >/dev/null \
+        && fail "IntentDurable recovery falsely published ${fault_name}"
+      ;;
+    IdentityObserved|StoreCommitted)
+      grep -F "$fault_name" <<<"$recovery" >/dev/null \
+        || fail "${phase} recovery did not publish ${fault_name}"
+      ip netns exec "$ns_name" env \
+        FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+        "$ferro_cli" network rm "$fault_name" >/dev/null \
+        || fail "${phase} recovered network could not be removed"
+      ;;
+  esac
+  ip -n "$ns_name" link delete "$fault_bridge" 2>/dev/null || true
+  rm -rf -- "$fault_runtime"
+}
+
+run_killed_create IntentDurable
+run_killed_create IdentityObserved
+run_killed_create StoreCommitted
 
 ferro_net network create --subnet "$subnet" "$net_name"
 
@@ -150,11 +213,70 @@ ip netns exec "$ep_ns" ping -c 1 -W 2 "$gateway" >/dev/null \
 
 printf 'privileged network lifecycle: endpoint %s pinged gateway %s\n' "$endpoint_cidr" "$gateway"
 
-# Association refusal is not exercised. Public NetworkCommands is
-# Create/Ls/Rm only. There is no ferro-cli network connect and no
-# documented public container-run hook that writes a ContainerRecord
-# onto this named network. Inventing a store put would fake the proof.
-printf 'SKIP association guard: no public ferro-cli network connect or documented container-associate hook (NetworkCommands is Create/Ls/Rm only)\n'
+# Exercise the public container path. The command intentionally omits --rm so
+# an exited record remains an extant association and must still block rm.
+run_output="$(ferro_net run "$test_image" --network "$net_name" \
+  --network-backend iptables -- sleep 60)" \
+  || fail "public run failed on named network"
+container_id="$(sed -n 's/.*container_id=\([^ ]*\).*/\1/p' <<<"$run_output" | head -n 1)"
+[[ -n "$container_id" ]] || fail "public run did not return a container id"
+container_pid="$(sed -n 's/.*pid=\([^ ]*\).*/\1/p' <<<"$run_output" | head -n 1)"
+[[ -n "$container_pid" ]] || fail "public run did not return a container pid"
+
+if ferro_net network rm "$net_name" >"$runtime_dir/rm-associated.log" 2>&1; then
+  fail "network rm succeeded while container ${container_id} was associated"
+fi
+grep -F "in use by extant container association" "$runtime_dir/rm-associated.log" \
+  >/dev/null || fail "network rm refused association with an unexpected error"
+
+kill "$container_pid" 2>/dev/null || true
+ferro_net rm "$container_id" \
+  || fail "public container removal failed after association refusal"
+
+run_killed_delete() {
+  local fault_runtime fault_name fault_bridge_suffix fault_bridge journal pid deadline recovery
+  fault_runtime="$(mktemp -d "/tmp/${prefix}-Removed.runtime.XXXXXX")"
+  fault_name="${net_name}-removed"
+  fault_bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$fault_name" | sha256sum | awk '{print substr($1,1,12)}')"
+  fault_bridge="fc-${fault_bridge_suffix}"
+  journal="$fault_runtime/network-operations.journal"
+  ip netns exec "$ns_name" env FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+    "$ferro_cli" network create --subnet "$subnet" "$fault_name" >/dev/null \
+    || fail "checkpoint delete fixture create failed"
+  ip netns exec "$ns_name" env FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+    FERROCRATE_ENABLE_TEST_FAULTS=1 FERROCRATE_NETWORK_KILL_AT=Removed \
+    "$ferro_cli" network rm "$fault_name" >"$fault_runtime/delete.log" 2>&1 &
+  pid=$!
+  deadline=$((SECONDS + 10))
+  while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+    if [[ -f "$journal" ]] && grep -aFq '"phase":"Removed"' "$journal"; then
+      kill -KILL "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.01
+  done
+  if ! grep -aFq '"phase":"Removed"' "$journal" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "did not observe Removed checkpoint for ${fault_name}"
+  fi
+  wait "$pid" 2>/dev/null || true
+  recovery="$(ip netns exec "$ns_name" env \
+    FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+    "$ferro_cli" network ls 2>&1)" \
+    || fail "fresh runtime could not inspect Removed recovery"
+  if grep -F "$fault_name" <<<"$recovery" >/dev/null; then
+    ip netns exec "$ns_name" env FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
+      "$ferro_cli" network rm "$fault_name" >/dev/null \
+      || fail "Removed recovery left a record that could not be finalized"
+  fi
+  if ip -n "$ns_name" -j link show "$fault_bridge" >/dev/null 2>&1; then
+    fail "bridge ${fault_bridge} survived Removed recovery"
+  fi
+  rm -rf -- "$fault_runtime"
+}
+
+run_killed_delete
 
 ip -n "$ns_name" link delete "$veth_host" || true
 if ip netns list 2>/dev/null | awk '{print $1}' | grep -Fxq -- "$ep_ns"; then
@@ -175,12 +297,5 @@ if [[ -f "$networks_json" ]]; then
   ' "$networks_json" >/dev/null \
     || fail "runtime networks.json still contains ${net_name}"
 fi
-
-# Checkpoint kill evidence is unsupported. FERROCRATE_NETWORK_KERNEL_STATE
-# selects a file-backed emulator; it is not a phase-kill injector.
-# No documented env or fault hook kills at IntentDurable,
-# IdentityObserved, StoreCommitted, or Removed and then proves recovery
-# or quarantine on a fresh runtime.
-printf 'SKIP checkpoint kill evidence: no documented env/fault hook to inject process kill at IntentDurable/IdentityObserved/StoreCommitted/Removed\n'
 
 printf 'privileged network lifecycle: delete observed absent %s\n' "$bridge_name"

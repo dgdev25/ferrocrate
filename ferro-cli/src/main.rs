@@ -4272,6 +4272,23 @@ fn handle_network_authorized(
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
+    let recovery = crate::network_lifecycle::recover_network_lifecycles(
+        runtime_dir,
+        cli_network_kernel().as_ref(),
+    )
+    .map_err(|error| format!("network recovery failed: {error}"))?;
+    if let Some(entry) = recovery
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.verdict, crate::network_lifecycle::NetworkRecoveryVerdict::Quarantined))
+    {
+        return Err(format!(
+            "network recovery quarantined {}: {}",
+            entry.network,
+            entry.detail.as_deref().unwrap_or("no detail")
+        ));
+    }
+
     match command {
         NetworkCommands::Create {
             name,

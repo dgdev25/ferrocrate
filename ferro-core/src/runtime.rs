@@ -6503,7 +6503,7 @@ fn verify_container_kernel_ownership(
     netns_name: Option<&str>,
     ownership: &NetworkOwnershipRecord,
     require_present: bool,
-) -> Result<(), RuntimeError> {
+) -> Result<bool, RuntimeError> {
     let expected_host_ifindex = ownership.host_ifindex.ok_or_else(|| {
         RuntimeError::Network("network ownership has no host-veth ifindex".to_string())
     })?;
@@ -6527,8 +6527,8 @@ fn verify_container_kernel_ownership(
         RuntimeError::Network("network ownership has no namespace name".to_string())
     })?;
     let netns_path = Path::new("/var/run/netns").join(netns_name);
-    match fs::symlink_metadata(&netns_path) {
-        Ok(metadata) => verify_kernel_identity(
+    let namespace_verified = match fs::symlink_metadata(&netns_path) {
+        Ok(metadata) => match verify_kernel_identity(
             KernelIdentity {
                 device: expected_namespace.device,
                 inode: expected_namespace.inode,
@@ -6537,14 +6537,32 @@ fn verify_container_kernel_ownership(
                 device: metadata.dev(),
                 inode: metadata.ino(),
             }),
-        )
-        .map(|_| ()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !require_present => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(RuntimeError::Network(
-            "owned network namespace is missing".to_string(),
-        )),
-        Err(error) => Err(error.into()),
-    }?;
+        ) {
+            Ok(_) => true,
+            Err(error)
+                if !require_present
+                    && error
+                        .to_string()
+                        .contains("owned kernel resource identity changed") =>
+            {
+                // A stale exited container must not authorize deletion of a
+                // replacement namespace. The caller may still remove proven
+                // record/firewall state, but must skip namespace/veth effects.
+                false
+            }
+            Err(error) => return Err(error),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !require_present => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(RuntimeError::Network(
+                "owned network namespace is missing".to_string(),
+            ))
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !namespace_verified {
+        return Ok(false);
+    }
 
     if let (Some(bridge), Some(expected)) = (&ownership.bridge, ownership.bridge_ifindex) {
         let path = Path::new("/sys/class/net").join(bridge);
@@ -6572,7 +6590,7 @@ fn verify_container_kernel_ownership(
             ));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn verify_firewall_ownership_fields(
@@ -6953,7 +6971,7 @@ fn cleanup_network_resources(
         (None, None) => {}
         (Some(backend), Some(ownership)) => {
             validate_network_ownership(container_id, backend, ownership)?;
-            verify_container_kernel_ownership(netns_name, ownership, false)?;
+            let namespace_verified = verify_container_kernel_ownership(netns_name, ownership, false)?;
             match backend {
                 NetworkBackend::Ebpf => {
                     if Path::new(ownership.ebpf_pin_path.as_deref().unwrap_or_default()).exists() {
@@ -7005,6 +7023,10 @@ fn cleanup_network_resources(
                         &mut runner,
                     )?;
                 }
+            }
+
+            if !namespace_verified {
+                return Ok(());
             }
         }
         _ => {

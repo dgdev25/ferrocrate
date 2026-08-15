@@ -283,6 +283,12 @@ impl PrincipalResolver {
         Self::from_peer_credentials_for_channel(fd, InvocationChannel::DockerUnix)
     }
 
+    pub fn from_cri_peer_credentials<Fd: AsFd>(
+        fd: &Fd,
+    ) -> Result<TransportPrincipal, PrincipalResolutionError> {
+        Self::from_peer_credentials_for_channel(fd, InvocationChannel::Cri)
+    }
+
     pub(crate) fn from_peer_credentials_for_channel<Fd: AsFd>(
         fd: &Fd,
         channel: InvocationChannel,

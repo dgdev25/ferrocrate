@@ -6,15 +6,192 @@ use crate::runtime::{
     PullImageResponse, RemoveImageRequest, RemoveImageResponse, RuntimeCondition, RuntimeStatus,
     StatusRequest, StatusResponse, VersionRequest, VersionResponse,
 };
+use ferro_core::authorization::surface::SurfaceAuthorization;
+use ferro_core::authorization::{Action, PrincipalResolver, RequestOrigin, TransportPrincipal};
 use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixListener;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
 use tonic::{Request, Response, Status};
+
+/// An optional identity assertion carried by a proxy. Metadata-only assertions
+/// are deliberately untrusted; protected assertions still require a verifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationAssertion {
+    subject: String,
+    proof: Option<Vec<u8>>,
+    trust_root: Option<String>,
+}
+impl DelegationAssertion {
+    pub fn untrusted(subject: impl Into<String>) -> Self {
+        Self {
+            subject: subject.into(),
+            proof: None,
+            trust_root: None,
+        }
+    }
+    pub fn protected(
+        subject: impl Into<String>,
+        proof: Vec<u8>,
+        trust_root: impl Into<String>,
+    ) -> Self {
+        Self {
+            subject: subject.into(),
+            proof: Some(proof),
+            trust_root: Some(trust_root.into()),
+        }
+    }
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+    pub fn proof(&self) -> Option<&[u8]> {
+        self.proof.as_deref()
+    }
+    pub fn trust_root(&self) -> Option<&str> {
+        self.trust_root.as_deref()
+    }
+}
+
+pub trait DelegationVerifier: Send + Sync {
+    fn verify(&self, assertion: &DelegationAssertion) -> bool;
+}
+
+#[derive(Clone)]
+pub struct CriIdentityPolicy {
+    transport_id: String,
+    trust_root: Option<String>,
+    verifier: Option<Arc<dyn DelegationVerifier>>,
+}
+impl CriIdentityPolicy {
+    pub fn transport_only(id: impl Into<String>) -> Self {
+        Self {
+            transport_id: id.into(),
+            trust_root: None,
+            verifier: None,
+        }
+    }
+    pub fn with_verifier(
+        id: impl Into<String>,
+        trust_root: impl Into<String>,
+        verifier: Box<dyn DelegationVerifier>,
+    ) -> Self {
+        Self {
+            transport_id: id.into(),
+            trust_root: Some(trust_root.into()),
+            verifier: Some(verifier.into()),
+        }
+    }
+    #[allow(clippy::result_large_err)]
+    pub fn resolve(
+        &self,
+        delegated: Option<DelegationAssertion>,
+    ) -> Result<EffectiveCriIdentity, Status> {
+        let accepted = delegated
+            .as_ref()
+            .filter(|a| a.proof.is_some() && a.trust_root.as_ref() == self.trust_root.as_ref())
+            .filter(|a| self.verifier.as_ref().is_some_and(|v| v.verify(a)));
+        Ok(EffectiveCriIdentity {
+            transport: self.transport_id.clone(),
+            delegated: delegated.as_ref().map(|a| a.subject.clone()),
+            effective: accepted.map_or_else(|| self.transport_id.clone(), |a| a.subject.clone()),
+            used_delegation: accepted.is_some(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectiveCriIdentity {
+    transport: String,
+    delegated: Option<String>,
+    effective: String,
+    used_delegation: bool,
+}
+impl EffectiveCriIdentity {
+    pub fn transport_id(&self) -> &str {
+        &self.transport
+    }
+    pub fn delegated_id(&self) -> Option<&str> {
+        self.delegated.as_deref()
+    }
+    pub fn effective_id(&self) -> &str {
+        &self.effective
+    }
+    pub fn used_delegation(&self) -> bool {
+        self.used_delegation
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn resolve_request_identity<T>(
+    policy: &CriIdentityPolicy,
+    request: &Request<T>,
+) -> Result<EffectiveCriIdentity, Status> {
+    // CRI metadata is telemetry only. A protected assertion must arrive from
+    // an integrity layer that inserts the typed extension after verification.
+    let assertion = request
+        .extensions()
+        .get::<DelegationAssertion>()
+        .cloned()
+        .or_else(|| {
+            request
+                .metadata()
+                .get("x-ferrocrate-delegated-principal")
+                .and_then(|v| v.to_str().ok())
+                .map(DelegationAssertion::untrusted)
+        });
+    let mut effective = policy.resolve(assertion)?;
+    if let Some(transport) = request.extensions().get::<TransportPrincipal>() {
+        effective.transport = transport.principal().id().as_str().to_owned();
+        if !effective.used_delegation {
+            effective.effective = effective.transport.clone();
+        }
+    }
+    Ok(effective)
+}
+
+struct AuthenticatedUnixStream {
+    inner: tokio::net::UnixStream,
+    principal: TransportPrincipal,
+}
+impl tonic::transport::server::Connected for AuthenticatedUnixStream {
+    type ConnectInfo = TransportPrincipal;
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.principal.clone()
+    }
+}
+impl AsyncRead for AuthenticatedUnixStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for AuthenticatedUnixStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
 
 const RUNTIME_NAME: &str = "ferrocrate";
 const RUNTIME_API_VERSION: &str = "v1";
@@ -32,6 +209,8 @@ pub enum CriError {
 pub struct CriRuntime {
     store: Arc<LocalImageStore>,
     runtime_dir: std::path::PathBuf,
+    identity_policy: CriIdentityPolicy,
+    authorization: Arc<SurfaceAuthorization>,
 }
 
 impl std::fmt::Debug for CriRuntime {
@@ -47,6 +226,8 @@ impl CriRuntime {
         Self {
             store,
             runtime_dir: std::path::PathBuf::from(runtime_dir),
+            identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
+            authorization: Arc::new(SurfaceAuthorization::compatibility()),
         }
     }
 
@@ -57,7 +238,24 @@ impl CriRuntime {
         Self {
             store,
             runtime_dir: runtime_dir.into(),
+            identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
+            authorization: Arc::new(SurfaceAuthorization::compatibility()),
         }
+    }
+
+    pub fn with_identity_policy(mut self, policy: CriIdentityPolicy) -> Self {
+        self.identity_policy = policy;
+        self
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn request_origin<T>(&self, request: &Request<T>) -> Result<RequestOrigin, Status> {
+        request
+            .extensions()
+            .get::<TransportPrincipal>()
+            .map(RequestOrigin::cri_transport)
+            .or_else(|| RequestOrigin::cli_current().ok())
+            .ok_or_else(|| Status::unauthenticated("CRI transport principal unavailable"))
     }
 }
 
@@ -219,6 +417,8 @@ impl ImageService for CriRuntime {
         &self,
         request: Request<PullImageRequest>,
     ) -> Result<Response<PullImageResponse>, Status> {
+        let _identity = resolve_request_identity(&self.identity_policy, &request)?;
+        let origin = self.request_origin(&request)?;
         let req = request.into_inner();
         let image = req
             .image
@@ -227,6 +427,10 @@ impl ImageService for CriRuntime {
         if image.trim().is_empty() {
             return Err(Status::invalid_argument("image spec is required"));
         }
+        let _proof = self
+            .authorization
+            .authorize_image(&origin, Action::ImagePull, &image)
+            .map_err(|denial| Status::permission_denied(denial.to_string()))?;
 
         let pulled =
             ferro_core::image_fetch::pull_image_with_store(&self.runtime_dir, &image, &self.store)
@@ -241,6 +445,8 @@ impl ImageService for CriRuntime {
         &self,
         request: Request<RemoveImageRequest>,
     ) -> Result<Response<RemoveImageResponse>, Status> {
+        let _identity = resolve_request_identity(&self.identity_policy, &request)?;
+        let origin = self.request_origin(&request)?;
         let req = request.into_inner();
         let image = req
             .image
@@ -250,6 +456,10 @@ impl ImageService for CriRuntime {
         if image.is_empty() {
             return Err(Status::invalid_argument("image spec is required"));
         }
+        let _proof = self
+            .authorization
+            .authorize_image(&origin, Action::ImageDelete, image)
+            .map_err(|denial| Status::permission_denied(denial.to_string()))?;
 
         let canonical = ferro_core::image_tagging::canonicalize_reference(image).ok();
         let mut removed = self
@@ -393,7 +603,16 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
     }
 
     let uds = UnixListener::bind(socket_path)?;
-    let incoming = UnixListenerStream::new(uds);
+    let incoming = UnixListenerStream::new(uds).map(|accepted| {
+        accepted.and_then(|stream| {
+            PrincipalResolver::from_cri_peer_credentials(&stream)
+                .map(|principal| AuthenticatedUnixStream {
+                    inner: stream,
+                    principal,
+                })
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
+        })
+    });
     let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
         .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
     let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))?;

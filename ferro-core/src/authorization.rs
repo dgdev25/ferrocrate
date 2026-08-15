@@ -12,6 +12,7 @@ pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod principal;
 pub(crate) mod runtime;
+pub mod surface;
 #[cfg(feature = "test-support")]
 pub use runtime::test_support;
 
@@ -21,6 +22,181 @@ pub use principal::{
     LinuxProcessIdentity, PrincipalResolutionError, PrincipalResolver, SupplementaryGroupPolicy,
     TransportPrincipal,
 };
+
+/// Authenticated caller information propagated from an entry point into the
+/// runtime gate. Callers cannot supply a principal string or role.
+#[derive(Clone, Debug)]
+pub struct RequestOrigin {
+    principal: ResolvedPrincipal,
+    invocation: crate::witness::Invocation,
+    request_id: Option<[u8; 16]>,
+    parent_request_id: Option<[u8; 16]>,
+    attempt: u32,
+    fanout: Option<FanoutContext>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct FanoutContext {
+    parent_request_id: [u8; 16],
+    child_id: [u8; 16],
+    idempotency_key: [u8; 32],
+    expected_action: Action,
+    expected_resource: String,
+    request_digest: [u8; 32],
+    deadline_unix_ms: u64,
+    policy_generation: u64,
+    policy_digest: [u8; 32],
+    attempt: u32,
+}
+
+impl FanoutContext {
+    pub fn parent_request_id(&self) -> &[u8; 16] {
+        &self.parent_request_id
+    }
+    pub fn child_id(&self) -> &[u8; 16] {
+        &self.child_id
+    }
+    pub fn idempotency_key(&self) -> &[u8; 32] {
+        &self.idempotency_key
+    }
+    pub fn request_digest(&self) -> &[u8; 32] {
+        &self.request_digest
+    }
+    pub fn deadline_unix_ms(&self) -> u64 {
+        self.deadline_unix_ms
+    }
+    pub fn policy_generation(&self) -> u64 {
+        self.policy_generation
+    }
+    pub fn policy_digest(&self) -> &[u8; 32] {
+        &self.policy_digest
+    }
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RequestOrigin {
+    pub fn cli_current() -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let status = std::fs::read_to_string("/proc/self/status")?;
+        let uid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|value| value.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing effective uid")
+            })?;
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+            .trim()
+            .to_owned();
+        let userns = std::fs::metadata("/proc/self/ns/user")?.ino();
+        let trusted = std::fs::metadata("/proc/1/ns/user")
+            .map(|meta| meta.ino() == userns)
+            .unwrap_or(false);
+        let role = if uid == 0 && trusted {
+            Role::Administrator
+        } else {
+            Role::Developer
+        };
+        Ok(Self {
+            principal: ResolvedPrincipal::new(
+                format!("linux:{boot_id}:uid:{uid}:userns:{userns}"),
+                role,
+            ),
+            invocation: crate::witness::Invocation::Cli,
+            request_id: None,
+            parent_request_id: None,
+            attempt: 0,
+            fanout: None,
+        })
+    }
+    pub fn docker(transport: &TransportPrincipal) -> Self {
+        Self {
+            principal: transport.principal().clone(),
+            invocation: crate::witness::Invocation::DockerUnix,
+            request_id: None,
+            parent_request_id: None,
+            attempt: 0,
+            fanout: None,
+        }
+    }
+    pub fn proxy(effective: &EffectivePrincipal) -> Self {
+        Self {
+            principal: effective.principal().clone(),
+            invocation: crate::witness::Invocation::Cri,
+            request_id: None,
+            parent_request_id: None,
+            attempt: 0,
+            fanout: None,
+        }
+    }
+    pub fn cri_transport(transport: &TransportPrincipal) -> Self {
+        Self {
+            principal: transport.principal().clone(),
+            invocation: crate::witness::Invocation::Cri,
+            request_id: None,
+            parent_request_id: None,
+            attempt: 0,
+            fanout: None,
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn compose_child(
+        parent: &Self,
+        child_id: [u8; 16],
+        parent_id: [u8; 16],
+        idempotency_key: [u8; 32],
+        expected_action: Action,
+        expected_resource: impl Into<String>,
+        request_digest: [u8; 32],
+        deadline_unix_ms: u64,
+        policy_generation: u64,
+        policy_digest: [u8; 32],
+        attempt: u32,
+    ) -> Self {
+        let fanout = FanoutContext {
+            parent_request_id: parent_id,
+            child_id,
+            idempotency_key,
+            expected_action,
+            expected_resource: expected_resource.into(),
+            request_digest,
+            deadline_unix_ms,
+            policy_generation,
+            policy_digest,
+            attempt,
+        };
+        Self {
+            principal: parent.principal.clone(),
+            invocation: crate::witness::Invocation::Compose,
+            request_id: Some(child_id),
+            parent_request_id: Some(parent_id),
+            attempt,
+            fanout: Some(fanout),
+        }
+    }
+    pub fn principal(&self) -> &ResolvedPrincipal {
+        &self.principal
+    }
+    pub fn invocation(&self) -> crate::witness::Invocation {
+        self.invocation
+    }
+    pub fn request_id(&self) -> Option<[u8; 16]> {
+        self.request_id
+    }
+    pub fn parent_request_id(&self) -> Option<[u8; 16]> {
+        self.parent_request_id
+    }
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+    pub fn fanout(&self) -> Option<&FanoutContext> {
+        self.fanout.as_ref()
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -309,6 +485,7 @@ pub struct RequestContext {
     action: Action,
     resource: Resource,
     facts: RequestFacts,
+    fanout: Option<FanoutContext>,
 }
 
 impl RequestContext {
@@ -326,6 +503,7 @@ impl RequestContext {
             action,
             resource,
             facts,
+            fanout: None,
         }
     }
 
@@ -347,6 +525,12 @@ impl RequestContext {
 
     pub fn facts(&self) -> &RequestFacts {
         &self.facts
+    }
+    pub fn fanout(&self) -> Option<&FanoutContext> {
+        self.fanout.as_ref()
+    }
+    fn attach_fanout(&mut self, fanout: Option<FanoutContext>) {
+        self.fanout = fanout;
     }
 }
 

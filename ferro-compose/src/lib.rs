@@ -16,7 +16,7 @@
 //! println!("Start order: {:?}", services);
 //! ```
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Errors that can occur during compose file parsing or validation.
@@ -38,7 +38,7 @@ pub type ComposeResult<T> = Result<T, ComposeError>;
 ///
 /// This is the root structure representing a compose.yaml file.
 /// Supports version 3.x format with variable interpolation.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ComposeFile {
     /// Compose file format version (e.g., "3.8").
     pub version: Option<String>,
@@ -57,7 +57,7 @@ pub struct ComposeFile {
 ///
 /// Represents a single service within a compose file with its configuration
 /// including image, build context, networking, and deployment options.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Service {
     /// Container image to use (e.g., "nginx:latest").
     pub image: Option<String>,
@@ -110,7 +110,7 @@ pub struct Service {
 }
 
 /// Build configuration for creating container images.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Build {
     /// Build context path (relative to compose file).
     pub context: Option<String>,
@@ -123,7 +123,7 @@ pub struct Build {
 }
 
 /// Container command - either a string or list of arguments.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum Command {
     /// Command as a shell string.
@@ -134,7 +134,7 @@ pub enum Command {
 }
 
 /// Environment variables - either key-value map or list of assignments.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum Environment {
     /// Environment as key-value pairs.
@@ -145,7 +145,7 @@ pub enum Environment {
 }
 
 /// Service dependencies with optional conditions.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum DependsOn {
     /// Simple list of service names.
@@ -166,14 +166,14 @@ impl DependsOn {
 }
 
 /// Condition for a service dependency (e.g., "service_healthy").
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DependsCondition {
     /// The condition type: "service_started", "service_healthy", or "service_completed_successfully".
     pub condition: String,
 }
 
 /// Health check configuration for determining container readiness.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct HealthCheck {
     /// Command to run for health check (e.g., ["CMD", "curl", "-f", "http://localhost/"]).
     pub test: Option<Vec<String>>,
@@ -192,7 +192,7 @@ pub struct HealthCheck {
 }
 
 /// Deployment configuration for service scaling and resources.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Deploy {
     /// Number of container replicas to run.
     pub replicas: Option<u32>,
@@ -202,7 +202,7 @@ pub struct Deploy {
 }
 
 /// Resource configuration with limits and reservations.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeployResources {
     /// Maximum resources the service can use.
     pub limits: Option<ResourceSpec>,
@@ -212,7 +212,7 @@ pub struct DeployResources {
 }
 
 /// CPU and memory resource specification.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ResourceSpec {
     /// CPU limit (e.g., "0.5" for half a CPU).
     pub cpus: Option<String>,
@@ -222,14 +222,14 @@ pub struct ResourceSpec {
 }
 
 /// Named network configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Network {
     /// Network driver ("bridge", "overlay", "host", etc.).
     pub driver: Option<String>,
 }
 
 /// Named volume configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Volume {
     /// Volume driver ("local", "nfs", etc.).
     pub driver: Option<String>,
@@ -416,3 +416,7 @@ services:
         }
     }
 }
+mod fanout;
+pub use fanout::{
+    FanoutAction, FanoutChild, FanoutError, FanoutPlan, FanoutResult, FanoutStatus, ServiceMutation,
+};

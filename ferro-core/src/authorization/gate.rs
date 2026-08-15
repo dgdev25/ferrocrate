@@ -13,6 +13,14 @@ use super::{Decision, MountClass, ReasonCode, RequestContext, ResourceKind, Reso
 pub struct PolicyPin {
     snapshot: PolicySnapshot,
 }
+impl PolicyPin {
+    pub fn generation(&self) -> u64 {
+        self.snapshot.generation
+    }
+    pub fn digest_bytes(&self) -> [u8; 32] {
+        self.snapshot.digest
+    }
+}
 
 /// The immutable identity of a resolved image.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

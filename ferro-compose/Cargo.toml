@@ -8,3 +8,4 @@ serde = { workspace = true }
 serde_yaml = "0.9"
 thiserror = { workspace = true }
 tempfile = { workspace = true }
+sha2 = "0.10"

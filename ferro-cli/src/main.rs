@@ -10,8 +10,11 @@ use ferro_compose::compose::{
 #[cfg(target_os = "linux")]
 use ferro_compose::{
     Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
-    Environment as ComposeEnvironment, Service as ComposeService,
+    Environment as ComposeEnvironment, FanoutAction, FanoutPlan, Service as ComposeService,
+    ServiceMutation,
 };
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
@@ -1432,7 +1435,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
         }
 
-        let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
+        let runtime = ContainerRuntime::new(&runtime_dir)
+            .map_err(|err| err.to_string())?
+            .with_request_origin(ferro_core::authorization::RequestOrigin::cli_current().map_err(|error| format!("CLI identity resolution failed: {error}"))?);
         let image_store =
             LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
 
@@ -3816,19 +3821,129 @@ fn handle_compose(
         ComposeCommands::Up { profile } => {
             let order = compose_up(&project).map_err(|err| err.to_string())?;
             let enabled = build_compose_enabled_set(&project, &profile)?;
-            for name in order {
-                if !enabled.contains(&name) {
-                    continue;
-                }
+            let selected_services: Vec<_> = order
+                .into_iter()
+                .filter(|name| enabled.contains(name))
+                .collect();
+            let selected: Vec<(String, String)> = selected_services
+                .into_iter()
+                .flat_map(|name| {
+                    let replicas = project
+                        .compose
+                        .services
+                        .get(&name)
+                        .and_then(|service| service.deploy.as_ref())
+                        .and_then(|deploy| deploy.replicas)
+                        .unwrap_or(1);
+                    (1..=replicas)
+                        .map(|index| {
+                            let instance = if replicas == 1 {
+                                name.clone()
+                            } else {
+                                format!("{name}-{index}")
+                            };
+                            (name.clone(), instance)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let parent_origin = ferro_core::authorization::RequestOrigin::cli_current()
+                .map_err(|error| format!("compose identity resolution failed: {error}"))?;
+            let mut parent_hasher = Sha256::new();
+            parent_hasher.update(b"ferrocrate/compose-parent/v1");
+            parent_hasher.update(std::process::id().to_be_bytes());
+            parent_hasher.update(
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .to_be_bytes(),
+            );
+            let parent_hash: [u8; 32] = parent_hasher.finalize().into();
+            let mut parent_id = [0; 16];
+            parent_id.copy_from_slice(&parent_hash[..16]);
+            let (policy_generation, policy_digest) = runtime.policy_binding();
+            let deadline = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .saturating_add(300_000)
+                .min(u64::MAX as u128) as u64;
+            let mutations = selected.iter().map(|(name, instance)| {
+                let service = project
+                    .compose
+                    .services
+                    .get(name)
+                    .expect("validated compose service");
+                let mut canonical =
+                    serde_json::to_vec(service).expect("serializable canonical service");
+                canonical.extend_from_slice(&(instance.len() as u64).to_be_bytes());
+                canonical.extend_from_slice(instance.as_bytes());
+                ServiceMutation::new(
+                    instance,
+                    FanoutAction::ContainerRun,
+                    Sha256::digest(canonical).into(),
+                )
+            });
+            let fanout = FanoutPlan::derive(
+                parent_id,
+                policy_generation,
+                policy_digest,
+                deadline,
+                0,
+                mutations,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut failures = Vec::new();
+            for ((name, instance), child) in selected.into_iter().zip(fanout.children()) {
                 let service = project
                     .compose
                     .services
                     .get(&name)
                     .ok_or_else(|| format!("compose: missing service {name}"))?;
                 if let Some(depends_on) = service.depends_on.as_ref() {
-                    wait_for_compose_dependencies(runtime, depends_on)?;
+                    if let Err(error) = wait_for_compose_dependencies(runtime, depends_on) {
+                        failures.push(format!("{name}: {error}"));
+                        continue;
+                    }
                 }
-                run_compose_service(runtime, store, volume_store, project_dir, &name, service)?;
+                fanout
+                    .verify_child(
+                        child,
+                        SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64,
+                    )
+                    .map_err(|error| error.to_string())?;
+                runtime.set_request_origin(ferro_core::authorization::RequestOrigin::compose_child(
+                    &parent_origin,
+                    *child.child_id(),
+                    parent_id,
+                    *child.idempotency_key(),
+                    ferro_core::authorization::Action::ContainerRun,
+                    instance.clone(),
+                    *child.request_digest(),
+                    child.deadline_unix_ms(),
+                    child.policy_generation(),
+                    *child.policy_digest(),
+                    child.attempt(),
+                ));
+                if let Err(error) = run_compose_service(
+                    runtime,
+                    store,
+                    volume_store,
+                    project_dir,
+                    &name,
+                    service,
+                    Some(&instance),
+                ) {
+                    failures.push(format!("{instance}: {error}"));
+                }
+            }
+            if !failures.is_empty() {
+                return Err(format!("compose partial result: {}", failures.join("; ")));
             }
         }
         ComposeCommands::Watch { profile, interval } => {
@@ -3979,6 +4094,7 @@ fn run_compose_service(
     project_dir: &Path,
     name: &str,
     service: &ComposeService,
+    instance_override: Option<&str>,
 ) -> Result<(), String> {
     let image = if service.image.is_some() || service.build.is_some() {
         build_compose_image(store, project_dir, name, service)?
@@ -4005,14 +4121,14 @@ fn run_compose_service(
         "on-failure" => "on-failure",
         _ => "no",
     };
-    let replicas = service
+    let replicas = if instance_override.is_some() { 1 } else { service
         .deploy
         .as_ref()
         .and_then(|deploy| deploy.replicas)
-        .unwrap_or(1);
+        .unwrap_or(1) };
 
     for idx in 1..=replicas {
-        let instance_name = if replicas == 1 {
+        let instance_name = if let Some(instance) = instance_override { instance.to_owned() } else if replicas == 1 {
             name.to_string()
         } else {
             format!("{name}-{idx}")
@@ -4450,8 +4566,16 @@ fn handle_docker_compat_connection(
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
     let response_result: Result<Vec<u8>, String> = (|| {
+        // Kernel authentication deliberately precedes HTTP/body decoding.
+        let peer = ferro_cli::authorization_surfaces::authenticate_docker_peer(
+            &stream,
+            ferro_cli::authorization_surfaces::DockerTelemetry::new(),
+        )
+        .map_err(|error| format!("docker peer authentication failed: {error}"))?;
         let request = read_http_request(&mut stream)?;
-        let runtime = ContainerRuntime::new(&runtime_dir).map_err(|err| err.to_string())?;
+        let runtime = ContainerRuntime::new(&runtime_dir)
+            .map_err(|err| err.to_string())?
+            .with_request_origin(peer.request_origin());
 
         let (path, query) = split_path_query(&request.path);
         let path = normalize_docker_api_path(&path);

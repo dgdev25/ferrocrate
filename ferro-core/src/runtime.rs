@@ -1458,6 +1458,19 @@ impl ContainerRuntime {
         )
     }
 
+    /// Bind an entry-point authenticated caller to all subsequent mutations
+    /// performed by this request-scoped runtime value.
+    pub fn with_request_origin(self, origin: crate::authorization::RequestOrigin) -> Self {
+        self.authorization.set_origin(origin);
+        self
+    }
+
+    pub fn set_request_origin(&self, origin: crate::authorization::RequestOrigin) {
+        self.authorization.set_origin(origin);
+    }
+
+    pub fn policy_binding(&self) -> (u64, [u8;32]) { self.authorization.policy_binding() }
+
     fn initialize(
         runtime_dir: &Path,
         authorization: RuntimeAuthorization,
@@ -1992,6 +2005,7 @@ impl ContainerRuntime {
         )?;
         let mut candidate =
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
+        candidate.name = name.map(str::to_owned);
         candidate.capabilities = normalized.facts.capabilities.clone();
         candidate.network_name = Some(network_mode.to_owned());
         let permit = self

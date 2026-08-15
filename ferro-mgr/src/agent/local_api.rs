@@ -1,11 +1,14 @@
 #[cfg(unix)]
-use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+use nix::sys::socket::{
+    getsockopt, recvmsg, sockopt::PeerCredentials, ControlMessageOwned, MsgFlags,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Mutex};
 #[cfg(unix)]
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
+    os::fd::{AsRawFd, OwnedFd},
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
 };
@@ -69,6 +72,7 @@ pub struct LocalApi {
     overlays: Mutex<BTreeMap<String, OverlayConfig>>,
     enforce_overlays: Mutex<bool>,
     delegated_netd: Mutex<Option<DelegatedNetd>>,
+    runtime_executable: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,7 +129,13 @@ impl LocalApi {
             overlays: Mutex::new(BTreeMap::new()),
             enforce_overlays: Mutex::new(false),
             delegated_netd: Mutex::new(None),
+            runtime_executable: None,
         }
+    }
+
+    pub fn with_runtime_executable(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.runtime_executable = Some(path.into());
+        self
     }
 
     pub fn with_delegation_bridge(self, bridge: DelegationBridge, client: UnixNetdClient) -> Self {
@@ -543,11 +553,22 @@ impl LocalApi {
                 Ok(stream) => stream,
                 Err(_) => continue,
             };
-            let caller_uid = getsockopt(&stream, PeerCredentials)
-                .map(|cred| cred.uid())
-                .unwrap_or(u32::MAX);
+            let caller_uid = getsockopt(&stream, PeerCredentials).ok();
+            let Some(credentials) = caller_uid else {
+                continue;
+            };
+            if credentials.uid() != self.runtime_uid {
+                continue;
+            }
+            let Some(expected_executable) = self.runtime_executable.as_deref() else {
+                continue;
+            };
+            let Ok(peer) = authenticate_peer_process(credentials.pid(), expected_executable) else {
+                continue;
+            };
+            let caller_uid = credentials.uid();
             let mut prefix = [0_u8; 4];
-            if stream.read_exact(&mut prefix).is_err() {
+            if receive_without_descriptors(&stream, &mut prefix).is_err() {
                 continue;
             }
             let length = u32::from_be_bytes(prefix) as usize;
@@ -555,7 +576,7 @@ impl LocalApi {
                 continue;
             }
             let mut body = vec![0_u8; length];
-            if stream.read_exact(&mut body).is_err() {
+            if receive_without_descriptors(&stream, &mut body).is_err() || !peer.still_valid() {
                 continue;
             }
             let enforced = self
@@ -606,6 +627,82 @@ impl LocalApi {
         }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+struct AuthenticatedPeer {
+    _pidfd: OwnedFd,
+    pid: i32,
+    executable: std::path::PathBuf,
+    start_time: String,
+}
+
+#[cfg(unix)]
+impl AuthenticatedPeer {
+    fn still_valid(&self) -> bool {
+        read_peer_identity(self.pid).is_ok_and(|(executable, start)| {
+            executable == self.executable && start == self.start_time
+        })
+    }
+}
+
+#[cfg(unix)]
+fn authenticate_peer_process(pid: i32, expected: &Path) -> Result<AuthenticatedPeer, ()> {
+    let process = rustix::process::Pid::from_raw(pid).ok_or(())?;
+    let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())
+        .map_err(|_| ())?;
+    let (executable, start_time) = read_peer_identity(pid)?;
+    if executable != expected {
+        return Err(());
+    }
+    Ok(AuthenticatedPeer {
+        _pidfd: pidfd,
+        pid,
+        executable,
+        start_time,
+    })
+}
+
+#[cfg(unix)]
+fn read_peer_identity(pid: i32) -> Result<(std::path::PathBuf, String), ()> {
+    let executable = fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| ())?;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
+    let start_time = stat
+        .rsplit(')')
+        .next()
+        .and_then(|value| value.split_whitespace().nth(19))
+        .ok_or(())?
+        .to_owned();
+    Ok((executable, start_time))
+}
+
+#[cfg(unix)]
+fn receive_without_descriptors(
+    stream: &std::os::unix::net::UnixStream,
+    bytes: &mut [u8],
+) -> Result<(), ()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let mut iov = [std::io::IoSliceMut::new(&mut bytes[offset..])];
+        let mut control = nix::cmsg_space!([std::os::fd::RawFd; 1]);
+        let message = recvmsg::<()>(
+            stream.as_raw_fd(),
+            &mut iov,
+            Some(&mut control),
+            MsgFlags::empty(),
+        )
+        .map_err(|_| ())?;
+        if message.bytes == 0
+            || message
+                .cmsgs()
+                .map_err(|_| ())?
+                .any(|item| matches!(item, ControlMessageOwned::ScmRights(_)))
+        {
+            return Err(());
+        }
+        offset += message.bytes;
+    }
+    Ok(())
 }
 
 fn decode_disabled_legacy(body: &[u8]) -> Result<LocalApiRequest, String> {

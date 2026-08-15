@@ -146,6 +146,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         )
         .unwrap(),
     )
+    .with_runtime_executable(std::env::current_exe().unwrap())
     .with_delegation_ledger(
         DelegationBridge::new(
             helper_key.verifying_key(),
@@ -291,16 +292,19 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
 fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
     let directory = tempfile::tempdir().unwrap();
     let uid = nix::unistd::geteuid().as_raw();
-    let local = Arc::new(LocalApi::new(
-        uid,
-        1_000,
-        Ipam::new(
-            "10.21.0.0/29".parse().unwrap(),
-            "10.21.0.1".parse().unwrap(),
-            vec![],
+    let local = Arc::new(
+        LocalApi::new(
+            uid,
+            1_000,
+            Ipam::new(
+                "10.21.0.0/29".parse().unwrap(),
+                "10.21.0.1".parse().unwrap(),
+                vec![],
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    ));
+        .with_runtime_executable(std::env::current_exe().unwrap()),
+    );
     local
         .register_overlay(
             "wg0",
@@ -337,6 +341,26 @@ fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
         send(&socket, &request),
         LocalApiResponse::Rejected { .. }
     ));
+
+    let descriptor = fs::File::open("/dev/null").unwrap();
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    use std::os::fd::AsRawFd;
+    let prefix = 0_u32.to_be_bytes();
+    let iov = [std::io::IoSlice::new(&prefix)];
+    let descriptors = [descriptor.as_raw_fd()];
+    nix::sys::socket::sendmsg::<()>(
+        stream.as_raw_fd(),
+        &iov,
+        &[nix::sys::socket::ControlMessage::ScmRights(&descriptors)],
+        nix::sys::socket::MsgFlags::empty(),
+        None,
+    )
+    .unwrap();
+    let mut response = [0_u8; 1];
+    assert_eq!(stream.read(&mut response).unwrap(), 0);
 }
 
 fn issuer(path: &std::path::Path, uid: u32) -> GrantIssuer {

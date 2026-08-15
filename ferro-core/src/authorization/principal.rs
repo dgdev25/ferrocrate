@@ -2,7 +2,8 @@
 
 use std::{
     io,
-    os::fd::{AsFd, AsRawFd, RawFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
+    sync::Arc,
 };
 
 use nix::errno::Errno;
@@ -88,6 +89,7 @@ pub struct LinuxProcessIdentity {
     trusted_user_namespace: bool,
     uid_map: Vec<IdMapEntry>,
     gid_map: Vec<IdMapEntry>,
+    executable_inode: u64,
 }
 
 impl LinuxProcessIdentity {
@@ -138,15 +140,30 @@ impl LinuxProcessIdentity {
     pub fn gid_map(&self) -> &[IdMapEntry] {
         &self.gid_map
     }
+
+    pub fn executable_inode(&self) -> u64 {
+        self.executable_inode
+    }
 }
 
 /// A principal authenticated by a local transport and its kernel identity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TransportPrincipal {
     principal: ResolvedPrincipal,
     identity: LinuxProcessIdentity,
     channel: InvocationChannel,
+    #[serde(skip)]
+    pidfd: Option<Arc<OwnedFd>>,
 }
+
+impl PartialEq for TransportPrincipal {
+    fn eq(&self, other: &Self) -> bool {
+        self.principal == other.principal
+            && self.identity == other.identity
+            && self.channel == other.channel
+    }
+}
+impl Eq for TransportPrincipal {}
 
 impl TransportPrincipal {
     pub fn principal(&self) -> &ResolvedPrincipal {
@@ -159,6 +176,24 @@ impl TransportPrincipal {
 
     pub fn channel(&self) -> InvocationChannel {
         self.channel
+    }
+
+    /// Revalidates the retained kernel process handle and executable identity
+    /// immediately before a privileged executor is entered.
+    pub fn revalidate_for_execution(&self) -> Result<(), PrincipalResolutionError> {
+        let pidfd = self
+            .pidfd
+            .as_ref()
+            .ok_or(PrincipalResolutionError::PeerPidfdUnsupported)?;
+        self.revalidate_with_reader(&SystemProcReader, pidfd.as_raw_fd())
+    }
+
+    fn revalidate_with_reader<R: ProcReader>(
+        &self,
+        reader: &R,
+        pidfd: RawFd,
+    ) -> Result<(), PrincipalResolutionError> {
+        procfs::verify_process_identity(reader, pidfd, &self.identity)
     }
 }
 
@@ -328,7 +363,15 @@ impl PrincipalResolver {
             Err(Errno::ENOPROTOOPT) => return Err(PrincipalResolutionError::PeerPidfdUnsupported),
             Err(error) => return Err(PrincipalResolutionError::PeerPidfd(error)),
         };
-        Self::resolve_with_reader(reader, peer, Some(pidfd.as_raw_fd()), channel)
+        let mut principal =
+            Self::resolve_with_reader(reader, peer, Some(pidfd.as_raw_fd()), channel)?;
+        // The owned pidfd is deliberately retained for the full request/connection
+        // lifetime through cloned `TransportPrincipal` values.
+        let owned = kernel
+            .into_owned_pidfd(pidfd)
+            .ok_or(PrincipalResolutionError::PeerPidfdUnsupported)?;
+        principal.pidfd = Some(Arc::new(owned));
+        Ok(principal)
     }
 
     fn resolve_with_reader<R: ProcReader>(
@@ -355,6 +398,7 @@ impl PrincipalResolver {
             principal,
             identity,
             channel,
+            pidfd: None,
         })
     }
 }

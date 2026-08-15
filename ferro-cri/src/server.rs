@@ -135,6 +135,13 @@ fn resolve_request_identity<T>(
     policy: &CriIdentityPolicy,
     request: &Request<T>,
 ) -> Result<EffectiveCriIdentity, Status> {
+    let transport = request
+        .extensions()
+        .get::<TransportPrincipal>()
+        .ok_or_else(|| Status::unauthenticated("CRI transport principal unavailable"))?;
+    transport
+        .revalidate_for_execution()
+        .map_err(|error| Status::unauthenticated(format!("CRI peer identity changed: {error}")))?;
     // CRI metadata is telemetry only. A protected assertion must arrive from
     // an integrity layer that inserts the typed extension after verification.
     let assertion = request
@@ -149,11 +156,9 @@ fn resolve_request_identity<T>(
                 .map(DelegationAssertion::untrusted)
         });
     let mut effective = policy.resolve(assertion)?;
-    if let Some(transport) = request.extensions().get::<TransportPrincipal>() {
-        effective.transport = transport.principal().id().as_str().to_owned();
-        if !effective.used_delegation {
-            effective.effective = effective.transport.clone();
-        }
+    effective.transport = transport.principal().id().as_str().to_owned();
+    if !effective.used_delegation {
+        effective.effective = effective.transport.clone();
     }
     Ok(effective)
 }
@@ -254,7 +259,6 @@ impl CriRuntime {
             .extensions()
             .get::<TransportPrincipal>()
             .map(RequestOrigin::cri_transport)
-            .or_else(|| RequestOrigin::cli_current().ok())
             .ok_or_else(|| Status::unauthenticated("CRI transport principal unavailable"))
     }
 }
@@ -734,6 +738,24 @@ mod tests {
         assert!(inner.info.contains_key("runtimeVersion"));
         assert_eq!(inner.info.get("runtimeApiVersion"), Some(&"v1".to_string()));
         assert!(inner.info.contains_key("runtimeDir"));
+    }
+
+    #[tokio::test]
+    async fn mutating_rpc_without_transport_connect_info_fails_closed() {
+        let runtime = create_test_runtime().await;
+        let request = Request::new(RemoveImageRequest {
+            image: Some(ImageSpec {
+                image: "missing:latest".into(),
+                ..Default::default()
+            }),
+        });
+
+        let error = runtime
+            .remove_image(request)
+            .await
+            .expect_err("missing connect identity must be rejected");
+
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]

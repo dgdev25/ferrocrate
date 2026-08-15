@@ -37,6 +37,10 @@ pub(super) trait KernelIdentityReader {
     ) -> Result<KernelPeerCredentials, PrincipalResolutionError>;
 
     fn peer_pidfd<Fd: AsFd>(&self, fd: &Fd) -> Result<Self::PidFd, Errno>;
+
+    fn into_owned_pidfd(&self, _pidfd: Self::PidFd) -> Option<std::os::fd::OwnedFd> {
+        None
+    }
 }
 
 pub(super) struct SystemKernelIdentityReader;
@@ -64,6 +68,10 @@ impl KernelIdentityReader for SystemKernelIdentityReader {
 
     fn peer_pidfd<Fd: AsFd>(&self, fd: &Fd) -> Result<Self::PidFd, Errno> {
         getsockopt(fd, sockopt::PeerPidfd)
+    }
+
+    fn into_owned_pidfd(&self, pidfd: Self::PidFd) -> Option<std::os::fd::OwnedFd> {
+        Some(pidfd)
     }
 }
 
@@ -117,6 +125,7 @@ pub(super) fn collect_process_identity<R: ProcReader>(
         "gid map",
     )?;
     let user_namespace_inode = inode_fact(reader, &proc_dir.join("ns/user"), "user namespace")?;
+    let executable_inode = inode_fact(reader, &proc_dir.join("exe"), "executable identity")?;
     let trusted_user_namespace_inode = inode_fact(
         reader,
         Path::new("/proc/self/ns/user"),
@@ -149,7 +158,27 @@ pub(super) fn collect_process_identity<R: ProcReader>(
         trusted_user_namespace: user_namespace_inode == trusted_user_namespace_inode,
         uid_map,
         gid_map,
+        executable_inode,
     })
+}
+
+pub(super) fn verify_process_identity<R: ProcReader>(
+    reader: &R,
+    pidfd: RawFd,
+    identity: &LinuxProcessIdentity,
+) -> Result<(), PrincipalResolutionError> {
+    verify_pidfd(reader, pidfd, identity.pid())?;
+    let proc_dir = PathBuf::from(format!("/proc/{}", identity.pid()));
+    let stat = read_fact(reader, &proc_dir.join("stat"), "stat")?;
+    let (pid, start) = parse_stat(&stat)?;
+    let executable_inode = inode_fact(reader, &proc_dir.join("exe"), "executable identity")?;
+    if pid != identity.pid()
+        || start != identity.start_time_ticks()
+        || executable_inode != identity.executable_inode()
+    {
+        return Err(PrincipalResolutionError::ProcessChanged);
+    }
+    Ok(())
 }
 
 fn read_fact<R: ProcReader>(

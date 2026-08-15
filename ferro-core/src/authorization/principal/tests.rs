@@ -62,6 +62,7 @@ impl FakeProcReader {
         reader.insert(format!("/proc/{PID}/gid_map"), "0 0 4294967295\n");
         reader.insert("/proc/sys/kernel/random/boot_id", BOOT_ID);
         reader.inodes.insert(format!("/proc/{PID}/ns/user"), 100);
+        reader.inodes.insert(format!("/proc/{PID}/exe"), 9001);
         reader.inodes.insert("/proc/self/ns/user".into(), 100);
         reader.insert(
             format!("/proc/self/fdinfo/{PIDFD}"),
@@ -148,8 +149,22 @@ fn process_lifetime_boot_and_namespace_facts_are_bound() {
     assert_eq!(identity.boot_id(), BOOT_ID);
     assert_eq!(identity.user_namespace_inode(), 100);
     assert!(identity.is_trusted_user_namespace());
+    assert_eq!(identity.executable_inode(), 9001);
     assert_eq!(identity.uid_map()[0].host_start(), 0);
     assert_eq!(identity.gid_map()[0].length(), u32::MAX);
+}
+
+#[test]
+fn executable_replacement_is_rejected_before_execution() {
+    let mut reader = FakeProcReader::fixture();
+    let principal = resolve(&reader, credentials(1001, 2001)).expect("resolved identity");
+    reader.inodes.insert(format!("/proc/{PID}/exe"), 9002);
+
+    let error = principal
+        .revalidate_with_reader(&reader, PIDFD)
+        .expect_err("changed executable rejected");
+
+    assert!(matches!(error, PrincipalResolutionError::ProcessChanged));
 }
 
 #[test]

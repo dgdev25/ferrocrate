@@ -8783,9 +8783,11 @@ mod tests {
     use crate::witness::{decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage};
     use sha2::Digest as _;
     use std::collections::{BTreeMap, HashMap};
+    use std::io::{Read, Write};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{mpsc, Mutex};
 
     #[test]
     fn normalized_compose_run_digest_changes_with_executor_input() {
@@ -9112,19 +9114,47 @@ mod tests {
     struct ProcessBarrier {
         action: String,
         phase: LifecyclePhasePoint,
-        ready: std::path::PathBuf,
+        signal_socket: std::path::PathBuf,
     }
 
     impl LifecyclePhaseHook for ProcessBarrier {
         fn reached(&self, action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
             if action == self.action && phase == self.phase {
-                std::fs::write(&self.ready, b"ready")?;
+                signal_barrier(&self.signal_socket, "ready")?;
                 loop {
                     std::thread::park();
                 }
             }
             Ok(())
         }
+    }
+
+    /// Sends exactly one lifecycle status over the parent's pre-bound socket.
+    /// Connecting is itself the readiness handshake: unlike a filesystem poll, it
+    /// cannot be observed before the child has reached the requested phase.
+    fn signal_barrier(socket: &Path, status: &str) -> Result<(), RuntimeError> {
+        let mut stream = UnixStream::connect(socket)?;
+        stream.write_all(status.as_bytes())?;
+        Ok(())
+    }
+
+    #[test]
+    fn process_barrier_reports_ready_over_its_unix_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("barrier.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let barrier = ProcessBarrier {
+            action: "run".into(),
+            phase: LifecyclePhasePoint::BindKernelEffect,
+            signal_socket: socket,
+        };
+        std::thread::spawn(move || {
+            let _ = barrier.reached("run", LifecyclePhasePoint::BindKernelEffect);
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut signal = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut signal).unwrap();
+        assert_eq!(signal, "ready");
     }
 
     /// Helper to acquire lock, recovering from poison (for test isolation)
@@ -11279,7 +11309,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let action = std::env::var("FERRO_PUBLIC_BARRIER_ACTION").unwrap();
         let marker = std::env::var("FERRO_PUBLIC_BARRIER_MARKER").unwrap();
         let phase = phase_from_name(&std::env::var("FERRO_PUBLIC_BARRIER_PHASE").unwrap());
-        let ready = std::path::PathBuf::from(std::env::var("FERRO_PUBLIC_BARRIER_READY").unwrap());
+        let signal_socket =
+            std::path::PathBuf::from(std::env::var("FERRO_PUBLIC_BARRIER_SIGNAL").unwrap());
         let cgroup = root.join("cgroup");
         std::fs::create_dir_all(&cgroup).unwrap();
         std::fs::write(cgroup.join("cgroup.controllers"), "cpu memory pids").unwrap();
@@ -11311,7 +11342,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             std::sync::Arc::new(ProcessBarrier {
                 action: action.clone(),
                 phase,
-                ready,
+                signal_socket: signal_socket.clone(),
             }),
             std::sync::Arc::new(DeterministicKernelResourceOps {
                 state: root.join("fake-kernel.json"),
@@ -11357,7 +11388,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 NetworkBackend::Iptables,
                 None,
             );
-            let _ = result;
+            if let Err(error) = result {
+                let _ = signal_barrier(&signal_socket, &format!("error:{error}"));
+            }
         } else {
             let mut old = std::process::Command::new("sleep")
                 .arg("60")
@@ -11376,8 +11409,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             record.stdout_path = container_dir.join("stdout").display().to_string();
             record.stderr_path = container_dir.join("stderr").display().to_string();
             runtime.store.put(&record).unwrap();
-            let _ = runtime.restart(container_id, std::time::Duration::from_millis(10));
+            if let Err(error) = runtime.restart(container_id, std::time::Duration::from_millis(10)) {
+                let _ = signal_barrier(&signal_socket, &format!("error:{error}"));
+            }
             let _ = old.kill();
+            let _ = old.wait();
         }
     }
 
@@ -11403,7 +11439,17 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             };
             for phase in phases {
                 let root = tempfile::tempdir().unwrap();
-                let ready = root.path().join("ready");
+                let signal_socket = root.path().join("barrier.sock");
+                let listener = UnixListener::bind(&signal_socket).unwrap();
+                let (signal_tx, signal_rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = listener.accept().and_then(|(mut stream, _)| {
+                        let mut signal = String::new();
+                        stream.read_to_string(&mut signal)?;
+                        Ok(signal)
+                    });
+                    let _ = signal_tx.send(result.map_err(|error| error.to_string()));
+                });
                 let marker = root.path().join("workload-marker");
                 let mut daemon = std::process::Command::new(std::env::current_exe().unwrap())
                     .arg("--exact")
@@ -11412,17 +11458,26 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                     .env("FERRO_PUBLIC_BARRIER_ROOT", root.path())
                     .env("FERRO_PUBLIC_BARRIER_ACTION", action)
                     .env("FERRO_PUBLIC_BARRIER_PHASE", phase)
-                    .env("FERRO_PUBLIC_BARRIER_READY", &ready)
+                    .env("FERRO_PUBLIC_BARRIER_SIGNAL", &signal_socket)
                     .env("FERRO_PUBLIC_BARRIER_MARKER", &marker)
+                    // This child exercises recovery boundaries, not image-signature
+                    // verification. Pin the inherited process environment so parallel
+                    // signature-verification tests cannot make it fail before ready.
+                    .env("FERROCRATE_SIGNATURE_VERIFY", "0")
                     .spawn()
                     .unwrap();
-                for _ in 0..1000 {
-                    if ready.exists() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                assert!(ready.exists(), "{action} did not reach {phase}");
+                let signal = signal_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap_or_else(|error| {
+                        panic!("{action} did not report {phase} readiness: {error}")
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!("{action} {phase} readiness transport failed: {error}")
+                    });
+                assert_eq!(
+                    signal, "ready",
+                    "{action} {phase} child failed before barrier"
+                );
                 nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(daemon.id() as i32),
                     nix::sys::signal::Signal::SIGKILL,

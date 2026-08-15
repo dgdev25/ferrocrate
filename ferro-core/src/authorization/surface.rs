@@ -86,14 +86,18 @@ pub(crate) struct SurfaceMutationAuthority<'a> {
 
 impl SurfacePermit {
     pub(crate) fn mutation_authority(&self) -> SurfaceMutationAuthority<'_> {
-        SurfaceMutationAuthority { _permit: std::marker::PhantomData }
+        SurfaceMutationAuthority {
+            _permit: std::marker::PhantomData,
+        }
     }
 }
 
 #[cfg(test)]
 impl SurfaceMutationAuthority<'static> {
     pub(crate) fn for_test() -> Self {
-        Self { _permit: std::marker::PhantomData }
+        Self {
+            _permit: std::marker::PhantomData,
+        }
     }
 }
 
@@ -142,6 +146,24 @@ impl SurfacePermit {
 }
 
 impl SurfaceAuthorization {
+    /// Construct the local administrative surface around an already-open
+    /// required journal. This keeps authorization intent/outcome and the
+    /// administrative mutation on one writer without reopening its lock.
+    pub fn local_administrative(
+        gate: Arc<AuthorizationGate>,
+        journal: Arc<WitnessJournal>,
+        runtime_id: [u8; 16],
+    ) -> Self {
+        let mut rng = rand::rng();
+        Self {
+            gate,
+            durability: SurfaceDurability::Required(journal),
+            runtime_id,
+            boot_id: read_boot_id().unwrap_or_else(|| rng.random()),
+            pseudonym_key: rng.random(),
+        }
+    }
+
     #[cfg(test)]
     fn compatibility() -> Self {
         let mut rng = rand::rng();
@@ -851,7 +873,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[cfg(test)]
 fn read_boot_id() -> Option<[u8; 16]> {
     let value = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
     let compact = value.trim().replace('-', "");

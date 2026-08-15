@@ -45,6 +45,10 @@ struct EmergencyState {
     sink_device: u64,
     sink_inode: u64,
     status: EmergencyStatus,
+    #[serde(default)]
+    main_witness_first: Option<u64>,
+    #[serde(default)]
+    main_witness_last: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -129,6 +133,8 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         sink_device: sink_metadata.dev(),
         sink_inode: sink_metadata.ino(),
         status: EmergencyStatus::Activated,
+        main_witness_first: None,
+        main_witness_last: None,
     };
     let receipt = serde_json::json!({"type":"activate","schema":1,"boot_id":state.boot_id,"deadline_uptime_ns":deadline,"action":state.action,"resource":state.resource,"nonce":state.nonce});
     append_sink(
@@ -171,6 +177,7 @@ fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
             "emergency execution is not terminal or quarantined; reconciliation denied".into(),
         );
     }
+    verify_main_witness(state_dir, &state)?;
     let receipt = serde_json::json!({"type":"reconcile","schema":1,"boot_id":state.boot_id,"action":state.action,"resource":state.resource,"nonce":state.nonce,"reconciled_uptime_ns":uptime_ns()?});
     append_sink(
         &canonical_sink,
@@ -233,7 +240,21 @@ where
     )?;
     state.status = EmergencyStatus::IntentDurable;
     write_state(&path, &state)?;
+    let before = main_witness_head(state_dir)?;
     let result = execute();
+    let after = main_witness_head(state_dir)?;
+    if let (Some(before), Some(after)) = (before, after) {
+        if after <= before {
+            state.status = EmergencyStatus::Unknown;
+            write_state(&path, &state)?;
+            return Err(
+                "emergency outcome is unknown because no main-journal evidence was published"
+                    .into(),
+            );
+        }
+        state.main_witness_first = Some(before.saturating_add(1));
+        state.main_witness_last = Some(after);
+    }
     let outcome = serde_json::json!({"type":"outcome","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"succeeded":result.is_ok(),"uptime_ns":uptime_ns()?});
     if let Err(error) = append_sink(
         &canonical_sink,
@@ -257,6 +278,68 @@ fn validate_sink_identity(path: &Path, state: &EmergencyState) -> Result<(), Str
         return Err("emergency sink device/inode changed after activation".into());
     }
     Ok(())
+}
+
+fn main_witness_head(state_dir: &Path) -> Result<Option<u64>, String> {
+    let id_path = state_dir.join("journal-id");
+    if !id_path.exists() {
+        return Ok(None);
+    }
+    secure_owner_file(&id_path)?;
+    let id = decode_hex::<16>(
+        fs::read_to_string(&id_path)
+            .map_err(|e| e.to_string())?
+            .trim(),
+    )?;
+    let mut reader =
+        ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
+            .map_err(|e| e.to_string())?;
+    let mut head = 0;
+    while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
+        head = ferro_core::witness::decode_record(&bytes)
+            .map_err(|e| e.to_string())?
+            .sequence();
+    }
+    reader.finish().map_err(|e| e.to_string())?;
+    Ok(Some(head))
+}
+
+fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), String> {
+    let (Some(first), Some(last)) = (state.main_witness_first, state.main_witness_last) else {
+        // Recovery-only unit/offline mode has no configured main journal. A
+        // production activation with journal-id always records the range.
+        return if state_dir.join("journal-id").exists() {
+            Err("emergency state lacks its main-journal correlation range".into())
+        } else {
+            Ok(())
+        };
+    };
+    let id = decode_hex::<16>(
+        fs::read_to_string(state_dir.join("journal-id"))
+            .map_err(|e| e.to_string())?
+            .trim(),
+    )?;
+    let expected = match state.action.as_str() {
+        "container.stop" => ferro_core::witness::WitnessAction::ContainerStop,
+        "container.kill" => ferro_core::witness::WitnessAction::ContainerKill,
+        "container.remove" => ferro_core::witness::WitnessAction::ContainerDelete,
+        _ => return Err("emergency action has no correlatable main-journal action".into()),
+    };
+    let mut reader =
+        ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
+            .map_err(|e| e.to_string())?;
+    let mut terminal = false;
+    while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
+        let record = ferro_core::witness::decode_record(&bytes).map_err(|e| e.to_string())?;
+        terminal |= record.sequence() >= first
+            && record.sequence() <= last
+            && record.action() == expected
+            && record.stage() == ferro_core::witness::WitnessStage::Outcome;
+    }
+    reader.finish().map_err(|e| e.to_string())?;
+    terminal.then_some(()).ok_or_else(|| {
+        "independent sink and main journal do not contain matching terminal evidence".into()
+    })
 }
 
 pub fn ensure_reconciled(state_dir: &Path) -> Result<(), String> {
@@ -288,22 +371,30 @@ fn verify_approval(key_path: &Path, approval_path: &Path, expected: &str) -> Res
 }
 
 fn append_sink(path: &Path, receipt: &[u8]) -> Result<(), String> {
-    secure_owner_file(path)?;
-    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() < SINK_HEADER.len() as u64 {
-        return Err("emergency sink is not pre-provisioned".into());
-    }
-    let mut check = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut header = vec![0; SINK_HEADER.len()];
-    check.read_exact(&mut header).map_err(|e| e.to_string())?;
-    if header != SINK_HEADER {
-        return Err("emergency sink has an invalid framing header".into());
-    }
     let mut file = OpenOptions::new()
+        .read(true)
         .append(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)
         .map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file()
+        || meta.uid() != nix::unistd::geteuid().as_raw()
+        || meta.mode() & 0o077 != 0
+        || meta.nlink() != 1
+    {
+        return Err(
+            "emergency sink descriptor owner, mode, type, or link count is insecure".into(),
+        );
+    }
+    if meta.len() < SINK_HEADER.len() as u64 {
+        return Err("emergency sink is not pre-provisioned".into());
+    }
+    let mut header = vec![0; SINK_HEADER.len()];
+    file.read_exact(&mut header).map_err(|e| e.to_string())?;
+    if header != SINK_HEADER {
+        return Err("emergency sink has an invalid framing header".into());
+    }
     file.write_all(receipt)
         .and_then(|_| file.write_all(b"\n"))
         .and_then(|_| file.sync_all())

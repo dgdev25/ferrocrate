@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
@@ -30,6 +32,15 @@ pub(crate) enum MediationError {
     Stale,
     #[error("invalid runtime identity")]
     Identity,
+    #[error("authorization checkpoint is missing, invalid, or stale")]
+    CheckpointStale,
+}
+
+#[derive(Clone)]
+struct CheckpointAdmission {
+    path: PathBuf,
+    max_age: Duration,
+    grace: Duration,
 }
 
 pub(crate) struct RuntimeAuthorization {
@@ -39,6 +50,7 @@ pub(crate) struct RuntimeAuthorization {
     boot_id: [u8; 16],
     pseudonym_key: [u8; 32],
     origin: Option<RequestOrigin>,
+    checkpoint_admission: Option<CheckpointAdmission>,
 }
 
 #[derive(Clone, Debug)]
@@ -261,7 +273,22 @@ impl RuntimeAuthorization {
             boot_id: read_boot_id().unwrap_or_else(|| rng.random()),
             pseudonym_key: rng.random(),
             origin: None,
+            checkpoint_admission: None,
         }
+    }
+
+    pub(crate) fn require_fresh_checkpoint(
+        mut self,
+        path: PathBuf,
+        max_age: Duration,
+        grace: Duration,
+    ) -> Self {
+        self.checkpoint_admission = Some(CheckpointAdmission {
+            path,
+            max_age,
+            grace,
+        });
+        self
     }
 
     pub(crate) fn with_origin(&self, origin: RequestOrigin) -> Self {
@@ -272,6 +299,7 @@ impl RuntimeAuthorization {
             boot_id: self.boot_id,
             pseudonym_key: self.pseudonym_key,
             origin: Some(origin),
+            checkpoint_admission: self.checkpoint_admission.clone(),
         }
     }
 
@@ -354,6 +382,7 @@ impl RuntimeAuthorization {
         record: &ContainerRecord,
         run: Option<&RunSecurityFacts>,
     ) -> Result<MutationPermit, MediationError> {
+        self.check_checkpoint_admission(action)?;
         let resource_uuid = canonical_uuid(&record.id);
         let state = lifecycle_state(&record.status).ok_or(MediationError::Stale)?;
         let generation = record.mutation_generation.max(1);
@@ -527,6 +556,31 @@ impl RuntimeAuthorization {
                 Err(MediationError::Denied(format!("{:?}", denial.code())))
             }
         }
+    }
+
+    fn check_checkpoint_admission(&self, action: Action) -> Result<(), MediationError> {
+        if matches!(action, Action::ContainerStop | Action::ContainerDelete) {
+            return Ok(());
+        }
+        let Some(admission) = self.checkpoint_admission.as_ref() else {
+            return Ok(());
+        };
+        let bytes = std::fs::read(&admission.path).map_err(|_| MediationError::CheckpointStale)?;
+        let checkpoint = crate::witness::Checkpoint::decode(&bytes)
+            .map_err(|_| MediationError::CheckpointStale)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let coordinator = crate::witness::CheckpointCoordinator::new(
+            &admission.path,
+            admission.max_age,
+            admission.grace,
+        );
+        coordinator
+            .allows_user_mutation(checkpoint.created_at_secs, now)
+            .then_some(())
+            .ok_or(MediationError::CheckpointStale)
     }
 
     pub(crate) fn revalidate(
@@ -703,6 +757,31 @@ mod recovery_tests {
             WitnessResourceKind::Network
         );
         assert_eq!(journal.records().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn missing_or_stale_checkpoint_denies_user_mutation_but_preserves_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let gate = Arc::new(AuthorizationGate::new(Arc::new(
+            PolicyStore::compatibility_disabled(),
+        )));
+        let authorization = RuntimeAuthorization::new_with_id(gate, None, [73; 16])
+            .require_fresh_checkpoint(
+                root.path().join("missing-checkpoint.bin"),
+                Duration::from_secs(30),
+                Duration::from_secs(5),
+            );
+
+        assert!(matches!(
+            authorization.check_checkpoint_admission(Action::ContainerRun),
+            Err(MediationError::CheckpointStale)
+        ));
+        assert!(authorization
+            .check_checkpoint_admission(Action::ContainerDelete)
+            .is_ok());
+        assert!(authorization
+            .check_checkpoint_admission(Action::ContainerStop)
+            .is_ok());
     }
 }
 

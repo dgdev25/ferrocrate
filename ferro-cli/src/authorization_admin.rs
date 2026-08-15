@@ -8,7 +8,8 @@ pub use emergency::{
     EmergencyActivate,
 };
 pub use witness::{
-    checkpoint, rotate_key, show, verify, CheckpointArgs, RotateArgs, ShowArgs, VerifyArgs,
+    checkpoint, checkpoint_on, open_required_journal, rotate_key, rotate_key_on, show, verify,
+    CheckpointArgs, RotateArgs, ShowArgs, VerifyArgs,
 };
 
 use ferro_core::authorization::policy::{PolicyCandidate, PolicyStore};
@@ -123,7 +124,7 @@ fn atomic_replace(bytes: &[u8], target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn require_host_admin() -> Result<(), String> {
+pub fn require_host_admin() -> Result<(), String> {
     let real = nix::unistd::getuid().as_raw();
     let effective = nix::unistd::geteuid().as_raw();
     if real != 0 || effective != 0 {

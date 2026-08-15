@@ -3546,7 +3546,16 @@ fn production_authorization(
             .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
         ))
     };
-    Ok(RuntimeAuthorization::new_with_id(gate, journal, runtime_id))
+    let authorization = RuntimeAuthorization::new_with_id(gate, journal, runtime_id);
+    if authorization.requires_provenance() {
+        Ok(authorization.require_fresh_checkpoint(
+            root.join("checkpoint.bin"),
+            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(60),
+        ))
+    } else {
+        Ok(authorization)
+    }
 }
 fn generate_container_id() -> String {
     // Use cryptographic randomness for unpredictable container IDs

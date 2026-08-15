@@ -7,11 +7,19 @@ use ferro_core::witness::{
     WitnessResourceKind, WitnessStage,
 };
 use serde::Deserialize;
+use std::sync::Arc;
 use std::{
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+pub fn open_required_journal(path: &Path, journal_id: &str) -> Result<Arc<WitnessJournal>, String> {
+    let id = decode_hex::<16>(journal_id)?;
+    WitnessJournal::open(JournalConfig::new(path, id, JournalMode::Required))
+        .map(Arc::new)
+        .map_err(|error| error.to_string())
+}
 
 pub struct ShowArgs<'a> {
     pub journal: &'a Path,
@@ -153,6 +161,10 @@ pub fn checkpoint(args: CheckpointArgs<'_>) -> Result<String, String> {
     let id = decode_hex::<16>(args.journal_id)?;
     let journal = WitnessJournal::open(JournalConfig::new(args.journal, id, JournalMode::Required))
         .map_err(|e| e.to_string())?;
+    checkpoint_on(args, &journal)
+}
+
+pub fn checkpoint_on(args: CheckpointArgs<'_>, journal: &WitnessJournal) -> Result<String, String> {
     let coordinator = CheckpointCoordinator::new(
         args.artifact,
         Duration::from_secs(300),
@@ -160,7 +172,7 @@ pub fn checkpoint(args: CheckpointArgs<'_>) -> Result<String, String> {
     );
     if args.recover_pending {
         coordinator
-            .reconcile_pending(&journal)
+            .reconcile_pending(journal)
             .map_err(|e| e.to_string())?;
         return Ok("checkpoint pending binding reconciled=true".into());
     }
@@ -176,7 +188,7 @@ pub fn checkpoint(args: CheckpointArgs<'_>) -> Result<String, String> {
     let predecessor = args.predecessor.map(read_checkpoint).transpose()?;
     let outcome = coordinator
         .capture_publish_bind(
-            &journal,
+            journal,
             now_secs()?,
             key.signing_key(),
             predecessor.as_ref(),
@@ -191,6 +203,10 @@ pub fn rotate_key(args: RotateArgs<'_>) -> Result<String, String> {
     let id = decode_hex::<16>(args.journal_id)?;
     let journal = WitnessJournal::open(JournalConfig::new(args.journal, id, JournalMode::Required))
         .map_err(|e| e.to_string())?;
+    rotate_key_on(args, &journal)
+}
+
+pub fn rotate_key_on(args: RotateArgs<'_>, journal: &WitnessJournal) -> Result<String, String> {
     let store = KeyStore::new(args.key_dir);
     let old = store.load(args.old_key).map_err(|e| e.to_string())?;
     let new = store.create(args.new_key).map_err(|e| e.to_string())?;
@@ -202,7 +218,7 @@ pub fn rotate_key(args: RotateArgs<'_>) -> Result<String, String> {
     );
     let outcome = coordinator
         .capture_rotate_publish_bind(
-            &journal,
+            journal,
             now_secs()?,
             old.signing_key(),
             new.signing_key(),

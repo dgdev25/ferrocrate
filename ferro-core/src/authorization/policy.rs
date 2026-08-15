@@ -2,7 +2,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 #[cfg(unix)]
@@ -48,6 +48,9 @@ impl PolicyCandidate {
 #[derive(Debug)]
 pub struct PolicyStore {
     active: RwLock<PolicySnapshot>,
+    /// Stable production path. Readers opportunistically refresh from this
+    /// path so a long-running daemon observes an atomically installed policy.
+    source: Option<PathBuf>,
 }
 
 /// Proof that the caller passed the separate policy-rollback authorization path.
@@ -114,14 +117,17 @@ impl PolicyStore {
                 digest: Sha256::digest(source).into(),
                 document: Arc::new(document),
             }),
+            source: None,
         }
     }
 
     /// Load and validate the initial policy snapshot.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
+        let path = path.as_ref();
         let snapshot = Self::load_candidate(path)?.snapshot;
         Ok(Self {
             active: RwLock::new(snapshot),
+            source: Some(path.to_path_buf()),
         })
     }
 
@@ -132,6 +138,7 @@ impl PolicyStore {
     pub fn from_candidate(candidate: &PolicyCandidate) -> Self {
         Self {
             active: RwLock::new(candidate.snapshot.clone()),
+            source: None,
         }
     }
 
@@ -155,10 +162,34 @@ impl PolicyStore {
 
     /// Clone the active immutable snapshot.
     pub fn snapshot(&self) -> PolicySnapshot {
+        self.refresh_from_stable_path();
         self.active
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn refresh_from_stable_path(&self) {
+        let Some(path) = self.source.as_ref() else {
+            return;
+        };
+        let Ok(candidate) = Self::load_candidate(path) else {
+            return;
+        };
+        let current = self
+            .active
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if candidate.snapshot.digest == current.digest {
+            return;
+        }
+        if let Ok(mut active) = self.active.write() {
+            // The stable path is administrator-owned, owner-only, single-link,
+            // and atomically installed. Rollback authorization is enforced and
+            // witnessed by the installer before it replaces that path.
+            *active = candidate.snapshot;
+        }
     }
 
     /// Validate a complete candidate and atomically install it if monotonic.
@@ -400,6 +431,29 @@ mod tests {
             .expect("authorized rollback");
 
         assert_eq!(installed.generation, 1);
+        assert_eq!(store.snapshot().generation, 1);
+    }
+
+    #[test]
+    fn existing_store_observes_atomic_monotonic_install_at_stable_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let active = dir.path().join("active-policy.toml");
+        let staged = dir.path().join(".active-policy.toml.new");
+        write_policy(&active, 1, "enforce");
+        let store = PolicyStore::load(&active).expect("load active");
+
+        write_policy(&staged, 2, "disabled");
+        fs::rename(&staged, &active).expect("atomic install");
+
+        let refreshed = store.snapshot();
+        assert_eq!(refreshed.generation, 2);
+        assert_eq!(
+            refreshed.document.mode,
+            super::super::AuthorizationMode::Disabled
+        );
+
+        write_policy(&staged, 1, "enforce");
+        fs::rename(&staged, &active).expect("authorized rollback install");
         assert_eq!(store.snapshot().generation, 1);
     }
 

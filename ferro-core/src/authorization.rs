@@ -362,6 +362,8 @@ pub enum Action {
     PolicyReload,
     #[serde(rename = "policy.rollback")]
     PolicyRollback,
+    #[serde(rename = "witness.checkpoint-publish")]
+    CheckpointPublish,
 }
 
 /// The five roles supported by the native policy.

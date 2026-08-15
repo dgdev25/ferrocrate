@@ -150,7 +150,10 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
         saw_rollback |= record.action() == ferro_core::witness::WitnessAction::PolicyRollback;
     }
     reader.finish().unwrap();
-    assert!(saw_rollback, "authorized rollback must be durably witnessed");
+    assert!(
+        saw_rollback,
+        "authorized rollback must be durably witnessed"
+    );
 }
 
 #[test]
@@ -202,12 +205,20 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
-    let journal_path = temp.path().join("journal");
+    let auth_dir = temp.path().join("authorization");
+    fs::create_dir(&auth_dir).unwrap();
+    fs::set_permissions(&auth_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    protected_write(
+        &auth_dir.join("active-policy.toml"),
+        b"schema_version = 1\ngeneration = 1\nmode = \"enforce\"\n",
+    );
+    let journal_path = auth_dir.join("witness-journal");
     let key_dir = temp.path().join("keys");
     fs::create_dir(&key_dir).unwrap();
     fs::set_permissions(&key_dir, fs::Permissions::from_mode(0o700)).unwrap();
     let id = [0x31; 16];
     let id_hex = id.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    protected_write(&auth_dir.join("journal-id"), format!("{id_hex}\n"));
     let journal =
         ferro_core::witness::WitnessJournal::open(ferro_core::witness::JournalConfig::new(
             &journal_path,
@@ -225,21 +236,24 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let artifact = temp.path().join("checkpoint.bin");
-    let output = cli(&[
-        "witness",
-        "checkpoint",
-        "--journal",
-        journal_path.to_str().unwrap(),
-        "--journal-id",
-        &id_hex,
-        "--artifact",
-        artifact.to_str().unwrap(),
-        "--key-dir",
-        key_dir.to_str().unwrap(),
-        "--key-name",
-        "active",
-    ]);
+    let artifact = auth_dir.join("checkpoint.bin");
+    let output = cli_runtime(
+        &[
+            "witness",
+            "checkpoint",
+            "--journal",
+            journal_path.to_str().unwrap(),
+            "--journal-id",
+            &id_hex,
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--key-dir",
+            key_dir.to_str().unwrap(),
+            "--key-name",
+            "active",
+        ],
+        temp.path(),
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -306,24 +320,27 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
 
     let first = temp.path().join("first-checkpoint.bin");
     fs::copy(&artifact, &first).unwrap();
-    let rotate = cli(&[
-        "witness",
-        "rotate-key",
-        "--journal",
-        journal_path.to_str().unwrap(),
-        "--journal-id",
-        &id_hex,
-        "--artifact",
-        artifact.to_str().unwrap(),
-        "--key-dir",
-        key_dir.to_str().unwrap(),
-        "--old-key",
-        "active",
-        "--new-key",
-        "successor",
-        "--predecessor",
-        first.to_str().unwrap(),
-    ]);
+    let rotate = cli_runtime(
+        &[
+            "witness",
+            "rotate-key",
+            "--journal",
+            journal_path.to_str().unwrap(),
+            "--journal-id",
+            &id_hex,
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--key-dir",
+            key_dir.to_str().unwrap(),
+            "--old-key",
+            "active",
+            "--new-key",
+            "successor",
+            "--predecessor",
+            first.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
     assert!(
         rotate.status.success(),
         "{}",

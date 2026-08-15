@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub mod gate;
 #[cfg(target_os = "linux")]
 pub mod cri_delegation;
+pub mod gate;
 pub mod helper_grant;
 mod helper_grant_delegation;
 mod helper_grant_encoding;
@@ -112,6 +112,11 @@ fn fanout_action_code(action: Action) -> u8 {
         Action::ContainerRun => 1,
         Action::ContainerStop => 2,
         Action::ContainerDelete => 3,
+        Action::ImagePull => 4,
+        Action::VolumeCreate => 5,
+        Action::ImageBuild => 6,
+        Action::ImageTag => 7,
+        Action::ImageReferenceWrite => 8,
         _ => 0,
     }
 }
@@ -329,6 +334,12 @@ pub enum Action {
     ImagePull,
     #[serde(rename = "image.delete")]
     ImageDelete,
+    #[serde(rename = "image.build")]
+    ImageBuild,
+    #[serde(rename = "image.tag")]
+    ImageTag,
+    #[serde(rename = "image.reference-write")]
+    ImageReferenceWrite,
     #[serde(rename = "volume.create")]
     VolumeCreate,
     #[serde(rename = "volume.delete")]

@@ -1,7 +1,7 @@
 use crate::ai_runtime::AiRuntimeConfig;
 use crate::dockerfile_build::{
     build_from_dockerfile_with_compression, build_from_dockerfile_with_store_and_compression,
-    BuildResult, DockerfileBuildError,
+    prepare_dockerfile_build, BuildResult, DockerfileBuildError, ImageBuildPlan,
 };
 use crate::image_store::LocalImageStore;
 use crate::layer_compression::CompressionFormat;
@@ -37,7 +37,7 @@ struct BuildSpec {
     tag: Option<String>,
 }
 
-pub fn build_from_ferrofile(
+pub(crate) fn build_from_ferrofile(
     ferrofile_path: &Path,
     runtime_dir: &Path,
     compression: CompressionFormat,
@@ -45,7 +45,7 @@ pub fn build_from_ferrofile(
     build_from_ferrofile_with_store(ferrofile_path, runtime_dir, compression, None)
 }
 
-pub fn build_from_ferrofile_with_store(
+pub(crate) fn build_from_ferrofile_with_store(
     ferrofile_path: &Path,
     runtime_dir: &Path,
     compression: CompressionFormat,
@@ -89,6 +89,45 @@ pub fn build_from_ferrofile_with_store(
         build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression)
     };
     result.map_err(Into::into)
+}
+
+pub fn prepare_ferrofile_build(
+    ferrofile_path: &Path,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+) -> Result<ImageBuildPlan, FerrofileBuildError> {
+    if !ferrofile_path.exists() {
+        return Err(FerrofileBuildError::Missing(
+            ferrofile_path.display().to_string(),
+        ));
+    }
+    let contents = fs::read_to_string(ferrofile_path)?;
+    let ferrofile: Ferrofile = toml::from_str(&contents)?;
+    let build = ferrofile
+        .build
+        .ok_or_else(|| FerrofileBuildError::Invalid("missing [build] section".to_string()))?;
+    let base_dir = ferrofile_path
+        .parent()
+        .ok_or_else(|| FerrofileBuildError::Invalid("invalid ferrofile path".to_string()))?;
+    let context_dir = build
+        .context
+        .as_deref()
+        .map(|path| base_dir.join(path))
+        .unwrap_or_else(|| base_dir.to_path_buf());
+    let dockerfile_path = build
+        .dockerfile
+        .as_deref()
+        .map(|path| context_dir.join(path))
+        .unwrap_or_else(|| context_dir.join("Dockerfile"));
+    prepare_dockerfile_build(
+        &dockerfile_path,
+        build.tag.as_deref(),
+        runtime_dir,
+        compression,
+        store,
+    )
+    .map_err(Into::into)
 }
 
 /// Parses the `[ai_runtime]` section from a ferrofile.toml, if present.

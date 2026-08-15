@@ -53,6 +53,95 @@ pub enum DockerfileBuildError {
     Compression(#[from] LayerCompressionError),
     #[error("layer size exceeds maximum ({0} bytes)")]
     LayerTooLarge(usize),
+    #[error("image build authorization binding failed: {0}")]
+    Authorization(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageBuildPlan {
+    dockerfile_path: PathBuf,
+    runtime_dir: PathBuf,
+    canonical_tag: String,
+    compression: CompressionFormat,
+    context_digest: String,
+    dockerfile_digest: [u8; 32],
+    base_digests: Vec<(String, Option<String>)>,
+    plan_digest: [u8; 32],
+}
+
+impl ImageBuildPlan {
+    pub fn canonical_tag(&self) -> &str {
+        &self.canonical_tag
+    }
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+    pub fn generation(&self) -> u64 {
+        1
+    }
+}
+
+pub fn prepare_dockerfile_build(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+) -> Result<ImageBuildPlan, DockerfileBuildError> {
+    if !dockerfile_path.exists() {
+        return Err(DockerfileBuildError::MissingDockerfile(
+            dockerfile_path.display().to_string(),
+        ));
+    }
+    let dockerfile = fs::read_to_string(dockerfile_path)?;
+    let stages = parse_stages(&dockerfile)?;
+    let context_dir = dockerfile_path
+        .parent()
+        .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
+    let context_digest = hash_context_dir(context_dir, dockerfile_path)?;
+    let canonical_tag = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+    let mut base_digests = Vec::with_capacity(stages.len());
+    for stage in stages {
+        if stage.base.eq_ignore_ascii_case("scratch") {
+            base_digests.push((stage.base, None));
+        } else {
+            let record = resolve_reference(store, &stage.base)?.ok_or_else(|| {
+                DockerfileBuildError::Invalid(format!("base image not found: {}", stage.base))
+            })?;
+            base_digests.push((stage.base, Some(record.digest)));
+        }
+    }
+    let dockerfile_digest: [u8; 32] = Sha256::digest(dockerfile.as_bytes()).into();
+    let mut hash = Sha256::new();
+    hash.update(b"ferrocrate/image-build-plan/v1");
+    for value in [canonical_tag.as_str(), context_digest.as_str()] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.update(dockerfile_digest);
+    hash.update([match compression {
+        CompressionFormat::None => 0,
+        CompressionFormat::Gzip => 1,
+        CompressionFormat::Zstd => 2,
+    }]);
+    hash.update((base_digests.len() as u64).to_be_bytes());
+    for (reference, digest) in &base_digests {
+        hash.update((reference.len() as u64).to_be_bytes());
+        hash.update(reference.as_bytes());
+        let digest = digest.as_deref().unwrap_or("");
+        hash.update((digest.len() as u64).to_be_bytes());
+        hash.update(digest.as_bytes());
+    }
+    Ok(ImageBuildPlan {
+        dockerfile_path: dockerfile_path.to_path_buf(),
+        runtime_dir: runtime_dir.to_path_buf(),
+        canonical_tag,
+        compression,
+        context_digest,
+        dockerfile_digest,
+        base_digests,
+        plan_digest: hash.finalize().into(),
+    })
 }
 
 pub struct BuildResult {
@@ -78,7 +167,7 @@ struct BuildCacheEntry {
     manifest_json: String,
 }
 
-pub fn build_from_dockerfile(
+pub(crate) fn build_from_dockerfile(
     dockerfile_path: &Path,
     tag: Option<&str>,
     runtime_dir: &Path,
@@ -91,7 +180,7 @@ pub fn build_from_dockerfile(
     )
 }
 
-pub fn build_from_dockerfile_with_compression(
+pub(crate) fn build_from_dockerfile_with_compression(
     dockerfile_path: &Path,
     tag: Option<&str>,
     runtime_dir: &Path,
@@ -107,7 +196,7 @@ pub fn build_from_dockerfile_with_compression(
     )
 }
 
-pub fn build_from_dockerfile_with_store_and_compression(
+pub(crate) fn build_from_dockerfile_with_store_and_compression(
     dockerfile_path: &Path,
     tag: Option<&str>,
     runtime_dir: &Path,
@@ -308,6 +397,68 @@ pub fn build_from_dockerfile_with_store_and_compression(
     }
 
     final_result.ok_or_else(|| DockerfileBuildError::Invalid("no stages built".to_string()))
+}
+
+pub fn execute_dockerfile_build_authorized(
+    plan: ImageBuildPlan,
+    store: &LocalImageStore,
+    permit: crate::authorization::surface::SurfacePermit,
+) -> Result<BuildResult, DockerfileBuildError> {
+    crate::authorization::surface::SurfaceAuthorization::validate_execution(
+        &permit,
+        crate::authorization::Action::ImageBuild,
+        crate::authorization::ResourceKind::Image,
+        plan.canonical_tag(),
+        plan.generation(),
+    )
+    .map_err(|error| DockerfileBuildError::Authorization(error.to_string()))?;
+    if permit.proof().canonical().operation_plan_digest() != Some(&plan.plan_digest()) {
+        permit
+            .finish(false)
+            .map_err(|error| DockerfileBuildError::Authorization(error.to_string()))?;
+        return Err(DockerfileBuildError::Authorization(
+            "image build plan does not match authorization proof".to_string(),
+        ));
+    }
+    let observed = prepare_dockerfile_build(
+        &plan.dockerfile_path,
+        Some(&plan.canonical_tag),
+        &plan.runtime_dir,
+        plan.compression,
+        store,
+    )?;
+    if observed.plan_digest != plan.plan_digest
+        || observed.context_digest != plan.context_digest
+        || observed.dockerfile_digest != plan.dockerfile_digest
+        || observed.base_digests != plan.base_digests
+    {
+        permit
+            .finish(false)
+            .map_err(|error| DockerfileBuildError::Authorization(error.to_string()))?;
+        return Err(DockerfileBuildError::Authorization(
+            "image build inputs changed after authorization".to_string(),
+        ));
+    }
+    match build_from_dockerfile_with_store_and_compression(
+        &plan.dockerfile_path,
+        Some(&plan.canonical_tag),
+        &plan.runtime_dir,
+        plan.compression,
+        store,
+    ) {
+        Ok(result) => {
+            permit
+                .finish(true)
+                .map_err(|error| DockerfileBuildError::Authorization(error.to_string()))?;
+            Ok(result)
+        }
+        Err(error) => {
+            permit
+                .finish_unknown()
+                .map_err(|finish| DockerfileBuildError::Authorization(finish.to_string()))?;
+            Err(error)
+        }
+    }
 }
 
 fn build_layer_from_dir(
@@ -1432,7 +1583,13 @@ fn resolve_base_image(
         });
     }
 
-    let _ = pull_image_with_store(runtime_dir, base, store);
+    if resolve_reference(store, base)
+        .map_err(DockerfileBuildError::Reference)?
+        .is_none()
+    {
+        pull_image_with_store(runtime_dir, base, store)
+            .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
+    }
     let record = resolve_reference(store, base)
         .map_err(DockerfileBuildError::Reference)?
         .ok_or_else(|| DockerfileBuildError::Invalid(format!("base image not found: {base}")))?;
@@ -1573,8 +1730,43 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         build_from_dockerfile_with_store_and_compression, dockerignore_matches, load_build_cache,
-        parse_stages,
+        parse_stages, prepare_dockerfile_build,
     };
+
+    #[test]
+    fn build_preparation_is_side_effect_free_and_binds_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let context = temp.path().join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        let dockerfile = context.join("Dockerfile");
+        std::fs::write(&dockerfile, "FROM scratch\nCOPY app /app\n").unwrap();
+        std::fs::write(context.join("app"), "one").unwrap();
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+
+        let first = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/app:test"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .unwrap();
+        std::fs::write(context.join("app"), "two").unwrap();
+        let second = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/app:test"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .unwrap();
+
+        assert_ne!(first.plan_digest(), second.plan_digest());
+        assert_eq!(first.canonical_tag(), "registry-1.docker.io/local/app:test");
+        assert!(store.list_references().unwrap().is_empty());
+        assert!(!runtime.join("build-cache.json").exists());
+    }
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;
     use crate::layer_compression::CompressionFormat;

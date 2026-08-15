@@ -209,6 +209,47 @@ impl SurfaceAuthorization {
         self.authorize(origin, request, action, ResourceKind::Image)
     }
 
+    pub fn authorize_image_fetch_plan(
+        &self,
+        origin: &RequestOrigin,
+        plan: &crate::image_fetch::ImageFetchPlan,
+        generation: u64,
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        origin.revalidate_transport()?;
+        let canonical_name = plan.canonical_reference();
+        let policy = self.gate.pin();
+        validate_fanout_origin(
+            origin,
+            Action::ImagePull,
+            canonical_name,
+            plan.plan_digest(),
+            policy.generation(),
+            policy.digest_bytes(),
+        )?;
+        let resource_id = stable_resource_id(ResourceKind::Image, canonical_name);
+        let resource =
+            Resource::canonical(ResourceKind::Image, resource_id.clone(), None, generation);
+        let facts = RequestFacts {
+            image_digest: Some(plan.manifest_digest().to_owned()),
+            ..RequestFacts::default()
+        };
+        let context = RequestContext::resolved(
+            origin_request_id(origin, &resource_id, Action::ImagePull),
+            Some(origin.principal().clone()),
+            Action::ImagePull,
+            resource,
+            facts,
+        );
+        let binding = super::gate::ImageBinding::new_plan(
+            plan.immutable_reference(),
+            plan.manifest_digest(),
+            plan.plan_digest(),
+        );
+        let bindings = ExecutionBindings::new(Some(binding), generation, None, None, Vec::new());
+        let request = CanonicalRequest::new(context, policy, bindings.clone(), bindings);
+        self.authorize(origin, request, Action::ImagePull, ResourceKind::Image)
+    }
+
     pub fn authorize_named(
         &self,
         origin: &RequestOrigin,
@@ -230,6 +271,151 @@ impl SurfaceAuthorization {
         let bindings = ExecutionBindings::new(None, generation, None, None, Vec::new());
         let request = CanonicalRequest::new(context, self.gate.pin(), bindings.clone(), bindings);
         self.authorize(origin, request, action, kind)
+    }
+
+    pub fn authorize_volume_create_plan(
+        &self,
+        origin: &RequestOrigin,
+        plan: &crate::volume_store::VolumeCreatePlan,
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        origin.revalidate_transport()?;
+        let policy = self.gate.pin();
+        validate_fanout_origin(
+            origin,
+            Action::VolumeCreate,
+            plan.name(),
+            plan.plan_digest(),
+            policy.generation(),
+            policy.digest_bytes(),
+        )?;
+        let resource_id = stable_resource_id(ResourceKind::Volume, plan.name());
+        let resource = Resource::canonical(
+            ResourceKind::Volume,
+            resource_id.clone(),
+            None,
+            plan.generation(),
+        );
+        let context = RequestContext::resolved(
+            origin_request_id(origin, &resource_id, Action::VolumeCreate),
+            Some(origin.principal().clone()),
+            Action::VolumeCreate,
+            resource,
+            RequestFacts::default(),
+        );
+        let bindings = ExecutionBindings::new(None, plan.generation(), None, None, Vec::new())
+            .with_operation_plan_digest(plan.plan_digest());
+        let request = CanonicalRequest::new(context, policy, bindings.clone(), bindings);
+        self.authorize(origin, request, Action::VolumeCreate, ResourceKind::Volume)
+    }
+
+    pub fn authorize_image_build_plan(
+        &self,
+        origin: &RequestOrigin,
+        plan: &crate::dockerfile_build::ImageBuildPlan,
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        origin.revalidate_transport()?;
+        let policy = self.gate.pin();
+        validate_fanout_origin(
+            origin,
+            Action::ImageBuild,
+            plan.canonical_tag(),
+            plan.plan_digest(),
+            policy.generation(),
+            policy.digest_bytes(),
+        )?;
+        let resource_id = stable_resource_id(ResourceKind::Image, plan.canonical_tag());
+        let resource = Resource::canonical(
+            ResourceKind::Image,
+            resource_id.clone(),
+            None,
+            plan.generation(),
+        );
+        let context = RequestContext::resolved(
+            origin_request_id(origin, &resource_id, Action::ImageBuild),
+            Some(origin.principal().clone()),
+            Action::ImageBuild,
+            resource,
+            RequestFacts::default(),
+        );
+        let bindings = ExecutionBindings::new(None, plan.generation(), None, None, Vec::new())
+            .with_operation_plan_digest(plan.plan_digest());
+        let request = CanonicalRequest::new(context, policy, bindings.clone(), bindings);
+        self.authorize(origin, request, Action::ImageBuild, ResourceKind::Image)
+    }
+
+    pub fn authorize_image_tag_plan(
+        &self,
+        origin: &RequestOrigin,
+        plan: &crate::image_tagging::ImageTagPlan,
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        origin.revalidate_transport()?;
+        let policy = self.gate.pin();
+        validate_fanout_origin(
+            origin,
+            Action::ImageTag,
+            plan.target_reference(),
+            plan.plan_digest(),
+            policy.generation(),
+            policy.digest_bytes(),
+        )?;
+        let resource_id = stable_resource_id(ResourceKind::Image, plan.target_reference());
+        let resource = Resource::canonical(
+            ResourceKind::Image,
+            resource_id.clone(),
+            None,
+            plan.generation(),
+        );
+        let context = RequestContext::resolved(
+            origin_request_id(origin, &resource_id, Action::ImageTag),
+            Some(origin.principal().clone()),
+            Action::ImageTag,
+            resource,
+            RequestFacts::default(),
+        );
+        let bindings = ExecutionBindings::new(None, plan.generation(), None, None, Vec::new())
+            .with_operation_plan_digest(plan.plan_digest());
+        let request = CanonicalRequest::new(context, policy, bindings.clone(), bindings);
+        self.authorize(origin, request, Action::ImageTag, ResourceKind::Image)
+    }
+
+    pub fn authorize_image_reference_write_plan(
+        &self,
+        origin: &RequestOrigin,
+        plan: &crate::image_store::ImageReferenceWritePlan,
+    ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        origin.revalidate_transport()?;
+        let policy = self.gate.pin();
+        validate_fanout_origin(
+            origin,
+            Action::ImageReferenceWrite,
+            plan.canonical_reference(),
+            plan.plan_digest(),
+            policy.generation(),
+            policy.digest_bytes(),
+        )?;
+        let resource_id = stable_resource_id(ResourceKind::Image, plan.canonical_reference());
+        let resource = Resource::canonical(
+            ResourceKind::Image,
+            resource_id.clone(),
+            None,
+            plan.generation(),
+        );
+        let context = RequestContext::resolved(
+            origin_request_id(origin, &resource_id, Action::ImageReferenceWrite),
+            Some(origin.principal().clone()),
+            Action::ImageReferenceWrite,
+            resource,
+            RequestFacts::default(),
+        );
+        let bindings = ExecutionBindings::new(None, plan.generation(), None, None, Vec::new())
+            .with_operation_plan_digest(plan.plan_digest());
+        let request = CanonicalRequest::new(context, policy, bindings.clone(), bindings);
+        self.authorize(
+            origin,
+            request,
+            Action::ImageReferenceWrite,
+            ResourceKind::Image,
+        )
     }
 
     pub fn validate_execution(
@@ -480,6 +666,9 @@ fn witness_action(action: Action) -> Result<WitnessAction, SurfaceAuthorizationE
     Ok(match action {
         Action::ImagePull => WitnessAction::ImagePull,
         Action::ImageDelete => WitnessAction::ImageDelete,
+        Action::ImageBuild => WitnessAction::ImageBuild,
+        Action::ImageTag => WitnessAction::ImageTag,
+        Action::ImageReferenceWrite => WitnessAction::ImageReferenceWrite,
         Action::VolumeCreate => WitnessAction::VolumeCreate,
         Action::VolumeDelete => WitnessAction::VolumeDelete,
         Action::NetworkCreate => WitnessAction::NetworkCreate,
@@ -499,7 +688,11 @@ fn witness_kind(kind: ResourceKind) -> Result<WitnessResourceKind, SurfaceAuthor
 
 fn recovery_action(action: WitnessAction) -> WitnessAction {
     match action {
-        WitnessAction::ImagePull | WitnessAction::ImageDelete => WitnessAction::ImageDelete,
+        WitnessAction::ImagePull
+        | WitnessAction::ImageDelete
+        | WitnessAction::ImageBuild
+        | WitnessAction::ImageTag
+        | WitnessAction::ImageReferenceWrite => WitnessAction::ImageDelete,
         WitnessAction::VolumeCreate | WitnessAction::VolumeDelete => WitnessAction::VolumeDelete,
         WitnessAction::NetworkCreate | WitnessAction::NetworkDelete => WitnessAction::NetworkDelete,
         _ => action,
@@ -580,6 +773,42 @@ fn request_id(resource_id: &str, action: Action) -> String {
         ]
         .concat(),
     )[..16])
+}
+
+fn origin_request_id(origin: &RequestOrigin, resource_id: &str, action: Action) -> String {
+    origin
+        .request_id()
+        .map(|id| hex(&id))
+        .unwrap_or_else(|| request_id(resource_id, action))
+}
+
+fn validate_fanout_origin(
+    origin: &RequestOrigin,
+    action: Action,
+    resource: &str,
+    request_digest: [u8; 32],
+    policy_generation: u64,
+    policy_digest: [u8; 32],
+) -> Result<(), SurfaceAuthorizationError> {
+    let Some(fanout) = origin.fanout() else {
+        return Ok(());
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    if !origin.fanout_integrity_valid()
+        || fanout.expected_action != action
+        || fanout.expected_resource != resource
+        || fanout.request_digest() != &request_digest
+        || fanout.deadline_unix_ms() < now_ms
+        || fanout.policy_generation() != policy_generation
+        || fanout.policy_digest() != &policy_digest
+    {
+        return Err(SurfaceAuthorizationError::InvalidBinding);
+    }
+    Ok(())
 }
 
 fn uuid(bytes: &[u8; 32]) -> String {

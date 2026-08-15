@@ -9,8 +9,8 @@ use ferro_compose::compose::{
 };
 #[cfg(target_os = "linux")]
 use ferro_compose::{
-    execute_fanout, Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
-    Environment as ComposeEnvironment, FanoutAction, FanoutExecutionError, FanoutOutcome,
+    Command as ComposeCommandSpec, DependsOn as ComposeDependsOn,
+    Environment as ComposeEnvironment, FanoutAction,
     FanoutPlan, FanoutReplayStore, Service as ComposeService, ServiceMutation,
 };
 #[cfg(target_os = "linux")]
@@ -1538,6 +1538,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 embed_model,
             } => handle_build(
                 &image_store,
+                &runtime.request_origin().ok_or_else(|| "build: authenticated request origin unavailable".to_string())?,
+                &surface_authorization,
                 dockerfile.as_deref(),
                 ferrofile.as_deref(),
                 tag.as_deref(),
@@ -2339,7 +2341,12 @@ fn handle_run(
     ensure_image_present(store, image, &origin, &surface_authorization)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
-    let volume_mounts = parse_volume_mounts(volume_store, volumes)?;
+    let volume_mounts = parse_volume_mounts(
+        volume_store,
+        volumes,
+        &origin,
+        &surface_authorization,
+    )?;
     let mut mounts = mounts;
     mounts.extend(volume_mounts);
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
@@ -2770,6 +2777,8 @@ fn parse_bind_mounts(bind_mounts: &[String]) -> Result<Vec<ferro_core::mounts::B
 fn parse_volume_mounts(
     volume_store: &LocalVolumeStore,
     volumes: &[String],
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
 ) -> Result<Vec<ferro_core::mounts::BindMount>, String> {
     let mut out = Vec::new();
     for entry in volumes {
@@ -2786,7 +2795,17 @@ fn parse_volume_mounts(
         } else {
             let record = match volume_store.get(source).map_err(|err| err.to_string())? {
                 Some(record) => record,
-                None => volume_store.create(source).map_err(|err| err.to_string())?,
+                None => {
+                    let plan = volume_store
+                        .prepare_create(source, "local", BTreeMap::new())
+                        .map_err(|err| err.to_string())?;
+                    let permit = authorization
+                        .authorize_volume_create_plan(origin, &plan)
+                        .map_err(|err| err.to_string())?;
+                    volume_store
+                        .create_with_driver_authorized(plan, permit)
+                        .map_err(|err| err.to_string())?
+                }
             };
             record.path
         };
@@ -2892,6 +2911,8 @@ fn build_limits(
 #[cfg(target_os = "linux")]
 fn handle_build(
     store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
     dockerfile: Option<&str>,
     ferrofile: Option<&str>,
     tag: Option<&str>,
@@ -2903,13 +2924,17 @@ fn handle_build(
     let compression = parse_compression(compression)?;
 
     let (result, source_desc) = if let Some(ferrofile_path) = ferrofile {
-        let r = ferro_core::ferrofile_build::build_from_ferrofile_with_store(
+        let plan = ferro_core::ferrofile_build::prepare_ferrofile_build(
             Path::new(ferrofile_path),
             &runtime_dir,
             compression,
-            Some(store),
+            store,
         )
         .map_err(|err| err.to_string())?;
+        let permit = authorization.authorize_image_build_plan(origin, &plan)
+            .map_err(|error| error.to_string())?;
+        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
+            .map_err(|error| error.to_string())?;
         let desc = format!("ferrofile={}", ferrofile_path);
         (r, desc)
     } else {
@@ -2924,7 +2949,7 @@ fn handle_build(
                 .map_err(|err| format!("failed to get current directory: {err}"))?
                 .join(dockerfile)
         };
-        let r = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
+        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build(
             &dockerfile_path,
             Some(tag),
             &runtime_dir,
@@ -2932,6 +2957,10 @@ fn handle_build(
             store,
         )
         .map_err(|err| err.to_string())?;
+        let permit = authorization.authorize_image_build_plan(origin, &plan)
+            .map_err(|error| error.to_string())?;
+        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
+            .map_err(|error| error.to_string())?;
         let desc = format!("dockerfile={}", dockerfile_path.display());
         (r, desc)
     };
@@ -3333,10 +3362,13 @@ fn handle_volume_authorized(
     match command {
         VolumeCommands::Create { name, driver, opts } => {
             let driver_opts = parse_driver_opts(&opts)?;
-            let proof = authorization
-                .authorize_named(origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, &name, 1)
+            let plan = store
+                .prepare_create(&name, &driver, driver_opts)
                 .map_err(|error| error.to_string())?;
-            let record = execute_volume_create(&store, &name, &driver, driver_opts, proof)?;
+            let proof = authorization
+                .authorize_volume_create_plan(origin, &plan)
+                .map_err(|error| error.to_string())?;
+            let record = execute_volume_create(&store, plan, proof)?;
             println!("volume create: {} {}", record.name, record.path);
         }
         VolumeCommands::Backup { name, path } => {
@@ -3345,10 +3377,13 @@ fn handle_volume_authorized(
         }
         VolumeCommands::Restore { name, path } => {
             if store.get(&name).map_err(|err| err.to_string())?.is_none() {
-                let permit = authorization
-                    .authorize_named(origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, &name, 1)
+                let plan = store
+                    .prepare_create(&name, "local", BTreeMap::new())
                     .map_err(|error| error.to_string())?;
-                store.create_with_driver_authorized(&name, "local", BTreeMap::new(), permit)
+                let permit = authorization
+                    .authorize_volume_create_plan(origin, &plan)
+                    .map_err(|error| error.to_string())?;
+                store.create_with_driver_authorized(plan, permit)
                     .map_err(|err| err.to_string())?;
             }
             let permit = authorization
@@ -3384,12 +3419,10 @@ fn handle_volume_authorized(
 
 fn execute_volume_create(
     store: &LocalVolumeStore,
-    name: &str,
-    driver: &str,
-    driver_opts: BTreeMap<String, String>,
+    plan: ferro_core::volume_store::VolumeCreatePlan,
     permit: SurfacePermit,
 ) -> Result<ferro_core::volume_store::VolumeRecord, String> {
-    store.create_with_driver_authorized(name, driver, driver_opts, permit).map_err(|error| error.to_string())
+    store.create_with_driver_authorized(plan, permit).map_err(|error| error.to_string())
 }
 
 fn execute_volume_remove(
@@ -3840,42 +3873,30 @@ fn handle_pull_authorized(
     let binding = ferro_core::image_fetch::inspect_image_binding(image)
         .map_err(|error| error.to_string())?;
     let proof = authorization
-        .authorize_image_binding(
-            origin,
-            AuthorizationAction::ImagePull,
-            &binding.reference,
-            &binding.digest,
-            1,
-        )
+        .authorize_image_fetch_plan(origin, &binding, 1)
         .map_err(|error| error.to_string())?;
-    execute_image_pull(store, image, lazy, &binding.reference, &binding.digest, proof)
+    execute_image_pull(store, lazy, binding, proof)
 }
 
 fn execute_image_pull(
     store: &LocalImageStore,
-    image: &str,
     lazy: bool,
-    canonical: &str,
-    digest: &str,
+    plan: ferro_core::image_fetch::ImageFetchPlan,
     permit: SurfacePermit,
 ) -> Result<(), String> {
     if lazy {
-        SurfaceAuthorization::validate_execution(&permit, AuthorizationAction::ImagePull, ResourceKind::Image, canonical, 1)
-            .map_err(|error| error.to_string())?;
-        if permit.proof().canonical().image_digest() != Some(digest) { return Err("image authorization digest does not match executor".to_string()); }
         let runtime_dir = runtime_dir();
         let canonical =
-            ferro_core::image_fetch::pull_manifest_only_with_store(&runtime_dir, image, store)
+            ferro_core::image_fetch::pull_manifest_only_with_store_authorized(&runtime_dir, &plan, store, permit)
                 .map_err(|err| err.to_string())?;
-        permit.finish(true).map_err(|error| error.to_string())?;
         println!("pull: manifest-only image={canonical}");
         return Ok(());
     }
     let runtime_dir = runtime_dir();
     ferro_core::image_fetch::pull_image_with_store_authorized(
-        &runtime_dir, image, canonical, digest, store, permit,
+        &runtime_dir, &plan, store, permit,
     ).map_err(|error| error.to_string())?;
-    println!("pull: image={canonical}");
+    println!("pull: image={}", plan.canonical_reference());
     Ok(())
 }
 
@@ -3987,6 +4008,100 @@ fn run_scanner(scanner: &str, rootfs: &Path) -> Result<String, String> {
 }
 
 #[cfg(target_os = "linux")]
+enum ComposePrerequisite {
+    ImageBuild(ferro_core::dockerfile_build::ImageBuildPlan),
+    ImagePull(ferro_core::image_fetch::ImageFetchPlan),
+    VolumeCreate(ferro_core::volume_store::VolumeCreatePlan),
+}
+
+#[cfg(target_os = "linux")]
+impl ComposePrerequisite {
+    fn mutation(&self) -> ServiceMutation {
+        match self {
+            Self::ImageBuild(plan) => ServiceMutation::new(
+                plan.canonical_tag(),
+                FanoutAction::ImageBuild,
+                plan.plan_digest(),
+            ),
+            Self::ImagePull(plan) => ServiceMutation::new(
+                plan.canonical_reference(),
+                FanoutAction::ImagePull,
+                plan.plan_digest(),
+            ),
+            Self::VolumeCreate(plan) => ServiceMutation::new(
+                plan.name(),
+                FanoutAction::VolumeCreate,
+                plan.plan_digest(),
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct PreparedComposeService {
+    name: String,
+    instance: String,
+    image: String,
+    prerequisites: Vec<ComposePrerequisite>,
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_compose_service(
+    store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
+    project_dir: &Path,
+    name: String,
+    instance: String,
+    service: &ComposeService,
+) -> Result<PreparedComposeService, String> {
+    let image = service
+        .image
+        .clone()
+        .unwrap_or_else(|| format!("local/compose-{name}:latest"));
+    let mut prerequisites = Vec::new();
+    if let Some(build) = service.build.as_ref() {
+        let context = build.context.as_deref().unwrap_or(".");
+        let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
+        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build(
+            &project_dir.join(context).join(dockerfile),
+            Some(&image),
+            &runtime_dir(),
+            CompressionFormat::Gzip,
+            store,
+        )
+        .map_err(|error| error.to_string())?;
+        prerequisites.push(ComposePrerequisite::ImageBuild(plan));
+    } else if resolve_reference(store, &image)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        prerequisites.push(ComposePrerequisite::ImagePull(
+            ferro_core::image_fetch::inspect_image_binding(&image)
+                .map_err(|error| error.to_string())?,
+        ));
+    }
+    let mut planned_volumes = HashSet::new();
+    if let Some(volumes) = service.volumes.as_ref() {
+        for entry in volumes {
+            let source = entry.split(':').next().unwrap_or("");
+            if source.is_empty() || source.starts_with('.') || source.contains('/') {
+                continue;
+            }
+            if planned_volumes.insert(source.to_string())
+                && volume_store.get(source).map_err(|error| error.to_string())?.is_none()
+            {
+                prerequisites.push(ComposePrerequisite::VolumeCreate(
+                    volume_store
+                        .prepare_create(source, "local", BTreeMap::new())
+                        .map_err(|error| error.to_string())?,
+                ));
+            }
+        }
+    }
+    Ok(PreparedComposeService { name, instance, image, prerequisites })
+}
+
+#[cfg(target_os = "linux")]
 fn handle_compose(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
@@ -4058,73 +4173,162 @@ fn handle_compose(
                         .services
                         .get(&name)
                         .ok_or_else(|| format!("compose: missing service {name}"))?;
-                    let (image, digest) = compose_service_execution_digest(
+                    prepare_compose_service(
+                        store,
+                        volume_store,
+                        project_dir,
+                        name,
+                        instance,
+                        service,
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+            let surface_authorization = runtime
+                .surface_authorization()
+                .map_err(|error| error.to_string())?;
+            let mut failures = Vec::new();
+            for prepared in prepared {
+                let service = project
+                    .compose.services.get(&prepared.name)
+                    .ok_or_else(|| format!("compose: missing service {}", prepared.name))?;
+                let mut mutations = prepared
+                    .prerequisites
+                    .iter()
+                    .map(ComposePrerequisite::mutation)
+                    .collect::<Vec<_>>();
+                let initial_run_digest = if mutations.is_empty() {
+                    compose_service_execution_digest(
                         runtime,
                         store,
                         volume_store,
                         project_dir,
-                        &name,
+                        &prepared.name,
                         service,
-                        &instance,
-                    )?;
-                    Ok::<_, String>((name, instance, image, digest))
-                })
-                .collect::<Result<_, _>>()?;
-            let mutations = prepared.iter().map(|(_, instance, _, digest)| {
-                ServiceMutation::new(instance, FanoutAction::ContainerRun, *digest)
-            });
-            let fanout = FanoutPlan::derive(
-                parent_id,
-                policy_generation,
-                policy_digest,
-                deadline,
-                0,
-                mutations,
-            )
-            .map_err(|error| error.to_string())?;
-            let result = execute_fanout(&fanout, &replay_store, current_unix_ms, |child| {
-                let (name, instance, image, _) = prepared
-                    .get(child.ordinal() as usize)
-                    .ok_or_else(|| FanoutExecutionError::Failed("compose child ordinal is invalid".into()))?;
-                let service = project
-                    .compose
-                    .services.get(name)
-                    .ok_or_else(|| FanoutExecutionError::Failed(format!("compose: missing service {name}")))?;
+                        &prepared.instance,
+                        &prepared.image,
+                    )?.1
+                } else {
+                    [0; 32]
+                };
+                mutations.push(ServiceMutation::new(
+                    &prepared.instance,
+                    FanoutAction::ContainerRun,
+                    initial_run_digest,
+                ));
+                let root_plan = FanoutPlan::derive(
+                    parent_id,
+                    policy_generation,
+                    policy_digest,
+                    deadline,
+                    0,
+                    mutations,
+                )
+                .map_err(|error| error.to_string())?;
+                let mut current_plan = root_plan.clone();
+                let mut predecessor = None;
+                let mut predecessor_outcome = [0; 32];
+                let mut prerequisite_failed = false;
+                for (ordinal, prerequisite) in prepared.prerequisites.into_iter().enumerate() {
+                    let mutation = prerequisite.mutation();
+                    let child = if let Some(previous) = predecessor.as_ref() {
+                        current_plan = current_plan
+                            .derive_dependent(previous, predecessor_outcome, mutation)
+                            .map_err(|error| error.to_string())?;
+                        current_plan.children()[0].clone()
+                    } else {
+                        root_plan.children()[ordinal].clone()
+                    };
+                    if let Err(error) = current_plan
+                        .verify_child(&child, current_unix_ms())
+                        .and_then(|_| replay_store.claim(&child))
+                    {
+                        failures.push(format!("{} prerequisite denied/skipped: {error}", prepared.instance));
+                        prerequisite_failed = true;
+                        break;
+                    }
+                    if let Err(error) = execute_compose_prerequisite(
+                        prerequisite,
+                        &child,
+                        &parent_origin,
+                        &surface_authorization,
+                        store,
+                        volume_store,
+                    ) {
+                        failures.push(format!("{} prerequisite failed: {error}", prepared.instance));
+                        prerequisite_failed = true;
+                        break;
+                    }
+                    predecessor_outcome = compose_predecessor_outcome_digest(&child);
+                    predecessor = Some(child);
+                }
+                if prerequisite_failed {
+                    continue;
+                }
                 if let Some(depends_on) = service.depends_on.as_ref() {
                     wait_for_compose_dependencies(runtime, depends_on)
-                        .map_err(FanoutExecutionError::Failed)?;
+                        .map_err(|error| format!("compose partial result: {error}"))?;
+                }
+                let run_digest = compose_service_execution_digest(
+                    runtime,
+                    store,
+                    volume_store,
+                    project_dir,
+                    &prepared.name,
+                    service,
+                    &prepared.instance,
+                    &prepared.image,
+                )?.1;
+                let run_child = if let Some(previous) = predecessor.as_ref() {
+                    current_plan = current_plan
+                        .derive_dependent(
+                            previous,
+                            predecessor_outcome,
+                            ServiceMutation::new(
+                                &prepared.instance,
+                                FanoutAction::ContainerRun,
+                                run_digest,
+                            ),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    current_plan.children()[0].clone()
+                } else {
+                    root_plan.children()[0].clone()
+                };
+                if let Err(error) = current_plan
+                    .verify_child(&run_child, current_unix_ms())
+                    .and_then(|_| replay_store.claim(&run_child))
+                {
+                    failures.push(format!("{} run denied/skipped: {error}", prepared.instance));
+                    continue;
                 }
                 let child_runtime = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(
                     &parent_origin,
-                    *child.child_id(),
-                    parent_id,
-                    *child.idempotency_key(),
+                    *run_child.child_id(),
+                    *run_child.parent_request_id(),
+                    *run_child.idempotency_key(),
                     ferro_core::authorization::Action::ContainerRun,
-                    instance,
-                    *child.request_digest(),
-                    child.deadline_unix_ms(),
-                    child.policy_generation(),
-                    *child.policy_digest(),
-                    child.attempt(),
-                    child.ordinal(),
-                    *child.plan_digest(),
+                    &prepared.instance,
+                    *run_child.request_digest(),
+                    run_child.deadline_unix_ms(),
+                    run_child.policy_generation(),
+                    *run_child.policy_digest(),
+                    run_child.attempt(),
+                    run_child.ordinal(),
+                    *run_child.plan_digest(),
                 ));
-                run_compose_service(
+                if let Err(error) = run_compose_service(
                     &child_runtime,
                     store,
                     volume_store,
                     project_dir,
-                    name,
+                    &prepared.name,
                     service,
-                    Some(instance),
-                    Some(image),
-                ).map_err(classify_compose_execution_error)
-            });
-            let failures: Vec<_> = result.statuses().iter().filter_map(|status| match status.outcome() {
-                FanoutOutcome::Succeeded => None,
-                FanoutOutcome::Denied(reason) => Some(format!("{}: denied: {reason}", hex_id(status.child_id()))),
-                FanoutOutcome::Failed(reason) => Some(format!("{}: failed: {reason}", hex_id(status.child_id()))),
-            }).collect();
+                    Some(&prepared.instance),
+                    Some(&prepared.image),
+                ) {
+                    failures.push(format!("{} run failed: {error}", prepared.instance));
+                }
+            }
             if !failures.is_empty() {
                 return Err(format!("compose partial result: {}", failures.join("; ")));
             }
@@ -4177,7 +4381,10 @@ fn handle_compose(
                     let runtime_action = match action {
                         FanoutAction::ContainerStop => ferro_core::authorization::Action::ContainerStop,
                         FanoutAction::ContainerDelete => ferro_core::authorization::Action::ContainerDelete,
-                        FanoutAction::ContainerRun => unreachable!(),
+                        FanoutAction::ContainerRun
+                        | FanoutAction::ImagePull
+                        | FanoutAction::VolumeCreate
+                        | FanoutAction::ImageBuild => unreachable!(),
                     };
                     ServiceMutation::new(
                         record.name.clone().unwrap_or_else(|| record.id.clone()),
@@ -4345,19 +4552,79 @@ fn current_unix_ms() -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-fn classify_compose_execution_error(error: String) -> FanoutExecutionError {
-    if error.to_ascii_lowercase().contains("denied")
-        || error.to_ascii_lowercase().contains("authorization")
-    {
-        FanoutExecutionError::Denied(error)
-    } else {
-        FanoutExecutionError::Failed(error)
+fn execute_compose_prerequisite(
+    prerequisite: ComposePrerequisite,
+    child: &ferro_compose::FanoutChild,
+    parent_origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
+) -> Result<(), String> {
+    let (action, resource) = match &prerequisite {
+        ComposePrerequisite::ImageBuild(plan) => (AuthorizationAction::ImageBuild, plan.canonical_tag()),
+        ComposePrerequisite::ImagePull(plan) => (AuthorizationAction::ImagePull, plan.canonical_reference()),
+        ComposePrerequisite::VolumeCreate(plan) => (AuthorizationAction::VolumeCreate, plan.name()),
+    };
+    let origin = RequestOrigin::compose_child(
+        parent_origin,
+        *child.child_id(),
+        *child.parent_request_id(),
+        *child.idempotency_key(),
+        action,
+        resource,
+        *child.request_digest(),
+        child.deadline_unix_ms(),
+        child.policy_generation(),
+        *child.policy_digest(),
+        child.attempt(),
+        child.ordinal(),
+        *child.plan_digest(),
+    );
+    match prerequisite {
+        ComposePrerequisite::ImageBuild(plan) => {
+            let permit = authorization
+                .authorize_image_build_plan(&origin, &plan)
+                .map_err(|error| error.to_string())?;
+            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+        ComposePrerequisite::ImagePull(plan) => {
+            let permit = authorization
+                .authorize_image_fetch_plan(&origin, &plan, 1)
+                .map_err(|error| error.to_string())?;
+            ferro_core::image_fetch::pull_image_with_store_authorized(
+                &runtime_dir(),
+                &plan,
+                store,
+                permit,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }
+        ComposePrerequisite::VolumeCreate(plan) => {
+            let permit = authorization
+                .authorize_volume_create_plan(&origin, &plan)
+                .map_err(|error| error.to_string())?;
+            volume_store
+                .create_with_driver_authorized(plan, permit)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn hex_id(id: &[u8; 16]) -> String {
-    id.iter().map(|byte| format!("{byte:02x}")).collect()
+fn compose_predecessor_outcome_digest(child: &ferro_compose::FanoutChild) -> [u8; 32] {
+    Sha256::digest([
+        b"ferrocrate/compose-predecessor-success/v1".as_slice(),
+        child.child_id(),
+        child.plan_digest(),
+        child.request_digest(),
+        &child.ordinal().to_be_bytes(),
+    ]
+    .concat())
+    .into()
 }
 
 #[cfg(target_os = "linux")]
@@ -4374,10 +4641,8 @@ fn run_compose_service(
 ) -> Result<(), String> {
     let image = if let Some(image) = prepared_image {
         image.to_owned()
-    } else if service.image.is_some() || service.build.is_some() {
-        build_compose_image(store, project_dir, name, service)?
     } else {
-        return Err(format!("compose: service {name} missing image or build"));
+        return Err(format!("compose: service {name} image prerequisite was not prepared"));
     };
     if let Some(networks) = service.networks.as_ref() {
         if networks.iter().any(|net| net != "default") {
@@ -4475,13 +4740,8 @@ fn compose_service_execution_digest(
     name: &str,
     service: &ComposeService,
     instance: &str,
+    image: &str,
 ) -> Result<(String, [u8; 32]), String> {
-    let image = build_compose_image(store, project_dir, name, service)?;
-    let origin = runtime
-        .request_origin()
-        .ok_or_else(|| "compose: authenticated request origin unavailable".to_string())?;
-    let surface_authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
-    ensure_image_present(store, &image, &origin, &surface_authorization)?;
     let cmd = compose_service_command(service);
     let env_entries = compose_service_env(project_dir, service)?;
     let env = parse_env_entries(&env_entries)?;
@@ -4509,7 +4769,7 @@ fn compose_service_execution_digest(
     let digest = runtime
         .normalized_run_execution_digest(
             store,
-            &image,
+            image,
             &effective_cmd,
             &env,
             &labels,
@@ -4530,38 +4790,7 @@ fn compose_service_execution_digest(
             NetworkBackend::Ebpf,
         )
         .map_err(|error| error.to_string())?;
-    Ok((image, digest))
-}
-
-#[cfg(target_os = "linux")]
-fn build_compose_image(
-    store: &LocalImageStore,
-    project_dir: &Path,
-    name: &str,
-    service: &ComposeService,
-) -> Result<String, String> {
-    let runtime_dir = runtime_dir();
-    let tag = service
-        .image
-        .clone()
-        .unwrap_or_else(|| format!("local/compose-{name}:latest"));
-
-    let Some(build) = service.build.as_ref() else {
-        return Ok(tag);
-    };
-
-    let context = build.context.as_deref().unwrap_or(".");
-    let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
-    let dockerfile_path = project_dir.join(context).join(dockerfile);
-    let result = ferro_core::dockerfile_build::build_from_dockerfile_with_store_and_compression(
-        &dockerfile_path,
-        Some(&tag),
-        &runtime_dir,
-        CompressionFormat::Gzip,
-        store,
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(result.reference)
+    Ok((image.to_string(), digest))
 }
 
 #[cfg(target_os = "linux")]
@@ -4665,10 +4894,10 @@ fn compose_service_mounts(
                 out.push(entry.clone());
                 continue;
             }
-            let record = match volume_store.get(source).map_err(|err| err.to_string())? {
-                Some(record) => record,
-                None => volume_store.create(source).map_err(|err| err.to_string())?,
-            };
+            let record = volume_store
+                .get(source)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("compose: volume prerequisite was not created: {source}"))?;
             let mode = parts.next().unwrap_or("");
             if mode.is_empty() {
                 out.push(format!("{}:{target}", record.path));
@@ -5270,10 +5499,13 @@ fn handle_docker_compat_connection(
                     .map(|map| map.iter().map(|(key, value)| format!("{key}={}", value.as_str().unwrap_or_default())).collect())
                     .unwrap_or_default();
                 let driver_opts = parse_driver_opts(&opts)?;
-                let proof = surface_authorization
-                    .authorize_named(&origin, AuthorizationAction::VolumeCreate, ResourceKind::Volume, name, 1)
+                let plan = volume_store
+                    .prepare_create(name, driver, driver_opts)
                     .map_err(|error| error.to_string())?;
-                execute_volume_create(&volume_store, name, driver, driver_opts, proof)?;
+                let proof = surface_authorization
+                    .authorize_volume_create_plan(&origin, &plan)
+                    .map_err(|error| error.to_string())?;
+                execute_volume_create(&volume_store, plan, proof)?;
                 let record = volume_store.get(name).map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: volume not found after create: {name}"))?;
                 let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
@@ -6456,8 +6688,11 @@ mod tests {
     fn build_handler_defaults_to_dockerfile_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err =
-            handle_build(&store, None, None, None, "gzip", "oci", None).expect_err("dockerfile should be read");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime.surface_authorization().expect("authorization");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let err = handle_build(&store, &origin, &authorization, None, None, None, "gzip", "oci", None)
+            .expect_err("dockerfile should be read");
         assert!(
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
@@ -6468,7 +6703,10 @@ mod tests {
     fn build_handler_rejects_invalid_tag() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        let err = handle_build(&store, Some("./Dockerfile"), None, Some(""), "gzip", "oci", None)
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime.surface_authorization().expect("authorization");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let err = handle_build(&store, &origin, &authorization, Some("./Dockerfile"), None, Some(""), "gzip", "oci", None)
             .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
     }

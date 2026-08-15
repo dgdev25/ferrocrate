@@ -157,7 +157,11 @@ impl RecoveryRecipe {
                 WitnessResourceKind::Container,
                 WitnessAction::ContainerDelete
             ) | (
-                WitnessAction::ImagePull | WitnessAction::ImageDelete,
+                WitnessAction::ImagePull
+                    | WitnessAction::ImageDelete
+                    | WitnessAction::ImageBuild
+                    | WitnessAction::ImageTag
+                    | WitnessAction::ImageReferenceWrite,
                 WitnessResourceKind::Image,
                 WitnessAction::ImageDelete
             ) | (
@@ -302,6 +306,9 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         16 => Some(WitnessAction::NetworkCreate),
         17 => Some(WitnessAction::NetworkDelete),
         18 => Some(WitnessAction::NetworkAttach),
+        24 => Some(WitnessAction::ImageBuild),
+        25 => Some(WitnessAction::ImageTag),
+        26 => Some(WitnessAction::ImageReferenceWrite),
         _ => None,
     }
 }

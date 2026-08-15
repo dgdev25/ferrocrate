@@ -1,9 +1,13 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use ferro_core::authorization::RequestOrigin;
 use ferro_core::image_manifest::{parse_image_manifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 use ferro_core::image_store::LocalImageStore;
-use ferro_core::image_tagging::{resolve_reference, tag_image};
+use ferro_core::image_tagging::{
+    execute_image_tag_authorized, prepare_image_tag, resolve_reference,
+};
 use ferro_core::registry::{RegistryAuth, RegistryClient};
+use ferro_core::runtime::ContainerRuntime;
 use httptest::matchers::{all_of, contains, request};
 use httptest::responders::status_code;
 use httptest::{Expectation, Server};
@@ -28,22 +32,35 @@ fn integration_pull_store_and_tag_image() {
         .expect("pull manifest should succeed");
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let store = LocalImageStore::open(temp.path()).expect("open store");
-    store
-        .put_reference(
+    let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+    let authorization = runtime.surface_authorization().expect("authorization");
+    let origin = RequestOrigin::cli_current().expect("origin");
+    let store = LocalImageStore::open(temp.path().join("images")).expect("open store");
+    let write = store
+        .prepare_reference_write(
             &format!("{}/library/alpine:latest", server.addr()),
             &manifest.config.digest,
             OCI_IMAGE_MANIFEST_MEDIA_TYPE,
             manifest_json,
         )
+        .expect("prepare manifest index");
+    let permit = authorization
+        .authorize_image_reference_write_plan(&origin, &write)
+        .expect("authorize write");
+    store
+        .put_reference_authorized(write, permit)
         .expect("store manifest index");
 
-    tag_image(
+    let tag = prepare_image_tag(
         &store,
         &format!("{}/library/alpine:latest", server.addr()),
         "ghcr.io/acme/alpine:stable",
     )
-    .expect("tag image");
+    .expect("prepare tag");
+    let permit = authorization
+        .authorize_image_tag_plan(&origin, &tag)
+        .expect("authorize tag");
+    execute_image_tag_authorized(&store, tag, permit).expect("tag image");
 
     let tagged = resolve_reference(&store, "ghcr.io/acme/alpine:stable")
         .expect("resolve tagged")

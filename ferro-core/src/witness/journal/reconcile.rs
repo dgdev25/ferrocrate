@@ -307,6 +307,9 @@ fn action(value: u8) -> Result<WitnessAction, JournalError> {
         21 => Ok(PolicyReload),
         22 => Ok(PolicyRollback),
         23 => Ok(CheckpointPublish),
+        24 => Ok(ImageBuild),
+        25 => Ok(ImageTag),
+        26 => Ok(ImageReferenceWrite),
         _ => Err(JournalError::Corrupt),
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,36 @@ pub enum VolumeStoreError {
     NotFound(String),
     #[error("volume authorization binding failed: {0}")]
     Authorization(String),
+    #[error("invalid volume name: {0}")]
+    InvalidName(String),
+}
+
+/// Immutable preparation result for a single volume creation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeCreatePlan {
+    name: String,
+    driver: String,
+    driver_opts: BTreeMap<String, String>,
+    generation: u64,
+    plan_digest: [u8; 32],
+}
+
+impl VolumeCreatePlan {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn driver(&self) -> &str {
+        &self.driver
+    }
+    pub fn driver_options(&self) -> &BTreeMap<String, String> {
+        &self.driver_opts
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
 }
 
 pub trait VolumeDriver: Send + Sync {
@@ -119,8 +150,45 @@ impl LocalVolumeStore {
         })
     }
 
-    pub fn create(&self, name: &str) -> Result<VolumeRecord, VolumeStoreError> {
+    pub(crate) fn create(&self, name: &str) -> Result<VolumeRecord, VolumeStoreError> {
         self.create_with_driver(name, "local", BTreeMap::new())
+    }
+
+    pub fn prepare_create(
+        &self,
+        name: &str,
+        driver: &str,
+        driver_opts: BTreeMap<String, String>,
+    ) -> Result<VolumeCreatePlan, VolumeStoreError> {
+        validate_volume_name(name)?;
+        if self.get(name)?.is_some() {
+            return Err(VolumeStoreError::Exists(name.to_string()));
+        }
+        if self.drivers.get(driver).is_none() {
+            return Err(VolumeStoreError::UnknownDriver(driver.to_string()));
+        }
+        let generation = 1_u64;
+        let mut hash = Sha256::new();
+        hash.update(b"ferrocrate/volume-create-plan/v1");
+        for value in [name, driver] {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        hash.update(generation.to_be_bytes());
+        hash.update((driver_opts.len() as u64).to_be_bytes());
+        for (key, value) in &driver_opts {
+            for item in [key.as_str(), value.as_str()] {
+                hash.update((item.len() as u64).to_be_bytes());
+                hash.update(item.as_bytes());
+            }
+        }
+        Ok(VolumeCreatePlan {
+            name: name.to_string(),
+            driver: driver.to_string(),
+            driver_opts,
+            generation,
+            plan_digest: hash.finalize().into(),
+        })
     }
 
     pub(crate) fn create_with_driver(
@@ -129,6 +197,7 @@ impl LocalVolumeStore {
         driver: &str,
         driver_opts: BTreeMap<String, String>,
     ) -> Result<VolumeRecord, VolumeStoreError> {
+        validate_volume_name(name)?;
         let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
         if tree.get(name.as_bytes())?.is_some() {
             return Err(VolumeStoreError::Exists(name.to_string()));
@@ -153,20 +222,26 @@ impl LocalVolumeStore {
 
     pub fn create_with_driver_authorized(
         &self,
-        name: &str,
-        driver: &str,
-        driver_opts: BTreeMap<String, String>,
+        plan: VolumeCreatePlan,
         permit: crate::authorization::surface::SurfacePermit,
     ) -> Result<VolumeRecord, VolumeStoreError> {
         crate::authorization::surface::SurfaceAuthorization::validate_execution(
             &permit,
             crate::authorization::Action::VolumeCreate,
             crate::authorization::ResourceKind::Volume,
-            name,
-            1,
+            plan.name(),
+            plan.generation(),
         )
         .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
-        match self.create_with_driver(name, driver, driver_opts) {
+        if permit.proof().canonical().operation_plan_digest() != Some(&plan.plan_digest()) {
+            permit
+                .finish(false)
+                .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+            return Err(VolumeStoreError::Authorization(
+                "volume creation plan does not match authorization proof".to_string(),
+            ));
+        }
+        match self.create_with_driver(&plan.name, &plan.driver, plan.driver_opts) {
             Ok(record) => {
                 permit
                     .finish(true)
@@ -316,6 +391,21 @@ impl LocalVolumeStore {
     }
 }
 
+fn validate_volume_name(name: &str) -> Result<(), VolumeStoreError> {
+    let valid = !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    if valid {
+        Ok(())
+    } else {
+        Err(VolumeStoreError::InvalidName(name.to_string()))
+    }
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -332,6 +422,26 @@ mod tests {
     use super::{LocalVolumeStore, VolumeStoreError};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn preparing_volume_create_is_side_effect_free_and_binds_options() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalVolumeStore::open(temp.path()).expect("store");
+        let mut first = BTreeMap::new();
+        first.insert("type".to_string(), "tmpfs".to_string());
+        let mut second = first.clone();
+        second.insert("size".to_string(), "64m".to_string());
+
+        let plan = store.prepare_create("data", "local", first).expect("plan");
+        let changed = store.prepare_create("data", "local", second).expect("plan");
+
+        assert_eq!(plan.name(), "data");
+        assert_eq!(plan.driver(), "local");
+        assert_eq!(plan.generation(), 1);
+        assert_ne!(plan.plan_digest(), changed.plan_digest());
+        assert!(store.get("data").unwrap().is_none());
+        assert!(!temp.path().join("data").exists());
+    }
 
     #[test]
     fn creates_lists_and_removes_volumes() {

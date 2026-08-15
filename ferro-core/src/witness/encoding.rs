@@ -306,6 +306,9 @@ fn action(value: u8) -> Result<WitnessAction, WitnessError> {
         21 => PolicyReload,
         22 => PolicyRollback,
         23 => CheckpointPublish,
+        24 => ImageBuild,
+        25 => ImageTag,
+        26 => ImageReferenceWrite,
         _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
     };
     Ok(action)

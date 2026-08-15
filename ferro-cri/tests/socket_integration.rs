@@ -49,7 +49,16 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
             "GET",
             "/v2/library/alpine/manifests/latest",
         ))
-        .times(4)
+        .times(2)
+        .respond_with(status_code(200).body(manifest)),
+    );
+    let manifest_digest = "sha256:1b75874027e3aa933373ebaaa9720a85e38f14be533478e9c3cc9163ff021544";
+    registry.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            format!("/v2/library/alpine/manifests/{manifest_digest}"),
+        ))
+        .times(2)
         .respond_with(status_code(200).body(manifest)),
     );
     registry.expect(Expectation::matching(request::method_path(
@@ -143,7 +152,9 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
         .expect("valid delegated remove");
     client
         .pull_image(PullImageRequest {
-            image: Some(ImageSpec { image: image.clone() }),
+            image: Some(ImageSpec {
+                image: image.clone(),
+            }),
             auth: Default::default(),
             sandbox_config: String::new(),
         })

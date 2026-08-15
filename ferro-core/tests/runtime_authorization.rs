@@ -1,4 +1,4 @@
-use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore};
+use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore, RequestOrigin};
 use ferro_core::container_store::CreationProvenance;
 use ferro_core::container_store::{ContainerRecord, LocalContainerStore};
 use ferro_core::image_store::LocalImageStore;
@@ -18,6 +18,29 @@ fn runtime_test_guard() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn seed_alpine(root: &std::path::Path) {
+    let store = LocalImageStore::open(root.join("images")).unwrap();
+    let digest = format!("sha256:{}", "b".repeat(64));
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":0}},"layers":[]}}"#
+    );
+    let plan = store
+        .prepare_reference_write(
+            "alpine",
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            &manifest,
+        )
+        .unwrap();
+    let authority = ContainerRuntime::new(&root.join("seed-authority")).unwrap();
+    let authorization = authority.surface_authorization().unwrap();
+    let origin = RequestOrigin::cli_current().unwrap();
+    let permit = authorization
+        .authorize_image_reference_write_plan(&origin, &plan)
+        .unwrap();
+    store.put_reference_authorized(plan, permit).unwrap();
 }
 
 #[derive(Default)]
@@ -89,12 +112,7 @@ fn assert_abort_reopen_matrix(action: &str) {
         let id = "00112233445566778899aabbccddeeff";
         let mut child = None;
         if action == "run" {
-            LocalImageStore::open(root.path().join("images")).unwrap().put_reference(
-                "alpine",
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":0},"layers":[]}"#,
-            ).unwrap();
+            seed_alpine(root.path());
         } else {
             let spawned = std::process::Command::new("sleep")
                 .arg("30")
@@ -721,15 +739,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
         std::fs::write(root.path().join("runtime-instance-id"), runtime_id).unwrap();
         let mut child = None;
         if action == "run" {
-            LocalImageStore::open(root.path().join("images"))
-                .unwrap()
-                .put_reference(
-                    "alpine",
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "application/vnd.oci.image.manifest.v1+json",
-                    r#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":0},"layers":[]}"#,
-                )
-                .unwrap();
+            seed_alpine(root.path());
         }
         if action != "run" {
             let spawned = std::process::Command::new("sleep")
@@ -899,7 +909,9 @@ fn disabled_mode_rejects_any_journal_and_uses_explicit_compatibility_path() {
     let error = ContainerRuntime::new_with_authorization(root.path(), gate, Some(journal.clone()))
         .err()
         .expect("disabled mode must reject journal configuration");
-    assert!(error.to_string().contains("disabled authorization cannot use"));
+    assert!(error
+        .to_string()
+        .contains("disabled authorization cannot use"));
     assert!(journal.records().unwrap().is_empty());
 }
 

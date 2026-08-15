@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -13,6 +14,27 @@ pub struct ImageRecord {
     pub manifest_media_type: String,
     pub manifest_json: String,
     pub created_at_unix: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageReferenceWritePlan {
+    canonical_reference: String,
+    digest: String,
+    manifest_media_type: String,
+    manifest_json: String,
+    plan_digest: [u8; 32],
+}
+
+impl ImageReferenceWritePlan {
+    pub fn canonical_reference(&self) -> &str {
+        &self.canonical_reference
+    }
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+    pub fn generation(&self) -> u64 {
+        1
+    }
 }
 
 #[derive(Debug, Error)]
@@ -38,7 +60,7 @@ impl LocalImageStore {
         Ok(Self { db })
     }
 
-    pub fn put_reference(
+    pub(crate) fn put_reference(
         &self,
         reference: &str,
         digest: &str,
@@ -61,6 +83,81 @@ impl LocalImageStore {
         tree.flush()?;
         digest_tree.flush()?;
         Ok(())
+    }
+
+    pub fn prepare_reference_write(
+        &self,
+        reference: &str,
+        digest: &str,
+        manifest_media_type: &str,
+        manifest_json: &str,
+    ) -> Result<ImageReferenceWritePlan, ImageStoreError> {
+        let canonical_reference = crate::image_tagging::canonicalize_reference(reference)
+            .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+        let manifest = crate::image_manifest::parse_image_manifest(manifest_json)
+            .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+        if manifest.config.digest != digest || manifest.media_type != manifest_media_type {
+            return Err(ImageStoreError::Authorization(
+                "reference metadata does not match parsed manifest".to_string(),
+            ));
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"ferrocrate/image-reference-write-plan/v1");
+        for value in [
+            canonical_reference.as_str(),
+            digest,
+            manifest_media_type,
+            manifest_json,
+        ] {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        Ok(ImageReferenceWritePlan {
+            canonical_reference,
+            digest: digest.to_string(),
+            manifest_media_type: manifest_media_type.to_string(),
+            manifest_json: manifest_json.to_string(),
+            plan_digest: hash.finalize().into(),
+        })
+    }
+
+    pub fn put_reference_authorized(
+        &self,
+        plan: ImageReferenceWritePlan,
+        permit: crate::authorization::surface::SurfacePermit,
+    ) -> Result<(), ImageStoreError> {
+        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+            &permit,
+            crate::authorization::Action::ImageReferenceWrite,
+            crate::authorization::ResourceKind::Image,
+            plan.canonical_reference(),
+            plan.generation(),
+        )
+        .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+        if permit.proof().canonical().operation_plan_digest() != Some(&plan.plan_digest()) {
+            permit
+                .finish(false)
+                .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+            return Err(ImageStoreError::Authorization(
+                "reference write plan does not match proof".to_string(),
+            ));
+        }
+        match self.put_reference(
+            &plan.canonical_reference,
+            &plan.digest,
+            &plan.manifest_media_type,
+            &plan.manifest_json,
+        ) {
+            Ok(()) => permit
+                .finish(true)
+                .map_err(|error| ImageStoreError::Authorization(error.to_string())),
+            Err(error) => {
+                permit
+                    .finish_unknown()
+                    .map_err(|finish| ImageStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
     }
 
     pub fn resolve_reference(
@@ -224,7 +321,36 @@ fn now_unix() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::LocalImageStore;
+    use super::{ImageStoreError, LocalImageStore};
+
+    #[test]
+    fn reference_write_preparation_is_side_effect_free_and_checks_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:{}","size":2}},"layers":[]}}"#,
+            "a".repeat(64)
+        );
+        let plan = store
+            .prepare_reference_write(
+                "local/app:test",
+                &format!("sha256:{}", "a".repeat(64)),
+                "application/vnd.oci.image.manifest.v1+json",
+                &manifest,
+            )
+            .unwrap();
+        assert!(store.list_references().unwrap().is_empty());
+        assert!(plan.canonical_reference().ends_with("/local/app:test"));
+        let error = store
+            .prepare_reference_write(
+                "local/app:test",
+                &format!("sha256:{}", "b".repeat(64)),
+                "application/vnd.oci.image.manifest.v1+json",
+                &manifest,
+            )
+            .unwrap_err();
+        assert!(matches!(error, ImageStoreError::Authorization(_)));
+    }
 
     #[test]
     fn stores_and_resolves_reference() {

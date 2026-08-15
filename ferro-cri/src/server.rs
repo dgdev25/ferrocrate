@@ -233,10 +233,7 @@ impl std::fmt::Debug for CriRuntime {
 }
 
 impl CriRuntime {
-    pub fn new(
-        store: Arc<LocalImageStore>,
-        authorization: Arc<SurfaceAuthorization>,
-    ) -> Self {
+    pub fn new(store: Arc<LocalImageStore>, authorization: Arc<SurfaceAuthorization>) -> Self {
         let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
             .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
         Self {
@@ -346,7 +343,7 @@ impl ImageService for CriRuntime {
             })
             .map(|record| {
                 // Extract tags from reference (e.g., "alpine:latest" -> ["alpine:latest"])
-                let repo_tags = if record.reference.starts_with("sha256:") {
+                let repo_tags = if record.reference.contains("@sha256:") {
                     vec![] // Digest reference, no tags
                 } else {
                     vec![record.reference.clone()]
@@ -379,13 +376,17 @@ impl ImageService for CriRuntime {
             .list_references()
             .map_err(|err| Status::internal(err.to_string()))?;
 
-        let found = images
-            .iter()
-            .find(|img| img.digest == image_spec.image || img.reference == image_spec.image);
+        let canonical_query =
+            ferro_core::image_tagging::canonicalize_reference(&image_spec.image).ok();
+        let found = images.iter().find(|img| {
+            img.digest == image_spec.image
+                || img.reference == image_spec.image
+                || canonical_query.as_deref() == Some(img.reference.as_str())
+        });
 
         match found {
             Some(record) => {
-                let repo_tags = if record.reference.starts_with("sha256:") {
+                let repo_tags = if record.reference.contains("@sha256:") {
                     vec![]
                 } else {
                     vec![record.reference.clone()]
@@ -465,13 +466,7 @@ impl ImageService for CriRuntime {
         let origin = identity.request_origin();
         let proof = self
             .authorization
-            .authorize_image_binding(
-                origin,
-                Action::ImagePull,
-                &binding.reference,
-                &binding.digest,
-                1,
-            )
+            .authorize_image_fetch_plan(origin, &binding, 1)
             .map_err(|denial| Status::permission_denied(denial.to_string()))?;
 
         let runtime_dir = self.runtime_dir.clone();
@@ -479,9 +474,7 @@ impl ImageService for CriRuntime {
         let pulled = tokio::task::spawn_blocking(move || {
             ferro_core::image_fetch::pull_image_with_store_authorized(
                 &runtime_dir,
-                &image,
-                &binding.reference,
-                &binding.digest,
+                &binding,
                 &store,
                 proof,
             )
@@ -718,7 +711,11 @@ mod tests {
     fn test_surface_authorization() -> Arc<SurfaceAuthorization> {
         let root = tempfile::tempdir().expect("authorization runtime").keep();
         let runtime = ferro_core::runtime::ContainerRuntime::new(&root).expect("test runtime");
-        Arc::new(runtime.surface_authorization().expect("surface authorization"))
+        Arc::new(
+            runtime
+                .surface_authorization()
+                .expect("surface authorization"),
+        )
     }
 
     fn authenticated<T>(message: T) -> Request<T> {
@@ -730,6 +727,28 @@ mod tests {
         request
     }
 
+    fn seed_test_image(store: &LocalImageStore, reference: &str, digest: &str) {
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":0}},"layers":[]}}"#
+        );
+        let plan = store
+            .prepare_reference_write(
+                reference,
+                digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                &manifest,
+            )
+            .expect("prepare test image");
+        let authorization = test_surface_authorization();
+        let origin = RequestOrigin::cli_current().expect("test origin");
+        let permit = authorization
+            .authorize_image_reference_write_plan(&origin, &plan)
+            .expect("authorize test image");
+        store
+            .put_reference_authorized(plan, permit)
+            .expect("seed test image");
+    }
+
     // Helper to create a test runtime with a temporary image store
     async fn create_test_runtime() -> CriRuntime {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -739,32 +758,17 @@ mod tests {
 
     // Helper to populate test store with sample images
     async fn populate_test_store(store: &LocalImageStore) {
-        store
-            .put_reference(
-                "alpine:latest",
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#,
-            )
-            .expect("put alpine");
-
-        store
-            .put_reference(
-                "ghcr.io/test/app:v1.0",
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2}"#,
-            )
-            .expect("put test app");
-
-        store
-            .put_reference(
-                "digest-only",
-                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2}"#,
-            )
-            .expect("put digest reference");
+        seed_test_image(
+            store,
+            "alpine:latest",
+            &format!("sha256:{}", "a".repeat(64)),
+        );
+        seed_test_image(
+            store,
+            "ghcr.io/test/app:v1.0",
+            &format!("sha256:{}", "b".repeat(64)),
+        );
+        seed_test_image(store, "digest-only", &format!("sha256:{}", "c".repeat(64)));
     }
 
     #[tokio::test]
@@ -877,22 +881,39 @@ mod tests {
         let inner = response.into_inner();
         assert_eq!(inner.images.len(), 3);
 
-        // Verify alpine:latest appears with tag
-        let alpine = &inner.images[0];
+        let alpine = inner
+            .images
+            .iter()
+            .find(|image| image.id == format!("sha256:{}", "a".repeat(64)))
+            .unwrap();
         assert_eq!(
             alpine.id,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(alpine.repo_tags, vec!["alpine:latest"]);
+        assert_eq!(
+            alpine.repo_tags,
+            vec!["registry-1.docker.io/library/alpine:latest"]
+        );
         assert_eq!(alpine.size, 0);
 
         // Verify digest-only reference (sorted alphabetically: digest-only comes before ghcr.io)
-        let digest_only = &inner.images[1];
+        let digest_only = inner
+            .images
+            .iter()
+            .find(|image| image.id == format!("sha256:{}", "c".repeat(64)))
+            .unwrap();
         assert!(digest_only.id.starts_with("sha256:cccccccc") && digest_only.id.len() == 71);
-        assert_eq!(digest_only.repo_tags, vec!["digest-only"]); // Has tag because reference doesn't start with "sha256:"
+        assert_eq!(
+            digest_only.repo_tags,
+            vec!["registry-1.docker.io/library/digest-only:latest"]
+        );
 
         // Verify ghcr.io/test/app:v1.0 appears with tag
-        let test_app = &inner.images[2];
+        let test_app = inner
+            .images
+            .iter()
+            .find(|image| image.id == format!("sha256:{}", "b".repeat(64)))
+            .unwrap();
         assert_eq!(
             test_app.id,
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -919,7 +940,10 @@ mod tests {
 
         let inner = response.into_inner();
         assert_eq!(inner.images.len(), 1);
-        assert_eq!(inner.images[0].repo_tags, vec!["alpine:latest"]);
+        assert_eq!(
+            inner.images[0].repo_tags,
+            vec!["registry-1.docker.io/library/alpine:latest"]
+        );
     }
 
     #[tokio::test]
@@ -983,7 +1007,10 @@ mod tests {
             image.id,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(image.repo_tags, vec!["alpine:latest"]);
+        assert_eq!(
+            image.repo_tags,
+            vec!["registry-1.docker.io/library/alpine:latest"]
+        );
         assert_eq!(image.size, 0);
     }
 
@@ -1045,7 +1072,10 @@ mod tests {
             image.id,
             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         );
-        assert_eq!(image.repo_tags, vec!["digest-only"]); // Has tag because reference doesn't start with "sha256:"
+        assert_eq!(
+            image.repo_tags,
+            vec!["registry-1.docker.io/library/digest-only:latest"]
+        );
         assert!(image.repo_digests.is_empty());
     }
 
@@ -1143,14 +1173,11 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
 
         // Only add digest-based references
-        store
-            .put_reference(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2}"#,
-            )
-            .expect("put digest");
+        seed_test_image(
+            &store,
+            "example.test/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &format!("sha256:{}", "a".repeat(64)),
+        );
 
         let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ListImagesRequest::default());
@@ -1189,7 +1216,7 @@ mod tests {
         assert!(inner.image.is_some());
         assert_eq!(
             inner.info.get("reference"),
-            Some(&"alpine:latest".to_string())
+            Some(&"registry-1.docker.io/library/alpine:latest".to_string())
         );
         assert!(inner.info.contains_key("digest"));
         assert!(inner.info.contains_key("manifestMediaType"));
@@ -1202,32 +1229,21 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
 
         // Add images in non-alphabetical order
-        store
-            .put_reference(
-                "zebra:latest",
-                "sha256:zzzz",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2}"#,
-            )
-            .expect("put zebra");
-
-        store
-            .put_reference(
-                "alpine:latest",
-                "sha256:aaaa",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2}"#,
-            )
-            .expect("put alpine");
-
-        store
-            .put_reference(
-                "mongo:latest",
-                "sha256:mmmm",
-                "application/vnd.oci.image.manifest.v1+json",
-                r#"{"schemaVersion":2}"#,
-            )
-            .expect("put mongo");
+        seed_test_image(
+            &store,
+            "zebra:latest",
+            &format!("sha256:{}", "d".repeat(64)),
+        );
+        seed_test_image(
+            &store,
+            "alpine:latest",
+            &format!("sha256:{}", "e".repeat(64)),
+        );
+        seed_test_image(
+            &store,
+            "mongo:latest",
+            &format!("sha256:{}", "f".repeat(64)),
+        );
 
         let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ListImagesRequest::default());
@@ -1240,9 +1256,18 @@ mod tests {
         let inner = response.into_inner();
         // Images should be sorted by reference (from store.list_references)
         assert_eq!(inner.images.len(), 3);
-        assert_eq!(inner.images[0].repo_tags[0], "alpine:latest");
-        assert_eq!(inner.images[1].repo_tags[0], "mongo:latest");
-        assert_eq!(inner.images[2].repo_tags[0], "zebra:latest");
+        assert_eq!(
+            inner.images[0].repo_tags[0],
+            "registry-1.docker.io/library/alpine:latest"
+        );
+        assert_eq!(
+            inner.images[1].repo_tags[0],
+            "registry-1.docker.io/library/mongo:latest"
+        );
+        assert_eq!(
+            inner.images[2].repo_tags[0],
+            "registry-1.docker.io/library/zebra:latest"
+        );
     }
 
     #[tokio::test]

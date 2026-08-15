@@ -27,6 +27,7 @@ impl PolicyPin {
 pub struct ImageBinding {
     reference: String,
     digest: String,
+    plan_digest: Option<[u8; 32]>,
 }
 
 impl ImageBinding {
@@ -35,6 +36,19 @@ impl ImageBinding {
         Self {
             reference: reference.into(),
             digest: digest.into(),
+            plan_digest: None,
+        }
+    }
+
+    pub(crate) fn new_plan(
+        reference: impl Into<String>,
+        manifest_digest: impl Into<String>,
+        plan_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            reference: reference.into(),
+            digest: manifest_digest.into(),
+            plan_digest: Some(plan_digest),
         }
     }
 
@@ -44,6 +58,10 @@ impl ImageBinding {
 
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    pub fn plan_digest(&self) -> Option<&[u8; 32]> {
+        self.plan_digest.as_ref()
     }
 }
 
@@ -165,6 +183,7 @@ pub struct ExecutionBindings {
     state_precondition: Option<ResourceState>,
     device_identity: Option<DeviceIdentity>,
     mount_handles: Vec<MountHandleDescriptor>,
+    operation_plan_digest: Option<[u8; 32]>,
 }
 
 impl ExecutionBindings {
@@ -182,7 +201,13 @@ impl ExecutionBindings {
             state_precondition,
             device_identity,
             mount_handles,
+            operation_plan_digest: None,
         }
+    }
+
+    pub(crate) fn with_operation_plan_digest(mut self, digest: [u8; 32]) -> Self {
+        self.operation_plan_digest = Some(digest);
+        self
     }
 }
 
@@ -241,6 +266,13 @@ impl CanonicalRequest {
         self.expected.image.as_ref().map(ImageBinding::reference)
     }
 
+    pub fn image_plan_digest(&self) -> Option<&[u8; 32]> {
+        self.expected
+            .image
+            .as_ref()
+            .and_then(ImageBinding::plan_digest)
+    }
+
     pub fn resource_id(&self) -> &str {
         self.context.resource().id().as_str()
     }
@@ -259,6 +291,10 @@ impl CanonicalRequest {
 
     pub fn mount_handles(&self) -> &[MountHandleDescriptor] {
         &self.expected.mount_handles
+    }
+
+    pub fn operation_plan_digest(&self) -> Option<&[u8; 32]> {
+        self.expected.operation_plan_digest.as_ref()
     }
 }
 

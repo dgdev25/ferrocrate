@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::delegation_ledger::{ChildIdentity, CreationProvenance};
+use super::netd_sequence::{NetdSequence, SequenceValue};
 use super::reconcile::NetdClient;
 use crate::proto::DesiredState;
 
@@ -134,7 +135,7 @@ pub struct DelegationBridge {
     envelope_key: SigningKey,
     cluster_id: String,
     node_id: String,
-    revision: u64,
+    sequence: NetdSequence,
 }
 
 impl DelegationBridge {
@@ -158,8 +159,16 @@ impl DelegationBridge {
             envelope_key,
             cluster_id: cluster_id.into(),
             node_id: node_id.into(),
-            revision: 0,
+            sequence: NetdSequence::memory(SequenceValue {
+                epoch: 1,
+                revision: 0,
+            }),
         }
+    }
+
+    pub fn with_sequence(mut self, sequence: NetdSequence) -> Self {
+        self.sequence = sequence;
+        self
     }
 
     pub fn validate_parent(
@@ -307,15 +316,15 @@ impl DelegationBridge {
                 child.nonce,
             )
             .map_err(|_| DelegationError::Binding)?;
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(DelegationError::Binding)?;
+        let sequence = self
+            .sequence
+            .reserve_child()
+            .map_err(|_| DelegationError::Binding)?;
         let mut envelope = SignedEnvelope {
             cluster_id: self.cluster_id.clone(),
             node_id: self.node_id.clone(),
-            epoch: 1,
-            revision: self.revision,
+            epoch: sequence.epoch,
+            revision: sequence.revision,
             lease_expires_unix_secs: parent.claims.wall_deadline_secs,
             request: child_request,
             signature: String::new(),
@@ -405,15 +414,15 @@ impl DelegationBridge {
                 child.nonce,
             )
             .map_err(|_| DelegationError::Binding)?;
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(DelegationError::Binding)?;
+        let sequence = self
+            .sequence
+            .reserve_child()
+            .map_err(|_| DelegationError::Binding)?;
         let mut envelope = SignedEnvelope {
             cluster_id: self.cluster_id.clone(),
             node_id: self.node_id.clone(),
-            epoch: 1,
-            revision: self.revision,
+            epoch: sequence.epoch,
+            revision: sequence.revision,
             lease_expires_unix_secs: parent.claims.wall_deadline_secs,
             request: child_request,
             signature: String::new(),

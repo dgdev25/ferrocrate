@@ -14,6 +14,7 @@ use ferro_mgr::{
         ipam::Ipam,
         local_api::{LocalApi, OverlayConfig},
         netd_client::{DelegationBridge, UnixNetdClient},
+        netd_sequence::{NetdSequence, SequenceValue},
         Agent, AgentError, StateStore,
     },
     proto::{control_service_client::ControlServiceClient, AgentMessage},
@@ -44,6 +45,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cluster_id = required("FERROCRATE_CLUSTER_ID")?;
     let state_path = PathBuf::from(required("FERROCRATE_AGENT_STATE")?);
     let netd_socket = required("FERROCRATE_NETD_SOCKET")?;
+    let persisted_state = StateStore::new(&state_path).load()?;
+    let sequence_path = std::env::var_os("FERROCRATE_AGENT_NETD_SEQUENCE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_path.with_extension("netd-sequence.json"));
+    let netd_sequence = NetdSequence::open(
+        sequence_path,
+        SequenceValue {
+            epoch: persisted_state.cluster_epoch,
+            revision: persisted_state.applied_revision,
+        },
+    )?;
     let verifying_key = base64::engine::general_purpose::STANDARD
         .decode(required("FERROCRATE_NETD_SIGNING_KEY")?)?;
     if verifying_key.len() != 32 {
@@ -87,7 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SigningKey::from_bytes(&envelope_key_bytes),
         cluster_id.clone(),
         node_id.clone(),
-    );
+    )
+    .with_sequence(netd_sequence.clone());
     let local_api = Arc::new(
         LocalApi::new(runtime_uid, lease_expiry, ipam).with_delegation_bridge(
             bridge,
@@ -107,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         netd_socket,
         runtime_uid,
         local_api,
+        netd_sequence,
     )
     .await
 }
@@ -133,6 +147,7 @@ async fn run_control_stream(
     netd_socket: String,
     runtime_uid: u32,
     local_api: Arc<LocalApi>,
+    netd_sequence: NetdSequence,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = required("FERROCRATE_CONTROL_ENDPOINT")?;
     let ca = std::fs::read(required("FERROCRATE_NODE_CA_CERT")?)?;
@@ -157,6 +172,7 @@ async fn run_control_stream(
             StateStore::new(state_path),
             UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
         )?
+        .with_netd_sequence(netd_sequence.clone())
     } else {
         Agent::new_enforcing(
             cluster_id,
@@ -164,6 +180,7 @@ async fn run_control_stream(
             StateStore::new(state_path),
             UnixNetdClient::new(netd_socket).with_node_id(node_id.clone()),
         )?
+        .with_netd_sequence(netd_sequence.clone())
     });
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     sender

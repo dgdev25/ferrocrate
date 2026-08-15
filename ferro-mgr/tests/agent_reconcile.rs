@@ -5,7 +5,10 @@ use std::sync::{
 
 use ed25519_dalek::SigningKey;
 use ferro_mgr::{
-    agent::{Agent, AgentError, NetdClient, StateStore},
+    agent::{
+        netd_sequence::{NetdSequence, SequenceValue},
+        Agent, AgentError, NetdClient, StateStore,
+    },
     desired_state::DesiredStateBuilder,
     proto::OverlayState,
 };
@@ -154,6 +157,69 @@ fn failed_netd_apply_does_not_advance_persisted_state() {
     assert!(agent.reconcile(desired(1, 100), 101).is_err());
     assert_eq!(agent.state().applied_revision, 0);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn shared_netd_sequence_advances_only_after_a_successful_apply_and_survives_restart() {
+    let directory = tempdir().unwrap();
+    let sequence_path = directory.path().join("netd-sequence.json");
+    let sequence = NetdSequence::open(
+        sequence_path.clone(),
+        SequenceValue {
+            epoch: 1,
+            revision: 7,
+        },
+    )
+    .unwrap();
+    let failed = Agent::new(
+        "cluster-a",
+        verifying_key(),
+        StateStore::new(directory.path().join("failed-state.json")),
+        FakeNetd {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: true,
+        },
+    )
+    .unwrap()
+    .with_netd_sequence(sequence.clone());
+
+    assert!(failed.reconcile(desired(1, 100), 101).is_err());
+    assert_eq!(
+        sequence.current().unwrap(),
+        SequenceValue {
+            epoch: 1,
+            revision: 7
+        }
+    );
+
+    let successful = Agent::new(
+        "cluster-a",
+        verifying_key(),
+        StateStore::new(directory.path().join("successful-state.json")),
+        FakeNetd {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        },
+    )
+    .unwrap()
+    .with_netd_sequence(sequence);
+    successful.reconcile(desired(9, 100), 101).unwrap();
+
+    let restarted = NetdSequence::open(
+        sequence_path,
+        SequenceValue {
+            epoch: 0,
+            revision: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.reserve_child().unwrap(),
+        SequenceValue {
+            epoch: 2,
+            revision: 10
+        }
+    );
 }
 
 #[test]

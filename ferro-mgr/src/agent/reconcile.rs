@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::{
     agent::{
         desired_authorization::DesiredAuthorizationBundle,
+        netd_sequence::{NetdSequence, SequenceValue},
         state::{AgentState, StateError, StateStore},
     },
     config::MAX_MESSAGE_BYTES,
@@ -54,6 +55,7 @@ pub struct Agent<C> {
     netd: C,
     enforce_authorization: bool,
     controller_keys: Vec<Vec<u8>>,
+    netd_sequence: Option<NetdSequence>,
 }
 
 impl<C: NetdClient> Agent<C> {
@@ -72,7 +74,13 @@ impl<C: NetdClient> Agent<C> {
             netd,
             enforce_authorization: false,
             controller_keys: Vec::new(),
+            netd_sequence: None,
         })
+    }
+
+    pub fn with_netd_sequence(mut self, sequence: NetdSequence) -> Self {
+        self.netd_sequence = Some(sequence);
+        self
     }
 
     pub fn new_enforcing(
@@ -177,7 +185,7 @@ impl<C: NetdClient> Agent<C> {
             None => self.netd.apply(&desired),
         }
         .map_err(AgentError::Netd)?;
-        *current = AgentState {
+        let next = AgentState {
             cluster_epoch: desired.cluster_epoch,
             applied_revision: desired.revision,
             overlays: desired
@@ -187,7 +195,16 @@ impl<C: NetdClient> Agent<C> {
                 .collect(),
             lease_expiry: desired.lease_expires_unix,
         };
-        self.store.save(&current)?;
+        self.store.save(&next)?;
+        if let Some(sequence) = &self.netd_sequence {
+            sequence
+                .advance_controller(SequenceValue {
+                    epoch: desired.cluster_epoch,
+                    revision: desired.revision,
+                })
+                .map_err(|error| AgentError::Netd(error.to_string()))?;
+        }
+        *current = next;
         Ok(current.applied_revision)
     }
 

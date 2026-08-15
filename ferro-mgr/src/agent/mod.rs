@@ -5,6 +5,7 @@ pub mod ipam;
 pub mod local_api;
 pub mod credentials;
 pub mod netd_client;
+pub mod netd_sequence;
 pub mod delegation_ledger;
 
 pub use reconcile::{Agent, AgentError, NetdClient};

@@ -6,6 +6,10 @@ use crate::runtime::{
     PullImageResponse, RemoveImageRequest, RemoveImageResponse, RuntimeCondition, RuntimeStatus,
     StatusRequest, StatusResponse, VersionRequest, VersionResponse,
 };
+pub use ferro_core::authorization::cri_delegation::{
+    CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,
+    DelegationTrustKey,
+};
 use ferro_core::authorization::surface::SurfaceAuthorization;
 use ferro_core::authorization::{Action, PrincipalResolver, RequestOrigin, TransportPrincipal};
 use ferro_core::image_store::{ImageStoreError, LocalImageStore};
@@ -23,97 +27,76 @@ use tokio::net::UnixListener;
 use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
 use tonic::{Request, Response, Status};
 
-/// An optional identity assertion carried by a proxy. Metadata-only assertions
-/// are deliberately untrusted; protected assertions still require a verifier.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DelegationAssertion {
-    subject: String,
-    proof: Option<Vec<u8>>,
-    trust_root: Option<String>,
-}
-impl DelegationAssertion {
-    pub fn untrusted(subject: impl Into<String>) -> Self {
-        Self {
-            subject: subject.into(),
-            proof: None,
-            trust_root: None,
-        }
-    }
-    pub fn protected(
-        subject: impl Into<String>,
-        proof: Vec<u8>,
-        trust_root: impl Into<String>,
-    ) -> Self {
-        Self {
-            subject: subject.into(),
-            proof: Some(proof),
-            trust_root: Some(trust_root.into()),
-        }
-    }
-    pub fn subject(&self) -> &str {
-        &self.subject
-    }
-    pub fn proof(&self) -> Option<&[u8]> {
-        self.proof.as_deref()
-    }
-    pub fn trust_root(&self) -> Option<&str> {
-        self.trust_root.as_deref()
-    }
-}
-
-pub trait DelegationVerifier: Send + Sync {
-    fn verify(&self, assertion: &DelegationAssertion) -> bool;
-}
-
 #[derive(Clone)]
 pub struct CriIdentityPolicy {
-    transport_id: String,
-    trust_root: Option<String>,
-    verifier: Option<Arc<dyn DelegationVerifier>>,
+    verifier: Option<Arc<CriDelegationVerifier>>,
 }
 impl CriIdentityPolicy {
-    pub fn transport_only(id: impl Into<String>) -> Self {
-        Self {
-            transport_id: id.into(),
-            trust_root: None,
-            verifier: None,
-        }
+    pub fn transport_only(_id: impl Into<String>) -> Self {
+        Self { verifier: None }
     }
-    pub fn with_verifier(
-        id: impl Into<String>,
-        trust_root: impl Into<String>,
-        verifier: Box<dyn DelegationVerifier>,
+    pub fn with_signed_verifier(
+        _id: impl Into<String>,
+        verifier: Arc<CriDelegationVerifier>,
     ) -> Self {
         Self {
-            transport_id: id.into(),
-            trust_root: Some(trust_root.into()),
-            verifier: Some(verifier.into()),
+            verifier: Some(verifier),
         }
     }
     #[allow(clippy::result_large_err)]
     pub fn resolve(
         &self,
+        transport: &TransportPrincipal,
         delegated: Option<DelegationAssertion>,
+        telemetry_subject: Option<String>,
+        action: Action,
+        resource: &str,
+        now_unix_ms: u64,
     ) -> Result<EffectiveCriIdentity, Status> {
-        let accepted = delegated
+        let accepted = match (delegated.as_ref(), self.verifier.as_ref()) {
+            (Some(assertion), Some(verifier)) => Some(
+                verifier
+                    .verify(
+                        assertion,
+                        transport.principal().id().as_str(),
+                        action,
+                        resource,
+                        now_unix_ms,
+                    )
+                    .map_err(|error| Status::permission_denied(error.to_string()))?,
+            ),
+            (Some(_), None) => {
+                return Err(Status::permission_denied(
+                    "signed CRI delegation is not configured",
+                ))
+            }
+            (None, _) => None,
+        };
+        let origin = accepted.map_or_else(
+            || RequestOrigin::cri_transport(transport),
+            |verified| RequestOrigin::verified_cri_delegation(transport, verified),
+        );
+        let delegated_id = delegated
             .as_ref()
-            .filter(|a| a.proof.is_some() && a.trust_root.as_ref() == self.trust_root.as_ref())
-            .filter(|a| self.verifier.as_ref().is_some_and(|v| v.verify(a)));
+            .map(|value| value.claims().delegated_principal().to_owned())
+            .or(telemetry_subject);
         Ok(EffectiveCriIdentity {
-            transport: self.transport_id.clone(),
-            delegated: delegated.as_ref().map(|a| a.subject.clone()),
-            effective: accepted.map_or_else(|| self.transport_id.clone(), |a| a.subject.clone()),
-            used_delegation: accepted.is_some(),
+            transport: transport.principal().id().as_str().to_owned(),
+            delegated: delegated_id,
+            effective: origin.principal().id().as_str().to_owned(),
+            used_delegation: origin.principal().id() != transport.principal().id(),
+            origin,
         })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct EffectiveCriIdentity {
     transport: String,
     delegated: Option<String>,
     effective: String,
     used_delegation: bool,
+    origin: RequestOrigin,
 }
 impl EffectiveCriIdentity {
     pub fn transport_id(&self) -> &str {
@@ -128,13 +111,37 @@ impl EffectiveCriIdentity {
     pub fn used_delegation(&self) -> bool {
         self.used_delegation
     }
+    pub fn request_origin(&self) -> &RequestOrigin {
+        &self.origin
+    }
 }
 
 #[allow(clippy::result_large_err)]
 fn resolve_request_identity<T>(
     policy: &CriIdentityPolicy,
     request: &Request<T>,
+    action: Action,
+    resource: &str,
 ) -> Result<EffectiveCriIdentity, Status> {
+    let transport = trusted_transport(request)?;
+    // CRI metadata is telemetry only. A signed assertion can only arrive as
+    // a typed extension inserted by a trusted transport integrity layer.
+    let assertion = request.extensions().get::<DelegationAssertion>().cloned();
+    let telemetry = request
+        .metadata()
+        .get("x-ferrocrate-delegated-principal")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    policy.resolve(transport, assertion, telemetry, action, resource, now)
+}
+
+#[allow(clippy::result_large_err)]
+fn trusted_transport<T>(request: &Request<T>) -> Result<&TransportPrincipal, Status> {
     let transport = request
         .extensions()
         .get::<TransportPrincipal>()
@@ -142,25 +149,7 @@ fn resolve_request_identity<T>(
     transport
         .revalidate_for_execution()
         .map_err(|error| Status::unauthenticated(format!("CRI peer identity changed: {error}")))?;
-    // CRI metadata is telemetry only. A protected assertion must arrive from
-    // an integrity layer that inserts the typed extension after verification.
-    let assertion = request
-        .extensions()
-        .get::<DelegationAssertion>()
-        .cloned()
-        .or_else(|| {
-            request
-                .metadata()
-                .get("x-ferrocrate-delegated-principal")
-                .and_then(|v| v.to_str().ok())
-                .map(DelegationAssertion::untrusted)
-        });
-    let mut effective = policy.resolve(assertion)?;
-    effective.transport = transport.principal().id().as_str().to_owned();
-    if !effective.used_delegation {
-        effective.effective = effective.transport.clone();
-    }
-    Ok(effective)
+    Ok(transport)
 }
 
 struct AuthenticatedUnixStream {
@@ -251,15 +240,6 @@ impl CriRuntime {
     pub fn with_identity_policy(mut self, policy: CriIdentityPolicy) -> Self {
         self.identity_policy = policy;
         self
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn request_origin<T>(&self, request: &Request<T>) -> Result<RequestOrigin, Status> {
-        request
-            .extensions()
-            .get::<TransportPrincipal>()
-            .map(RequestOrigin::cri_transport)
-            .ok_or_else(|| Status::unauthenticated("CRI transport principal unavailable"))
     }
 }
 
@@ -421,24 +401,48 @@ impl ImageService for CriRuntime {
         &self,
         request: Request<PullImageRequest>,
     ) -> Result<Response<PullImageResponse>, Status> {
-        let _identity = resolve_request_identity(&self.identity_policy, &request)?;
-        let origin = self.request_origin(&request)?;
-        let req = request.into_inner();
-        let image = req
+        let image = request
+            .get_ref()
             .image
+            .as_ref()
             .ok_or_else(|| Status::invalid_argument("image spec is required"))?
-            .image;
+            .image
+            .clone();
         if image.trim().is_empty() {
             return Err(Status::invalid_argument("image spec is required"));
         }
-        let _proof = self
+        trusted_transport(&request)?;
+        // The typed identity is resolved against the exact action/resource and
+        // becomes the principal presented to the authorization gate.
+        let binding = ferro_core::image_fetch::inspect_image_binding(&image)
+            .map_err(map_image_fetch_error)?;
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ImagePull,
+            &binding.reference,
+        )?;
+        let origin = identity.request_origin();
+        let proof = self
             .authorization
-            .authorize_image(&origin, Action::ImagePull, &image)
+            .authorize_image_binding(
+                origin,
+                Action::ImagePull,
+                &binding.reference,
+                &binding.digest,
+                1,
+            )
             .map_err(|denial| Status::permission_denied(denial.to_string()))?;
 
-        let pulled =
-            ferro_core::image_fetch::pull_image_with_store(&self.runtime_dir, &image, &self.store)
-                .map_err(map_image_fetch_error)?;
+        let pulled = ferro_core::image_fetch::pull_image_with_store_authorized(
+            &self.runtime_dir,
+            &image,
+            &binding.reference,
+            &binding.digest,
+            &self.store,
+            proof,
+        )
+        .map_err(map_image_fetch_error)?;
 
         Ok(Response::new(PullImageResponse {
             image_ref: pulled.reference,
@@ -449,51 +453,59 @@ impl ImageService for CriRuntime {
         &self,
         request: Request<RemoveImageRequest>,
     ) -> Result<Response<RemoveImageResponse>, Status> {
-        let _identity = resolve_request_identity(&self.identity_policy, &request)?;
-        let origin = self.request_origin(&request)?;
-        let req = request.into_inner();
-        let image = req
+        let image = request
+            .get_ref()
             .image
+            .as_ref()
             .ok_or_else(|| Status::invalid_argument("image spec is required"))?
-            .image;
+            .image
+            .clone();
         let image = image.trim();
         if image.is_empty() {
             return Err(Status::invalid_argument("image spec is required"));
         }
-        let _proof = self
-            .authorization
-            .authorize_image(&origin, Action::ImageDelete, image)
-            .map_err(|denial| Status::permission_denied(denial.to_string()))?;
-
+        trusted_transport(&request)?;
         let canonical = ferro_core::image_tagging::canonicalize_reference(image).ok();
-        let mut removed = self
+        let records = self
             .store
-            .remove_reference(image)
+            .list_references()
             .map_err(|err| Status::internal(err.to_string()))?;
-        if !removed {
-            if let Some(canonical) = canonical.as_ref() {
-                if canonical != image {
-                    removed = self
-                        .store
-                        .remove_reference(canonical)
-                        .map_err(|err| Status::internal(err.to_string()))?;
-                }
-            }
-        }
-        if !removed && image.starts_with("sha256:") {
-            let refs = self
-                .store
-                .list_references()
-                .map_err(|err| Status::internal(err.to_string()))?;
-            for record in refs.into_iter().filter(|entry| entry.digest == image) {
-                let _ = self.store.remove_reference(&record.reference);
-                removed = true;
-            }
-        }
-
-        if !removed {
+        let targets: Vec<_> = records
+            .into_iter()
+            .filter(|record| {
+                record.reference == image
+                    || canonical.as_deref() == Some(record.reference.as_str())
+                    || (image.starts_with("sha256:") && record.digest == image)
+            })
+            .collect();
+        if targets.is_empty() {
             return Err(Status::not_found(format!("image {} not found", image)));
         }
+        if targets.len() != 1 {
+            return Err(Status::failed_precondition(
+                "digest resolves to multiple references; delete an immutable reference",
+            ));
+        }
+        let record = &targets[0];
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ImageDelete,
+            &record.reference,
+        )?;
+        let proof = self
+            .authorization
+            .authorize_image_binding(
+                identity.request_origin(),
+                Action::ImageDelete,
+                &record.reference,
+                &record.digest,
+                1,
+            )
+            .map_err(|denial| Status::permission_denied(denial.to_string()))?;
+        self.store
+            .remove_reference_authorized(&record.reference, &record.digest, proof)
+            .map_err(|err| Status::internal(err.to_string()))?;
 
         Ok(Response::new(RemoveImageResponse {}))
     }
@@ -641,6 +653,15 @@ mod tests {
     };
     use tonic::Request;
 
+    fn authenticated<T>(message: T) -> Request<T> {
+        let (peer, _other) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let principal = PrincipalResolver::from_cri_peer_credentials(&peer)
+            .expect("resolve test transport principal");
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(principal);
+        request
+    }
+
     // Helper to create a test runtime with a temporary image store
     async fn create_test_runtime() -> CriRuntime {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -746,7 +767,6 @@ mod tests {
         let request = Request::new(RemoveImageRequest {
             image: Some(ImageSpec {
                 image: "missing:latest".into(),
-                ..Default::default()
             }),
         });
 
@@ -985,7 +1005,7 @@ mod tests {
         populate_test_store(&store).await;
         let runtime = CriRuntime::new(Arc::new(store));
 
-        let request = Request::new(RemoveImageRequest {
+        let request = authenticated(RemoveImageRequest {
             image: Some(ImageSpec {
                 image: "alpine:latest".to_string(),
             }),
@@ -1011,7 +1031,7 @@ mod tests {
     #[tokio::test]
     async fn remove_image_returns_not_found_when_missing() {
         let runtime = create_test_runtime().await;
-        let request = Request::new(RemoveImageRequest {
+        let request = authenticated(RemoveImageRequest {
             image: Some(ImageSpec {
                 image: "alpine:latest".to_string(),
             }),

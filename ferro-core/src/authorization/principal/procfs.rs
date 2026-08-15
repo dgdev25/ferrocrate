@@ -38,7 +38,7 @@ pub(super) trait KernelIdentityReader {
 
     fn peer_pidfd<Fd: AsFd>(&self, fd: &Fd) -> Result<Self::PidFd, Errno>;
 
-    fn into_owned_pidfd(&self, _pidfd: Self::PidFd) -> Option<std::os::fd::OwnedFd> {
+    fn retain_owned_pidfd(&self, _pidfd: Self::PidFd) -> Option<std::os::fd::OwnedFd> {
         None
     }
 }
@@ -70,7 +70,7 @@ impl KernelIdentityReader for SystemKernelIdentityReader {
         getsockopt(fd, sockopt::PeerPidfd)
     }
 
-    fn into_owned_pidfd(&self, pidfd: Self::PidFd) -> Option<std::os::fd::OwnedFd> {
+    fn retain_owned_pidfd(&self, pidfd: Self::PidFd) -> Option<std::os::fd::OwnedFd> {
         Some(pidfd)
     }
 }

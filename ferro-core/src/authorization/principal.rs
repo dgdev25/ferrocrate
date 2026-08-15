@@ -368,7 +368,7 @@ impl PrincipalResolver {
         // The owned pidfd is deliberately retained for the full request/connection
         // lifetime through cloned `TransportPrincipal` values.
         let owned = kernel
-            .into_owned_pidfd(pidfd)
+            .retain_owned_pidfd(pidfd)
             .ok_or(PrincipalResolutionError::PeerPidfdUnsupported)?;
         principal.pidfd = Some(Arc::new(owned));
         Ok(principal)

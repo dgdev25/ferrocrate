@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 pub mod gate;
+#[cfg(target_os = "linux")]
+pub mod cri_delegation;
 pub mod helper_grant;
 mod helper_grant_delegation;
 mod helper_grant_encoding;
@@ -33,6 +35,8 @@ pub struct RequestOrigin {
     parent_request_id: Option<[u8; 16]>,
     attempt: u32,
     fanout: Option<FanoutContext>,
+    #[cfg(target_os = "linux")]
+    transport: Option<TransportPrincipal>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -111,6 +115,7 @@ impl RequestOrigin {
             parent_request_id: None,
             attempt: 0,
             fanout: None,
+            transport: None,
         })
     }
     pub fn docker(transport: &TransportPrincipal) -> Self {
@@ -121,6 +126,7 @@ impl RequestOrigin {
             parent_request_id: None,
             attempt: 0,
             fanout: None,
+            transport: Some(transport.clone()),
         }
     }
     pub fn proxy(effective: &EffectivePrincipal) -> Self {
@@ -131,6 +137,7 @@ impl RequestOrigin {
             parent_request_id: None,
             attempt: 0,
             fanout: None,
+            transport: Some(effective.transport().clone()),
         }
     }
     pub fn cri_transport(transport: &TransportPrincipal) -> Self {
@@ -141,6 +148,21 @@ impl RequestOrigin {
             parent_request_id: None,
             attempt: 0,
             fanout: None,
+            transport: Some(transport.clone()),
+        }
+    }
+    pub fn verified_cri_delegation(
+        transport: &TransportPrincipal,
+        verified: cri_delegation::VerifiedCriDelegation,
+    ) -> Self {
+        Self {
+            principal: verified.into_principal(),
+            invocation: crate::witness::Invocation::Cri,
+            request_id: None,
+            parent_request_id: None,
+            attempt: 0,
+            fanout: None,
+            transport: Some(transport.clone()),
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -176,7 +198,13 @@ impl RequestOrigin {
             parent_request_id: Some(parent_id),
             attempt,
             fanout: Some(fanout),
+            transport: parent.transport.clone(),
         }
+    }
+    pub fn revalidate_transport(&self) -> Result<(), PrincipalResolutionError> {
+        self.transport
+            .as_ref()
+            .map_or(Ok(()), TransportPrincipal::revalidate_for_execution)
     }
     pub fn principal(&self) -> &ResolvedPrincipal {
         &self.principal

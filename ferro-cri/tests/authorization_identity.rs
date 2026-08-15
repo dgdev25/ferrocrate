@@ -1,68 +1,87 @@
-use ferro_cri::server::{CriIdentityPolicy, DelegationAssertion, DelegationVerifier};
+#![cfg(target_os = "linux")]
 
-struct Reject;
-impl DelegationVerifier for Reject {
-    fn verify(&self, _: &DelegationAssertion) -> bool {
-        false
-    }
-}
-struct Accept;
-impl DelegationVerifier for Accept {
-    fn verify(&self, _: &DelegationAssertion) -> bool {
-        true
-    }
-}
+use std::{os::unix::net::UnixStream, sync::Arc};
 
-#[test]
-fn transport_is_authoritative_by_default_and_metadata_cannot_elevate() {
-    let policy = CriIdentityPolicy::transport_only("cri:kubelet");
-    let effective = policy
-        .resolve(Some(DelegationAssertion::untrusted("root")))
-        .unwrap();
-    assert_eq!(effective.transport_id(), "cri:kubelet");
-    assert_eq!(effective.delegated_id(), Some("root"));
-    assert_eq!(effective.effective_id(), "cri:kubelet");
-    assert!(!effective.used_delegation());
+use ed25519_dalek::{Signer, SigningKey};
+use ferro_core::authorization::{Action, PrincipalResolver};
+use ferro_cri::server::{
+    CriDelegationClaims, CriDelegationVerifier, CriIdentityPolicy, DelegationAssertion,
+    DelegationTrustKey,
+};
+
+fn transport() -> ferro_core::authorization::TransportPrincipal {
+    let (peer, _other) = UnixStream::pair().unwrap();
+    PrincipalResolver::from_cri_peer_credentials(&peer).unwrap()
 }
 
 #[test]
-fn rejected_integrity_assertion_cannot_replace_transport() {
-    let policy = CriIdentityPolicy::with_verifier("cri:kubelet", "root-a", Box::new(Reject));
-    let effective = policy
-        .resolve(Some(DelegationAssertion::protected(
-            "alice",
-            vec![1],
-            "root-a",
-        )))
-        .unwrap();
-    assert_eq!(effective.effective_id(), "cri:kubelet");
-}
+fn metadata_is_telemetry_only_and_signed_delegation_becomes_gate_origin() {
+    let transport = transport();
+    let signing = SigningKey::from_bytes(&[11; 32]);
+    let replay = tempfile::tempdir().unwrap();
+    let verifier = CriDelegationVerifier::open(
+        vec![DelegationTrustKey::developer(
+            "issuer",
+            "key",
+            signing.verifying_key(),
+        )],
+        "ferro-cri",
+        "boot",
+        [9; 32],
+        replay.path(),
+    )
+    .unwrap();
+    let policy = CriIdentityPolicy::with_signed_verifier("unused", Arc::new(verifier));
+    let transport_id = transport.principal().id().as_str().to_owned();
 
-#[test]
-fn authenticated_integrity_protected_configured_delegation_becomes_effective() {
-    let policy = CriIdentityPolicy::with_verifier("cri:kubelet", "root-a", Box::new(Accept));
-    let effective = policy
-        .resolve(Some(DelegationAssertion::protected(
-            "alice",
-            vec![1],
-            "root-a",
-        )))
+    let metadata_only = policy
+        .resolve(
+            &transport,
+            None,
+            Some("root".into()),
+            Action::ImageDelete,
+            "alpine",
+            1,
+        )
         .unwrap();
-    assert_eq!(effective.transport_id(), "cri:kubelet");
-    assert_eq!(effective.delegated_id(), Some("alice"));
-    assert_eq!(effective.effective_id(), "alice");
+    assert_eq!(
+        metadata_only.request_origin().principal().id().as_str(),
+        transport_id
+    );
+    assert!(!metadata_only.used_delegation());
+
+    let claims = CriDelegationClaims::new(
+        "issuer",
+        "key",
+        transport_id,
+        "ferro-cri",
+        "alice",
+        vec![Action::ImageDelete],
+        vec!["alpine".into()],
+        "nonce",
+        2_000,
+        "boot",
+        [9; 32],
+    )
+    .unwrap();
+    let assertion = DelegationAssertion::new(
+        claims.clone(),
+        signing.sign(&claims.signing_bytes()).to_bytes(),
+    )
+    .unwrap();
+    let effective = policy
+        .resolve(
+            &transport,
+            Some(assertion),
+            None,
+            Action::ImageDelete,
+            "alpine",
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        effective.request_origin().principal().id().as_str(),
+        "alice"
+    );
     assert!(effective.used_delegation());
-}
-
-#[test]
-fn wrong_trust_root_is_rejected_even_with_accepting_verifier() {
-    let policy = CriIdentityPolicy::with_verifier("cri:kubelet", "root-a", Box::new(Accept));
-    let effective = policy
-        .resolve(Some(DelegationAssertion::protected(
-            "alice",
-            vec![1],
-            "root-b",
-        )))
-        .unwrap();
-    assert_eq!(effective.effective_id(), "cri:kubelet");
 }

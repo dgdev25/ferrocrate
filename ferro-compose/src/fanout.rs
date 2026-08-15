@@ -138,6 +138,39 @@ impl FanoutReplayStore {
 }
 
 impl FanoutPlan {
+    pub fn derive_dependent(
+        &self,
+        predecessor: &FanoutChild,
+        predecessor_outcome: [u8; 32],
+        mutation: ServiceMutation,
+    ) -> Result<Self, FanoutError> {
+        self.verify_child(predecessor, predecessor.deadline_unix_ms)?;
+        let template = self
+            .children
+            .get(predecessor.ordinal as usize + 1)
+            .filter(|template| {
+                template.service == mutation.service && template.action == mutation.action
+            })
+            .ok_or(FanoutError::Replay)?;
+        let mut parent = Sha256::new();
+        parent.update(b"ferrocrate/compose-dependent-parent/v1");
+        parent.update(self.digest);
+        parent.update(predecessor.child_id);
+        parent.update(predecessor_outcome);
+        parent.update(template.ordinal.to_be_bytes());
+        let parent_hash: [u8; 32] = parent.finalize().into();
+        let mut parent_id = [0; 16];
+        parent_id.copy_from_slice(&parent_hash[..16]);
+        Self::derive(
+            parent_id,
+            predecessor.policy_generation,
+            predecessor.policy_digest,
+            predecessor.deadline_unix_ms,
+            predecessor.attempt,
+            [mutation],
+        )
+    }
+
     pub fn derive<I>(
         parent: [u8; 16],
         generation: u64,

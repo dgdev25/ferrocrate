@@ -60,6 +60,46 @@ fn command_path_rejects_restart_replay_and_executes_attempt_scoped_retry() {
 }
 
 #[test]
+fn dependent_delete_is_bound_to_stop_receipt_and_committed_graph_position() {
+    let root = FanoutPlan::derive(
+        [3; 16],
+        4,
+        [5; 32],
+        10_000,
+        0,
+        [
+            ServiceMutation::new("web", FanoutAction::ContainerStop, [1; 32]),
+            ServiceMutation::new("web", FanoutAction::ContainerDelete, [0; 32]),
+        ],
+    )
+    .unwrap();
+    let stop = &root.children()[0];
+    let first = root
+        .derive_dependent(
+            stop,
+            [7; 32],
+            ServiceMutation::new("web", FanoutAction::ContainerDelete, [8; 32]),
+        )
+        .unwrap();
+    let changed_receipt = root
+        .derive_dependent(
+            stop,
+            [9; 32],
+            ServiceMutation::new("web", FanoutAction::ContainerDelete, [8; 32]),
+        )
+        .unwrap();
+    assert_ne!(first.children()[0].child_id(), changed_receipt.children()[0].child_id());
+    assert!(matches!(
+        root.derive_dependent(
+            stop,
+            [7; 32],
+            ServiceMutation::new("other", FanoutAction::ContainerDelete, [8; 32]),
+        ),
+        Err(FanoutError::Replay)
+    ));
+}
+
+#[test]
 fn replay_claims_are_durable_and_attempt_scoped() {
     let temp = tempfile::tempdir().unwrap();
     let first = FanoutPlan::derive([1; 16], 7, [2; 32], 10_000, 0, [mutation("web", 4)]).unwrap();

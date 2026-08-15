@@ -4182,32 +4182,53 @@ fn handle_compose(
                     ServiceMutation::new(
                         record.name.clone().unwrap_or_else(|| record.id.clone()),
                         action,
-                        ferro_core::authorization::compose_down_executor_digest(record, runtime_action),
+                        if action == FanoutAction::ContainerDelete {
+                            Sha256::digest([
+                                b"ferrocrate/compose-down-delete-intent/v1".as_slice(),
+                                record.id.as_bytes(),
+                            ].concat()).into()
+                        } else {
+                            ferro_core::authorization::compose_down_executor_digest(record, runtime_action)
+                        },
                     )
                 })
             });
             let fanout = FanoutPlan::derive(parent_id, generation, policy_digest, deadline, 0, mutations).map_err(|error| error.to_string())?;
-            let result = execute_fanout(&fanout, &replay_store, current_unix_ms, |child| {
-                    let record = selected.get(child.ordinal() as usize / 2)
-                        .ok_or_else(|| FanoutExecutionError::Failed("compose down child ordinal is invalid".into()))?;
-                    let action = match child.action() {
-                        FanoutAction::ContainerStop => ferro_core::authorization::Action::ContainerStop,
-                        FanoutAction::ContainerDelete => ferro_core::authorization::Action::ContainerDelete,
-                        FanoutAction::ContainerRun => return Err(FanoutExecutionError::Failed("compose down contains run child".into())),
-                    };
+            let mut failures = Vec::new();
+            for (index, record) in selected.iter().enumerate() {
+                let stop_child = &fanout.children()[index * 2];
+                if let Err(error) = fanout.verify_child(stop_child, current_unix_ms()).and_then(|_| replay_store.claim(stop_child)) {
+                    failures.push(format!("{}: stop denied/skipped: {error}", record.id));
+                    continue;
+                }
+                let action = ferro_core::authorization::Action::ContainerStop;
                     let resource = record.name.clone().unwrap_or_else(|| record.id.clone());
-                    let scoped = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(&parent_origin, *child.child_id(), parent_id, *child.idempotency_key(), action, resource, *child.request_digest(), child.deadline_unix_ms(), child.policy_generation(), *child.policy_digest(), child.attempt(), child.ordinal(), *child.plan_digest()));
-                    match action {
-                        ferro_core::authorization::Action::ContainerStop => scoped.stop(&record.id, std::time::Duration::from_secs(5)),
-                        ferro_core::authorization::Action::ContainerDelete => scoped.remove(&record.id),
-                        _ => unreachable!(),
-                    }.map(|_| ()).map_err(|error| classify_compose_execution_error(error.to_string()))
-            });
-            let failures: Vec<_> = result.statuses().iter().filter_map(|status| match status.outcome() {
-                FanoutOutcome::Succeeded => None,
-                FanoutOutcome::Denied(reason) => Some(format!("{}: denied: {reason}", hex_id(status.child_id()))),
-                FanoutOutcome::Failed(reason) => Some(format!("{}: failed: {reason}", hex_id(status.child_id()))),
-            }).collect();
+                let scoped = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(&parent_origin, *stop_child.child_id(), parent_id, *stop_child.idempotency_key(), action, resource.clone(), *stop_child.request_digest(), stop_child.deadline_unix_ms(), stop_child.policy_generation(), *stop_child.policy_digest(), stop_child.attempt(), stop_child.ordinal(), *stop_child.plan_digest()));
+                if let Err(error) = scoped.stop(&record.id, std::time::Duration::from_secs(5)) {
+                    failures.push(format!("{}: stop failed; delete skipped: {error}", record.id));
+                    continue;
+                }
+                let stopped = runtime.inspect(&record.id).map_err(|error| error.to_string())?;
+                let delete_digest = ferro_core::authorization::compose_down_executor_digest(&stopped, ferro_core::authorization::Action::ContainerDelete);
+                let predecessor_digest: [u8; 32] = Sha256::digest([
+                    b"ferrocrate/compose-predecessor-outcome/v1".as_slice(),
+                    stop_child.child_id(),
+                    stopped.status.as_bytes(),
+                    &stopped.mutation_generation.to_be_bytes(),
+                    fanout.plan_digest(),
+                ].concat()).into();
+                let delete_plan = fanout.derive_dependent(stop_child, predecessor_digest, ServiceMutation::new(resource.clone(), FanoutAction::ContainerDelete, delete_digest)).map_err(|error| error.to_string())?;
+                let delete_child = &delete_plan.children()[0];
+                let delete_parent = *delete_child.parent_request_id();
+                if let Err(error) = delete_plan.verify_child(delete_child, current_unix_ms()).and_then(|_| replay_store.claim(delete_child)) {
+                    failures.push(format!("{}: delete denied/skipped: {error}", record.id));
+                    continue;
+                }
+                let delete_runtime = runtime.request_scoped(ferro_core::authorization::RequestOrigin::compose_child(&parent_origin, *delete_child.child_id(), delete_parent, *delete_child.idempotency_key(), ferro_core::authorization::Action::ContainerDelete, resource, *delete_child.request_digest(), delete_child.deadline_unix_ms(), delete_child.policy_generation(), *delete_child.policy_digest(), delete_child.attempt(), delete_child.ordinal(), *delete_child.plan_digest()));
+                if let Err(error) = delete_runtime.remove(&record.id) {
+                    failures.push(format!("{}: delete failed: {error}", record.id));
+                }
+            }
             if !failures.is_empty() {
                 return Err(format!("compose down partial result: {}", failures.join("; ")));
             }

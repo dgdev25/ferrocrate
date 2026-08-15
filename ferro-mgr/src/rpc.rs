@@ -8,6 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::{
+    admin::AdminAuthorizer,
     controller_authorization::{ControllerAuthorizationError, ControllerGrantIssuer},
     desired_state::DesiredStateBuilder,
     enrollment::EnrollmentService,
@@ -16,6 +17,7 @@ use crate::{
         admin_service_server::AdminService, control_service_server::ControlService,
         enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse,
         AgentMessage, DesiredState, EnrollRequest, EnrollResponse, ManagerMessage,
+        PublishDesiredRequest, PublishDesiredResponse,
     },
     store::{Enrollment, ManagerStore},
 };
@@ -115,12 +117,13 @@ impl ControlServiceImpl {
             .controller
             .as_ref()
             .ok_or_else(|| "controller grant issuer is required".to_string())?;
-        let overlay_id = overlays
-            .first()
-            .map(|v| v.overlay_id.clone())
-            .ok_or_else(|| {
-                "empty desired updates require an explicit deletion resource".to_string()
-            })?;
+        if !self
+            .store
+            .node_is_active(node_id)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("target node is not enrolled or has been revoked".into());
+        }
         let revision = self.store.next_revision().map_err(|e| e.to_string())?;
         let desired = self.builder.snapshot(revision, overlays, now_unix);
         let prior = self
@@ -131,6 +134,17 @@ impl ControlServiceImpl {
         if prior.is_none() && !current.is_empty() {
             return Err("prior authorized desired state is unavailable".into());
         }
+        let overlay_id = desired
+            .overlays
+            .first()
+            .map(|overlay| overlay.overlay_id.clone())
+            .or_else(|| {
+                prior
+                    .as_ref()
+                    .and_then(|state| state.overlays.first())
+                    .map(|overlay| overlay.overlay_id.clone())
+            })
+            .ok_or_else(|| "empty desired state has no prior authorized resource".to_string())?;
         let operations = controller
             .issue_exact_diff_from_state(&desired, node_id, prior.as_ref(), now_monotonic_millis)
             .map_err(|e| match e {
@@ -299,13 +313,45 @@ fn chrono_like_now() -> i64 {
 pub struct AdminServiceImpl {
     store: Arc<ManagerStore>,
     cluster_epoch: u64,
+    authorizer: Option<AdminAuthorizer>,
+    control: Option<Arc<ControlServiceImpl>>,
 }
 impl AdminServiceImpl {
     pub fn new(store: Arc<ManagerStore>, cluster_epoch: u64) -> Self {
         Self {
             store,
             cluster_epoch,
+            authorizer: None,
+            control: None,
         }
+    }
+    pub fn new_authorized(
+        store: Arc<ManagerStore>,
+        cluster_epoch: u64,
+        cluster_id: impl Into<String>,
+        control: Arc<ControlServiceImpl>,
+    ) -> Self {
+        Self {
+            store,
+            cluster_epoch,
+            authorizer: Some(AdminAuthorizer::new(cluster_id)),
+            control: Some(control),
+        }
+    }
+
+    fn authorize<T>(&self, request: &Request<T>, method: &str) -> Result<(), Status> {
+        let authorizer = self
+            .authorizer
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("authenticated admin mode is required"))?;
+        let identity = request
+            .extensions()
+            .get::<crate::pki::CertificateIdentity>()
+            .ok_or_else(|| Status::unauthenticated("client certificate identity is required"))?;
+        authorizer
+            .authorize(identity, method)
+            .map(|_| ())
+            .map_err(|_| Status::permission_denied("administrator principal is not authorized"))
     }
 }
 
@@ -315,6 +361,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<AdminRequest>,
     ) -> Result<Response<AdminResponse>, Status> {
+        self.authorize(&request, "Inspect")?;
         let request = request.into_inner();
         if request.cluster_id.is_empty() {
             return Err(Status::invalid_argument("cluster_id is required"));
@@ -328,4 +375,45 @@ impl AdminService for AdminServiceImpl {
             cluster_epoch: self.cluster_epoch,
         }))
     }
+
+    async fn publish_desired(
+        &self,
+        request: Request<PublishDesiredRequest>,
+    ) -> Result<Response<PublishDesiredResponse>, Status> {
+        self.authorize(&request, "PublishDesired")?;
+        let request = request.into_inner();
+        if request.cluster_id.is_empty() || request.node_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "cluster_id and node_id are required",
+            ));
+        }
+        let authorizer = self.authorizer.as_ref().expect("authorized above");
+        if authorizer.cluster_id() != request.cluster_id {
+            return Err(Status::permission_denied("request is for another cluster"));
+        }
+        let revision = self
+            .control
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("controller publisher is required"))?
+            .publish_desired(
+                &request.node_id,
+                request.overlays,
+                &[],
+                chrono_like_now(),
+                monotonic_like_now(),
+            )
+            .map_err(|error| {
+                Status::permission_denied(format!("desired update rejected: {error}"))
+            })?;
+        Ok(Response::new(PublishDesiredResponse { revision }))
+    }
+}
+
+fn monotonic_like_now() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
 }

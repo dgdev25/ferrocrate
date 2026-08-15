@@ -7,6 +7,7 @@ use ferro_mgr::{
     controller_authorization::{ControllerGrantIssuer, ControllerPolicy},
     enrollment::EnrollmentService,
     pki::CertificateAuthority,
+    pki::{CertificateIdentity, CertificateRole},
     proto::{
         admin_service_server::AdminServiceServer, control_service_server::ControlServiceServer,
         enrollment_service_server::EnrollmentServiceServer,
@@ -100,14 +101,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         boot_id,
         ControllerPolicy::new(allowed_nodes, resources),
     );
-    let control_service = ControlServiceServer::new(ControlServiceImpl::new_authorized(
-        cluster_id,
+    let control_impl = Arc::new(ControlServiceImpl::new_authorized(
+        cluster_id.clone(),
         cluster_epoch,
         signing_key,
         store.clone(),
         controller,
     ));
-    let admin_service = AdminServiceServer::new(AdminServiceImpl::new(store, cluster_epoch));
+    let control_service = ControlServiceServer::from_arc(control_impl.clone());
+    let admin_impl =
+        AdminServiceImpl::new_authorized(store, cluster_epoch, cluster_id.clone(), control_impl);
+    let admin_cluster = cluster_id.clone();
+    let admin_service =
+        AdminServiceServer::with_interceptor(admin_impl, move |mut request: tonic::Request<()>| {
+            use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
+            let authenticated = request
+                .extensions()
+                .get::<TlsConnectInfo<TcpConnectInfo>>()
+                .and_then(TlsConnectInfo::peer_certs)
+                .is_some_and(|certificates| !certificates.is_empty());
+            if !authenticated {
+                return Err(tonic::Status::unauthenticated(
+                    "administrator client certificate is required",
+                ));
+            }
+            request.extensions_mut().insert(CertificateIdentity {
+                cluster_id: admin_cluster.clone(),
+                role: CertificateRole::Administrator,
+                // rustls has already checked certificate validity against the admin CA.
+                expires_at: i64::MAX,
+            });
+            Ok(request)
+        });
     let public = Server::builder()
         .tls_config(ServerTlsConfig::new().identity(identity.clone()))?
         .add_service(enrollment_service)

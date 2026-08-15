@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::UnixListener,
@@ -15,6 +15,7 @@ use std::{
 };
 
 const MAX_STORE_BYTES: u64 = 128 * 1024 * 1024;
+const FRAME_MAGIC: &[u8; 8] = b"FRCSF001";
 const FRAME_COMMIT: &[u8; 8] = b"FRCMT001";
 
 pub struct SinkServeConfig<'a> {
@@ -196,21 +197,27 @@ impl UnixSinkStore {
         let mut lifecycles = BTreeMap::new();
         loop {
             let frame_start = offset;
-            let mut length_bytes = [0; 4];
-            match reader.read(&mut length_bytes[..1]) {
+            let mut magic = [0; FRAME_MAGIC.len()];
+            match reader.read(&mut magic[..1]) {
                 Ok(0) => break,
                 Ok(1) => {}
                 Ok(_) => unreachable!(),
                 Err(error) => return Err(error.to_string()),
             }
-            if let Err(error) = reader.read_exact(&mut length_bytes[1..]) {
-                if error.kind() != ErrorKind::UnexpectedEof {
-                    return Err(error.to_string());
-                }
+            let mut length_bytes = [0; 4];
+            let mut header_checksum = [0; 32];
+            let header_incomplete = reader.read_exact(&mut magic[1..]).is_err()
+                || reader.read_exact(&mut length_bytes).is_err()
+                || reader.read_exact(&mut header_checksum).is_err();
+            if header_incomplete {
                 file.set_len(frame_start)
                     .and_then(|_| file.sync_all())
                     .map_err(|e| e.to_string())?;
                 break;
+            }
+            let expected_header = Sha256::digest([magic.as_slice(), &length_bytes].concat());
+            if &magic != FRAME_MAGIC || header_checksum != expected_header[..] {
+                return Err("committed emergency sink frame header mismatch".into());
             }
             let length = u32::from_be_bytes(length_bytes) as usize;
             if length > super::protocol::MAX_FRAME_BYTES {
@@ -267,7 +274,8 @@ impl UnixSinkStore {
             }
             head = receipt.head;
             next_sequence += 1;
-            offset += 4 + length as u64 + 32 + FRAME_COMMIT.len() as u64;
+            offset +=
+                FRAME_MAGIC.len() as u64 + 4 + 32 + length as u64 + 32 + FRAME_COMMIT.len() as u64;
         }
         file.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
         Ok(Self {
@@ -329,8 +337,12 @@ impl UnixSinkStore {
             receipt: receipt.clone(),
         })
         .map_err(|e| e.to_string())?;
+        let length = (durable.len() as u32).to_be_bytes();
+        let header_checksum = Sha256::digest([FRAME_MAGIC.as_slice(), &length].concat());
         self.file
-            .write_all(&(durable.len() as u32).to_be_bytes())
+            .write_all(FRAME_MAGIC)
+            .and_then(|_| self.file.write_all(&length))
+            .and_then(|_| self.file.write_all(&header_checksum))
             .and_then(|_| self.file.write_all(&durable))
             .and_then(|_| self.file.write_all(&Sha256::digest(&durable)))
             .and_then(|_| self.file.write_all(FRAME_COMMIT))
@@ -536,11 +548,14 @@ mod tests {
         drop(store);
 
         let bytes = std::fs::read(&path).unwrap();
-        let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
-        let mut entry: StoredSinkEntry = serde_json::from_slice(&bytes[4..4 + length]).unwrap();
+        let length = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let mut entry: StoredSinkEntry = serde_json::from_slice(&bytes[44..44 + length]).unwrap();
         entry.record[0] ^= 1;
         let body = serde_json::to_vec(&entry).unwrap();
-        let mut corrupt = (body.len() as u32).to_be_bytes().to_vec();
+        let length = (body.len() as u32).to_be_bytes();
+        let mut corrupt = FRAME_MAGIC.to_vec();
+        corrupt.extend_from_slice(&length);
+        corrupt.extend_from_slice(&Sha256::digest([FRAME_MAGIC.as_slice(), &length].concat()));
         corrupt.extend_from_slice(&body);
         corrupt.extend_from_slice(&Sha256::digest(&body));
         corrupt.extend_from_slice(FRAME_COMMIT);
@@ -581,10 +596,24 @@ mod tests {
         drop(store);
         let committed = std::fs::metadata(&path).unwrap().len();
         let committed_bytes = std::fs::read(&path).unwrap();
+        let length = 10_u32.to_be_bytes();
+        let header = [
+            FRAME_MAGIC.as_slice(),
+            &length,
+            &Sha256::digest([FRAME_MAGIC.as_slice(), &length].concat()),
+        ]
+        .concat();
         for tail in [
-            vec![0, 0, 0],
-            [10_u32.to_be_bytes().as_slice(), b"short"].concat(),
-            [10_u32.to_be_bytes().as_slice(), b"0123456789", &[1; 12]].concat(),
+            FRAME_MAGIC[..3].to_vec(),
+            [header.as_slice(), b"short"].concat(),
+            [header.as_slice(), b"0123456789", &[1; 12]].concat(),
+            [
+                header.as_slice(),
+                b"0123456789",
+                Sha256::digest(b"0123456789").as_slice(),
+                &FRAME_COMMIT[..3],
+            ]
+            .concat(),
         ] {
             let mut bytes = committed_bytes.clone();
             bytes.extend_from_slice(&tail);
@@ -610,6 +639,29 @@ mod tests {
             .err()
             .unwrap()
             .contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn restart_rejects_committed_upward_length_corruption() {
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let path = named.path().to_owned();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let mut store = UnixSinkStore::open(named.reopen().unwrap(), [1; 16], key.clone()).unwrap();
+        store.append(request("n", 0, b"resource")).unwrap();
+        drop(store);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let length = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+        bytes[8..12].copy_from_slice(&length.saturating_add(1024).to_be_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        assert!(UnixSinkStore::open(file, [1; 16], key)
+            .err()
+            .unwrap()
+            .contains("header mismatch"));
     }
 
     #[test]

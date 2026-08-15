@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
 };
 
+use crate::grants_recovery::hex;
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ferro_core::authorization::helper_grant::{
@@ -495,7 +496,4 @@ impl PartialEq for GrantError {
     fn eq(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
-}
-fn hex(value: &[u8]) -> String {
-    value.iter().map(|b| format!("{b:02x}")).collect()
 }

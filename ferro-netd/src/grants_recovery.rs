@@ -1,5 +1,9 @@
 use crate::grants::{GrantError, GrantLedger, GrantPhase, GrantResult, GrantVerifier};
 
+pub(crate) fn hex(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub(crate) enum RecoveryObservation {
     Consistent(bool),
     Conflict,

@@ -219,6 +219,34 @@ impl RuntimeAuthorization {
             recipe,
             at_stage(&template, WitnessStage::RequestReceived, 1),
         )?;
+        let cleanup_authorization_action = match cleanup_action {
+            WitnessAction::ContainerDelete => Action::ContainerDelete,
+            WitnessAction::NetworkDetach => Action::NetworkDetach,
+            WitnessAction::VolumeUnmount => Action::VolumeUnmount,
+            _ => return Err(MediationError::Identity),
+        };
+        let canonical_resource = canonical_uuid(container_id);
+        let authority = super::admission::ReservedCleanupAuthority::from_recovery_path(
+            operation,
+            canonical_resource.clone(),
+            1,
+            self.runtime_id,
+            journal.journal_id(),
+            self.boot_id,
+            cleanup_authorization_action,
+        );
+        self.gate
+            .admit_reserved_cleanup(
+                cleanup_authorization_action,
+                &authority,
+                operation,
+                &canonical_resource,
+                1,
+                self.runtime_id,
+                journal.journal_id(),
+                self.boot_id,
+            )
+            .map_err(|_| MediationError::CheckpointStale)?;
         let mut decision = at_stage(&template, WitnessStage::Decision, 2);
         decision.decision = Some(true);
         decision.decision_id = Some(rand::rng().random());
@@ -375,7 +403,10 @@ impl RuntimeAuthorization {
         run: Option<&RunSecurityFacts>,
     ) -> Result<MutationPermit, MediationError> {
         if !(self.emergency.is_some()
-            && matches!(action, Action::ContainerStop | Action::ContainerKill | Action::ContainerDelete))
+            && matches!(
+                action,
+                Action::ContainerStop | Action::ContainerKill | Action::ContainerDelete
+            ))
         {
             self.gate
                 .admit(action)
@@ -521,14 +552,18 @@ impl RuntimeAuthorization {
 
         let emergency_override = self.gate.policy_would_deny(&request).unwrap_or(false)
             && self.emergency.as_ref().is_some_and(|authority| {
-                origin.is_some_and(|origin| authority.consume(
-                    action,
-                    &record.id,
-                    generation,
-                    origin.principal(),
-                    pinned_policy_digest,
-                    *operation.as_bytes(),
-                ).is_ok())
+                origin.is_some_and(|origin| {
+                    authority
+                        .consume(
+                            action,
+                            &record.id,
+                            generation,
+                            origin.principal(),
+                            pinned_policy_digest,
+                            *operation.as_bytes(),
+                        )
+                        .is_ok()
+                })
             });
         let authorization = if emergency_override {
             self.gate.authorize_emergency(request)
@@ -579,7 +614,6 @@ impl RuntimeAuthorization {
             }
         }
     }
-
 
     pub(crate) fn revalidate(
         &self,
@@ -769,17 +803,104 @@ mod recovery_tests {
             ),
         ));
 
-        assert!(matches!(
-            gate.admit(Action::ContainerRun),
-            Err(_)
-        ));
+        assert!(matches!(gate.admit(Action::ContainerRun), Err(_)));
         assert!(gate.admit(Action::ContainerDelete).is_err());
         assert!(gate.admit(Action::ContainerStop).is_err());
+        let operation = crate::witness::OperationId::from_bytes([1; 16]);
         let authority =
-            crate::authorization::admission::ReservedCleanupAuthority::from_recovery_path();
+            crate::authorization::admission::ReservedCleanupAuthority::from_recovery_path(
+                operation,
+                "resource".into(),
+                1,
+                [2; 16],
+                [3; 16],
+                [4; 16],
+                Action::ContainerDelete,
+            );
         assert!(gate
-            .admit_reserved_cleanup(Action::ContainerDelete, &authority)
+            .admit_reserved_cleanup(
+                Action::ContainerDelete,
+                &authority,
+                operation,
+                "resource",
+                1,
+                [2; 16],
+                [3; 16],
+                [4; 16]
+            )
             .is_ok());
+        assert!(gate
+            .admit_reserved_cleanup(
+                Action::ContainerDelete,
+                &authority,
+                operation,
+                "other",
+                1,
+                [2; 16],
+                [3; 16],
+                [4; 16]
+            )
+            .is_err());
+        assert!(gate
+            .admit_reserved_cleanup(
+                Action::ContainerDelete,
+                &authority,
+                operation,
+                "resource",
+                2,
+                [2; 16],
+                [3; 16],
+                [4; 16]
+            )
+            .is_err());
+        assert!(gate
+            .admit_reserved_cleanup(
+                Action::ContainerDelete,
+                &authority,
+                operation,
+                "resource",
+                1,
+                [9; 16],
+                [3; 16],
+                [4; 16]
+            )
+            .is_err());
+        assert!(gate
+            .admit_reserved_cleanup(
+                Action::ContainerDelete,
+                &authority,
+                operation,
+                "resource",
+                1,
+                [2; 16],
+                [9; 16],
+                [4; 16]
+            )
+            .is_err());
+        assert!(gate
+            .admit_reserved_cleanup(
+                Action::ContainerDelete,
+                &authority,
+                operation,
+                "resource",
+                1,
+                [2; 16],
+                [3; 16],
+                [9; 16]
+            )
+            .is_err());
+        assert!(gate
+            .admit_reserved_cleanup(
+                Action::NetworkDetach,
+                &authority,
+                operation,
+                "resource",
+                1,
+                [2; 16],
+                [3; 16],
+                [4; 16]
+            )
+            .is_err());
     }
 }
 

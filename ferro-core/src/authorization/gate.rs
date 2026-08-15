@@ -400,29 +400,62 @@ pub struct AuthorizationGate {
 
 impl AuthorizationGate {
     pub fn new(policies: Arc<PolicyStore>) -> Self {
-        Self { policies, admission: None }
+        Self {
+            policies,
+            admission: None,
+        }
     }
 
-    pub fn with_admission(policies: Arc<PolicyStore>, admission: super::admission::MutationAdmission) -> Self {
-        Self { policies, admission: Some(admission) }
+    pub fn with_admission(
+        policies: Arc<PolicyStore>,
+        admission: super::admission::MutationAdmission,
+    ) -> Self {
+        Self {
+            policies,
+            admission: Some(admission),
+        }
     }
 
-    pub(crate) fn admit(&self, action: super::Action) -> Result<(), super::admission::MutationAdmissionError> {
-        let class = if matches!(action, super::Action::CheckpointPublish | super::Action::CheckpointRecover | super::Action::KeyRotate) {
+    pub(crate) fn admit(
+        &self,
+        action: super::Action,
+    ) -> Result<(), super::admission::MutationAdmissionError> {
+        let class = if matches!(
+            action,
+            super::Action::CheckpointPublish
+                | super::Action::CheckpointRecover
+                | super::Action::KeyRotate
+        ) {
             super::admission::AdmissionAuthority::CheckpointRepair
         } else {
             super::admission::AdmissionAuthority::UserMutation
         };
-        self.admission.as_ref().map_or(Ok(()), |admission| admission.admit(action, class))
+        self.admission
+            .as_ref()
+            .map_or(Ok(()), |admission| admission.admit(action, class))
     }
 
     pub(crate) fn admit_reserved_cleanup(
         &self,
         action: super::Action,
-        _authority: &super::admission::ReservedCleanupAuthority,
+        authority: &super::admission::ReservedCleanupAuthority,
+        operation: crate::witness::OperationId,
+        resource: &str,
+        generation: u64,
+        runtime: [u8; 16],
+        journal: [u8; 16],
+        boot: [u8; 16],
     ) -> Result<(), super::admission::MutationAdmissionError> {
+        if !authority.matches(
+            action, operation, resource, generation, runtime, journal, boot,
+        ) {
+            return Err(super::admission::MutationAdmissionError);
+        }
         self.admission.as_ref().map_or(Ok(()), |admission| {
-            admission.admit(action, super::admission::AdmissionAuthority::ReservedCleanup(_authority))
+            admission.admit(
+                action,
+                super::admission::AdmissionAuthority::ReservedCleanup(authority),
+            )
         })
     }
 
@@ -461,7 +494,12 @@ impl AuthorizationGate {
     pub(crate) fn policy_would_deny(&self, request: &CanonicalRequest) -> Result<bool, Denial> {
         validate_policy_binding(request)?;
         validate_canonical_bindings(request)?;
-        Ok(!request.policy.snapshot.document.evaluate(&request.context).allowed)
+        Ok(!request
+            .policy
+            .snapshot
+            .document
+            .evaluate(&request.context)
+            .allowed)
     }
 
     pub(crate) fn authorize_emergency(

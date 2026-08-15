@@ -34,11 +34,57 @@ pub(crate) enum AdmissionAuthority<'a> {
 
 /// Opaque authority available only to lifecycle recovery code that already
 /// holds a durable operation/provenance reservation.
-pub(crate) struct ReservedCleanupAuthority(());
+pub(crate) struct ReservedCleanupAuthority {
+    operation: crate::witness::OperationId,
+    resource: String,
+    generation: u64,
+    runtime: [u8; 16],
+    journal: [u8; 16],
+    boot: [u8; 16],
+    action: Action,
+}
 
 impl ReservedCleanupAuthority {
-    pub(crate) const fn from_recovery_path() -> Self {
-        Self(())
+    pub(crate) fn from_recovery_path(
+        operation: crate::witness::OperationId,
+        resource: String,
+        generation: u64,
+        runtime: [u8; 16],
+        journal: [u8; 16],
+        boot: [u8; 16],
+        action: Action,
+    ) -> Self {
+        Self {
+            operation,
+            resource,
+            generation,
+            runtime,
+            journal,
+            boot,
+            action,
+        }
+    }
+
+    pub(crate) fn matches(
+        &self,
+        action: Action,
+        operation: crate::witness::OperationId,
+        resource: &str,
+        generation: u64,
+        runtime: [u8; 16],
+        journal: [u8; 16],
+        boot: [u8; 16],
+    ) -> bool {
+        matches!(
+            action,
+            Action::ContainerDelete | Action::NetworkDetach | Action::VolumeUnmount
+        ) && self.action == action
+            && self.operation == operation
+            && self.resource == resource
+            && self.generation == generation
+            && self.runtime == runtime
+            && self.journal == journal
+            && self.boot == boot
     }
 }
 
@@ -328,7 +374,15 @@ mod tests {
                 "{action:?} recovery path was blocked"
             );
         }
-        let authority = ReservedCleanupAuthority::from_recovery_path();
+        let authority = ReservedCleanupAuthority::from_recovery_path(
+            crate::witness::OperationId::from_bytes([1; 16]),
+            "resource".into(),
+            1,
+            [2; 16],
+            [3; 16],
+            [4; 16],
+            Action::ContainerDelete,
+        );
         assert!(admission
             .admit(
                 Action::ContainerDelete,

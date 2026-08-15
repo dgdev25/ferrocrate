@@ -409,6 +409,15 @@ impl AuthorizationGate {
         }
     }
 
+    pub(crate) fn install_policy_candidate(
+        &self,
+        candidate: &super::policy::PolicyCandidate,
+        rollback_authorized: bool,
+    ) -> Result<PolicySnapshot, super::policy::PolicyError> {
+        self.policies
+            .install_candidate(candidate, rollback_authorized)
+    }
+
     pub(crate) fn mode(&self) -> super::AuthorizationMode {
         self.policies.snapshot().document.mode
     }

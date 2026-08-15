@@ -423,7 +423,7 @@ impl CheckpointVerifier {
         )
     }
 
-    pub fn verify_iter<'a, I>(
+    pub fn verify_iter<I, T>(
         &self,
         evidence: I,
         checkpoints: &[Checkpoint],
@@ -431,7 +431,8 @@ impl CheckpointVerifier {
         max_age: Duration,
     ) -> Result<VerificationReport, CheckpointError>
     where
-        I: IntoIterator<Item = &'a [u8]>,
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]>,
     {
         const MAX_CHECKPOINTS: usize = 4096;
         if checkpoints.is_empty() || checkpoints.len() > MAX_CHECKPOINTS {

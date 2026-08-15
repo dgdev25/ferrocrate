@@ -85,7 +85,14 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
-    let active = temp.path().join("active.toml");
+    let auth_dir = temp.path().join("authorization");
+    fs::create_dir(&auth_dir).unwrap();
+    fs::set_permissions(&auth_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let active = auth_dir.join("active-policy.toml");
+    protected_write(
+        &auth_dir.join("journal-id"),
+        b"42424242424242424242424242424242\n",
+    );
     let older = temp.path().join("older.toml");
     protected_write(
         &active,
@@ -95,16 +102,7 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
         &older,
         b"schema_version = 1\ngeneration = 8\nmode = \"enforce\"\n",
     );
-    let output = cli_runtime(
-        &[
-            "policy",
-            "reload",
-            older.to_str().unwrap(),
-            "--active",
-            active.to_str().unwrap(),
-        ],
-        temp.path(),
-    );
+    let output = cli_runtime(&["policy", "reload", older.to_str().unwrap()], temp.path());
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -127,8 +125,6 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
             "policy",
             "reload",
             older.to_str().unwrap(),
-            "--active",
-            active.to_str().unwrap(),
             "--rollback-approval",
             approval.to_str().unwrap(),
         ],
@@ -140,6 +136,21 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("policy_version=8"));
+    let runtime = ferro_core::runtime::ContainerRuntime::new(temp.path()).unwrap();
+    assert_eq!(runtime.policy_binding().0, 8);
+    drop(runtime);
+    let mut reader = ferro_core::witness::WitnessReader::open_read_only(
+        auth_dir.join("witness-journal"),
+        [0x42; 16],
+    )
+    .unwrap();
+    let mut saw_rollback = false;
+    while let Some(bytes) = reader.next_record().unwrap() {
+        let record = ferro_core::witness::decode_record(&bytes).unwrap();
+        saw_rollback |= record.action() == ferro_core::witness::WitnessAction::PolicyRollback;
+    }
+    reader.finish().unwrap();
+    assert!(saw_rollback, "authorized rollback must be durably witnessed");
 }
 
 #[test]
@@ -159,11 +170,13 @@ fn unreconciled_emergency_state_blocks_normal_commands_after_restart() {
 
 #[test]
 fn witness_show_is_bounded_and_rejects_unbounded_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing-journal");
     let output = cli(&[
         "witness",
         "show",
         "--journal",
-        "/unused",
+        missing.to_str().unwrap(),
         "--journal-id",
         "00000000000000000000000000000000",
         "--limit",
@@ -171,6 +184,16 @@ fn witness_show_is_bounded_and_rejects_unbounded_requests() {
     ]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("between 1 and 1000"));
+    let readonly = cli(&[
+        "witness",
+        "show",
+        "--journal",
+        missing.to_str().unwrap(),
+        "--journal-id",
+        "00000000000000000000000000000000",
+    ]);
+    assert!(!readonly.status.success());
+    assert!(!missing.exists());
 }
 
 #[test]
@@ -224,6 +247,14 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("checkpoint bound"));
 
+    let live_writer =
+        ferro_core::witness::WitnessJournal::open(ferro_core::witness::JournalConfig::new(
+            &journal_path,
+            id,
+            ferro_core::witness::JournalMode::Required,
+        ))
+        .unwrap();
+
     let show = cli(&[
         "witness",
         "show",
@@ -271,6 +302,7 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
         !report.contains("verified=true"),
         "must not collapse dimensions: {report}"
     );
+    drop(live_writer);
 
     let first = temp.path().join("first-checkpoint.bin");
     fs::copy(&artifact, &first).unwrap();

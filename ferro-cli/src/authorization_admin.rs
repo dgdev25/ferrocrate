@@ -4,13 +4,14 @@ mod emergency;
 mod witness;
 
 pub use emergency::{
-    activate_emergency, ensure_reconciled, reconcile_emergency, EmergencyActivate,
+    activate_emergency, ensure_reconciled, execute_emergency, reconcile_emergency,
+    EmergencyActivate,
 };
 pub use witness::{
     checkpoint, rotate_key, show, verify, CheckpointArgs, RotateArgs, ShowArgs, VerifyArgs,
 };
 
-use ferro_core::authorization::policy::PolicyStore;
+use ferro_core::authorization::policy::{PolicyCandidate, PolicyStore};
 use ferro_core::authorization::{
     surface::{SurfaceAuthorization, SurfacePermit},
     Action, ResourceKind,
@@ -35,7 +36,7 @@ pub fn policy_check(path: &Path) -> Result<String, String> {
 }
 
 pub fn policy_reload(
-    candidate: &Path,
+    candidate: &PolicyCandidate,
     active: &Path,
     rollback: Option<&Path>,
     permit: &SurfacePermit,
@@ -43,9 +44,7 @@ pub fn policy_reload(
     canonical_name: &str,
 ) -> Result<String, String> {
     require_host_admin()?;
-    let next = PolicyStore::load(candidate)
-        .map_err(|error| format!("policy-reload: {error}"))?
-        .snapshot();
+    let next = candidate.snapshot();
     SurfaceAuthorization::validate_execution(
         permit,
         action,
@@ -71,7 +70,7 @@ pub fn policy_reload(
             verify_rollback_approval(approval, current.generation, next.generation, &next.digest)?;
         }
     }
-    atomic_replace(candidate, active)?;
+    atomic_replace(candidate.source_bytes(), active)?;
     Ok(format!(
         "allowed=true reason=policy-reloaded rule=policy.atomic-reload policy_version={} policy_digest={}",
         next.generation, hex(&next.digest)))
@@ -95,7 +94,7 @@ fn verify_rollback_approval(
     Ok(())
 }
 
-fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
+fn atomic_replace(bytes: &[u8], target: &Path) -> Result<(), String> {
     if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("active policy path is a symbolic link".into());
     }
@@ -107,7 +106,6 @@ fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
     {
         return Err("active policy parent directory is not administrator-controlled".into());
     }
-    let bytes = fs::read(source).map_err(|e| e.to_string())?;
     let temp = parent.join(format!(".policy.{}.tmp", std::process::id()));
     let mut out = fs::OpenOptions::new()
         .write(true)
@@ -115,7 +113,7 @@ fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
         .mode(0o600)
         .open(&temp)
         .map_err(|e| e.to_string())?;
-    out.write_all(&bytes)
+    out.write_all(bytes)
         .and_then(|_| out.sync_all())
         .map_err(|e| e.to_string())?;
     fs::rename(&temp, target).map_err(|e| e.to_string())?;

@@ -42,7 +42,22 @@ struct EmergencyState {
     resource: String,
     nonce: String,
     sink: String,
+    sink_device: u64,
+    sink_inode: u64,
+    status: EmergencyStatus,
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum EmergencyStatus {
+    Activated,
+    IntentDurable,
+    Terminal,
+    Unknown,
+    Quarantined,
+}
+
+struct EmergencyPermit(EmergencyState);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +110,13 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
     }
     let sink =
         fs::canonicalize(args.sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    let state_root = fs::canonicalize(args.state_dir).map_err(|e| e.to_string())?;
+    if sink.starts_with(&state_root) {
+        return Err(
+            "emergency sink must be independently provisioned outside runtime state".into(),
+        );
+    }
+    let sink_metadata = fs::metadata(&sink).map_err(|e| e.to_string())?;
     let state = EmergencyState {
         schema: 1,
         boot_id,
@@ -104,6 +126,9 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         resource: args.resource.into(),
         nonce: args.nonce.into(),
         sink: sink.display().to_string(),
+        sink_device: sink_metadata.dev(),
+        sink_inode: sink_metadata.ino(),
+        status: EmergencyStatus::Activated,
     };
     let receipt = serde_json::json!({"type":"activate","schema":1,"boot_id":state.boot_id,"deadline_uptime_ns":deadline,"action":state.action,"resource":state.resource,"nonce":state.nonce});
     append_sink(
@@ -137,6 +162,15 @@ fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
     if canonical_sink.display().to_string() != state.sink {
         return Err("reconciliation sink does not match the activation receipt sink".into());
     }
+    validate_sink_identity(&canonical_sink, &state)?;
+    if !matches!(
+        state.status,
+        EmergencyStatus::Terminal | EmergencyStatus::Quarantined
+    ) {
+        return Err(
+            "emergency execution is not terminal or quarantined; reconciliation denied".into(),
+        );
+    }
     let receipt = serde_json::json!({"type":"reconcile","schema":1,"boot_id":state.boot_id,"action":state.action,"resource":state.resource,"nonce":state.nonce,"reconciled_uptime_ns":uptime_ns()?});
     append_sink(
         &canonical_sink,
@@ -147,6 +181,82 @@ fn reconcile_verified(state_dir: &Path, sink: &Path) -> Result<String, String> {
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
     Ok("emergency reconciled receipt_persisted=true normal_operations_allowed=true".into())
+}
+
+pub fn execute_emergency<F>(
+    state_dir: &Path,
+    sink: &Path,
+    action: &str,
+    resource: &str,
+    execute: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    require_host_admin()?;
+    require_console()?;
+    execute_verified(state_dir, sink, action, resource, execute)
+}
+
+fn execute_verified<F>(
+    state_dir: &Path,
+    sink: &Path,
+    action: &str,
+    resource: &str,
+    execute: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let path = state_dir.join(STATE_FILE);
+    let mut permit = EmergencyPermit(
+        serde_json::from_slice(&fs::read(&path).map_err(|e| format!("emergency state: {e}"))?)
+            .map_err(|e| e.to_string())?,
+    );
+    let state = &mut permit.0;
+    if state.boot_id != boot_id()? || uptime_ns()? >= state.deadline_uptime_ns {
+        return Err("emergency permit boot or monotonic deadline is invalid".into());
+    }
+    if state.action != action
+        || state.resource != resource
+        || state.status != EmergencyStatus::Activated
+    {
+        return Err("emergency permit action/resource is out of scope or already consumed".into());
+    }
+    let canonical_sink =
+        fs::canonicalize(sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    validate_sink_identity(&canonical_sink, &state)?;
+    let intent = serde_json::json!({"type":"intent","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"uptime_ns":uptime_ns()?});
+    append_sink(
+        &canonical_sink,
+        &serde_json::to_vec(&intent).map_err(|e| e.to_string())?,
+    )?;
+    state.status = EmergencyStatus::IntentDurable;
+    write_state(&path, &state)?;
+    let result = execute();
+    let outcome = serde_json::json!({"type":"outcome","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"succeeded":result.is_ok(),"uptime_ns":uptime_ns()?});
+    if let Err(error) = append_sink(
+        &canonical_sink,
+        &serde_json::to_vec(&outcome).map_err(|e| e.to_string())?,
+    ) {
+        state.status = EmergencyStatus::Unknown;
+        write_state(&path, &state)?;
+        return Err(format!(
+            "emergency outcome is unknown because the sink failed: {error}"
+        ));
+    }
+    state.status = EmergencyStatus::Terminal;
+    write_state(&path, &state)?;
+    result?;
+    Ok("emergency execution terminal=true reconciliation_required=true".into())
+}
+
+fn validate_sink_identity(path: &Path, state: &EmergencyState) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    if metadata.dev() != state.sink_device || metadata.ino() != state.sink_inode {
+        return Err("emergency sink device/inode changed after activation".into());
+    }
+    Ok(())
 }
 
 pub fn ensure_reconciled(state_dir: &Path) -> Result<(), String> {
@@ -342,6 +452,10 @@ mod tests {
             .contains("another boot"));
         persisted.boot_id = original_boot;
         write_state(&state_path, &persisted).unwrap();
+        execute_verified(&state_dir, &sink, "container.stop", "container:abc", || {
+            Ok(())
+        })
+        .unwrap();
         reconcile_verified(&state_dir, &sink).unwrap();
         assert!(ensure_reconciled(&state_dir).is_ok());
         assert!(activate_verified(args())

@@ -22,6 +22,7 @@ mod checkpoint_evidence;
 mod encoding;
 mod journal;
 mod keys;
+mod reader;
 mod recovery;
 mod validation;
 mod verify;
@@ -39,6 +40,7 @@ pub use journal::{
     JournalMode, RecoveryClassification, WitnessJournal,
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
+pub use reader::WitnessReader;
 pub(crate) use recovery::RecoveryEvidence;
 pub use recovery::{
     ObservationDigest, ObservationHandle, OperationId, PendingOperation, RecoveryRecipe,
@@ -323,6 +325,37 @@ impl DecodedRecord {
 
     pub fn record_hash(&self) -> [u8; 32] {
         hash_record(&self.bytes)
+    }
+
+    pub fn principal_pseudonym(&self) -> [u8; 32] {
+        self.record.principal_digest
+    }
+    pub fn action(&self) -> WitnessAction {
+        self.record.action
+    }
+    pub fn resource_kind(&self) -> WitnessResourceKind {
+        self.record.resource_kind
+    }
+    pub fn resource_pseudonym(&self) -> [u8; 32] {
+        self.record.resource_digest
+    }
+    pub fn resource_generation(&self) -> u64 {
+        self.record.resource_generation
+    }
+    pub fn policy_generation(&self) -> u64 {
+        self.record.policy_version
+    }
+    pub fn policy_digest(&self) -> [u8; 32] {
+        self.record.policy_digest
+    }
+    pub fn decision(&self) -> Option<bool> {
+        self.record.decision
+    }
+    pub fn reason(&self) -> Option<ReasonCode> {
+        self.record.reason
+    }
+    pub fn rule_id(&self) -> Option<[u8; 16]> {
+        self.record.rule.map(RuleSummary::id)
     }
 
     pub(super) fn record(&self) -> &ParsedRecord {

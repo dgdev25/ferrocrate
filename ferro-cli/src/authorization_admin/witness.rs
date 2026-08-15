@@ -3,8 +3,8 @@ use ed25519_dalek::VerifyingKey;
 use ferro_core::witness::{
     decode_record, Checkpoint, CheckpointCoordinator, CheckpointVerifier, Invocation,
     JournalConfig, JournalMode, KeyStore, PrincipalSummary, PublicationOutcome, ResourceSummary,
-    TrustBundle, WitnessAction, WitnessJournal, WitnessOutcome, WitnessRecord, WitnessResourceKind,
-    WitnessStage,
+    TrustBundle, WitnessAction, WitnessJournal, WitnessOutcome, WitnessReader, WitnessRecord,
+    WitnessResourceKind, WitnessStage,
 };
 use serde::Deserialize;
 use std::{
@@ -64,28 +64,37 @@ pub fn show(args: ShowArgs<'_>) -> Result<String, String> {
         return Err("witness show limit must be between 1 and 1000".into());
     }
     let id = decode_hex::<16>(args.journal_id)?;
-    let journal = WitnessJournal::open(JournalConfig::new(args.journal, id, JournalMode::Required))
-        .map_err(|e| e.to_string())?;
+    let mut reader = WitnessReader::open_read_only(args.journal, id).map_err(|e| e.to_string())?;
     let wanted = args.stage.map(parse_stage).transpose()?;
     let mut lines = Vec::new();
-    for bytes in journal.records().map_err(|e| e.to_string())? {
+    while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
         let record = decode_record(&bytes).map_err(|e| e.to_string())?;
         if record.sequence() < args.from_sequence.unwrap_or(1)
             || wanted.is_some_and(|stage| record.stage() != stage)
         {
             continue;
         }
-        lines.push(format!(
-            "epoch={} sequence={} stage={:?} record_hash={}",
-            record.epoch(),
-            record.sequence(),
-            record.stage(),
-            hex(&record.record_hash())
-        ));
-        if lines.len() == args.limit {
-            break;
+        if lines.len() < args.limit {
+            lines.push(format!(
+                "epoch={} sequence={} stage={:?} principal={} action={:?} resource_kind={:?} resource={} resource_generation={} decision={:?} reason={:?} rule={} policy_generation={} policy_digest={} record_hash={}",
+                record.epoch(),
+                record.sequence(),
+                record.stage(),
+                hex(&record.principal_pseudonym()),
+                record.action(),
+                record.resource_kind(),
+                hex(&record.resource_pseudonym()),
+                record.resource_generation(),
+                record.decision(),
+                record.reason(),
+                record.rule_id().map(|value| hex(&value)).unwrap_or_else(|| "none".into()),
+                record.policy_generation(),
+                hex(&record.policy_digest()),
+                hex(&record.record_hash())
+            ));
         }
     }
+    reader.finish().map_err(|e| e.to_string())?;
     Ok(if lines.is_empty() {
         "witness records: <none>".into()
     } else {
@@ -119,17 +128,16 @@ pub fn verify(args: VerifyArgs<'_>) -> Result<String, String> {
             "minimum checkpoint is not present in the explicitly supplied checkpoint chain".into(),
         );
     }
-    let journal = WitnessJournal::open(JournalConfig::new(args.journal, id, JournalMode::Required))
-        .map_err(|e| e.to_string())?;
-    let records = journal.records().map_err(|e| e.to_string())?;
+    let mut reader = WitnessReader::open_read_only(args.journal, id).map_err(|e| e.to_string())?;
     let report = CheckpointVerifier::new(TrustBundle::new(id, key).with_minimum(minimum))
         .verify_iter(
-            records.iter().map(Vec::as_slice),
+            reader.records(),
             &checkpoints,
             now_secs()?,
             Duration::from_secs(args.max_age_seconds),
         )
         .map_err(|e| format!("witness verification failed: {e}"))?;
+    reader.finish().map_err(|e| e.to_string())?;
     Ok(format!(
         "integrity={}\nlifecycle_consistency={}\ncompleteness={}\nfreshness={:?}\ncheckpoint_age={:?}\nrecords={}",
         report.integrity,

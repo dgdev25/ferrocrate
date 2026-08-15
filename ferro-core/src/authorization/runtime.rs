@@ -94,6 +94,14 @@ impl MutationPermit {
 }
 
 impl RuntimeAuthorization {
+    pub(crate) fn install_policy_candidate(
+        &self,
+        candidate: &super::policy::PolicyCandidate,
+        rollback_authorized: bool,
+    ) -> Result<super::policy::PolicySnapshot, super::policy::PolicyError> {
+        self.gate
+            .install_policy_candidate(candidate, rollback_authorized)
+    }
     pub(crate) fn surface_authorization(
         &self,
     ) -> Result<super::surface::SurfaceAuthorization, super::surface::SurfaceAuthorizationError>

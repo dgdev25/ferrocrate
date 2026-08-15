@@ -1553,9 +1553,10 @@ impl ContainerRuntime {
     pub fn new(runtime_dir: &Path) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
         let runtime_id = load_or_create_runtime_id(runtime_dir)?;
+        let authorization = production_authorization(runtime_dir, runtime_id)?;
         Self::initialize(
             runtime_dir,
-            RuntimeAuthorization::compatibility_with_id(runtime_id),
+            authorization,
             Arc::new(NoopLifecyclePhaseHook),
             Arc::new(ProductionKernelResourceOps),
         )
@@ -1589,6 +1590,16 @@ impl ContainerRuntime {
 
     pub fn policy_binding(&self) -> (u64, [u8; 32]) {
         self.authorization.policy_binding()
+    }
+
+    pub fn install_policy_candidate(
+        &self,
+        candidate: &crate::authorization::policy::PolicyCandidate,
+        rollback_authorized: bool,
+    ) -> Result<crate::authorization::policy::PolicySnapshot, RuntimeError> {
+        self.authorization
+            .install_policy_candidate(candidate, rollback_authorized)
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))
     }
 
     /// Return the binding suitable for a delegation-enabled service. Delegation
@@ -3097,7 +3108,11 @@ impl ContainerRuntime {
             let operation_id = self
                 .store
                 .get(id)?
-                .and_then(|record| record.pending_mutation.map(|reservation| reservation.operation_id))
+                .and_then(|record| {
+                    record
+                        .pending_mutation
+                        .map(|reservation| reservation.operation_id)
+                })
                 .ok_or(ContainerStoreError::MutationConflict)?;
             self.store.transition_status_for_mutation(
                 id,
@@ -3110,7 +3125,11 @@ impl ContainerRuntime {
             let operation_id = self
                 .store
                 .get(id)?
-                .and_then(|record| record.pending_mutation.map(|reservation| reservation.operation_id))
+                .and_then(|record| {
+                    record
+                        .pending_mutation
+                        .map(|reservation| reservation.operation_id)
+                })
                 .ok_or(ContainerStoreError::MutationConflict)?;
             self.store.transition_status_for_mutation(
                 id,
@@ -3480,6 +3499,54 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+fn production_authorization(
+    runtime_dir: &Path,
+    runtime_id: [u8; 16],
+) -> Result<RuntimeAuthorization, RuntimeError> {
+    let root = runtime_dir.join("authorization");
+    let policy_path = root.join("active-policy.toml");
+    if !policy_path.exists() {
+        return Ok(RuntimeAuthorization::compatibility_with_id(runtime_id));
+    }
+    let policies = Arc::new(
+        crate::authorization::policy::PolicyStore::load(&policy_path)
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
+    );
+    let gate = Arc::new(AuthorizationGate::new(policies));
+    let journal = if gate.mode() == crate::authorization::AuthorizationMode::Disabled {
+        None
+    } else {
+        let id_path = root.join("journal-id");
+        let text = fs::read_to_string(&id_path).map_err(|error| {
+            RuntimeError::Authorization(format!(
+                "enabled authorization requires protected {}: {error}",
+                id_path.display()
+            ))
+        })?;
+        let value = text.trim();
+        if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(RuntimeError::Authorization(
+                "authorization journal ID must be 32 hexadecimal characters".into(),
+            ));
+        }
+        let mut id = [0_u8; 16];
+        for (index, byte) in id.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
+                RuntimeError::Authorization("authorization journal ID is invalid".into())
+            })?;
+        }
+        Some(Arc::new(
+            crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
+                root.join("witness-journal"),
+                id,
+                crate::witness::JournalMode::Required,
+            ))
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
+        ))
+    };
+    Ok(RuntimeAuthorization::new_with_id(gate, journal, runtime_id))
 }
 fn generate_container_id() -> String {
     // Use cryptographic randomness for unpredictable container IDs

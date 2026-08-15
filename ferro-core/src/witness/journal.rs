@@ -192,6 +192,7 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Outcome, OperationId(record.request_id))?;
+        self.publish_read_snapshot()?;
         Ok(())
     }
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
@@ -304,6 +305,7 @@ impl WitnessJournal {
             if reserve.metadata()?.len() != stored_reserve {
                 return Err(JournalError::AutomationStopped);
             }
+            self.publish_read_snapshot()?;
             return Ok(());
         }
         self.meta.insert(JOURNAL_ID, &self.journal_id)?;
@@ -337,6 +339,7 @@ impl WitnessJournal {
         {
             return Err(JournalError::AutomationStopped);
         }
+        self.publish_read_snapshot()?;
         Ok(())
     }
 
@@ -414,6 +417,7 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Received, id)?;
+        self.publish_read_snapshot()?;
         self.post_ack_rotation();
         Ok(())
     }
@@ -446,6 +450,7 @@ impl WitnessJournal {
         let decision_id = record.decision_id.ok_or(JournalError::InvalidStage)?;
         let decision_digest = self.append_decision_record(id, &mut record, &mut state)?;
         self.flush(FlushBoundary::Decision, id)?;
+        self.publish_read_snapshot()?;
         self.post_ack_rotation();
         Ok(DurableIntent {
             journal_id: self.journal_id,
@@ -544,6 +549,7 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Decision, id)?;
+        self.publish_read_snapshot()?;
         self.post_ack_rotation();
         Ok(())
     }
@@ -631,9 +637,11 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         if forced_unknown {
+            self.publish_read_snapshot()?;
             Err(JournalError::Indeterminate { operation_id: id })
         } else {
             self.flush(FlushBoundary::Outcome, id)?;
+            self.publish_read_snapshot()?;
             self.post_ack_rotation();
             Ok(())
         }
@@ -677,6 +685,33 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         Ok(next_hash)
+    }
+
+    fn publish_read_snapshot(&self) -> Result<(), JournalError> {
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let records = self.records()?;
+        let temporary = self.root.join(".witness.readonly-v2.tmp");
+        let target = self.root.join(super::reader::READER_FILE);
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary)?;
+        file.write_all(super::reader::READER_MAGIC)?;
+        file.write_all(&self.journal_id)?;
+        file.write_all(&(records.len() as u64).to_be_bytes())?;
+        for bytes in records {
+            let decoded = decode_record(&bytes)?;
+            file.write_all(&decoded.sequence().to_be_bytes())?;
+            file.write_all(&(bytes.len() as u32).to_be_bytes())?;
+            file.write_all(&bytes)?;
+        }
+        file.sync_all()?;
+        fs::rename(&temporary, &target)?;
+        File::open(&self.root)?.sync_all()?;
+        Ok(())
     }
 }
 

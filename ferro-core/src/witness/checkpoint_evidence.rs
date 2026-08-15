@@ -5,7 +5,7 @@ use super::{
 use crate::witness::verify::StreamVerifier;
 use sha2::{Digest, Sha256};
 
-pub(super) fn verify_streaming<'a, I>(
+pub(super) fn verify_streaming<I, T>(
     evidence: I,
     journal_id: [u8; 16],
     checkpoints: &[Checkpoint],
@@ -15,7 +15,8 @@ pub(super) fn verify_streaming<'a, I>(
     predecessor_hash: [u8; 32],
 ) -> Result<VerificationReport, CheckpointError>
 where
-    I: IntoIterator<Item = &'a [u8]>,
+    I: IntoIterator<Item = T>,
+    T: AsRef<[u8]>,
 {
     checkpoints.first().ok_or(CheckpointError::Untrusted)?;
     let mut verifier = StreamVerifier::new(
@@ -25,7 +26,8 @@ where
     let mut checkpoint_cursor = 0_usize;
     let mut current_epoch = starting_epoch;
 
-    for bytes in evidence {
+    for item in evidence {
+        let bytes = item.as_ref();
         let decoded = decode_record(bytes).map_err(|_| CheckpointError::Rollback)?;
         let record = decoded.record();
         let expected_checkpoint = checkpoints.get(checkpoint_cursor);

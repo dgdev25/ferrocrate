@@ -25,6 +25,25 @@ pub struct PolicySnapshot {
     pub document: Arc<PolicyDocument>,
 }
 
+/// A fully validated policy and the exact bytes read from one protected file
+/// descriptor. Callers authorize and install this value rather than reopening
+/// a caller-controlled path after authorization.
+#[derive(Clone, Debug)]
+pub struct PolicyCandidate {
+    snapshot: PolicySnapshot,
+    source: Arc<[u8]>,
+}
+
+impl PolicyCandidate {
+    pub fn snapshot(&self) -> &PolicySnapshot {
+        &self.snapshot
+    }
+
+    pub fn source_bytes(&self) -> &[u8] {
+        &self.source
+    }
+}
+
 /// A thread-safe store that replaces policies only after full validation.
 #[derive(Debug)]
 pub struct PolicyStore {
@@ -53,6 +72,8 @@ pub enum PolicyError {
     Symlink,
     #[error("policy must be a regular file")]
     NotRegularFile,
+    #[error("policy must have exactly one filesystem link")]
+    HardLinked,
     #[error("policy owner {actual} does not match effective uid {expected}")]
     WrongOwner { expected: u32, actual: u32 },
     #[error("policy mode {mode:#o} permits modification by group or other users")]
@@ -98,10 +119,38 @@ impl PolicyStore {
 
     /// Load and validate the initial policy snapshot.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
-        let snapshot = load_snapshot(path.as_ref())?;
+        let snapshot = Self::load_candidate(path)?.snapshot;
         Ok(Self {
             active: RwLock::new(snapshot),
         })
+    }
+
+    pub fn load_candidate(path: impl AsRef<Path>) -> Result<PolicyCandidate, PolicyError> {
+        load_candidate(path.as_ref())
+    }
+
+    pub fn from_candidate(candidate: &PolicyCandidate) -> Self {
+        Self {
+            active: RwLock::new(candidate.snapshot.clone()),
+        }
+    }
+
+    /// Atomically replace the in-memory snapshot with the exact candidate
+    /// that was already authorized and durably installed by the caller.
+    pub fn install_candidate(
+        &self,
+        candidate: &PolicyCandidate,
+        rollback_authorized: bool,
+    ) -> Result<PolicySnapshot, PolicyError> {
+        let mut active = self.active.write().map_err(|_| PolicyError::LockPoisoned)?;
+        if candidate.snapshot.generation < active.generation && !rollback_authorized {
+            return Err(PolicyError::Rollback {
+                current: active.generation,
+                candidate: candidate.snapshot.generation,
+            });
+        }
+        *active = candidate.snapshot.clone();
+        Ok(active.clone())
     }
 
     /// Clone the active immutable snapshot.
@@ -139,7 +188,7 @@ impl PolicyStore {
         path: &Path,
         rollback_authorized: bool,
     ) -> Result<PolicySnapshot, PolicyError> {
-        let candidate = load_snapshot(path)?;
+        let candidate = load_candidate(path)?.snapshot;
         let mut active = self.active.write().map_err(|_| PolicyError::LockPoisoned)?;
         if candidate.generation < active.generation && !rollback_authorized {
             return Err(PolicyError::Rollback {
@@ -152,7 +201,7 @@ impl PolicyStore {
     }
 }
 
-fn load_snapshot(path: &Path) -> Result<PolicySnapshot, PolicyError> {
+fn load_candidate(path: &Path) -> Result<PolicyCandidate, PolicyError> {
     let mut file = open_without_following_symlinks(path)?;
     validate_metadata(&file)?;
 
@@ -169,10 +218,13 @@ fn load_snapshot(path: &Path) -> Result<PolicySnapshot, PolicyError> {
     let document: PolicyDocument = toml::from_str(std::str::from_utf8(&source)?)?;
     validate_document(&document)?;
     let digest = Sha256::digest(&source).into();
-    Ok(PolicySnapshot {
-        generation: document.generation,
-        digest,
-        document: Arc::new(document),
+    Ok(PolicyCandidate {
+        snapshot: PolicySnapshot {
+            generation: document.generation,
+            digest,
+            document: Arc::new(document),
+        },
+        source: source.into(),
     })
 }
 
@@ -199,6 +251,9 @@ fn validate_metadata(file: &File) -> Result<(), PolicyError> {
 
     #[cfg(unix)]
     {
+        if metadata.nlink() != 1 {
+            return Err(PolicyError::HardLinked);
+        }
         validate_unix_owner_and_mode(
             nix::unistd::geteuid().as_raw(),
             metadata.uid(),

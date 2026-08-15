@@ -19,6 +19,7 @@ pub struct NetdServer {
     pub(crate) addresses: BTreeMap<String, Vec<String>>,
     pub(crate) effect_receipts: BTreeMap<String, crate::effect_receipt::EffectReceipt>,
     pub(crate) quarantined: BTreeSet<String>,
+    pub(crate) overlay_intents: BTreeMap<String, crate::server_state::OverlayMutationIntent>,
     pub(crate) authorization_identity: Option<(AuthorizationServiceMode, String)>,
     pub(crate) journal: Option<PathBuf>,
     pub(crate) kernel: Box<dyn NetKernelOps>,
@@ -49,6 +50,7 @@ impl NetdServer {
             addresses: BTreeMap::new(),
             effect_receipts: BTreeMap::new(),
             quarantined: BTreeSet::new(),
+            overlay_intents: BTreeMap::new(),
             authorization_identity: None,
             journal: None,
             #[cfg(any(test, feature = "test-support"))]

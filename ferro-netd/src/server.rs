@@ -78,13 +78,19 @@ impl NetdServer {
             return reject(code, "authorization grant rejected");
         }
         let request_id = granted.grant.claims.request_id.clone();
+        let operation_id = granted.grant.claims.operation_id;
         let nonce = granted.grant.claims.nonce;
+        let mut effect_started = false;
         macro_rules! reject_effect {
             ($code:expr, $reason:expr, $identity:expr) => {{
-                if self
-                    .record_grant_failure(&request_id, nonce, $identity, $reason)
-                    .is_err()
-                {
+                let failed_identity = $identity;
+                let recorded = if effect_started {
+                    let _ = self.mark_overlay_intent(&failed_identity, "outcome_unknown");
+                    self.record_grant_unknown(nonce, failed_identity, effect_receipt.clone())
+                } else {
+                    self.record_grant_failure(&request_id, nonce, failed_identity, $reason)
+                };
+                if recorded.is_err() {
                     return reject(RejectionCode::Busy, "failure witness unavailable");
                 }
                 return reject($code, $reason);
@@ -109,6 +115,23 @@ impl NetdServer {
                     .as_ref()
                     .and_then(crate::effect_receipt::EffectReceipt::route_interface)
                     .map(str::to_owned);
+                if self
+                    .begin_overlay_intent(
+                        operation_id,
+                        "apply",
+                        effect_receipt.clone(),
+                        routes.clone(),
+                        addresses.clone(),
+                    )
+                    .is_err()
+                {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to persist overlay mutation intent",
+                        identity.clone()
+                    );
+                }
+                effect_started = true;
                 if created_bridge {
                     if self.kernel.create_overlay(&interfaces.bridge).is_err() {
                         reject_effect!(
@@ -220,7 +243,10 @@ impl NetdServer {
                 self.routes.insert(overlay_id.clone(), routes);
                 self.addresses.insert(overlay_id.clone(), addresses);
                 self.effect_receipts
-                    .insert(identity.clone(), effect_receipt);
+                    .insert(identity.clone(), effect_receipt.clone());
+                if let Some(intent) = self.overlay_intents.get_mut(&identity) {
+                    intent.phase = "succeeded".into();
+                }
                 if self.persist().is_err() {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
@@ -241,6 +267,7 @@ impl NetdServer {
                         if let Some(previous) = previous_receipt {
                             self.effect_receipts.insert(identity.clone(), previous);
                         }
+                        self.quarantined.insert(format!("ambiguous-{identity}"));
                     }
                     reject_effect!(
                         RejectionCode::Busy,
@@ -268,7 +295,24 @@ impl NetdServer {
                 let owned_addresses = self.addresses.get(&overlay_id).cloned();
                 let owned_receipt = self.effect_receipts.get(&identity).cloned();
                 let was_owned = self.overlays.contains(&overlay_id);
+                if self
+                    .begin_overlay_intent(
+                        operation_id,
+                        "remove",
+                        effect_receipt.clone(),
+                        vec![],
+                        vec![],
+                    )
+                    .is_err()
+                {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to persist overlay deletion intent",
+                        identity.clone()
+                    );
+                }
                 if was_owned {
+                    effect_started = true;
                     if let Some(routes) = self.routes.get(&overlay_id) {
                         let route_interface = self
                             .effect_receipts
@@ -317,6 +361,9 @@ impl NetdServer {
                     self.overlays.remove(&overlay_id);
                 }
                 self.effect_receipts.remove(&identity);
+                if let Some(intent) = self.overlay_intents.get_mut(&identity) {
+                    intent.phase = "succeeded".into();
+                }
                 if self.persist().is_err() {
                     if was_owned {
                         self.overlays.insert(overlay_id.clone());
@@ -330,6 +377,7 @@ impl NetdServer {
                     if let Some(receipt) = owned_receipt {
                         self.effect_receipts.insert(identity.clone(), receipt);
                     }
+                    self.quarantined.insert(format!("ambiguous-{identity}"));
                     reject_effect!(
                         RejectionCode::Busy,
                         "failed to persist overlay deletion",
@@ -392,6 +440,7 @@ impl NetdServer {
                     host_addr: None,
                     container_addr: None,
                 };
+                effect_started = true;
                 if self.kernel.create_endpoint(&config).is_err() {
                     reject_effect!(
                         RejectionCode::Busy,
@@ -431,7 +480,7 @@ impl NetdServer {
                 }
                 self.endpoints.insert(endpoint_id.clone(), overlay_id);
                 self.effect_receipts
-                    .insert(format!("endpoint:{endpoint_id}"), effect_receipt);
+                    .insert(format!("endpoint:{endpoint_id}"), effect_receipt.clone());
                 if self.persist().is_err() {
                     let _ = self.endpoints.remove(&endpoint_id);
                     self.effect_receipts
@@ -457,14 +506,16 @@ impl NetdServer {
                 NetdResponse::Attached
             }
             NetdRequest::DetachEndpoint { endpoint_id, .. } => {
-                if self.endpoints.remove(&endpoint_id).is_some()
-                    && self.kernel.remove_endpoint(&endpoint_id).is_err()
-                {
-                    reject_effect!(
-                        RejectionCode::Busy,
-                        "failed to destroy endpoint veth",
-                        format!("endpoint:{endpoint_id}")
-                    );
+                if self.endpoints.contains_key(&endpoint_id) {
+                    effect_started = true;
+                    if self.kernel.remove_endpoint(&endpoint_id).is_err() {
+                        reject_effect!(
+                            RejectionCode::Busy,
+                            "failed to destroy endpoint veth",
+                            format!("endpoint:{endpoint_id}")
+                        );
+                    }
+                    self.endpoints.remove(&endpoint_id);
                 }
                 self.effect_receipts
                     .remove(&format!("endpoint:{endpoint_id}"));

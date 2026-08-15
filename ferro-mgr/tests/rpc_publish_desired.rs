@@ -97,6 +97,7 @@ async fn authenticated_publish_authorizes_final_overlay_deletion_atomically() {
                 routes: vec![],
                 peers: vec![],
                 wireguard: Some(true),
+                addresses: vec!["10.0.0.1/24".into()],
             }],
         })
         .await

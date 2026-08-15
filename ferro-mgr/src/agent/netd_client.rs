@@ -737,6 +737,7 @@ mod tests {
                 routes: vec!["10.0.0.0/24".into()],
                 peers: vec![],
                 wireguard: Some(true),
+                addresses: vec!["10.0.0.1/24".into()],
             }],
             100,
         );

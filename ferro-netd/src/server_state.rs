@@ -22,9 +22,57 @@ struct PersistedState {
     effect_receipts: BTreeMap<String, crate::effect_receipt::EffectReceipt>,
     #[serde(default)]
     quarantined: BTreeSet<String>,
+    #[serde(default)]
+    overlay_intents: BTreeMap<String, OverlayMutationIntent>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct OverlayMutationIntent {
+    pub(crate) operation_id: [u8; 16],
+    pub(crate) action: String,
+    pub(crate) prior: Option<crate::effect_receipt::EffectReceipt>,
+    pub(crate) desired: crate::effect_receipt::EffectReceipt,
+    pub(crate) phase: String,
+    #[serde(default)]
+    pub(crate) routes: Vec<String>,
+    #[serde(default)]
+    pub(crate) addresses: Vec<String>,
 }
 
 impl NetdServer {
+    pub(crate) fn begin_overlay_intent(
+        &mut self,
+        operation_id: [u8; 16],
+        action: &str,
+        desired: crate::effect_receipt::EffectReceipt,
+        routes: Vec<String>,
+        addresses: Vec<String>,
+    ) -> Result<(), String> {
+        let identity = desired.identity();
+        self.overlay_intents.insert(
+            identity.clone(),
+            OverlayMutationIntent {
+                operation_id,
+                action: action.into(),
+                prior: self.effect_receipts.get(&identity).cloned(),
+                desired,
+                phase: "pending".into(),
+                routes,
+                addresses,
+            },
+        );
+        self.persist()
+    }
+    pub(crate) fn mark_overlay_intent(
+        &mut self,
+        identity: &str,
+        phase: &str,
+    ) -> Result<(), String> {
+        if let Some(intent) = self.overlay_intents.get_mut(identity) {
+            intent.phase = phase.into();
+        }
+        self.persist()
+    }
     pub(crate) fn validate_frame(
         &self,
         uid: u32,
@@ -65,11 +113,7 @@ impl NetdServer {
     }
 
     pub(crate) fn request_is_quarantined(&self, request: &crate::protocol::NetdRequest) -> bool {
-        let overlay = format!(
-            "legacy-overlay:{}",
-            crate::request_binding::request_overlay_id(request)
-        );
-        self.quarantined.contains(&overlay)
+        self.overlay_is_quarantined(crate::request_binding::request_overlay_id(request))
             || match request {
                 crate::protocol::NetdRequest::AttachEndpoint { endpoint_id, .. }
                 | crate::protocol::NetdRequest::DetachEndpoint { endpoint_id, .. } => self
@@ -77,6 +121,12 @@ impl NetdServer {
                     .contains(&format!("legacy-endpoint:{endpoint_id}")),
                 _ => false,
             }
+    }
+    pub(crate) fn overlay_is_quarantined(&self, overlay: &str) -> bool {
+        let suffix = format!("overlay:{overlay}");
+        self.quarantined
+            .iter()
+            .any(|entry| entry.ends_with(&suffix))
     }
     pub(crate) fn finish_inspect(
         &mut self,
@@ -115,6 +165,7 @@ impl NetdServer {
             self.addresses = state.addresses;
             self.effect_receipts = state.effect_receipts;
             self.quarantined = state.quarantined;
+            self.overlay_intents = state.overlay_intents;
         }
         self.journal = Some(path);
         self.overlays.retain(|overlay| {
@@ -139,6 +190,56 @@ impl NetdServer {
             }
             verifiable
         });
+        for (identity, receipt) in &self.effect_receipts {
+            if self.kernel.observe_effect(receipt) != LiveEffectObservation::Exact {
+                self.quarantined.insert(format!("ambiguous-{identity}"));
+            }
+        }
+        for (identity, intent) in self.overlay_intents.clone() {
+            if intent.phase == "succeeded" {
+                continue;
+            }
+            let overlay = identity.strip_prefix("overlay:").unwrap_or("").to_string();
+            match self.kernel.observe_effect(&intent.desired) {
+                LiveEffectObservation::Exact => {
+                    self.quarantined.retain(|entry| !entry.ends_with(&identity));
+                    if intent.desired.expected_exists() {
+                        self.overlays.insert(overlay.clone());
+                        self.routes.insert(overlay.clone(), intent.routes);
+                        self.addresses.insert(overlay, intent.addresses);
+                        self.effect_receipts
+                            .insert(identity.clone(), intent.desired);
+                    } else {
+                        self.overlays.remove(&overlay);
+                        self.routes.remove(&overlay);
+                        self.addresses.remove(&overlay);
+                        self.effect_receipts.remove(&identity);
+                    }
+                    if let Some(value) = self.overlay_intents.get_mut(&identity) {
+                        value.phase = "recovered".into();
+                    }
+                }
+                _ if intent.prior.as_ref().is_some_and(|prior| {
+                    self.kernel.observe_effect(prior) == LiveEffectObservation::Exact
+                }) =>
+                {
+                    self.quarantined.retain(|entry| !entry.ends_with(&identity));
+                    if let Some(prior) = intent.prior {
+                        self.overlays.insert(overlay);
+                        self.effect_receipts.insert(identity.clone(), prior);
+                    }
+                    if let Some(value) = self.overlay_intents.get_mut(&identity) {
+                        value.phase = "not_applied".into();
+                    }
+                }
+                _ => {
+                    self.quarantined.insert(format!("ambiguous-{identity}"));
+                    if let Some(value) = self.overlay_intents.get_mut(&identity) {
+                        value.phase = "quarantined".into();
+                    }
+                }
+            }
+        }
         self.persist()?;
         if let Some(grants) = self.grants.as_mut() {
             let overlays = &self.overlays;
@@ -209,6 +310,7 @@ impl NetdServer {
                 addresses: self.addresses.clone(),
                 effect_receipts: self.effect_receipts.clone(),
                 quarantined: self.quarantined.clone(),
+                overlay_intents: self.overlay_intents.clone(),
             })
             .map_err(|error| error.to_string())?,
         )

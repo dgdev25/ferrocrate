@@ -116,6 +116,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
             routes: vec![],
             peers: vec![],
             wireguard: Some(true),
+            addresses: vec!["10.0.0.1/24".into()],
         }],
         100,
     );
@@ -354,6 +355,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
             routes: vec!["10.30.0.0/24".into()],
             peers: vec![],
             wireguard: Some(true),
+            addresses: vec!["10.0.0.1/24".into()],
         }],
         200,
     );
@@ -440,12 +442,9 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     let failure = snapshot
         .receipts
         .iter()
-        .find(|receipt| receipt.phase == "failed")
-        .expect("failed effect must have a durable receipt");
-    assert_eq!(
-        failure.outcome.as_deref(),
-        Some("failed to persist endpoint ownership")
-    );
+        .find(|receipt| receipt.phase == "outcome-unknown")
+        .expect("post-effect persistence failure must remain outcome-unknown");
+    assert!(failure.outcome.is_none());
 
     // If only the result receipt write fails, restart observes the complete live
     // endpoint state and resolves OutcomeUnknown without replaying the effect.

@@ -76,6 +76,7 @@ impl ControllerGrantIssuer {
                     routes: vec![],
                     peers: vec![],
                     wireguard: Some(true),
+                    addresses: vec![],
                 })
                 .collect(),
             signature: vec![],
@@ -136,7 +137,7 @@ impl ControllerGrantIssuer {
                 },
                 peers,
                 routes: overlay.routes.clone(),
-                addresses: Vec::new(),
+                addresses: overlay.addresses.clone(),
             });
         }
         for overlay_id in current.difference(&wanted) {
@@ -203,6 +204,7 @@ impl ControllerGrantIssuer {
         let prior_canonical = prior_overlay.map(|overlay| serde_json::json!({
             "overlay_id": overlay.overlay_id,
             "wireguard": overlay.wireguard,
+            "addresses": overlay.addresses,
             "routes": overlay.routes,
             "peers": overlay.peers.iter().map(|peer| serde_json::json!({
                 "node_id": peer.node_id,
@@ -428,6 +430,7 @@ mod tests {
                 routes: vec![],
                 peers: vec![],
                 wireguard: Some(true),
+                addresses: vec![],
             }],
             100,
         );

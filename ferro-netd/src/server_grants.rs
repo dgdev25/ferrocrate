@@ -83,6 +83,18 @@ impl NetdServer {
                 outcome,
             )
     }
+    pub(crate) fn record_grant_unknown(
+        &mut self,
+        nonce: [u8; 16],
+        identity: String,
+        receipt: crate::effect_receipt::EffectReceipt,
+    ) -> Result<(), GrantError> {
+        self.grants
+            .as_mut()
+            .ok_or(GrantError::NotConsumed)?
+            .ledger
+            .mark_outcome_unknown(nonce, Some(identity), Some(receipt))
+    }
 }
 
 fn monotonic_millis() -> u64 {

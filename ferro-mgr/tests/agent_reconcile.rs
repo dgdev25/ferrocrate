@@ -50,6 +50,7 @@ fn desired(revision: u64, now_unix: i64) -> ferro_mgr::proto::DesiredState {
             routes: vec![],
             peers: vec![],
             wireguard: Some(true),
+            addresses: vec!["10.0.0.1/24".into()],
         }],
         now_unix,
     )

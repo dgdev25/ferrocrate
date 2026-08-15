@@ -72,3 +72,10 @@ Focused review corrections:
 - Overlay deletion retains ownership until route, address, WireGuard and bridge effects all finish. Persistence failure restores the ownership/tombstone view for deterministic recovery.
 - Quarantine is enforced before grant consumption. Omitted protobuf mode is rejected, while explicit `Some(false)` is the only bridge-only representation.
 - The routed topology is explicit: the bridge owns container gateway addresses, WireGuard remains a distinct L3 peer device, remote routes target WireGuard, and WireGuard mode requires IPv4 forwarding. Address/route placement and forwarding are grant- and receipt-bound; WireGuard is never incorrectly enslaved to the bridge.
+
+Transactional mutation follow-up:
+
+- Desired overlays now carry explicit bridge gateway addresses end-to-end; the controller no longer emits an empty hard-coded address set.
+- Overlay apply/remove writes a durable mutation intent containing operation ID, action, prior receipt, desired receipt, routes, addresses, and phase before the first kernel call. The ownership state and terminal intent phase are written together.
+- Any granted failure after entering the effect boundary is recorded as `OutcomeUnknown`, never `Failed`. Same-process ambiguity is quarantined immediately. Restart compares the desired and prior complete receipts: exact desired state is committed as recovered, exact prior state is retained as not-applied, and partial/unverifiable state is quarantined.
+- Disabled legacy mutations use the same durable intent record and are blocked by canonical-resource quarantine checks.

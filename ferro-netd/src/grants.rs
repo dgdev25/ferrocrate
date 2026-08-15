@@ -174,7 +174,7 @@ impl GrantLedger {
             )
             && grant.claims.live_identity_digest == Some(live)
     }
-    fn mark_outcome_unknown(
+    pub(crate) fn mark_outcome_unknown(
         &mut self,
         nonce: [u8; 16],
         effect_identity: Option<String>,

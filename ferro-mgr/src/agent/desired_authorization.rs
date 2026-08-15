@@ -146,7 +146,7 @@ impl DesiredAuthorizationBundle {
                     })).collect::<Vec<_>>();
                     if peers != &expected_peers
                         || routes != &overlay.routes
-                        || !addresses.is_empty()
+                        || addresses != &overlay.addresses
                         || overlay.wireguard.is_none()
                         || (*mode == super::netd_client::OverlayMode::WireGuard)
                             != (overlay.wireguard == Some(true))

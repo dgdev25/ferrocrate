@@ -33,6 +33,8 @@ struct OverlayState {
     peers: Vec<Peer>,
     #[prost(bool, optional, tag = "4")]
     wireguard: Option<bool>,
+    #[prost(string, repeated, tag = "5")]
+    addresses: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -105,6 +107,13 @@ impl NetdServer {
         {
             return Err(RejectionCode::InvalidFrame);
         }
+        if desired
+            .overlays
+            .iter()
+            .any(|overlay| self.overlay_is_quarantined(&overlay.overlay_id))
+        {
+            return Err(RejectionCode::PolicyViolation);
+        }
         let wanted = desired
             .overlays
             .iter()
@@ -117,6 +126,25 @@ impl NetdServer {
             .collect::<Vec<_>>()
         {
             let interfaces = crate::interface_identity::overlay_interfaces(&overlay);
+            let delete_request = NetdRequest::RemoveOverlay {
+                overlay_id: overlay.clone(),
+            };
+            let delete_receipt = EffectReceipt::from_request(
+                &delete_request,
+                envelope.revision,
+                envelope.epoch,
+                envelope.revision,
+            );
+            let mut operation_id = [0_u8; 16];
+            operation_id[..8].copy_from_slice(&envelope.revision.to_be_bytes());
+            self.begin_overlay_intent(
+                operation_id,
+                "legacy_remove",
+                delete_receipt,
+                vec![],
+                vec![],
+            )
+            .map_err(|_| RejectionCode::Busy)?;
             if let Some(routes) = self.routes.get(&overlay) {
                 let route_interface = self
                     .effect_receipts
@@ -139,6 +167,9 @@ impl NetdServer {
             self.routes.remove(&overlay);
             self.addresses.remove(&overlay);
             self.effect_receipts.remove(&format!("overlay:{overlay}"));
+            if let Some(intent) = self.overlay_intents.get_mut(&format!("overlay:{overlay}")) {
+                intent.phase = "succeeded".into();
+            }
         }
         for overlay in desired.overlays {
             let mode = if overlay.wireguard == Some(true) {
@@ -165,8 +196,24 @@ impl NetdServer {
                 mode,
                 peers: peers.clone(),
                 routes: overlay.routes.clone(),
-                addresses: Vec::new(),
+                addresses: overlay.addresses.clone(),
             };
+            let desired_receipt = EffectReceipt::from_request(
+                &request,
+                envelope.revision,
+                envelope.epoch,
+                envelope.revision,
+            );
+            let mut operation_id = [0_u8; 16];
+            operation_id[..8].copy_from_slice(&envelope.revision.to_be_bytes());
+            self.begin_overlay_intent(
+                operation_id,
+                "legacy_apply",
+                desired_receipt.clone(),
+                overlay.routes.clone(),
+                overlay.addresses.clone(),
+            )
+            .map_err(|_| RejectionCode::Busy)?;
             let previous_routes = self
                 .routes
                 .get(&overlay.overlay_id)
@@ -196,6 +243,9 @@ impl NetdServer {
             } else {
                 &interfaces.bridge
             };
+            self.kernel
+                .apply_addresses(&interfaces.bridge, &overlay.addresses)
+                .map_err(|_| RejectionCode::Busy)?;
             let removed = if previous_route_interface.as_deref() == Some(route_interface) {
                 previous_routes
                     .iter()
@@ -229,15 +279,14 @@ impl NetdServer {
             self.overlays.insert(overlay.overlay_id.clone());
             self.routes
                 .insert(overlay.overlay_id.clone(), overlay.routes);
-            self.effect_receipts.insert(
-                format!("overlay:{}", overlay.overlay_id),
-                EffectReceipt::from_request(
-                    &request,
-                    envelope.revision,
-                    envelope.epoch,
-                    envelope.revision,
-                ),
-            );
+            self.effect_receipts
+                .insert(format!("overlay:{}", overlay.overlay_id), desired_receipt);
+            if let Some(intent) = self
+                .overlay_intents
+                .get_mut(&format!("overlay:{}", overlay.overlay_id))
+            {
+                intent.phase = "succeeded".into();
+            }
         }
         self.persist().map_err(|_| RejectionCode::Busy)?;
         Ok(NetdResponse::Applied)
@@ -284,6 +333,7 @@ mod tests {
                 routes: Vec::new(),
                 peers: Vec::new(),
                 wireguard: Some(true),
+                addresses: vec!["10.0.0.1/24".into()],
             }],
         );
         let mut missing_mode = apply.clone();

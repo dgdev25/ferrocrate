@@ -40,6 +40,14 @@ struct EmergencyState {
     sink: String,
     sink_device: u64,
     sink_inode: u64,
+    #[serde(default)]
+    sink_journal_id: Option<String>,
+    #[serde(default)]
+    sink_sequence: u64,
+    #[serde(default)]
+    sink_head: Option<String>,
+    #[serde(default)]
+    sink_receipts: Vec<super::emergency_sink::SinkReceipt>,
     status: EmergencyStatus,
     #[serde(default)]
     main_witness_first: Option<u64>,
@@ -274,6 +282,10 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         sink: sink.display().to_string(),
         sink_device: sink_metadata.dev(),
         sink_inode: sink_metadata.ino(),
+        sink_journal_id: None,
+        sink_sequence: 0,
+        sink_head: None,
+        sink_receipts: Vec::new(),
         status: EmergencyStatus::Activated,
         main_witness_first: None,
         main_witness_last: None,
@@ -984,6 +996,10 @@ mod tests {
             sink: "/sink".into(),
             sink_device: 1,
             sink_inode: 2,
+            sink_journal_id: None,
+            sink_sequence: 0,
+            sink_head: None,
+            sink_receipts: Vec::new(),
             status: EmergencyStatus::Activated,
             main_witness_first: None,
             main_witness_last: None,

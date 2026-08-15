@@ -12,6 +12,8 @@ pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod principal;
 pub(crate) mod runtime;
+#[cfg(feature = "test-support")]
+pub use runtime::test_support;
 
 #[cfg(target_os = "linux")]
 pub use principal::{

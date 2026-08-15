@@ -33,6 +33,7 @@ rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 ferro-netd = { path = "../ferro-netd", features = ["test-support"] }
+ferro-core = { path = "../ferro-core", features = ["test-support"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

@@ -9,24 +9,26 @@ use std::{
 };
 
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use ferro_core::{
-    authorization::helper_grant::{
-        signing_bytes, GrantAction, GrantClaims, GrantIssuer, GrantKind, HelperGrant,
-        ResourceBinding,
+    authorization::helper_grant::{GrantIssuer, ResourceBinding},
+    authorization::{
+        gate::AuthorizationGate,
+        policy::PolicyStore,
+        test_support::{authorize_attach, authorize_cleanup},
     },
     managed_overlay::{
-        managed_parameters, DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest,
-        ManagedOverlayCompatibilityMode, ManagedOverlayDelegation, ManagedOverlayRequest,
-        MANAGED_OVERLAY_PROTOCOL_VERSION,
+        LegacyManagedOverlayRequest, ManagedOverlayClient, ManagedOverlayCompatibilityMode,
+        ManagedOverlayRequest, ManagedOverlayResponse, MANAGED_OVERLAY_PROTOCOL_VERSION,
     },
+    witness::{JournalConfig, JournalMode, WitnessJournal},
 };
 use ferro_mgr::{
     agent::{
         delegation_ledger::DelegationLedger,
         ipam::Ipam,
         local_api::{LocalApi, LocalApiResponse, OverlayConfig},
-        netd_client::{endpoint_live_identity_digest, DelegationBridge, UnixNetdClient},
+        netd_client::{DelegationBridge, UnixNetdClient},
         netd_sequence::{NetdSequence, SequenceValue},
         Agent, StateStore,
     },
@@ -41,7 +43,7 @@ use ferro_netd::{
     test_support::{serve_one, FaultHandle, FaultPoint},
 };
 
-const RESOURCE: &str = "123e4567-e89b-12d3-a456-426614174000";
+const RESOURCE: &str = "9e0c6a49-e01e-3e51-9a4f-5bb9663075b4";
 
 #[test]
 fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
@@ -53,6 +55,24 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     let key_path = directory.path().join("helper.key");
     fs::write(&key_path, helper_key.to_bytes()).unwrap();
     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let policy_path = directory.path().join("runtime-policy.toml");
+    fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy_path).unwrap(),
+    )));
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            directory.path().join("witness"),
+            [70; 16],
+            JournalMode::Required,
+        ))
+        .unwrap(),
+    );
 
     let policy = Policy::new(
         "cluster-a".into(),
@@ -188,20 +208,36 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         container_id: "container-a".into(),
         now_unix: 100,
     };
-    let attach = delegated(
-        &helper_key,
-        attach_request,
-        "attach-parent",
-        [1; 16],
-        false,
-        None,
-    );
+    let attach_authority =
+        authorize_attach(gate.clone(), journal.clone(), "container-a", 7, "wg0").unwrap();
     serve_next(listener.try_clone().unwrap(), server.clone(), uid, 101);
-    let attach_response = send(&local_socket, &attach);
-    assert!(
-        matches!(attach_response, LocalApiResponse::Attached(_)),
-        "{attach_response:?}"
+    let client = ManagedOverlayClient::new(&local_socket);
+    let (proof, intent) = attach_authority.parts();
+    assert_eq!(
+        proof.canonical().context().action(),
+        ferro_core::authorization::Action::ContainerRun
     );
+    assert_eq!(proof.canonical().resource_id(), RESOURCE);
+    assert_ne!(proof.canonical().policy_digest(), &[0; 32]);
+    let attach_response = client
+        .request_authorized(
+            &attach_request,
+            proof,
+            intent,
+            &issuer(&key_path, uid),
+            "boot-a",
+            1_000,
+            u64::MAX,
+            [1; 16],
+            "runtime",
+        )
+        .unwrap();
+    let ManagedOverlayResponse::Attached(attachment) = attach_response else {
+        panic!("attach rejected")
+    };
+    let cleanup_token = attachment
+        .cleanup_provenance
+        .expect("manager cleanup provenance");
 
     let persisted: serde_json::Value =
         serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
@@ -221,24 +257,52 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         container_id: "container-a".into(),
         now_unix: 100,
     };
-    let detach = delegated(
-        &helper_key,
-        detach_request,
-        "detach-parent",
-        [2; 16],
-        true,
-        Some(origin),
-    );
+    assert_eq!(cleanup_token.origin_request_id, origin);
+    let cleanup_authority =
+        authorize_cleanup(gate.clone(), journal.clone(), "container-a", 7).unwrap();
     serve_next(listener.try_clone().unwrap(), server.clone(), uid, 101);
-    let response = send(&local_socket, &detach);
-    assert_eq!(response, LocalApiResponse::Detached { released: true });
+    let (proof, intent) = cleanup_authority.parts();
+    let response = client
+        .request_cleanup_authorized(
+            &detach_request,
+            proof,
+            intent,
+            &cleanup_token,
+            &issuer(&key_path, uid),
+            "boot-a",
+            1_000,
+            u64::MAX,
+            [2; 16],
+            "runtime",
+        )
+        .unwrap();
+    assert_eq!(
+        response,
+        ManagedOverlayResponse::Detached { released: true }
+    );
     let receipt_count = server.lock().unwrap().test_snapshot().receipts.len();
     assert_eq!(receipt_count, 3);
     assert!(server.lock().unwrap().test_snapshot().endpoints.is_empty());
     assert_eq!(sequence.current().unwrap().revision, 3);
 
     // Exact parent replay is answered from the manager ledger without minting or calling netd.
-    assert_eq!(send(&local_socket, &detach), response);
+    assert_eq!(
+        client
+            .request_cleanup_authorized(
+                &detach_request,
+                proof,
+                intent,
+                &cleanup_token,
+                &issuer(&key_path, uid),
+                "boot-a",
+                1_000,
+                u64::MAX,
+                [2; 16],
+                "runtime",
+            )
+            .unwrap(),
+        response
+    );
     assert_eq!(
         server.lock().unwrap().test_snapshot().receipts.len(),
         receipt_count
@@ -284,22 +348,29 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     );
     assert_eq!(sequence.current().unwrap().revision, 4);
 
-    let attach2 = delegated(
-        &helper_key,
-        ManagedOverlayRequest::AttachContainer {
-            overlay_id: "wg0".into(),
-            container_id: "container-c".into(),
-            now_unix: 202,
-        },
-        "attach-parent-2",
-        [4; 16],
-        false,
-        None,
-    );
+    let attach2_request = ManagedOverlayRequest::AttachContainer {
+        overlay_id: "wg0".into(),
+        container_id: "container-c".into(),
+        now_unix: 202,
+    };
+    let attach2 = authorize_attach(gate.clone(), journal.clone(), "container-c", 7, "wg0").unwrap();
     serve_next(listener.try_clone().unwrap(), server.clone(), uid, 203);
+    let (proof, intent) = attach2.parts();
     assert!(matches!(
-        send(&local_socket, &attach2),
-        LocalApiResponse::Attached(_)
+        client
+            .request_authorized(
+                &attach2_request,
+                proof,
+                intent,
+                &issuer(&key_path, uid),
+                "boot-a",
+                1_000,
+                u64::MAX,
+                [4; 16],
+                "runtime",
+            )
+            .unwrap(),
+        ManagedOverlayResponse::Attached(_)
     ));
     assert_eq!(sequence.current().unwrap().revision, 5);
     let restarted = NetdSequence::open(
@@ -320,19 +391,25 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         container_id: "container-b".into(),
         now_unix: 100,
     };
-    let ambiguous = delegated(
-        &helper_key,
-        ambiguous_request,
-        "ambiguous-parent",
-        [3; 16],
-        false,
-        None,
-    );
+    let ambiguous = authorize_attach(gate, journal, "container-b", 7, "wg0").unwrap();
     faults.fail_once(FaultPoint::StatePersist);
     serve_next(listener, server.clone(), uid, 101);
+    let (proof, intent) = ambiguous.parts();
     assert!(matches!(
-        send(&local_socket, &ambiguous),
-        LocalApiResponse::Rejected { .. }
+        client
+            .request_authorized(
+                &ambiguous_request,
+                proof,
+                intent,
+                &issuer(&key_path, uid),
+                "boot-a",
+                1_000,
+                u64::MAX,
+                [3; 16],
+                "runtime",
+            )
+            .unwrap(),
+        ManagedOverlayResponse::Rejected { .. }
     ));
     let snapshot = server.lock().unwrap().test_snapshot();
     assert!(!snapshot.endpoints.contains_key("container-b"));
@@ -424,54 +501,6 @@ fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
 
 fn issuer(path: &std::path::Path, uid: u32) -> GrantIssuer {
     GrantIssuer::from_key_file("key-1", path, uid).unwrap()
-}
-
-fn delegated(
-    key: &SigningKey,
-    request: ManagedOverlayRequest,
-    request_id: &str,
-    nonce: [u8; 16],
-    cleanup: bool,
-    origin: Option<String>,
-) -> DelegatedManagedOverlayRequest {
-    let digest = managed_parameters(&request).unwrap().digest();
-    let claims = GrantClaims {
-        schema_version: 1,
-        request_id: request_id.into(),
-        action: if cleanup {
-            GrantAction::NetworkDetach
-        } else {
-            GrantAction::NetworkAttach
-        },
-        resource: ResourceBinding::new(RESOURCE, 7).unwrap(),
-        parameter_digest: digest,
-        boot_id: "boot-a".into(),
-        wall_deadline_secs: 1_000,
-        monotonic_deadline_millis: u64::MAX,
-        nonce,
-        operation_id: nonce,
-        request_digest: [6; 32],
-        precondition_digest: [4; 32],
-        recovery_recipe_digest: [5; 32],
-        issuer: "runtime".into(),
-        key_id: "key-1".into(),
-        kind: if cleanup {
-            GrantKind::Cleanup
-        } else {
-            GrantKind::Mutation
-        },
-        origin_request_id: origin,
-        live_identity_digest: cleanup.then(|| endpoint_live_identity_digest("container-a")),
-    };
-    let signature = key.sign(&signing_bytes(&claims));
-    let grant = HelperGrant {
-        claims,
-        signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
-    };
-    DelegatedManagedOverlayRequest {
-        request,
-        delegation: ManagedOverlayDelegation::new(grant),
-    }
 }
 
 fn serve_next(

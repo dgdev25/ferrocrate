@@ -671,3 +671,96 @@ fn read_boot_id() -> Option<[u8; 16]> {
     }
     Some(out)
 }
+
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::{RunSecurityFacts, RuntimeAuthorization};
+    use crate::{
+        authorization::{
+            gate::{AuthorizationGate, AuthorizedRequest},
+            Action,
+        },
+        container_store::ContainerRecord,
+        witness::{DurableIntent, WitnessJournal},
+    };
+    use std::sync::Arc;
+
+    pub struct ManagedOverlayAuthority {
+        proof: AuthorizedRequest,
+        intent: DurableIntent,
+    }
+
+    impl ManagedOverlayAuthority {
+        pub fn parts(&self) -> (&AuthorizedRequest, &DurableIntent) {
+            (&self.proof, &self.intent)
+        }
+    }
+
+    pub fn authorize_attach(
+        gate: Arc<AuthorizationGate>,
+        journal: Arc<WitnessJournal>,
+        container_id: &str,
+        resource_generation: u64,
+        overlay_id: &str,
+    ) -> Result<ManagedOverlayAuthority, String> {
+        authorize(
+            gate,
+            journal,
+            container_id,
+            resource_generation,
+            Some(overlay_id),
+            Action::ContainerRun,
+        )
+    }
+
+    pub fn authorize_cleanup(
+        gate: Arc<AuthorizationGate>,
+        journal: Arc<WitnessJournal>,
+        container_id: &str,
+        resource_generation: u64,
+    ) -> Result<ManagedOverlayAuthority, String> {
+        authorize(
+            gate,
+            journal,
+            container_id,
+            resource_generation,
+            None,
+            Action::ContainerDelete,
+        )
+    }
+
+    fn authorize(
+        gate: Arc<AuthorizationGate>,
+        journal: Arc<WitnessJournal>,
+        container_id: &str,
+        resource_generation: u64,
+        overlay_id: Option<&str>,
+        action: Action,
+    ) -> Result<ManagedOverlayAuthority, String> {
+        let mut record = ContainerRecord::authorization_candidate(
+            container_id.into(),
+            "test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        );
+        record.status = "stopped".into();
+        record.mutation_generation = resource_generation;
+        let runtime = RuntimeAuthorization::new_with_id(gate, Some(journal), [91; 16]);
+        let permit = if let Some(overlay_id) = overlay_id {
+            runtime.authorize_run(
+                &record,
+                &RunSecurityFacts {
+                    network_ids: vec![overlay_id.into()],
+                    ..Default::default()
+                },
+            )
+        } else {
+            runtime.authorize(action, &record)
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(ManagedOverlayAuthority {
+            proof: permit.proof,
+            intent: permit
+                .intent
+                .ok_or_else(|| "durable intent missing".to_string())?,
+        })
+    }
+}

@@ -3,6 +3,9 @@ name = "ferro-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test-support = []
+
 [dependencies]
 flate2 = "1.0"
 nix = { workspace = true, features = ["socket", "fs"] }

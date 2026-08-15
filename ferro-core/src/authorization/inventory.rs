@@ -64,8 +64,8 @@ pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
     entry("mutation.compose", "verified FanoutPlan child -> private runtime executor", "verify_child -> child RequestOrigin -> ContainerRuntime mediated method", "children_bind_parent_order_action_digest_deadline_and_attempt"),
     entry("mutation.cri", "CRI image mutation executor with effective identity", "authenticated Unix connect info -> immutable image binding -> SurfaceAuthorization::authorize_image_binding -> proof-consuming image executor", "transport_is_authoritative_by_default_and_metadata_cannot_elevate"),
     entry("mutation.runtime-background", "runtime-owned recovery and cleanup", "RuntimeAuthorization internal recovery", "required_cleanup_reserve_survives_enospc"),
-    entry("mutation.images", "private execute_image_pull / execute_image_delete", "CLI or authenticated Docker origin -> immutable binding -> SurfaceAuthorization::authorize_image_binding", "image_authorization_binds_the_immutable_digest"),
-    entry("mutation.volumes", "private execute_volume_create / execute_volume_remove", "CLI or authenticated Docker origin -> SurfaceAuthorization::authorize_named", "docker_compat_volume_create_delete_routes_are_mediated"),
+    entry("mutation.images", "pull_image_with_store_authorized / LocalImageStore::remove_reference_authorized", "CLI, authenticated Docker, or CRI origin -> immutable binding -> SurfaceAuthorization::authorize_image_binding", "image_authorization_binds_the_immutable_digest"),
+    entry("mutation.volumes", "LocalVolumeStore::create_with_driver_authorized / LocalVolumeStore::remove_authorized", "CLI or authenticated Docker origin -> SurfaceAuthorization::authorize_named", "docker_compat_volume_create_delete_routes_are_mediated"),
     entry("mutation.networks", "private execute_network_create / execute_network_remove", "CLI or authenticated Docker origin -> SurfaceAuthorization::authorize_named", "docker_compat_network_create_list_delete_routes_work"),
     entry("mutation.helper-calls", "privileged helper mutation executors", "GrantVerifier::verify -> request-bound grant", "helper_grant_is_single_use"),
 ];

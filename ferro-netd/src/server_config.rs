@@ -24,6 +24,8 @@ pub struct NetdServer {
     pub(crate) authorization_identity: Option<(AuthorizationServiceMode, String)>,
     pub(crate) journal: Option<PathBuf>,
     pub(crate) journal_lock: Option<File>,
+    pub(crate) journal_id: [u8; 16],
+    pub(crate) journal_generation: u64,
     pub(crate) kernel: Box<dyn NetKernelOps>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_faults: crate::test_support::FaultHandle,
@@ -56,6 +58,8 @@ impl NetdServer {
             authorization_identity: None,
             journal: None,
             journal_lock: None,
+            journal_id: [0; 16],
+            journal_generation: 0,
             #[cfg(any(test, feature = "test-support"))]
             test_faults: Default::default(),
         }

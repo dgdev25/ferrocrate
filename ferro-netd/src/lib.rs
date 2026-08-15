@@ -4,6 +4,7 @@ mod grants_recovery;
 mod interface_identity;
 mod kernel_ops;
 mod legacy_desired;
+mod ownership_journal;
 pub mod policy;
 pub mod protocol;
 mod request_binding;

@@ -2,29 +2,7 @@ use crate::kernel_ops::LiveEffectObservation;
 use crate::{grants_recovery::RecoveryObservation, server::NetdServer};
 use ferro_core::authorization::AuthorizationServiceMode;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedState {
-    overlays: BTreeSet<String>,
-    endpoints: BTreeMap<String, String>,
-    #[serde(default)]
-    routes: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    addresses: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    effect_receipts: BTreeMap<String, crate::effect_receipt::EffectReceipt>,
-    #[serde(default)]
-    quarantined: BTreeSet<String>,
-    #[serde(default)]
-    overlay_intents: BTreeMap<String, OverlayMutationIntent>,
-}
+use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
 #[cfg(test)]
 mod intent_tests {
@@ -274,7 +252,7 @@ impl NetdServer {
         }
         self.persist()
     }
-    pub(crate) fn persist_ownership(&self) -> Result<(), String> {
+    pub(crate) fn persist_ownership(&mut self) -> Result<(), String> {
         #[cfg(any(test, feature = "test-support"))]
         if self
             .test_faults
@@ -392,10 +370,10 @@ impl NetdServer {
         lock.try_lock_exclusive()
             .map_err(|_| "ownership journal already has a writer".to_string())?;
         self.journal_lock = Some(lock);
-        if path.exists() {
-            let state: PersistedState =
-                serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
-                    .map_err(|error| error.to_string())?;
+        let loaded = crate::ownership_journal::load(&path)?;
+        self.journal_id = loaded.journal_id;
+        self.journal_generation = loaded.generation;
+        if let Some(state) = loaded.state {
             self.overlays = state.overlays;
             self.endpoints = state.endpoints;
             self.routes = state.routes;
@@ -536,7 +514,7 @@ impl NetdServer {
         Ok(self)
     }
 
-    pub(crate) fn persist(&self) -> Result<(), String> {
+    pub(crate) fn persist(&mut self) -> Result<(), String> {
         #[cfg(any(test, feature = "test-support"))]
         if self
             .test_faults
@@ -547,50 +525,25 @@ impl NetdServer {
         let Some(path) = &self.journal else {
             return Ok(());
         };
-        static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let file_name = path
-            .file_name()
-            .and_then(|v| v.to_str())
-            .ok_or("invalid journal path")?;
-        let temporary = path.with_file_name(format!(
-            ".{file_name}.tmp.{}.{}",
-            std::process::id(),
-            sequence
-        ));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(&temporary)
-                .map_err(|error| error.to_string())?;
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(|error| error.to_string())?;
-            file.write_all(
-                &serde_json::to_vec(&PersistedState {
-                    overlays: self.overlays.clone(),
-                    endpoints: self.endpoints.clone(),
-                    routes: self.routes.clone(),
-                    addresses: self.addresses.clone(),
-                    effect_receipts: self.effect_receipts.clone(),
-                    quarantined: self.quarantined.clone(),
-                    overlay_intents: self.overlay_intents.clone(),
-                })
-                .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-            file.sync_all().map_err(|error| error.to_string())?;
-            fs::rename(&temporary, path).map_err(|error| error.to_string())?;
-            let parent = path.parent().ok_or("journal has no parent directory")?;
-            std::fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|error| error.to_string())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        let generation = self
+            .journal_generation
+            .checked_add(1)
+            .ok_or("ownership journal generation exhausted")?;
+        crate::ownership_journal::store(
+            path,
+            self.journal_id,
+            generation,
+            &crate::ownership_journal::PersistedState {
+                overlays: self.overlays.clone(),
+                endpoints: self.endpoints.clone(),
+                routes: self.routes.clone(),
+                addresses: self.addresses.clone(),
+                effect_receipts: self.effect_receipts.clone(),
+                quarantined: self.quarantined.clone(),
+                overlay_intents: self.overlay_intents.clone(),
+            },
+        )?;
+        self.journal_generation = generation;
+        Ok(())
     }
 }

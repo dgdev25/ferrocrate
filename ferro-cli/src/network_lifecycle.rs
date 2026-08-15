@@ -73,6 +73,21 @@ pub(crate) struct NetworkCreateRecord {
 }
 
 impl NetworkCreateRecord {
+    /// Convert an exact `NetworkRecord` into a create intent.
+    ///
+    /// `BridgeConfig` is built only from `bridge_name` / `bridge_cidr`.
+    /// The original record is retained unmodified for journal snapshot and
+    /// store publication. Logical `record.name` is not the kernel identity.
+    pub(crate) fn from_record(record: NetworkRecord) -> Result<Self, NetworkLifecycleError> {
+        let config = ferro_net::BridgeConfig {
+            name: record.bridge_name.clone(),
+            cidr: record.bridge_cidr.clone(),
+            ipv6_cidr: None,
+        };
+        validate_bridge_config(&config)?;
+        Ok(NetworkCreateRecord { config, record })
+    }
+
     pub(crate) fn intended_identity(&self) -> BridgeIdentity {
         BridgeIdentity {
             name: self.config.name.clone(),
@@ -89,6 +104,16 @@ impl NetworkCreateRecord {
         }
     }
 
+    /// Logical resource name (journal resource binding / store key).
+    fn logical_name(&self) -> &str {
+        &self.record.name
+    }
+
+    /// Kernel bridge name (`BridgeConfig` / `BridgeIdentity`).
+    fn bridge_name(&self) -> &str {
+        &self.config.name
+    }
+
     fn snapshot(&self) -> RecordSnapshot {
         RecordSnapshot {
             record: self.record.clone(),
@@ -96,33 +121,51 @@ impl NetworkCreateRecord {
     }
 }
 
-/// Build a validated network record. Invalid names or CIDRs are rejected
+/// Validate bridge name and CIDRs by exercising ferro-net command builders.
+fn validate_bridge_config(config: &ferro_net::BridgeConfig) -> Result<(), NetworkLifecycleError> {
+    ferro_net::bridge::build_ip_link_add_bridge_cmd(&config.name)
+        .map_err(|e| NetworkLifecycleError::InvalidRecord(e.to_string()))?;
+    if !config.cidr.is_empty() {
+        ferro_net::bridge::build_ip_addr_add_bridge_cmd(&config.name, &config.cidr)
+            .map_err(|e| NetworkLifecycleError::InvalidRecord(e.to_string()))?;
+    }
+    if let Some(v6) = config.ipv6_cidr.as_deref() {
+        if !v6.is_empty() {
+            ferro_net::bridge::build_ip_addr_add_ipv6_bridge_cmd(&config.name, v6)
+                .map_err(|e| NetworkLifecycleError::InvalidRecord(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Build a validated create record. Invalid names or CIDRs are rejected
 /// before any journal entry is written.
+///
+/// When `bridge_name` is `None`, the logical name is also used as the kernel
+/// bridge name (test convenience). Production callers with distinct logical
+/// and bridge names should use [`NetworkCreateRecord::from_record`].
 pub(crate) fn create_network_record(
     name: &str,
     cidr: Option<&str>,
     ipv6_cidr: Option<&str>,
 ) -> Result<NetworkCreateRecord, NetworkLifecycleError> {
+    create_network_record_with_bridge(name, name, cidr, ipv6_cidr)
+}
+
+/// Build a validated create record with an explicit kernel bridge name.
+pub(crate) fn create_network_record_with_bridge(
+    logical_name: &str,
+    bridge_name: &str,
+    cidr: Option<&str>,
+    ipv6_cidr: Option<&str>,
+) -> Result<NetworkCreateRecord, NetworkLifecycleError> {
     let config = ferro_net::BridgeConfig {
-        name: name.to_string(),
+        name: bridge_name.to_string(),
         cidr: cidr.unwrap_or("").to_string(),
         ipv6_cidr: ipv6_cidr.map(|c| c.to_string()),
     };
-    // Force the shared validators to run by exercising command construction.
-    ferro_net::bridge::build_ip_link_add_bridge_cmd(name)
-        .map_err(|e| NetworkLifecycleError::InvalidRecord(e.to_string()))?;
-    if !config.cidr.is_empty() {
-        ferro_net::bridge::build_ip_addr_add_bridge_cmd(name, &config.cidr)
-            .map_err(|e| NetworkLifecycleError::InvalidRecord(e.to_string()))?;
-    }
-    if let Some(v6) = config.ipv6_cidr.as_deref() {
-        if !v6.is_empty() {
-            ferro_net::bridge::build_ip_addr_add_ipv6_bridge_cmd(name, v6)
-                .map_err(|e| NetworkLifecycleError::InvalidRecord(e.to_string()))?;
-        }
-    }
+    validate_bridge_config(&config)?;
 
-    // Construct a deterministic full NetworkRecord from the validated BridgeConfig.
     let (subnet, gateway) = if !config.cidr.is_empty() {
         (config.cidr.clone(), config.cidr.clone())
     } else {
@@ -130,7 +173,7 @@ pub(crate) fn create_network_record(
     };
 
     let record = NetworkRecord {
-        name: config.name.clone(),
+        name: logical_name.to_string(),
         driver: "bridge".to_string(),
         subnet,
         gateway,
@@ -639,10 +682,11 @@ fn validate_operation_history(
             || op.resource.name.is_empty()
             || op.resource.uuid != stable_resource_uuid(&op.resource.name)
             || op.resource.name != op.record.record.name
+            || op.record.record.bridge_name.is_empty()
             || op
                 .intended
                 .as_ref()
-                .is_some_and(|identity| identity.name != op.resource.name)
+                .is_some_and(|identity| identity.name != op.record.record.bridge_name)
         {
             return Err(NetworkLifecycleError::JournalCorrupt(
                 "invalid operation identity".to_string(),
@@ -727,10 +771,11 @@ fn mint_operation(
         detail,
     };
     if operation.resource.name != operation.record.record.name
+        || operation.record.record.bridge_name.is_empty()
         || operation
             .intended
             .as_ref()
-            .is_some_and(|identity| identity.name != operation.resource.name)
+            .is_some_and(|identity| identity.name != operation.record.record.bridge_name)
         || !is_initial_phase(action, &operation.phase)
     {
         return Err(NetworkLifecycleError::JournalCorrupt(
@@ -830,11 +875,14 @@ pub(crate) fn run_network_create(
     kernel: &dyn NetworkKernel,
 ) -> Result<BridgeIdentity, NetworkLifecycleError> {
     let intended = record.intended_identity();
-    let name = intended.name.clone();
+    // Journal resource binding uses the logical network name.
+    let logical_name = record.logical_name().to_string();
+    // Kernel create/observe uses the bridge identity name.
+    let bridge_name = record.bridge_name().to_string();
     let snapshot = record.snapshot();
     let intent = append_lifecycle_entry(
         runtime_dir,
-        &name,
+        &logical_name,
         NetworkAction::Create,
         snapshot.clone(),
         NetworkLifecyclePhase::IntentDurable,
@@ -844,7 +892,7 @@ pub(crate) fn run_network_create(
     )?;
 
     if let Err(create_error) = kernel.create_bridge(&record.config) {
-        let observed = kernel.observe_bridge(&name);
+        let observed = kernel.observe_bridge(&bridge_name);
         let (observed, observation_detail) = match observed {
             Ok(Some(observed)) => (Some(observed.clone()), format!("observed {:?}", observed)),
             Ok(None) => (None, "bridge absent".to_string()),
@@ -864,7 +912,7 @@ pub(crate) fn run_network_create(
         return Err(NetworkLifecycleError::Quarantined(detail));
     }
 
-    match kernel.observe_bridge(&name) {
+    match kernel.observe_bridge(&bridge_name) {
         Ok(Some(observed)) => {
             if is_intended_create_observation(&intended, &observed) {
                 append_lifecycle_checkpoint(
@@ -1204,9 +1252,13 @@ pub(crate) fn recover_network_lifecycles(
     let mut entries = Vec::new();
 
     for op in pending {
-        let name = op.resource.name.clone();
+        // Recovery report keys on the logical resource name.
+        let logical_name = op.resource.name.clone();
+        // Kernel observation always uses the bridge identity name, never the
+        // logical resource name (they may differ).
+        let bridge_name = op.record.record.bridge_name.clone();
         let mut entry = NetworkRecoveryEntry {
-            network: name.clone(),
+            network: logical_name.clone(),
             resource_uuid: op.resource.uuid.clone(),
             generation: op.resource.generation,
             verdict: NetworkRecoveryVerdict::Quarantined,
@@ -1242,8 +1294,8 @@ pub(crate) fn recover_network_lifecycles(
                 let Some(recorded_observation) = recorded_observation else {
                     // Only an already recorded exact observation may be
                     // published. Recovery never adopts or replays a bare
-                    // create intent.
-                    match kernel.observe_bridge(&name) {
+                    // create intent. Observe by bridge name, not resource name.
+                    match kernel.observe_bridge(&bridge_name) {
                         Ok(None) => {
                             entry.verdict = NetworkRecoveryVerdict::NotApplied;
                             entry.committed = false;
@@ -1270,10 +1322,12 @@ pub(crate) fn recover_network_lifecycles(
                     continue;
                 };
 
-                match kernel.observe_bridge(&name) {
+                match kernel.observe_bridge(&bridge_name) {
                     // Publication must still reflect the exact identity that
                     // was recorded before the crash; a conflicting live bridge
                     // is evidence, not permission to overwrite the store.
+                    // The store receives the original journaled NetworkRecord
+                    // unmodified (logical name retained).
                     Ok(Some(observed)) if observed == *recorded_observation => {
                         let record = match network_record_from_snapshot(&op.record) {
                             Ok(record) => record,
@@ -1335,7 +1389,7 @@ pub(crate) fn recover_network_lifecycles(
                     }
                 }
             }
-            NetworkAction::Delete => match kernel.observe_bridge(&name) {
+            NetworkAction::Delete => match kernel.observe_bridge(&bridge_name) {
                 Ok(None) => {
                     append_lifecycle_checkpoint(
                         runtime_dir,
@@ -2419,5 +2473,203 @@ mod tests {
             NetworkRecoveryVerdict::RemovalCommitted
         );
         assert!(read_pending_operations(dir.path()).unwrap().is_empty());
+    }
+
+    /// Exact NetworkRecord with distinct logical name and kernel bridge name.
+    fn blue_net_record() -> NetworkRecord {
+        NetworkRecord {
+            name: "blue-net".into(),
+            driver: "bridge".to_string(),
+            subnet: "10.0.0.0/24".to_string(),
+            gateway: "10.0.0.1".to_string(),
+            bridge_name: "fc-blue-012345".to_string(),
+            bridge_cidr: "10.0.0.1/24".to_string(),
+            created_at_unix: 1_700_000_000,
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn from_record_builds_bridge_config_and_retains_original() {
+        let original = blue_net_record();
+        let create = NetworkCreateRecord::from_record(original.clone()).unwrap();
+        assert_eq!(create.config.name, "fc-blue-012345");
+        assert_eq!(create.config.cidr, "10.0.0.1/24");
+        assert_eq!(create.snapshot().record, original);
+        assert_eq!(create.logical_name(), "blue-net");
+        assert_eq!(create.bridge_name(), "fc-blue-012345");
+        let intended = create.intended_identity();
+        assert_eq!(intended.name, "fc-blue-012345");
+        assert_eq!(intended.cidr.as_deref(), Some("10.0.0.1/24"));
+    }
+
+    #[test]
+    fn logical_and_bridge_identity_are_distinct_through_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let original = blue_net_record();
+        let create = NetworkCreateRecord::from_record(original.clone()).unwrap();
+
+        let observed = run_network_create_and_publish(dir.path(), &create, &kernel).unwrap();
+
+        assert_eq!(observed.name, "fc-blue-012345");
+        assert_eq!(observed.cidr.as_deref(), Some("10.0.0.1/24"));
+        assert!(observed.ifindex.is_some());
+        // Kernel must not have a bridge named after the logical resource.
+        assert!(kernel.observe_bridge("blue-net").unwrap().is_none());
+        assert!(kernel
+            .observe_bridge("fc-blue-012345")
+            .unwrap()
+            .is_some());
+
+        let ops = read_operations(dir.path()).unwrap();
+        assert!(!ops.is_empty());
+        for op in &ops {
+            assert_eq!(op.resource.name, "blue-net");
+            assert_eq!(op.resource.uuid, stable_resource_uuid("blue-net"));
+            assert_eq!(op.record.record, original);
+            if let Some(intended) = &op.intended {
+                assert_eq!(intended.name, "fc-blue-012345");
+            }
+        }
+        assert!(ops.iter().any(|op| {
+            op.phase == NetworkLifecyclePhase::IntentDurable
+                && op.resource.name == "blue-net"
+                && op.intended.as_ref().map(|i| i.name.as_str()) == Some("fc-blue-012345")
+        }));
+        assert!(ops
+            .iter()
+            .any(|op| op.phase == NetworkLifecyclePhase::IdentityObserved
+                && op.observed.as_ref().map(|o| o.name.as_str()) == Some("fc-blue-012345")));
+        assert!(ops
+            .iter()
+            .any(|op| op.phase == NetworkLifecyclePhase::StoreCommitted));
+
+        let stored = load_networks(dir.path()).unwrap();
+        assert_eq!(stored, vec![original]);
+    }
+
+    #[test]
+    fn recovery_from_identity_observed_uses_bridge_name_and_commits_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let original = blue_net_record();
+        let create = NetworkCreateRecord::from_record(original.clone()).unwrap();
+        let intended = BridgeIdentity {
+            ifindex: Some(5),
+            ..create.intended_identity()
+        };
+        let observed = intended.clone();
+        // Live bridge is under the kernel name only.
+        kernel
+            .state
+            .lock()
+            .unwrap()
+            .insert("fc-blue-012345".into(), observed.clone());
+        // A same-name bridge under the logical name must not mask recovery.
+        kernel.state.lock().unwrap().insert(
+            "blue-net".into(),
+            BridgeIdentity {
+                name: "blue-net".into(),
+                ifindex: Some(99),
+                cidr: Some("10.9.9.1/24".into()),
+                ipv6_cidr: None,
+            },
+        );
+
+        let intent = append_lifecycle_entry(
+            dir.path(),
+            "blue-net",
+            NetworkAction::Create,
+            create.snapshot(),
+            NetworkLifecyclePhase::IntentDurable,
+            Some(intended.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(intent.resource.name, "blue-net");
+        assert_eq!(
+            intent.intended.as_ref().map(|i| i.name.as_str()),
+            Some("fc-blue-012345")
+        );
+        append_lifecycle_checkpoint(
+            dir.path(),
+            &intent,
+            NetworkLifecyclePhase::IdentityObserved,
+            Some(observed.clone()),
+            None,
+        )
+        .unwrap();
+
+        let report = recover_network_lifecycles(dir.path(), &kernel).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].network, "blue-net");
+        assert_eq!(
+            report.entries[0].verdict,
+            NetworkRecoveryVerdict::AppliedAndCommitted
+        );
+        assert!(report.entries[0].committed);
+
+        let stored = load_networks(dir.path()).unwrap();
+        assert_eq!(stored, vec![original]);
+        let ops = read_operations(dir.path()).unwrap();
+        assert!(ops
+            .iter()
+            .any(|op| op.phase == NetworkLifecyclePhase::StoreCommitted
+                && op.resource.name == "blue-net"
+                && op.observed.as_ref() == Some(&observed)));
+        // Logical-name decoy bridge must remain untouched.
+        assert_eq!(
+            kernel.observe_bridge("blue-net").unwrap().unwrap().ifindex,
+            Some(99)
+        );
+        assert_eq!(kernel.destroy_call_count(), 0);
+    }
+
+    #[test]
+    fn same_name_bridge_does_not_mask_another_logical_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let original = blue_net_record();
+        let create = NetworkCreateRecord::from_record(original.clone()).unwrap();
+
+        // Kernel has a bridge whose name equals the logical resource name,
+        // but the intended kernel identity is fc-blue-012345 (absent).
+        kernel.state.lock().unwrap().insert(
+            "blue-net".into(),
+            BridgeIdentity {
+                name: "blue-net".into(),
+                ifindex: Some(3),
+                cidr: Some("10.0.0.1/24".into()),
+                ipv6_cidr: None,
+            },
+        );
+
+        append_lifecycle_entry(
+            dir.path(),
+            "blue-net",
+            NetworkAction::Create,
+            create.snapshot(),
+            NetworkLifecyclePhase::IntentDurable,
+            Some(create.intended_identity()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let report = recover_network_lifecycles(dir.path(), &kernel).unwrap();
+        assert_eq!(
+            report.entries[0].verdict,
+            NetworkRecoveryVerdict::NotApplied,
+            "recovery must observe fc-blue-012345, not a decoy named blue-net"
+        );
+        assert!(!report.entries[0].committed);
+        assert_eq!(kernel.create_call_count(), 0);
+        assert_eq!(kernel.destroy_call_count(), 0);
+        // Decoy survives; store is not published from the decoy.
+        assert!(kernel.observe_bridge("blue-net").unwrap().is_some());
+        assert!(load_networks(dir.path()).unwrap().is_empty());
+        assert!(!read_pending_operations(dir.path()).unwrap().is_empty());
     }
 }

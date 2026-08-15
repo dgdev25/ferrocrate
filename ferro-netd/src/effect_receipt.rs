@@ -21,6 +21,7 @@ pub(crate) enum EffectReceipt {
         generation: u64,
         netns_digest: [u8; 32],
         bridge_master_digest: [u8; 32],
+        netns_name: Option<String>,
         netns_inode: Option<u64>,
         expected_exists: bool,
     },
@@ -42,9 +43,9 @@ impl EffectReceipt {
             } => Self::Overlay {
                 overlay_id: overlay_id.clone(),
                 generation,
-                peer_digest: digest(peers),
-                address_digest: digest(addresses),
-                route_digest: digest(routes),
+                peer_digest: peer_digest(peers),
+                address_digest: digest_sorted(addresses),
+                route_digest: digest_sorted(routes),
                 policy_epoch: epoch,
                 policy_revision: revision,
                 expected_exists: true,
@@ -71,6 +72,7 @@ impl EffectReceipt {
                 generation,
                 netns_digest: digest(netns),
                 bridge_master_digest: digest(overlay_id),
+                netns_name: netns.clone(),
                 netns_inode: netns.as_deref().and_then(netns_inode),
                 expected_exists: true,
             },
@@ -83,6 +85,7 @@ impl EffectReceipt {
                 generation,
                 netns_digest: [0; 32],
                 bridge_master_digest: digest(overlay_id),
+                netns_name: None,
                 netns_inode: None,
                 expected_exists: false,
             },
@@ -108,8 +111,27 @@ impl EffectReceipt {
     }
 }
 
-fn digest<T: Serialize>(value: &T) -> [u8; 32] {
+pub(crate) fn digest<T: Serialize>(value: &T) -> [u8; 32] {
     Sha256::digest(serde_json::to_vec(value).unwrap_or_default()).into()
+}
+
+pub(crate) fn peer_digest(peers: &[crate::protocol::PeerSpec]) -> [u8; 32] {
+    let mut canonical = peers
+        .iter()
+        .map(|peer| {
+            let mut allowed = peer.allowed_ips.clone();
+            allowed.sort();
+            (peer.public_key.clone(), peer.endpoint.clone(), allowed)
+        })
+        .collect::<Vec<_>>();
+    canonical.sort();
+    digest(&canonical)
+}
+
+pub(crate) fn digest_sorted(values: &[String]) -> [u8; 32] {
+    let mut canonical = values.to_vec();
+    canonical.sort();
+    digest(&canonical)
 }
 
 fn netns_inode(name: &str) -> Option<u64> {

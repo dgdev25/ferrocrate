@@ -415,7 +415,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     };
     let ambiguous = authorize_attach(gate, journal, "container-b", 7, "wg0").unwrap();
     faults.fail_once(FaultPoint::StatePersist);
-    serve_next(listener, server.clone(), uid, 101);
+    serve_next(listener.try_clone().unwrap(), server.clone(), uid, 101);
     let (proof, intent) = ambiguous.parts();
     assert!(matches!(
         client
@@ -444,6 +444,79 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         failure.outcome.as_deref(),
         Some("failed to persist endpoint ownership")
     );
+
+    // If only the result receipt write fails, restart observes the complete live
+    // endpoint state and resolves OutcomeUnknown without replaying the effect.
+    let recovery_request = ManagedOverlayRequest::AttachContainer {
+        overlay_id: "wg0".into(),
+        container_id: "container-d".into(),
+        now_unix: 210,
+    };
+    let recovery = authorize_attach(
+        Arc::new(AuthorizationGate::new(Arc::new(
+            PolicyStore::load(&policy_path).unwrap(),
+        ))),
+        Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                directory.path().join("witness-recovery"),
+                [71; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        ),
+        "container-d",
+        7,
+        "wg0",
+    )
+    .unwrap();
+    faults.fail_once(FaultPoint::ResultPersist);
+    serve_next(listener, server.clone(), uid, 211);
+    let (proof, intent) = recovery.parts();
+    assert!(matches!(
+        client
+            .request_authorized(
+                &recovery_request,
+                proof,
+                intent,
+                &issuer(&key_path, uid),
+                "boot-a",
+                1_000,
+                u64::MAX,
+                [5; 16],
+                "runtime",
+            )
+            .unwrap(),
+        ManagedOverlayResponse::Rejected { .. }
+    ));
+    drop(client);
+    drop(local);
+    drop(server);
+    let recovered = NetdServer::deterministic_with_faults(
+        uid,
+        Policy::new(
+            "cluster-a".into(),
+            "node-a".into(),
+            &base64::engine::general_purpose::STANDARD
+                .encode(envelope_key.verifying_key().to_bytes()),
+        )
+        .unwrap(),
+        directory.path().join("kernel.json"),
+        FaultHandle::default(),
+    )
+    .with_authorization_identity(service_mode, "boot-a")
+    .with_grants(GrantVerifier::new(
+        helper_key.verifying_key(),
+        "runtime",
+        "key-1",
+        "boot-a",
+        GrantLedger::open(directory.path().join("netd-grants.json")).unwrap(),
+    ))
+    .load_journal(directory.path().join("netd-state.json"))
+    .unwrap();
+    assert!(recovered.test_snapshot().receipts.iter().any(|receipt| {
+        receipt.outcome.as_deref() == Some("recovered_after_unknown_effect")
+            && receipt.phase == "succeeded"
+    }));
 }
 
 #[test]

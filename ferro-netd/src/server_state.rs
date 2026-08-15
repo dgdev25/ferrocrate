@@ -1,3 +1,4 @@
+use crate::kernel_ops::LiveEffectObservation;
 use crate::{grants_recovery::RecoveryObservation, server::NetdServer};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -57,10 +58,19 @@ impl NetdServer {
                     } else {
                         !receipts.contains_key(&identity)
                     };
-                    if name.is_empty() || kernel.observe_link(name) != owned || !receipt_matches {
-                        RecoveryObservation::Conflict
-                    } else {
-                        RecoveryObservation::Consistent(owned)
+                    if name.is_empty() || !receipt_matches {
+                        return RecoveryObservation::Conflict;
+                    }
+                    match kernel.observe_effect(receipt) {
+                        LiveEffectObservation::Exact => {
+                            RecoveryObservation::Consistent(receipt.expected_exists())
+                        }
+                        LiveEffectObservation::Absent if !owned => {
+                            RecoveryObservation::Consistent(false)
+                        }
+                        LiveEffectObservation::Absent
+                        | LiveEffectObservation::Mismatch
+                        | LiveEffectObservation::Unknown => RecoveryObservation::Conflict,
                     }
                 })
                 .map_err(|error| error.to_string())?;

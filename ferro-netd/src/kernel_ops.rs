@@ -8,8 +8,20 @@ use ferro_net::{
 };
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LiveEffectObservation {
+    Exact,
+    Absent,
+    Mismatch,
+    Unknown,
+}
+
 pub(crate) trait NetKernelOps: Send {
     fn observe_link(&self, name: &str) -> bool;
+    fn observe_effect(
+        &self,
+        receipt: &crate::effect_receipt::EffectReceipt,
+    ) -> LiveEffectObservation;
     fn create_overlay(&mut self, name: &str) -> Result<(), String>;
     fn remove_overlay(&mut self, name: &str) -> Result<(), String>;
     fn create_endpoint(&mut self, config: &VethConfig) -> Result<(), String>;
@@ -50,6 +62,78 @@ impl NetKernelOps for RealNetKernelOps {
             name.into(),
         ])
         .is_ok()
+    }
+    fn observe_effect(
+        &self,
+        receipt: &crate::effect_receipt::EffectReceipt,
+    ) -> LiveEffectObservation {
+        use crate::effect_receipt::{digest_sorted, peer_digest, EffectReceipt};
+        match receipt {
+            EffectReceipt::Overlay {
+                overlay_id,
+                peer_digest: expected_peers,
+                address_digest,
+                route_digest,
+                expected_exists,
+                ..
+            } => {
+                if !self.observe_link(overlay_id) {
+                    return if *expected_exists {
+                        LiveEffectObservation::Absent
+                    } else {
+                        LiveEffectObservation::Exact
+                    };
+                }
+                if !expected_exists {
+                    return LiveEffectObservation::Mismatch;
+                }
+                let routes = match observe_routes(overlay_id) {
+                    Ok(value) => value,
+                    Err(()) => return LiveEffectObservation::Unknown,
+                };
+                let addresses = match observe_addresses(overlay_id) {
+                    Ok(value) => value,
+                    Err(()) => return LiveEffectObservation::Unknown,
+                };
+                let peers = match observe_wireguard_peers(overlay_id) {
+                    Ok(value) => value,
+                    Err(()) => return LiveEffectObservation::Unknown,
+                };
+                if digest_sorted(&routes) == *route_digest
+                    && digest_sorted(&addresses) == *address_digest
+                    && peer_digest(&peers) == *expected_peers
+                {
+                    LiveEffectObservation::Exact
+                } else {
+                    LiveEffectObservation::Mismatch
+                }
+            }
+            EffectReceipt::Endpoint {
+                endpoint_id,
+                overlay_id,
+                netns_name,
+                netns_inode,
+                expected_exists,
+                ..
+            } => {
+                if !self.observe_link(endpoint_id) {
+                    return if *expected_exists {
+                        LiveEffectObservation::Absent
+                    } else {
+                        LiveEffectObservation::Exact
+                    };
+                }
+                if !expected_exists {
+                    return LiveEffectObservation::Mismatch;
+                }
+                match observe_endpoint(endpoint_id, overlay_id, netns_name.as_deref(), *netns_inode)
+                {
+                    Ok(true) => LiveEffectObservation::Exact,
+                    Ok(false) => LiveEffectObservation::Mismatch,
+                    Err(()) => LiveEffectObservation::Unknown,
+                }
+            }
+        }
     }
     fn create_overlay(&mut self, name: &str) -> Result<(), String> {
         create_bridge(&BridgeConfig {
@@ -159,110 +243,121 @@ impl NetKernelOps for RealNetKernelOps {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) mod deterministic {
-    use super::*;
-    use std::{collections::BTreeSet, path::PathBuf};
-    pub(crate) struct PersistentKernelOps {
-        path: PathBuf,
-        links: BTreeSet<String>,
-        faults: crate::test_support::FaultHandle,
-    }
-    impl PersistentKernelOps {
-        pub(crate) fn open(path: PathBuf) -> Self {
-            let links = std::fs::read(&path)
-                .ok()
-                .and_then(|v| serde_json::from_slice(&v).ok())
-                .unwrap_or_default();
-            Self {
-                path,
-                links,
-                faults: Default::default(),
-            }
-        }
-        pub(crate) fn with_faults(path: PathBuf, faults: crate::test_support::FaultHandle) -> Self {
-            let mut value = Self::open(path);
-            value.faults = faults;
-            value
-        }
-        fn effect(&self) -> Result<(), String> {
-            if self.faults.take(crate::test_support::FaultPoint::Effect) {
-                Err("injected effect failure".into())
-            } else {
-                Ok(())
-            }
-        }
-        fn save(&self) -> Result<(), String> {
-            std::fs::write(
-                &self.path,
-                serde_json::to_vec(&self.links).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())
-        }
-    }
-    impl NetKernelOps for PersistentKernelOps {
-        fn observe_link(&self, name: &str) -> bool {
-            self.links.contains(name)
-        }
-        fn create_overlay(&mut self, name: &str) -> Result<(), String> {
-            self.effect()?;
-            self.links.insert(name.into());
-            self.save()
-        }
-        fn remove_overlay(&mut self, name: &str) -> Result<(), String> {
-            self.effect()?;
-            self.links.remove(name);
-            self.save()
-        }
-        fn create_endpoint(&mut self, config: &VethConfig) -> Result<(), String> {
-            self.effect()?;
-            self.links.insert(config.pair.host.clone());
-            self.save()
-        }
-        fn attach_endpoint(&mut self, _: &str, _: &str) -> Result<(), String> {
-            self.effect()
-        }
-        fn move_endpoint(&mut self, _: &str, _: &str) -> Result<(), String> {
-            self.effect()
-        }
-        fn remove_endpoint(&mut self, endpoint: &str) -> Result<(), String> {
-            self.effect()?;
-            self.links.remove(endpoint);
-            self.save()
-        }
-        fn apply_routes(&mut self, _: &str, _: &[String]) -> Result<(), String> {
-            self.effect()
-        }
-        fn remove_routes(&mut self, _: &str, _: &[String]) -> Result<(), String> {
-            self.effect()
-        }
-        fn apply_wireguard(&mut self, _: &str, _: &[String], _: &[PeerSpec]) -> Result<(), String> {
-            self.effect()
-        }
-        fn remove_wireguard(&mut self, _: &str) -> Result<(), String> {
-            self.effect()
-        }
-    }
-
-    #[test]
-    fn deterministic_backend_recovers_observed_links() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("kernel.json");
-        let mut first = PersistentKernelOps::open(path.clone());
-        first.create_overlay("overlay-a").unwrap();
-        drop(first);
-        assert!(PersistentKernelOps::open(path).observe_link("overlay-a"));
-    }
-
-    #[test]
-    fn injected_effect_failure_is_one_shot() {
-        let directory = tempfile::tempdir().unwrap();
-        let faults = crate::test_support::FaultHandle::default();
-        faults.fail_once(crate::test_support::FaultPoint::Effect);
-        let mut kernel =
-            PersistentKernelOps::with_faults(directory.path().join("kernel.json"), faults);
-        assert!(kernel.create_overlay("overlay-a").is_err());
-        kernel.create_overlay("overlay-a").unwrap();
-        assert!(kernel.observe_link("overlay-a"));
-    }
+fn observe_routes(interface: &str) -> Result<Vec<String>, ()> {
+    let output = exec_cmd_capture(&[
+        "ip".into(),
+        "-j".into(),
+        "route".into(),
+        "show".into(),
+        "dev".into(),
+        interface.into(),
+    ])
+    .map_err(|_| ())?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|_| ())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("dst")?.as_str().map(str::to_owned))
+        .collect())
 }
+
+fn observe_addresses(interface: &str) -> Result<Vec<String>, ()> {
+    let output = exec_cmd_capture(&[
+        "ip".into(),
+        "-j".into(),
+        "addr".into(),
+        "show".into(),
+        "dev".into(),
+        interface.into(),
+    ])
+    .map_err(|_| ())?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|_| ())?;
+    Ok(rows
+        .iter()
+        .flat_map(|row| {
+            row.get("addr_info")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|address| {
+            Some(format!(
+                "{}/{}",
+                address.get("local")?.as_str()?,
+                address.get("prefixlen")?.as_u64()?
+            ))
+        })
+        .collect())
+}
+
+fn observe_wireguard_peers(interface: &str) -> Result<Vec<PeerSpec>, ()> {
+    let output = exec_cmd_capture(&["wg".into(), "show".into(), interface.into(), "dump".into()])
+        .map_err(|_| ())?;
+    Ok(output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (fields.len() >= 4).then(|| PeerSpec {
+                node_id: String::new(),
+                public_key: fields[0].to_owned(),
+                endpoint: fields[2].to_owned(),
+                allowed_ips: fields[3]
+                    .split(',')
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        })
+        .collect())
+}
+
+fn observe_endpoint(
+    endpoint: &str,
+    overlay: &str,
+    netns: Option<&str>,
+    expected_inode: Option<u64>,
+) -> Result<bool, ()> {
+    let output = exec_cmd_capture(&[
+        "ip".into(),
+        "-j".into(),
+        "link".into(),
+        "show".into(),
+        "dev".into(),
+        endpoint.into(),
+    ])
+    .map_err(|_| ())?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|_| ())?;
+    let master_matches = rows
+        .first()
+        .and_then(|row| row.get("master"))
+        .and_then(serde_json::Value::as_str)
+        == Some(overlay);
+    let Some(namespace) = netns else {
+        return Ok(master_matches);
+    };
+    use std::os::unix::fs::MetadataExt;
+    let inode = std::fs::metadata(format!("/var/run/netns/{namespace}"))
+        .map_err(|_| ())?
+        .ino();
+    if expected_inode != Some(inode) {
+        return Ok(false);
+    }
+    let peer = format!("fc-{endpoint}");
+    let peer_exists = exec_cmd_capture(&[
+        "ip".into(),
+        "netns".into(),
+        "exec".into(),
+        namespace.into(),
+        "ip".into(),
+        "link".into(),
+        "show".into(),
+        "dev".into(),
+        peer,
+    ])
+    .is_ok();
+    Ok(master_matches && peer_exists)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "kernel_deterministic.rs"]
+pub(crate) mod deterministic;

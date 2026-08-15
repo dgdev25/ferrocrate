@@ -48,6 +48,15 @@ impl NetdServer {
         identity: String,
         outcome: &str,
     ) -> Result<(), GrantError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .test_faults
+            .take(crate::test_support::FaultPoint::ResultPersist)
+        {
+            return Err(GrantError::Io(std::io::Error::other(
+                "injected result persistence failure",
+            )));
+        }
         if let Some(verifier) = self.grants.as_mut() {
             verifier.record_result(
                 &ConsumedGrant::restored(request_id, nonce),

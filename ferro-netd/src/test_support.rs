@@ -94,6 +94,7 @@ impl NetdServer {
 pub enum FaultPoint {
     Effect,
     StatePersist,
+    ResultPersist,
 }
 
 #[derive(Clone, Default)]

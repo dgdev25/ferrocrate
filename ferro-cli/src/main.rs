@@ -4340,6 +4340,7 @@ fn hex_id(id: &[u8; 16]) -> String {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn run_compose_service(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,

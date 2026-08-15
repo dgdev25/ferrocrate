@@ -60,9 +60,18 @@ Durable helper minting now verifies the journaled canonical request digest again
 
 A controller-signed, revision-bound `DesiredAuthorizationBundle` transport and enforcing agent consumer were added. The agent verifies the desired-state digest and exact apply/remove transition, then forwards only the provided per-operation `GrantedEnvelope` values. Legacy reconciliation is available only through explicit disabled mode. Because the controller currently has neither a legitimate root per-overlay grant issuer nor persisted authorization bundles, non-empty production desired state fails closed instead of exercising ambient authority; completing that producer requires extending controller authorization and persistence.
 
+The final hardening pass completed that producer: a custody-checked controller issuer evaluates the complete exact diff, denies the whole revision when any resource lacks canonical policy authorization, issues unique per-child grants, and atomically persists the desired state with its signed bundle. RPC retrieves the same stored pair and the agent accepts a bounded overlap key during controller rotation.
+
+Successful endpoint creation now fsyncs cleanup provenance including the attach child request, canonical resource generation, overlay/container/netns, and netd-compatible live identity. Detach accepts only a deletion-only cleanup parent matching that provenance. Disabled compatibility uses an explicit versioned `mode=disabled` envelope and requires both authenticated peer transport and disabled server policy.
+
+Netd production configuration now loads a bounded verification keyring rather than a single ambient key. Accepted endpoint syscall/storage failures are durably recorded as failed results, while a restart with an armed unknown effect writes a correlated quarantine outcome and never makes the nonce replayable.
+
 Additional verification:
 
 - `cargo test -p ferro-mgr --lib` — PASS (7 tests, including restart and separate-process ledger exclusion).
 - `cargo test -p ferro-core authorization:: --lib` — PASS (46 tests).
 - `cargo test -p ferro-core witness::journal --lib` — PASS.
 - `cargo check -p ferro-mgr --lib --bin ferro-agent` — PASS.
+- `cargo test -p ferro-netd` — PASS (15 tests, including real server/granted-wire, ancillary FD rejection, replay/restart, key overlap, and unknown-effect quarantine).
+- `cargo test -p ferro-mgr` — PASS (all unit/integration/doc tests; 14 focused authorization tests).
+- `cargo clippy -p ferro-core -p ferro-mgr -p ferro-netd --all-targets` — PASS with documented pre-existing warnings.

@@ -10,7 +10,7 @@ service AdminService {
 
 message EnrollRequest { string node_id = 1; bytes public_key = 2; string enrollment_token = 3; bytes csr = 4; string endpoint = 5; }
 message EnrollResponse { string cluster_id = 1; uint64 cluster_epoch = 2; bytes certificate = 3; bytes ca_certificate = 4; }
-message OverlayState { string overlay_id = 1; repeated string routes = 2; repeated Peer peers = 3; }
+message OverlayState { string overlay_id = 1; repeated string routes = 2; repeated Peer peers = 3; optional bool wireguard = 4; }
 message Peer { string node_id = 1; bytes public_key = 2; string endpoint = 3; repeated string allowed_ips = 4; }
 message DesiredState { string cluster_id = 1; uint64 cluster_epoch = 2; uint64 revision = 3; repeated OverlayState overlays = 4; bytes signature = 5; int64 lease_expires_unix = 6; }
 message AgentMessage { string node_id = 1; uint64 acknowledged_revision = 2; bytes payload = 3; }

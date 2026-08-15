@@ -1,140 +1,18 @@
-use crate::kernel_ops::{NetKernelOps, RealNetKernelOps};
-use crate::policy::Policy;
+use crate::protocol::{GrantedEnvelope, NetdRequest, NetdResponse, RejectionCode, SignedEnvelope};
 use crate::request_binding::{request_overlay_id, request_parameters};
+pub use crate::server_config::NetdServer;
 use crate::server_grants::reject;
-use crate::{
-    grants::GrantVerifier,
-    protocol::{
-        DesiredStateEnvelope, GrantedDesiredStateEnvelope, GrantedEnvelope, NetdRequest,
-        NetdResponse, RejectionCode, SignedEnvelope, MAX_FRAME_BYTES,
-    },
-};
-use ferro_core::authorization::AuthorizationServiceMode;
 use ferro_net::{
     bridge::build_ip_link_set_master_cmd,
     veth::{VethConfig, VethPair},
 };
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
-
-pub struct NetdServer {
-    uid: u32,
-    policy: Policy,
-    pub(crate) grants: Option<GrantVerifier>,
-    pub(crate) overlays: BTreeSet<String>,
-    pub(crate) endpoints: BTreeMap<String, String>,
-    pub(crate) routes: BTreeMap<String, Vec<String>>,
-    pub(crate) effect_receipts: BTreeMap<String, crate::effect_receipt::EffectReceipt>,
-    authorization_identity: Option<(AuthorizationServiceMode, String)>,
-    pub(crate) journal: Option<PathBuf>,
-    pub(crate) kernel: Box<dyn NetKernelOps>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) test_faults: crate::test_support::FaultHandle,
-}
 impl NetdServer {
-    pub fn new(uid: u32, policy: Policy) -> Self {
-        Self {
-            uid,
-            policy,
-            grants: None,
-            overlays: BTreeSet::new(),
-            endpoints: BTreeMap::new(),
-            routes: BTreeMap::new(),
-            effect_receipts: BTreeMap::new(),
-            authorization_identity: None,
-            journal: None,
-            kernel: Box::new(RealNetKernelOps::new()),
-            #[cfg(any(test, feature = "test-support"))]
-            test_faults: Default::default(),
-        }
-    }
-    pub fn with_grants(mut self, grants: GrantVerifier) -> Self {
-        self.grants = Some(grants);
-        self
-    }
-    pub fn with_wireguard(
-        uid: u32,
-        policy: Policy,
-        private_key_path: PathBuf,
-        listen_port: u16,
-    ) -> Self {
-        Self {
-            uid,
-            policy,
-            grants: None,
-            overlays: BTreeSet::new(),
-            endpoints: BTreeMap::new(),
-            routes: BTreeMap::new(),
-            effect_receipts: BTreeMap::new(),
-            authorization_identity: None,
-            journal: None,
-            kernel: Box::new(RealNetKernelOps::with_wireguard(
-                private_key_path,
-                listen_port,
-            )),
-            #[cfg(any(test, feature = "test-support"))]
-            test_faults: Default::default(),
-        }
-    }
-    pub fn with_authorization_identity(
-        mut self,
-        mode: AuthorizationServiceMode,
-        instance_boot: impl Into<String>,
-    ) -> Self {
-        self.authorization_identity = Some((mode, instance_boot.into()));
-        self
-    }
     pub fn handle_peer(&mut self, uid: u32, frame: &[u8], now: u64) -> NetdResponse {
-        if uid != self.uid {
-            return reject(RejectionCode::UnauthorizedPeer, "unexpected Unix peer UID");
+        if let Err(response) = self.validate_frame(uid, frame) {
+            return response;
         }
-        if frame.len() > MAX_FRAME_BYTES + 4 {
-            return reject(RejectionCode::OversizedFrame, "frame exceeds 1 MiB");
-        }
-        if frame.len() < 4 {
-            return reject(RejectionCode::InvalidFrame, "missing frame prefix");
-        }
-        let length = u32::from_be_bytes(frame[..4].try_into().expect("prefix")) as usize;
-        if length > MAX_FRAME_BYTES || length != frame.len() - 4 {
-            return reject(RejectionCode::OversizedFrame, "invalid frame length");
-        }
-        let granted_desired =
-            serde_json::from_slice::<GrantedDesiredStateEnvelope>(&frame[4..]).ok();
-        if granted_desired.is_some() {
-            return reject(
-                RejectionCode::PolicyViolation,
-                "bulk desired-state grants are forbidden; submit one authorized mutation per resource",
-            );
-        }
-        if let Ok(desired) = serde_json::from_slice::<DesiredStateEnvelope>(&frame[4..]) {
-            let Some((expected, boot)) = &self.authorization_identity else {
-                return reject(
-                    RejectionCode::PolicyViolation,
-                    "service mode is not configured",
-                );
-            };
-            let peer = match AuthorizationServiceMode::parse(
-                &desired.handshake.mode,
-                desired.handshake.policy_digest,
-            ) {
-                Ok(value) => value,
-                Err(_) => return reject(RejectionCode::PolicyViolation, "invalid service mode"),
-            };
-            if expected.mode() != ferro_core::authorization::AuthorizationMode::Disabled
-                || expected.require_match(peer).is_err()
-                || desired.handshake.instance_boot != *boot
-            {
-                return reject(
-                    RejectionCode::PolicyViolation,
-                    "legacy desired state is available only on matching disabled service",
-                );
-            }
-            if let Err(code) = self.policy.validate_desired(&desired, now) {
-                return reject(code, "legacy desired signature or revision rejected");
-            }
-            return self
-                .apply_legacy_desired(&desired)
-                .unwrap_or_else(|code| reject(code, "legacy desired mutation failed"));
+        if let Some(response) = self.try_legacy_frame(&frame[4..], now) {
+            return response;
         }
         let granted: GrantedEnvelope = match serde_json::from_slice(&frame[4..]) {
             Ok(value) => value,
@@ -152,20 +30,11 @@ impl NetdServer {
                 );
             }
         };
-        if let Some((expected, boot)) = &self.authorization_identity {
-            let peer = match AuthorizationServiceMode::parse(
-                &granted.handshake.mode,
-                granted.handshake.policy_digest,
-            ) {
-                Ok(value) => value,
-                Err(_) => return reject(RejectionCode::PolicyViolation, "invalid service mode"),
-            };
-            if expected.require_match(peer).is_err() || granted.handshake.instance_boot != *boot {
-                return reject(
-                    RejectionCode::PolicyViolation,
-                    "authorization service identity mismatch",
-                );
-            }
+        if !self.validate_granted_handshake(&granted.handshake) {
+            return reject(
+                RejectionCode::PolicyViolation,
+                "authorization service identity mismatch",
+            );
         }
         let envelope = granted.envelope;
         if let Err(code) = self.policy.validate(&envelope, now) {
@@ -175,6 +44,17 @@ impl NetdServer {
             Ok(value) => value,
             Err(code) => return reject(code, "invalid normalized parameters"),
         };
+        if self.request_is_quarantined(&envelope.request) {
+            self.policy.rollback(
+                request_overlay_id(&envelope.request),
+                envelope.epoch,
+                envelope.revision,
+            );
+            return reject(
+                RejectionCode::PolicyViolation,
+                "resource has unverifiable legacy ownership and requires operator reconciliation",
+            );
+        }
         let effect_receipt = crate::effect_receipt::EffectReceipt::from_request(
             &envelope.request,
             granted.resource_generation,
@@ -213,31 +93,70 @@ impl NetdServer {
         match envelope.request {
             NetdRequest::ApplyOverlay {
                 overlay_id,
+                mode,
                 peers,
                 routes,
                 addresses,
             } => {
+                let interfaces = crate::interface_identity::overlay_interfaces(&overlay_id);
+                let created_bridge = !self.overlays.contains(&overlay_id);
+                let identity = format!("overlay:{overlay_id}");
+                let previous_routes = self.routes.get(&overlay_id).cloned().unwrap_or_default();
+                let previous_addresses =
+                    self.addresses.get(&overlay_id).cloned().unwrap_or_default();
+                let previous_receipt = self.effect_receipts.get(&identity).cloned();
+                let previous_interface = previous_receipt
+                    .as_ref()
+                    .and_then(crate::effect_receipt::EffectReceipt::route_interface)
+                    .map(str::to_owned);
+                if created_bridge {
+                    if self.kernel.create_overlay(&interfaces.bridge).is_err() {
+                        reject_effect!(
+                            RejectionCode::Busy,
+                            "failed to create overlay bridge",
+                            format!("overlay:{overlay_id}")
+                        );
+                    }
+                }
+                let route_interface = match mode {
+                    crate::protocol::OverlayMode::WireGuard => {
+                        if self
+                            .kernel
+                            .apply_wireguard(&interfaces.wireguard, &[], &peers)
+                            .is_err()
+                        {
+                            if created_bridge {
+                                let _ = self.kernel.remove_overlay(&interfaces.bridge);
+                            }
+                            reject_effect!(
+                                RejectionCode::Busy,
+                                "failed to apply required WireGuard overlay",
+                                format!("overlay:{overlay_id}")
+                            );
+                        }
+                        if self.kernel.ensure_forwarding().is_err() {
+                            reject_effect!(
+                                RejectionCode::Busy,
+                                "failed to enable routed overlay forwarding",
+                                identity.clone()
+                            );
+                        }
+                        interfaces.wireguard.as_str()
+                    }
+                    crate::protocol::OverlayMode::BridgeOnly => interfaces.bridge.as_str(),
+                };
                 if self
                     .kernel
-                    .apply_wireguard(&overlay_id, &addresses, &peers)
+                    .apply_addresses(&interfaces.bridge, &addresses)
                     .is_err()
                 {
                     reject_effect!(
                         RejectionCode::Busy,
-                        "failed to apply WireGuard overlay",
-                        format!("overlay:{overlay_id}")
+                        "failed to apply bridge gateway addresses",
+                        identity.clone()
                     );
                 }
-                if !self.overlays.contains(&overlay_id)
-                    && self.kernel.create_overlay(&overlay_id).is_err()
-                {
-                    reject_effect!(
-                        RejectionCode::Busy,
-                        "failed to create overlay bridge",
-                        format!("overlay:{overlay_id}")
-                    );
-                }
-                if self.kernel.apply_routes(&overlay_id, &routes).is_err() {
+                if self.kernel.apply_routes(route_interface, &routes).is_err() {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
                     reject_effect!(
@@ -246,17 +165,83 @@ impl NetdServer {
                         format!("overlay:{overlay_id}")
                     );
                 }
+                if let Some(previous_interface) = previous_interface.as_deref() {
+                    let obsolete = if previous_interface == route_interface {
+                        previous_routes
+                            .iter()
+                            .filter(|route| !routes.contains(route))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    } else {
+                        previous_routes.clone()
+                    };
+                    if self
+                        .kernel
+                        .remove_routes(previous_interface, &obsolete)
+                        .is_err()
+                    {
+                        reject_effect!(
+                            RejectionCode::Busy,
+                            "failed to remove obsolete overlay routes",
+                            identity.clone()
+                        );
+                    }
+                }
+                let obsolete_addresses = previous_addresses
+                    .iter()
+                    .filter(|address| !addresses.contains(address))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if self
+                    .kernel
+                    .remove_addresses(&interfaces.bridge, &obsolete_addresses)
+                    .is_err()
+                {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to remove obsolete bridge addresses",
+                        identity.clone()
+                    );
+                }
+                if previous_receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.overlay_mode())
+                    == Some(crate::protocol::OverlayMode::WireGuard)
+                    && mode == crate::protocol::OverlayMode::BridgeOnly
+                    && self.kernel.remove_wireguard(&interfaces.wireguard).is_err()
+                {
+                    reject_effect!(
+                        RejectionCode::Busy,
+                        "failed to remove obsolete WireGuard overlay",
+                        identity.clone()
+                    );
+                }
                 self.overlays.insert(overlay_id.clone());
                 self.routes.insert(overlay_id.clone(), routes);
+                self.addresses.insert(overlay_id.clone(), addresses);
                 self.effect_receipts
-                    .insert(format!("overlay:{overlay_id}"), effect_receipt);
+                    .insert(identity.clone(), effect_receipt);
                 if self.persist().is_err() {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
-                    self.overlays.remove(&overlay_id);
-                    self.effect_receipts
-                        .remove(&format!("overlay:{overlay_id}"));
-                    let _ = self.kernel.remove_overlay(&overlay_id);
+                    if created_bridge {
+                        self.overlays.remove(&overlay_id);
+                        self.routes.remove(&overlay_id);
+                        self.addresses.remove(&overlay_id);
+                        self.effect_receipts.remove(&identity);
+                        if mode == crate::protocol::OverlayMode::WireGuard {
+                            let _ = self.kernel.remove_wireguard(&interfaces.wireguard);
+                        }
+                        let _ = self.kernel.remove_overlay(&interfaces.bridge);
+                    } else {
+                        self.overlays.insert(overlay_id.clone());
+                        self.routes.insert(overlay_id.clone(), previous_routes);
+                        self.addresses
+                            .insert(overlay_id.clone(), previous_addresses);
+                        if let Some(previous) = previous_receipt {
+                            self.effect_receipts.insert(identity.clone(), previous);
+                        }
+                    }
                     reject_effect!(
                         RejectionCode::Busy,
                         "failed to persist overlay ownership",
@@ -277,16 +262,20 @@ impl NetdServer {
                 NetdResponse::Applied
             }
             NetdRequest::RemoveOverlay { overlay_id } => {
-                if self.kernel.remove_wireguard(&overlay_id).is_err() {
-                    reject_effect!(
-                        RejectionCode::Busy,
-                        "failed to remove WireGuard overlay",
-                        format!("overlay:{overlay_id}")
-                    );
-                }
-                if self.overlays.contains(&overlay_id) {
+                let interfaces = crate::interface_identity::overlay_interfaces(&overlay_id);
+                let identity = format!("overlay:{overlay_id}");
+                let owned_routes = self.routes.get(&overlay_id).cloned();
+                let owned_addresses = self.addresses.get(&overlay_id).cloned();
+                let owned_receipt = self.effect_receipts.get(&identity).cloned();
+                let was_owned = self.overlays.contains(&overlay_id);
+                if was_owned {
                     if let Some(routes) = self.routes.get(&overlay_id) {
-                        if self.kernel.remove_routes(&overlay_id, routes).is_err() {
+                        let route_interface = self
+                            .effect_receipts
+                            .get(&format!("overlay:{overlay_id}"))
+                            .and_then(crate::effect_receipt::EffectReceipt::route_interface)
+                            .unwrap_or(&interfaces.wireguard);
+                        if self.kernel.remove_routes(route_interface, routes).is_err() {
                             reject_effect!(
                                 RejectionCode::Busy,
                                 "failed to remove overlay routes",
@@ -294,19 +283,53 @@ impl NetdServer {
                             );
                         }
                     }
-                    self.routes.remove(&overlay_id);
-                    self.overlays.remove(&overlay_id);
-                    if self.kernel.remove_overlay(&overlay_id).is_err() {
+                    if let Some(addresses) = self.addresses.get(&overlay_id) {
+                        if self
+                            .kernel
+                            .remove_addresses(&interfaces.bridge, addresses)
+                            .is_err()
+                        {
+                            reject_effect!(
+                                RejectionCode::Busy,
+                                "failed to remove bridge addresses",
+                                format!("overlay:{overlay_id}")
+                            );
+                        }
+                    }
+                    if self.kernel.observe_link(&interfaces.wireguard)
+                        && self.kernel.remove_wireguard(&interfaces.wireguard).is_err()
+                    {
+                        reject_effect!(
+                            RejectionCode::Busy,
+                            "failed to remove WireGuard overlay",
+                            format!("overlay:{overlay_id}")
+                        );
+                    }
+                    if self.kernel.remove_overlay(&interfaces.bridge).is_err() {
                         reject_effect!(
                             RejectionCode::Busy,
                             "failed to remove overlay bridge",
                             format!("overlay:{overlay_id}")
                         );
                     }
+                    self.routes.remove(&overlay_id);
+                    self.addresses.remove(&overlay_id);
+                    self.overlays.remove(&overlay_id);
                 }
-                self.effect_receipts
-                    .remove(&format!("overlay:{overlay_id}"));
+                self.effect_receipts.remove(&identity);
                 if self.persist().is_err() {
+                    if was_owned {
+                        self.overlays.insert(overlay_id.clone());
+                    }
+                    if let Some(routes) = owned_routes {
+                        self.routes.insert(overlay_id.clone(), routes);
+                    }
+                    if let Some(addresses) = owned_addresses {
+                        self.addresses.insert(overlay_id.clone(), addresses);
+                    }
+                    if let Some(receipt) = owned_receipt {
+                        self.effect_receipts.insert(identity.clone(), receipt);
+                    }
                     reject_effect!(
                         RejectionCode::Busy,
                         "failed to persist overlay deletion",
@@ -332,7 +355,13 @@ impl NetdServer {
                 netns,
             } => {
                 if let Some(existing_overlay) = self.endpoints.get(&endpoint_id) {
-                    if existing_overlay != &overlay_id || !self.kernel.observe_link(&endpoint_id) {
+                    let stored_receipt =
+                        self.effect_receipts.get(&format!("endpoint:{endpoint_id}"));
+                    if existing_overlay != &overlay_id
+                        || stored_receipt != Some(&effect_receipt)
+                        || self.kernel.observe_effect(&effect_receipt)
+                            != crate::kernel_ops::LiveEffectObservation::Exact
+                    {
                         reject_effect!(
                             RejectionCode::PolicyViolation,
                             "endpoint identity conflict",
@@ -353,6 +382,7 @@ impl NetdServer {
                     return NetdResponse::Attached;
                 }
                 let container = format!("fc-{endpoint_id}");
+                let bridge = crate::interface_identity::overlay_interfaces(&overlay_id).bridge;
                 let config = VethConfig {
                     pair: VethPair {
                         host: endpoint_id.clone(),
@@ -369,7 +399,7 @@ impl NetdServer {
                         format!("endpoint:{endpoint_id}")
                     );
                 }
-                if build_ip_link_set_master_cmd(&endpoint_id, &overlay_id).is_err() {
+                if build_ip_link_set_master_cmd(&endpoint_id, &bridge).is_err() {
                     let _ = self.kernel.remove_endpoint(&endpoint_id);
                     reject_effect!(
                         RejectionCode::PolicyViolation,
@@ -377,11 +407,7 @@ impl NetdServer {
                         format!("endpoint:{endpoint_id}")
                     );
                 }
-                if self
-                    .kernel
-                    .attach_endpoint(&endpoint_id, &overlay_id)
-                    .is_err()
-                {
+                if self.kernel.attach_endpoint(&endpoint_id, &bridge).is_err() {
                     let _ = self.kernel.remove_endpoint(&endpoint_id);
                     reject_effect!(
                         RejectionCode::Busy,
@@ -463,21 +489,7 @@ impl NetdServer {
                 NetdResponse::Detached
             }
             NetdRequest::Inspect { overlay_id } => {
-                if self
-                    .record_grant_result(
-                        &request_id,
-                        nonce,
-                        format!("overlay:{overlay_id}"),
-                        "inspected",
-                    )
-                    .is_err()
-                {
-                    return reject(RejectionCode::Busy, "result witness unavailable");
-                }
-                NetdResponse::Snapshot {
-                    overlay_id,
-                    revision: envelope.revision,
-                }
+                self.finish_inspect(&request_id, nonce, overlay_id, envelope.revision)
             }
         }
     }

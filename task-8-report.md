@@ -48,3 +48,27 @@ Round 4 verification:
 
 - `cargo test -p ferro-netd --all-targets --quiet` — passed: 6 library tests, 2 binary tests, 7 grant tests and 6 socket tests.
 - `cargo test -p ferro-mgr --all-targets --quiet` — passed: 19 manager unit tests and every integration target, including authenticated PublishDesired, global sequence restart, matching/mismatching handshakes, disabled nonempty-to-empty reconciliation, and real Unix cross-stack mutation.
+
+## Production topology correction
+
+- Each canonical overlay now derives two stable, collision-resistant Linux interface identities: `fb<12 hex>` for the bridge and `fw<12 hex>` for WireGuard. Both are 14 bytes, below `IFNAMSIZ`, and are bound into controller grants, normalized request parameters, effect receipts and persisted ownership.
+- Desired state carries an explicit signed `wireguard` mode. Netd creates the bridge first, then the distinct WireGuard link when required, configures addresses/peers and routes on the mode-selected interface, and always enslaves endpoint veths to the bridge. Removal reverses that order and proves both links absent.
+- Production WireGuard apply/remove fails closed when key configuration is unavailable. Bridge-only mode is explicit rather than inferred from missing configuration.
+- Live and deterministic observations verify the bridge and WireGuard link kinds independently. Stale WireGuard state prevents successful deletion recovery; a wrong bridge master, missing topology link, peer/address/route mismatch, or link-name kind collision cannot become an idempotent success.
+- Ownership journals written before interface identities were recorded deserialize as legacy and are quarantined for operator reconciliation rather than mutated under guessed topology.
+- The deterministic command recorder asserts ordered, distinct `ip link add ... type bridge`, `ip link add ... type wireguard`, `wg set`, route, veth, and bridge-master effects. The unprivileged test environment cannot safely run an actual root-namespace fixture.
+
+Topology verification:
+
+- `cargo test -p ferro-netd --all-features --quiet` — passed: 9 library tests, 2 binary tests, 7 grant tests and 6 socket tests.
+- `cargo test -p ferro-mgr --all-targets --quiet` — all unit and integration targets passed.
+- `cargo test -p ferro-core managed_overlay --quiet` — stable interface identity test passed.
+- Task-owned netd modules remain at or below 500 lines (`server.rs` 496, `kernel_deterministic.rs` 500, `grants.rs` 499).
+
+Focused review corrections:
+
+- Updates snapshot prior ownership. A persistence failure cleans up only topology created by that request; existing topology is retained with its prior durable receipt so restart observation quarantines any partial live transition instead of deleting a working network.
+- Mode transitions remove obsolete routes from the prior interface and remove the WireGuard link on WireGuard-to-bridge-only changes. Bridge-only receipts name the expected-absent WireGuard link, so stale extras cannot be accepted as exact state.
+- Overlay deletion retains ownership until route, address, WireGuard and bridge effects all finish. Persistence failure restores the ownership/tombstone view for deterministic recovery.
+- Quarantine is enforced before grant consumption. Omitted protobuf mode is rejected, while explicit `Some(false)` is the only bridge-only representation.
+- The routed topology is explicit: the bridge owns container gateway addresses, WireGuard remains a distinct L3 peer device, remote routes target WireGuard, and WireGuard mode requires IPv4 forwarding. Address/route placement and forwarding are grant- and receipt-bound; WireGuard is never incorrectly enslaved to the bridge.

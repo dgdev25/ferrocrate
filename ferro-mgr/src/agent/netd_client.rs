@@ -96,6 +96,7 @@ pub enum NetdResponse {
 pub enum NetdRequest {
     ApplyOverlay {
         overlay_id: String,
+        mode: OverlayMode,
         peers: Vec<serde_json::Value>,
         routes: Vec<String>,
         addresses: Vec<String>,
@@ -115,6 +116,21 @@ pub enum NetdRequest {
     Inspect {
         overlay_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayMode {
+    WireGuard,
+    BridgeOnly,
+}
+impl OverlayMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::WireGuard => "wireguard",
+            Self::BridgeOnly => "bridge_only",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -320,6 +336,11 @@ impl DelegationBridge {
             "endpoint.attach",
             vec![
                 ("overlay_id".into(), overlay_id.clone()),
+                (
+                    "bridge_ifname".into(),
+                    ferro_core::managed_overlay::managed_interface_identities(overlay_id)
+                        .bridge_ifname,
+                ),
                 ("endpoint_id".into(), endpoint_id.into()),
                 ("netns".into(), netns.into()),
             ],
@@ -422,6 +443,11 @@ impl DelegationBridge {
             "endpoint.detach",
             vec![
                 ("overlay_id".into(), overlay_id.clone()),
+                (
+                    "bridge_ifname".into(),
+                    ferro_core::managed_overlay::managed_interface_identities(overlay_id)
+                        .bridge_ifname,
+                ),
                 ("endpoint_id".into(), endpoint_id.into()),
             ],
             vec![],
@@ -710,6 +736,7 @@ mod tests {
                 overlay_id: "wg0".into(),
                 routes: vec!["10.0.0.0/24".into()],
                 peers: vec![],
+                wireguard: Some(true),
             }],
             100,
         );
@@ -774,6 +801,10 @@ mod tests {
                 ("overlay_id".into(), "wg0".into()),
                 ("endpoint_id".into(), "ep1".into()),
                 ("netns".into(), "ferro-c1".into()),
+                (
+                    "bridge_ifname".into(),
+                    ferro_core::managed_overlay::managed_interface_identities("wg0").bridge_ifname,
+                ),
             ],
             vec![],
         )

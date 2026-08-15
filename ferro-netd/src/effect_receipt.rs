@@ -1,4 +1,4 @@
-use crate::protocol::NetdRequest;
+use crate::protocol::{NetdRequest, OverlayMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -7,12 +7,22 @@ use sha2::{Digest, Sha256};
 pub(crate) enum EffectReceipt {
     Overlay {
         overlay_id: String,
+        #[serde(default)]
+        bridge_ifname: String,
+        #[serde(default)]
+        wireguard_ifname: Option<String>,
+        #[serde(default)]
+        mode: OverlayMode,
+        #[serde(default = "legacy_true")]
+        legacy_identity: bool,
         generation: u64,
         peer_digest: [u8; 32],
         address_digest: [u8; 32],
         route_digest: [u8; 32],
         policy_epoch: u64,
         policy_revision: u64,
+        #[serde(default)]
+        forwarding_required: bool,
         expected_exists: bool,
     },
     Endpoint {
@@ -24,6 +34,8 @@ pub(crate) enum EffectReceipt {
         netns_name: Option<String>,
         netns_inode: Option<u64>,
         expected_exists: bool,
+        #[serde(default = "legacy_true")]
+        legacy_identity: bool,
     },
 }
 
@@ -37,28 +49,46 @@ impl EffectReceipt {
         match request {
             NetdRequest::ApplyOverlay {
                 overlay_id,
+                mode,
                 peers,
                 routes,
                 addresses,
-            } => Self::Overlay {
-                overlay_id: overlay_id.clone(),
-                generation,
-                peer_digest: peer_digest(peers),
-                address_digest: digest_sorted(addresses),
-                route_digest: digest_sorted(routes),
-                policy_epoch: epoch,
-                policy_revision: revision,
-                expected_exists: true,
-            },
-            NetdRequest::RemoveOverlay { overlay_id } | NetdRequest::Inspect { overlay_id } => {
+            } => {
+                let interfaces = crate::interface_identity::overlay_interfaces(overlay_id);
                 Self::Overlay {
                     overlay_id: overlay_id.clone(),
+                    bridge_ifname: interfaces.bridge,
+                    wireguard_ifname: Some(interfaces.wireguard),
+                    mode: *mode,
+                    legacy_identity: false,
+                    generation,
+                    peer_digest: peer_digest(peers),
+                    address_digest: digest_sorted(addresses),
+                    route_digest: digest_sorted(routes),
+                    policy_epoch: epoch,
+                    policy_revision: revision,
+                    forwarding_required: *mode == OverlayMode::WireGuard,
+                    expected_exists: true,
+                }
+            }
+            NetdRequest::RemoveOverlay { overlay_id } | NetdRequest::Inspect { overlay_id } => {
+                let interfaces = crate::interface_identity::overlay_interfaces(overlay_id);
+                Self::Overlay {
+                    overlay_id: overlay_id.clone(),
+                    bridge_ifname: interfaces.bridge,
+                    // Deletion proves that neither topology link remains, irrespective of
+                    // the mode of the overlay being removed.
+                    wireguard_ifname: matches!(request, NetdRequest::RemoveOverlay { .. })
+                        .then_some(interfaces.wireguard),
+                    mode: OverlayMode::BridgeOnly,
+                    legacy_identity: false,
                     generation,
                     peer_digest: [0; 32],
                     address_digest: [0; 32],
                     route_digest: [0; 32],
                     policy_epoch: epoch,
                     policy_revision: revision,
+                    forwarding_required: false,
                     expected_exists: !matches!(request, NetdRequest::RemoveOverlay { .. }),
                 }
             }
@@ -71,10 +101,13 @@ impl EffectReceipt {
                 overlay_id: overlay_id.clone(),
                 generation,
                 netns_digest: digest(netns),
-                bridge_master_digest: digest(overlay_id),
+                bridge_master_digest: digest(
+                    &crate::interface_identity::overlay_interfaces(overlay_id).bridge,
+                ),
                 netns_name: netns.clone(),
                 netns_inode: netns.as_deref().and_then(netns_inode),
                 expected_exists: true,
+                legacy_identity: false,
             },
             NetdRequest::DetachEndpoint {
                 overlay_id,
@@ -84,11 +117,47 @@ impl EffectReceipt {
                 overlay_id: overlay_id.clone(),
                 generation,
                 netns_digest: [0; 32],
-                bridge_master_digest: digest(overlay_id),
+                bridge_master_digest: digest(
+                    &crate::interface_identity::overlay_interfaces(overlay_id).bridge,
+                ),
                 netns_name: None,
                 netns_inode: None,
                 expected_exists: false,
+                legacy_identity: false,
             },
+        }
+    }
+
+    pub(crate) fn route_interface(&self) -> Option<&str> {
+        match self {
+            Self::Overlay {
+                bridge_ifname,
+                wireguard_ifname,
+                mode,
+                ..
+            } => Some(match mode {
+                OverlayMode::WireGuard => wireguard_ifname.as_deref().unwrap_or(bridge_ifname),
+                OverlayMode::BridgeOnly => bridge_ifname,
+            }),
+            Self::Endpoint { .. } => None,
+        }
+    }
+
+    pub(crate) const fn overlay_mode(&self) -> Option<OverlayMode> {
+        match self {
+            Self::Overlay { mode, .. } => Some(*mode),
+            Self::Endpoint { .. } => None,
+        }
+    }
+
+    pub(crate) const fn is_legacy_identity(&self) -> bool {
+        match self {
+            Self::Overlay {
+                legacy_identity, ..
+            }
+            | Self::Endpoint {
+                legacy_identity, ..
+            } => *legacy_identity,
         }
     }
 
@@ -109,6 +178,10 @@ impl EffectReceipt {
             } => *expected_exists,
         }
     }
+}
+
+const fn legacy_true() -> bool {
+    true
 }
 
 pub(crate) fn digest<T: Serialize>(value: &T) -> [u8; 32] {
@@ -150,6 +223,7 @@ mod tests {
     fn partial_overlay_state_changes_the_expected_receipt() {
         let request = |routes: Vec<String>, key: &str| NetdRequest::ApplyOverlay {
             overlay_id: "wg0".into(),
+            mode: OverlayMode::WireGuard,
             peers: vec![PeerSpec {
                 node_id: "node-b".into(),
                 public_key: key.into(),

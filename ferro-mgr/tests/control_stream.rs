@@ -13,7 +13,7 @@ fn duplicate_sessions_and_revision_gaps_are_bounded() {
 #[test]
 fn leases_are_capped_at_fifteen_minutes_and_identified() {
     let builder = DesiredStateBuilder::new("cluster-a", 9, vec![3; 32]);
-    let state = builder.snapshot(7, vec![OverlayState { overlay_id: "ov-a".into(), routes: vec![], peers: vec![] }], 100);
+    let state = builder.snapshot(7, vec![OverlayState { overlay_id: "ov-a".into(), routes: vec![], peers: vec![], wireguard: Some(true) }], 100);
     assert_eq!(state.cluster_id, "cluster-a");
     assert_eq!(state.lease_expires_unix, 100 + MAX_LEASE_SECONDS);
     assert_eq!(state.signature.len(), 64);

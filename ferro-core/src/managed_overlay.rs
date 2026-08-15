@@ -6,6 +6,7 @@ use crate::{
     witness::DurableIntent,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::{
     io::{Read, Write},
@@ -13,6 +14,30 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedInterfaceIdentities {
+    pub bridge_ifname: String,
+    pub wireguard_ifname: String,
+}
+
+pub fn managed_interface_identities(overlay_id: &str) -> ManagedInterfaceIdentities {
+    let digest = Sha256::digest(
+        [
+            b"ferrocrate.overlay-interfaces.v1\0".as_slice(),
+            overlay_id.as_bytes(),
+        ]
+        .concat(),
+    );
+    let suffix = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    ManagedInterfaceIdentities {
+        bridge_ifname: format!("fb{suffix}"),
+        wireguard_ifname: format!("fw{suffix}"),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedOverlayRef(String);

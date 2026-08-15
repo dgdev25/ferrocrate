@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    agent::netd_client::{GrantedEnvelope, NetdRequest, ServiceHandshake, SignedEnvelope},
+    agent::netd_client::{
+        GrantedEnvelope, NetdRequest, OverlayMode, ServiceHandshake, SignedEnvelope,
+    },
     proto::DesiredState,
 };
 
@@ -73,6 +75,7 @@ impl ControllerGrantIssuer {
                     overlay_id: overlay_id.clone(),
                     routes: vec![],
                     peers: vec![],
+                    wireguard: Some(true),
                 })
                 .collect(),
             signature: vec![],
@@ -92,6 +95,19 @@ impl ControllerGrantIssuer {
             return Err(ControllerAuthorizationError::Denied {
                 resource: node_id.into(),
             });
+        }
+        if desired
+            .overlays
+            .iter()
+            .any(|overlay| overlay.wireguard.is_none())
+            || prior.is_some_and(|state| {
+                state
+                    .overlays
+                    .iter()
+                    .any(|overlay| overlay.wireguard.is_none())
+            })
+        {
+            return Err(ControllerAuthorizationError::Encoding);
         }
         let wanted: BTreeSet<_> = desired
             .overlays
@@ -113,6 +129,11 @@ impl ControllerGrantIssuer {
             })).collect();
             requests.push(NetdRequest::ApplyOverlay {
                 overlay_id: overlay.overlay_id.clone(),
+                mode: if overlay.wireguard == Some(true) {
+                    OverlayMode::WireGuard
+                } else {
+                    OverlayMode::BridgeOnly
+                },
                 peers,
                 routes: overlay.routes.clone(),
                 addresses: Vec::new(),
@@ -181,6 +202,7 @@ impl ControllerGrantIssuer {
         }
         let prior_canonical = prior_overlay.map(|overlay| serde_json::json!({
             "overlay_id": overlay.overlay_id,
+            "wireguard": overlay.wireguard,
             "routes": overlay.routes,
             "peers": overlay.peers.iter().map(|peer| serde_json::json!({
                 "node_id": peer.node_id,
@@ -292,36 +314,64 @@ fn parameters(
     let (action, name, fields) = match request {
         NetdRequest::ApplyOverlay {
             overlay_id,
+            mode,
             peers,
             routes,
             addresses,
-        } => (
-            GrantAction::NetworkCreate,
-            "overlay.apply",
-            vec![
-                ("overlay_id".into(), overlay_id.clone()),
-                (
-                    "peers".into(),
-                    serde_json::to_string(peers)
-                        .map_err(|_| ControllerAuthorizationError::Encoding)?,
-                ),
-                (
-                    "routes".into(),
-                    serde_json::to_string(routes)
-                        .map_err(|_| ControllerAuthorizationError::Encoding)?,
-                ),
-                (
-                    "addresses".into(),
-                    serde_json::to_string(addresses)
-                        .map_err(|_| ControllerAuthorizationError::Encoding)?,
-                ),
-            ],
-        ),
-        NetdRequest::RemoveOverlay { overlay_id } => (
-            GrantAction::NetworkDelete,
-            "overlay.delete",
-            vec![("overlay_id".into(), overlay_id.clone())],
-        ),
+        } => {
+            let interfaces = ferro_core::managed_overlay::managed_interface_identities(overlay_id);
+            (
+                GrantAction::NetworkCreate,
+                "overlay.apply",
+                vec![
+                    ("overlay_id".into(), overlay_id.clone()),
+                    ("overlay_mode".into(), mode.as_str().into()),
+                    ("bridge_ifname".into(), interfaces.bridge_ifname.clone()),
+                    (
+                        "wireguard_ifname".into(),
+                        interfaces.wireguard_ifname.clone(),
+                    ),
+                    ("address_interface".into(), interfaces.bridge_ifname.clone()),
+                    (
+                        "route_interface".into(),
+                        match mode {
+                            OverlayMode::WireGuard => interfaces.wireguard_ifname.clone(),
+                            OverlayMode::BridgeOnly => interfaces.bridge_ifname.clone(),
+                        },
+                    ),
+                    (
+                        "forwarding_required".into(),
+                        (*mode == OverlayMode::WireGuard).to_string(),
+                    ),
+                    (
+                        "peers".into(),
+                        serde_json::to_string(peers)
+                            .map_err(|_| ControllerAuthorizationError::Encoding)?,
+                    ),
+                    (
+                        "routes".into(),
+                        serde_json::to_string(routes)
+                            .map_err(|_| ControllerAuthorizationError::Encoding)?,
+                    ),
+                    (
+                        "addresses".into(),
+                        serde_json::to_string(addresses)
+                            .map_err(|_| ControllerAuthorizationError::Encoding)?,
+                    ),
+                ],
+            )
+        }
+        NetdRequest::RemoveOverlay { overlay_id } => {
+            (GrantAction::NetworkDelete, "overlay.delete", {
+                let interfaces =
+                    ferro_core::managed_overlay::managed_interface_identities(overlay_id);
+                vec![
+                    ("overlay_id".into(), overlay_id.clone()),
+                    ("bridge_ifname".into(), interfaces.bridge_ifname),
+                    ("wireguard_ifname".into(), interfaces.wireguard_ifname),
+                ]
+            })
+        }
         _ => return Err(ControllerAuthorizationError::Encoding),
     };
     Ok((
@@ -377,8 +427,15 @@ mod tests {
                 overlay_id: "overlay-a".into(),
                 routes: vec![],
                 peers: vec![],
+                wireguard: Some(true),
             }],
             100,
+        );
+        let mut unspecified = desired.clone();
+        unspecified.overlays[0].wireguard = None;
+        assert_eq!(
+            issuer.issue_exact_diff(&unspecified, "node-a", &[], 10),
+            Err(ControllerAuthorizationError::Encoding)
         );
         assert_eq!(
             issuer.issue_exact_diff(&desired, "node-a", &[], 10),

@@ -49,6 +49,7 @@ fn desired(revision: u64, now_unix: i64) -> ferro_mgr::proto::DesiredState {
             overlay_id: "overlay-a".into(),
             routes: vec![],
             peers: vec![],
+            wireguard: Some(true),
         }],
         now_unix,
     )

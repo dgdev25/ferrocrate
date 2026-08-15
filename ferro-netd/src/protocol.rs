@@ -59,6 +59,7 @@ pub struct GrantedDesiredStateEnvelope {
 pub enum NetdRequest {
     ApplyOverlay {
         overlay_id: String,
+        mode: OverlayMode,
         peers: Vec<PeerSpec>,
         routes: Vec<String>,
         #[serde(default)]
@@ -80,6 +81,26 @@ pub enum NetdRequest {
     Inspect {
         overlay_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayMode {
+    WireGuard,
+    BridgeOnly,
+}
+impl Default for OverlayMode {
+    fn default() -> Self {
+        Self::BridgeOnly
+    }
+}
+impl OverlayMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WireGuard => "wireguard",
+            Self::BridgeOnly => "bridge_only",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

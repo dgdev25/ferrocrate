@@ -96,6 +96,7 @@ async fn authenticated_publish_authorizes_final_overlay_deletion_atomically() {
                 overlay_id: "wg0".into(),
                 routes: vec![],
                 peers: vec![],
+                wireguard: Some(true),
             }],
         })
         .await

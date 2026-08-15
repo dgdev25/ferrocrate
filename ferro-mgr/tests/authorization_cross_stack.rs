@@ -115,6 +115,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
             overlay_id: "wg0".into(),
             routes: vec![],
             peers: vec![],
+            wireguard: Some(true),
         }],
         100,
     );
@@ -352,6 +353,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
             overlay_id: "wg0".into(),
             routes: vec!["10.30.0.0/24".into()],
             peers: vec![],
+            wireguard: Some(true),
         }],
         200,
     );

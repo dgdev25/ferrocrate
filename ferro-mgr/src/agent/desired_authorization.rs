@@ -128,6 +128,7 @@ impl DesiredAuthorizationBundle {
             match &operation.envelope.request {
                 NetdRequest::ApplyOverlay {
                     overlay_id,
+                    mode,
                     peers,
                     routes,
                     addresses,
@@ -146,6 +147,9 @@ impl DesiredAuthorizationBundle {
                     if peers != &expected_peers
                         || routes != &overlay.routes
                         || !addresses.is_empty()
+                        || overlay.wireguard.is_none()
+                        || (*mode == super::netd_client::OverlayMode::WireGuard)
+                            != (overlay.wireguard == Some(true))
                         || !applies.insert(overlay_id.as_str())
                     {
                         return Err(BundleError::Binding);
@@ -173,33 +177,65 @@ fn operation_parameters(
     let (action, name, fields) = match request {
         NetdRequest::ApplyOverlay {
             overlay_id,
+            mode,
             peers,
             routes,
             addresses,
-        } => (
-            GrantAction::NetworkCreate,
-            "overlay.apply",
-            vec![
-                ("overlay_id".into(), overlay_id.clone()),
-                (
-                    "peers".into(),
-                    serde_json::to_string(peers).map_err(|_| BundleError::Invalid)?,
-                ),
-                (
-                    "routes".into(),
-                    serde_json::to_string(routes).map_err(|_| BundleError::Invalid)?,
-                ),
-                (
-                    "addresses".into(),
-                    serde_json::to_string(addresses).map_err(|_| BundleError::Invalid)?,
-                ),
-            ],
-        ),
-        NetdRequest::RemoveOverlay { overlay_id } => (
-            GrantAction::NetworkDelete,
-            "overlay.delete",
-            vec![("overlay_id".into(), overlay_id.clone())],
-        ),
+        } => {
+            let interfaces = ferro_core::managed_overlay::managed_interface_identities(overlay_id);
+            (
+                GrantAction::NetworkCreate,
+                "overlay.apply",
+                vec![
+                    ("overlay_id".into(), overlay_id.clone()),
+                    ("overlay_mode".into(), mode.as_str().into()),
+                    ("bridge_ifname".into(), interfaces.bridge_ifname.clone()),
+                    (
+                        "wireguard_ifname".into(),
+                        interfaces.wireguard_ifname.clone(),
+                    ),
+                    ("address_interface".into(), interfaces.bridge_ifname.clone()),
+                    (
+                        "route_interface".into(),
+                        match mode {
+                            super::netd_client::OverlayMode::WireGuard => {
+                                interfaces.wireguard_ifname.clone()
+                            }
+                            super::netd_client::OverlayMode::BridgeOnly => {
+                                interfaces.bridge_ifname.clone()
+                            }
+                        },
+                    ),
+                    (
+                        "forwarding_required".into(),
+                        (*mode == super::netd_client::OverlayMode::WireGuard).to_string(),
+                    ),
+                    (
+                        "peers".into(),
+                        serde_json::to_string(peers).map_err(|_| BundleError::Invalid)?,
+                    ),
+                    (
+                        "routes".into(),
+                        serde_json::to_string(routes).map_err(|_| BundleError::Invalid)?,
+                    ),
+                    (
+                        "addresses".into(),
+                        serde_json::to_string(addresses).map_err(|_| BundleError::Invalid)?,
+                    ),
+                ],
+            )
+        }
+        NetdRequest::RemoveOverlay { overlay_id } => {
+            (GrantAction::NetworkDelete, "overlay.delete", {
+                let interfaces =
+                    ferro_core::managed_overlay::managed_interface_identities(overlay_id);
+                vec![
+                    ("overlay_id".into(), overlay_id.clone()),
+                    ("bridge_ifname".into(), interfaces.bridge_ifname),
+                    ("wireguard_ifname".into(), interfaces.wireguard_ifname),
+                ]
+            })
+        }
         _ => return Err(BundleError::Binding),
     };
     GrantParameters::new(name, fields, vec![])

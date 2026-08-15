@@ -167,7 +167,7 @@ struct BuildCacheEntry {
     manifest_json: String,
 }
 
-pub(crate) fn build_from_dockerfile(
+fn build_from_dockerfile(
     dockerfile_path: &Path,
     tag: Option<&str>,
     runtime_dir: &Path,

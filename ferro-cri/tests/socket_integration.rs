@@ -1,5 +1,7 @@
 use ed25519_dalek::{Signer, SigningKey};
-use ferro_core::authorization::{Action, PrincipalResolver};
+use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore, Action, PrincipalResolver};
+use ferro_core::runtime::ContainerRuntime;
+use ferro_core::witness::{JournalConfig, JournalMode, WitnessJournal};
 use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
 use ferro_cri::runtime::{ImageFsInfoRequest, ListImagesRequest, StatusRequest, VersionRequest};
@@ -69,22 +71,73 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
     let transport = PrincipalResolver::from_cri_peer_credentials(&peer).unwrap();
     let subject = transport.principal().id().as_str().to_owned();
     let signing = SigningKey::from_bytes(&[23; 32]);
+    let policy_path = runtime.path().join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy_path).unwrap(),
+    )));
+    let journal = Arc::new(
+        WitnessJournal::open(JournalConfig::new(
+            runtime.path().join("witness"),
+            [41; 16],
+            JournalMode::Required,
+        ))
+        .unwrap(),
+    );
+    let control_runtime = Arc::new(
+        ContainerRuntime::new_with_authorization(runtime.path(), gate, Some(journal)).unwrap(),
+    );
+    let (_, runtime_policy_digest, runtime_boot) =
+        control_runtime.delegation_authority_binding().unwrap();
+    let mismatched = CriDelegationVerifier::open(
+        vec![DelegationTrustKey::developer(
+            "issuer",
+            "wire-key",
+            signing.verifying_key(),
+        )],
+        "wire",
+        runtime_boot.clone(),
+        [99; 32],
+        runtime.path().join("mismatch-replay"),
+    )
+    .unwrap();
+    let mismatch_error = ferro_cri::server::serve_with_identity_policy(
+        runtime.path().join("must-not-bind.sock"),
+        CriIdentityPolicy::with_signed_verifier("wire", Arc::new(mismatched)),
+        Arc::clone(&control_runtime),
+    )
+    .await
+    .expect_err("policy mismatch must fail before serving");
+    assert!(mismatch_error.to_string().contains("policy digest"));
+    assert!(!runtime.path().join("must-not-bind.sock").exists());
     let verifier = CriDelegationVerifier::open(
         vec![DelegationTrustKey::developer(
             "issuer",
             "wire-key",
             signing.verifying_key(),
         )],
-        "ferro-cri",
-        "test-boot",
-        [5; 32],
+        "wire",
+        runtime_boot.clone(),
+        runtime_policy_digest,
         runtime.path().join("replay"),
     )
     .unwrap();
     let policy = CriIdentityPolicy::with_signed_verifier("wire", Arc::new(verifier));
     let socket_for_server = socket.clone();
+    let runtime_for_server = Arc::clone(&control_runtime);
     let server = tokio::spawn(async move {
-        let _ = ferro_cri::server::serve_with_identity_policy(socket_for_server, policy).await;
+        let _ = ferro_cri::server::serve_with_identity_policy(
+            socket_for_server,
+            policy,
+            runtime_for_server,
+        )
+        .await;
     });
     wait_for_socket(&socket).await;
     let channel = connect_channel(socket.clone()).await;
@@ -100,14 +153,14 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
             "issuer",
             "wire-key",
             subject.clone(),
-            "ferro-cri",
+            "wire",
             "delegated-user",
             vec![action],
             vec![resource.clone()],
             nonce,
             deadline,
-            "test-boot",
-            [5; 32],
+            runtime_boot.clone(),
+            runtime_policy_digest,
         )
         .unwrap();
         DelegationAssertion::new(

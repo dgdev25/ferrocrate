@@ -1591,6 +1591,24 @@ impl ContainerRuntime {
         self.authorization.policy_binding()
     }
 
+    /// Return the binding suitable for a delegation-enabled service. Delegation
+    /// is never enabled on compatibility mode or without a required journal.
+    pub fn delegation_authority_binding(&self) -> Result<(u64, [u8; 32], String), RuntimeError> {
+        if self.authorization.authorization_mode()
+            == crate::authorization::AuthorizationMode::Disabled
+            || !self.authorization.requires_provenance()
+        {
+            return Err(RuntimeError::Authorization(
+                "delegation requires enabled policy and a required witness journal".into(),
+            ));
+        }
+        let (generation, digest) = self.policy_binding();
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+            .trim()
+            .to_owned();
+        Ok((generation, digest, boot))
+    }
+
     fn initialize(
         runtime_dir: &Path,
         authorization: RuntimeAuthorization,

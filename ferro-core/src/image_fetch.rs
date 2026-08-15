@@ -152,7 +152,7 @@ pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, Image
     ImageFetchPlan::from_resolved_manifest(image, &manifest_json)
 }
 
-pub(crate) fn pull_image(
+fn pull_image(
     runtime_dir: &Path,
     image: &str,
 ) -> Result<ImageFetchResult, ImageFetchError> {
@@ -251,12 +251,6 @@ fn pull_planned_image_with_store_mode(
     }
 
     let manifest = parse_image_manifest(&fetched_json)?;
-    store.put_reference(
-        plan.canonical_reference(),
-        plan.config_digest(),
-        &manifest.media_type,
-        &fetched_json,
-    )?;
 
     let config_root = runtime_dir.join("images").join("configs");
     fs::create_dir_all(&config_root)?;
@@ -271,6 +265,7 @@ fn pull_planned_image_with_store_mode(
     }
     verify_digest(&config_path, plan.config_digest())?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
+    fs::File::open(&config_path)?.sync_all()?;
 
     let blob_root = runtime_dir.join("images").join("blobs");
     fs::create_dir_all(&blob_root)?;
@@ -287,8 +282,17 @@ fn pull_planned_image_with_store_mode(
         }
         verify_digest(&blob_path, digest)?;
         let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
+        fs::File::open(&blob_path)?.sync_all()?;
         layer_paths.push(blob_path);
     }
+    // Publication is the commit point. Until every selected object has been
+    // fetched, verified, and durably synced, no reference is visible.
+    store.put_reference(
+        plan.canonical_reference(),
+        plan.config_digest(),
+        &manifest.media_type,
+        &fetched_json,
+    )?;
     Ok(ImageFetchResult {
         reference: plan.canonical_reference.clone(),
         layer_paths,
@@ -311,7 +315,7 @@ pub fn pull_manifest_only_with_store_authorized(
         }
         Err(error) => {
             permit
-                .finish(false)
+                .finish_unknown()
                 .map_err(|finish| ImageFetchError::Integrity(finish.to_string()))?;
             Err(error)
         }
@@ -362,14 +366,14 @@ pub fn pull_image_with_store_authorized(
         }
         Err(error) => {
             permit
-                .finish(false)
+                .finish_unknown()
                 .map_err(|finish| ImageFetchError::Integrity(finish.to_string()))?;
             Err(error)
         }
     }
 }
 
-pub(crate) fn pull_manifest_only(
+fn pull_manifest_only(
     runtime_dir: &Path,
     image: &str,
 ) -> Result<String, ImageFetchError> {
@@ -377,7 +381,7 @@ pub(crate) fn pull_manifest_only(
     pull_manifest_only_with_store(runtime_dir, image, &store)
 }
 
-pub(crate) fn pull_manifest_only_with_store(
+fn pull_manifest_only_with_store(
     runtime_dir: &Path,
     image: &str,
     store: &LocalImageStore,
@@ -609,6 +613,7 @@ mod tests {
     use httptest::matchers::request;
     use httptest::responders::status_code;
     use httptest::{Expectation, Server};
+    use sha2::{Digest, Sha256};
     use std::fs;
 
     #[test]
@@ -653,6 +658,38 @@ mod tests {
         assert!(matches!(error, ImageFetchError::StaleBinding(_)));
         assert!(store.list_references().unwrap().is_empty());
         assert!(!temp.path().join("images/configs").exists());
+    }
+
+    #[test]
+    fn planned_pull_publishes_reference_only_after_verified_objects() {
+        let server = Server::run();
+        let config_digest = format!("sha256:{:x}", Sha256::digest(b"expected"));
+        let manifest = format!(r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":8}},"layers":[]}}"#);
+        let image = format!("{}/library/atomic:latest", server.addr());
+        let plan = ImageFetchPlan::from_resolved_manifest(&image, &manifest).unwrap();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/atomic/manifests/{}", plan.manifest_digest()),
+            ))
+            .respond_with(status_code(200).body(manifest)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/atomic/blobs/{config_digest}"),
+            ))
+            .respond_with(status_code(200).body("corrupt")),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path().join("images")).unwrap();
+
+        pull_planned_image_with_store(temp.path(), &plan, &store)
+            .expect_err("corrupt config must prevent publication");
+        assert!(store.list_references().unwrap().is_empty());
+        drop(store);
+        let reopened = LocalImageStore::open(temp.path().join("images")).unwrap();
+        assert!(reopened.list_references().unwrap().is_empty());
     }
 
     #[test]

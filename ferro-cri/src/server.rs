@@ -30,18 +30,46 @@ use tonic::{Request, Response, Status};
 #[derive(Clone)]
 pub struct CriIdentityPolicy {
     verifier: Option<Arc<CriDelegationVerifier>>,
+    channel: String,
 }
 impl CriIdentityPolicy {
-    pub fn transport_only(_id: impl Into<String>) -> Self {
-        Self { verifier: None }
+    pub fn transport_only(id: impl Into<String>) -> Self {
+        Self { verifier: None, channel: id.into() }
     }
     pub fn with_signed_verifier(
-        _id: impl Into<String>,
+        id: impl Into<String>,
         verifier: Arc<CriDelegationVerifier>,
     ) -> Self {
         Self {
             verifier: Some(verifier),
+            channel: id.into(),
         }
+    }
+
+    fn validate_authority(
+        &self,
+        runtime: &ferro_core::runtime::ContainerRuntime,
+    ) -> Result<(), CriError> {
+        let verifier = self.verifier.as_ref().ok_or_else(|| {
+            CriError::Configuration("delegation-enabled CRI requires a verifier".into())
+        })?;
+        let (_, digest, boot) = runtime.delegation_authority_binding()?;
+        if verifier.policy_digest() != digest {
+            return Err(CriError::Configuration(
+                "delegation policy digest does not match runtime policy".into(),
+            ));
+        }
+        if verifier.audience() != self.channel {
+            return Err(CriError::Configuration(
+                "delegation audience does not match CRI channel".into(),
+            ));
+        }
+        if verifier.boot_id() != boot {
+            return Err(CriError::Configuration(
+                "delegation boot binding does not match runtime boot".into(),
+            ));
+        }
+        Ok(())
     }
     #[allow(clippy::result_large_err)]
     pub fn resolve(
@@ -217,6 +245,8 @@ pub enum CriError {
     ImageStore(#[from] ImageStoreError),
     #[error("runtime authorization error: {0}")]
     Runtime(#[from] ferro_core::runtime::RuntimeError),
+    #[error("CRI authorization configuration error: {0}")]
+    Configuration(String),
 }
 
 pub struct CriRuntime {
@@ -649,9 +679,18 @@ fn measure_tree_usage(path: &Path) -> Result<(u64, u64), std::io::Error> {
 }
 
 pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
-    serve_with_identity_policy(
+    serve_disabled(socket_path).await
+}
+
+pub async fn serve_disabled(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
+    let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
+        .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
+    let runtime = Arc::new(ferro_core::runtime::ContainerRuntime::new(Path::new(&runtime_dir))?);
+    serve_configured(
         socket_path,
         CriIdentityPolicy::transport_only("cri:local-transport"),
+        runtime,
+        false,
     )
     .await
 }
@@ -659,6 +698,17 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 pub async fn serve_with_identity_policy(
     socket_path: impl AsRef<Path>,
     identity_policy: CriIdentityPolicy,
+    runtime: Arc<ferro_core::runtime::ContainerRuntime>,
+) -> Result<(), CriError> {
+    identity_policy.validate_authority(&runtime)?;
+    serve_configured(socket_path, identity_policy, runtime, true).await
+}
+
+async fn serve_configured(
+    socket_path: impl AsRef<Path>,
+    identity_policy: CriIdentityPolicy,
+    control_runtime: Arc<ferro_core::runtime::ContainerRuntime>,
+    delegation_enabled: bool,
 ) -> Result<(), CriError> {
     let socket_path = socket_path.as_ref();
     if let Some(parent) = socket_path.parent() {
@@ -683,7 +733,9 @@ pub async fn serve_with_identity_policy(
         .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
     let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))?;
     let store = Arc::new(store);
-    let control_runtime = ferro_core::runtime::ContainerRuntime::new(Path::new(&runtime_dir))?;
+    if delegation_enabled && identity_policy.verifier.is_none() {
+        return Err(CriError::Configuration("delegation verifier unavailable".into()));
+    }
     let authorization = Arc::new(control_runtime.surface_authorization()?);
     let runtime = CriRuntime::new(store.clone(), Arc::clone(&authorization))
         .with_identity_policy(identity_policy.clone());

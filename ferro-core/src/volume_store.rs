@@ -150,7 +150,7 @@ impl LocalVolumeStore {
         })
     }
 
-    pub(crate) fn create(&self, name: &str) -> Result<VolumeRecord, VolumeStoreError> {
+    fn create(&self, name: &str) -> Result<VolumeRecord, VolumeStoreError> {
         self.create_with_driver(name, "local", BTreeMap::new())
     }
 
@@ -191,7 +191,7 @@ impl LocalVolumeStore {
         })
     }
 
-    pub(crate) fn create_with_driver(
+    fn create_with_driver(
         &self,
         name: &str,
         driver: &str,
@@ -280,7 +280,7 @@ impl LocalVolumeStore {
         Ok(Some(record))
     }
 
-    pub(crate) fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {
+    fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {
         let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
         let Some(value) = tree.get(name.as_bytes())? else {
             return Ok(false);
@@ -344,7 +344,7 @@ impl LocalVolumeStore {
         Ok(())
     }
 
-    pub(crate) fn restore(
+    fn restore(
         &self,
         name: &str,
         src: impl AsRef<Path>,

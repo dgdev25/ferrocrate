@@ -37,7 +37,7 @@ struct BuildSpec {
     tag: Option<String>,
 }
 
-pub(crate) fn build_from_ferrofile(
+fn build_from_ferrofile(
     ferrofile_path: &Path,
     runtime_dir: &Path,
     compression: CompressionFormat,
@@ -45,7 +45,7 @@ pub(crate) fn build_from_ferrofile(
     build_from_ferrofile_with_store(ferrofile_path, runtime_dir, compression, None)
 }
 
-pub(crate) fn build_from_ferrofile_with_store(
+fn build_from_ferrofile_with_store(
     ferrofile_path: &Path,
     runtime_dir: &Path,
     compression: CompressionFormat,

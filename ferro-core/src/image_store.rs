@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sled::transaction::Transactional;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -77,9 +78,20 @@ impl LocalImageStore {
         };
 
         let encoded = serde_json::to_vec(&record)?;
-        tree.insert(reference.as_bytes(), encoded)?;
         let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
-        digest_tree.insert(digest.as_bytes(), serde_json::to_vec(&record)?)?;
+        let digest_encoded = serde_json::to_vec(&record)?;
+        (&tree, &digest_tree)
+            .transaction(|(references, digests)| {
+                references.insert(reference.as_bytes(), encoded.as_slice())?;
+                digests.insert(digest.as_bytes(), digest_encoded.as_slice())?;
+                Ok::<_, sled::transaction::ConflictableTransactionError<()>>(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(()) => {
+                    ImageStoreError::Authorization("image publication aborted".into())
+                }
+                sled::transaction::TransactionError::Storage(error) => ImageStoreError::Open(error),
+            })?;
         tree.flush()?;
         digest_tree.flush()?;
         Ok(())

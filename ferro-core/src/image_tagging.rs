@@ -77,7 +77,7 @@ pub fn resolve_reference(
     Ok(record)
 }
 
-pub(crate) fn tag_image(
+fn tag_image(
     store: &LocalImageStore,
     source_reference: &str,
     target_reference: &str,

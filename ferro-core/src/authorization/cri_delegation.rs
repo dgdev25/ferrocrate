@@ -317,6 +317,18 @@ pub struct CriDelegationVerifier {
 }
 
 impl CriDelegationVerifier {
+    pub fn policy_digest(&self) -> [u8; 32] {
+        self.policy_digest
+    }
+
+    pub fn boot_id(&self) -> &str {
+        &self.boot_id
+    }
+
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+
     pub fn open(
         keys: Vec<DelegationTrustKey>,
         audience: impl Into<String>,

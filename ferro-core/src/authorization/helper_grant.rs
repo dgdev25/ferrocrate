@@ -320,12 +320,13 @@ impl GrantIssuer {
         monotonic_deadline_millis: u64,
         nonce: [u8; 16],
         issuer: &str,
-        policy_digest: [u8; 32],
+        precondition_digest: [u8; 32],
+        recovery_recipe_digest: [u8; 32],
     ) -> Result<HelperGrant, GrantBuildError> {
         if !matches!(
             action,
             GrantAction::NetworkCreate | GrantAction::NetworkDelete
-        ) || policy_digest == [0; 32]
+        ) || precondition_digest == [0; 32] || recovery_recipe_digest == [0; 32]
         {
             return Err(GrantBuildError::UnsupportedAction);
         }
@@ -343,8 +344,8 @@ impl GrantIssuer {
             GrantKind::Mutation,
         )?;
         claims.request_digest = parameters.digest();
-        claims.precondition_digest = policy_digest;
-        claims.recovery_recipe_digest = policy_digest;
+        claims.precondition_digest = precondition_digest;
+        claims.recovery_recipe_digest = recovery_recipe_digest;
         Ok(self.sign(claims))
     }
     #[allow(clippy::too_many_arguments)]
@@ -390,8 +391,8 @@ impl GrantIssuer {
         )?;
         claims.operation_id = *intent.operation_id().as_bytes();
         claims.request_digest = request_digest;
-        claims.precondition_digest = request_digest;
-        claims.recovery_recipe_digest = intent.decision_digest();
+        claims.precondition_digest = intent.precondition_digest();
+        claims.recovery_recipe_digest = intent.recovery_recipe_digest();
         Ok(self.sign(claims))
     }
     #[allow(clippy::too_many_arguments)]
@@ -457,8 +458,8 @@ impl GrantIssuer {
         )?;
         claims.operation_id = *intent.operation_id().as_bytes();
         claims.request_digest = request_digest;
-        claims.precondition_digest = request_digest;
-        claims.recovery_recipe_digest = intent.decision_digest();
+        claims.precondition_digest = intent.precondition_digest();
+        claims.recovery_recipe_digest = intent.recovery_recipe_digest();
         Ok(self.sign(claims))
     }
 }

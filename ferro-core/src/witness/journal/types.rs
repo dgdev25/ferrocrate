@@ -160,6 +160,8 @@ pub struct DurableIntent {
     pub(super) decision_id: [u8; 16],
     pub(super) decision_digest: [u8; 32],
     pub(super) request_digest: [u8; 32],
+    pub(super) precondition_digest: [u8; 32],
+    pub(super) recovery_recipe_digest: [u8; 32],
 }
 
 impl DurableIntent {
@@ -173,10 +175,13 @@ impl DurableIntent {
     pub const fn execution_generation(&self) -> u64 {
         self.execution_generation
     }
-    pub(crate) const fn decision_digest(&self) -> [u8; 32] {
-        self.decision_digest
-    }
     pub(crate) const fn request_digest(&self) -> [u8; 32] {
         self.request_digest
+    }
+    pub(crate) const fn precondition_digest(&self) -> [u8; 32] {
+        self.precondition_digest
+    }
+    pub(crate) const fn recovery_recipe_digest(&self) -> [u8; 32] {
+        self.recovery_recipe_digest
     }
 }

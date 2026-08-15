@@ -2,6 +2,7 @@ use super::{
     decode_record, encode_record, hash_record, OperationId, RecoveryRecipe, WitnessAction,
     WitnessOutcome, WitnessRecord, WitnessStage,
 };
+use sha2::Digest;
 use sled::transaction::{ConflictableTransactionError, Transactional};
 mod inspect;
 mod quota;
@@ -429,7 +430,7 @@ impl WitnessJournal {
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
         self.preflight(FlushBoundary::Decision)?;
         let pending = self.pending.get(id.0)?.ok_or(JournalError::NotPending)?;
-        let (generation, _) = RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
+        let (generation, recipe) = RecoveryRecipe::decode(&pending).ok_or(JournalError::Corrupt)?;
         let mut state =
             OperationState::decode(&self.operations.get(id.0)?.ok_or(JournalError::NotPending)?)
                 .ok_or(JournalError::Corrupt)?;
@@ -455,6 +456,15 @@ impl WitnessJournal {
             decision_id,
             decision_digest,
             request_digest: state.request_digest,
+            precondition_digest: *recipe.precondition_digest(),
+            recovery_recipe_digest: sha2::Sha256::digest(
+                [
+                    b"ferrocrate.recovery-recipe.v1\0".as_slice(),
+                    pending.as_ref(),
+                ]
+                .concat(),
+            )
+            .into(),
         })
     }
 

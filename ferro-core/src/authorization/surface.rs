@@ -754,6 +754,7 @@ fn witness_action(action: Action) -> Result<WitnessAction, SurfaceAuthorizationE
         Action::CheckpointPublish => WitnessAction::CheckpointPublish,
         Action::CheckpointRecover => WitnessAction::CheckpointRecover,
         Action::KeyRotate => WitnessAction::KeyRotate,
+        Action::RootlessMapping => WitnessAction::RootlessMapping,
         _ => return Err(SurfaceAuthorizationError::InvalidBinding),
     })
 }
@@ -764,6 +765,7 @@ fn witness_kind(kind: ResourceKind) -> Result<WitnessResourceKind, SurfaceAuthor
         ResourceKind::Volume => WitnessResourceKind::Volume,
         ResourceKind::Network => WitnessResourceKind::Network,
         ResourceKind::Administrative => WitnessResourceKind::Administrative,
+        ResourceKind::RootlessMapping => WitnessResourceKind::RootlessMapping,
         _ => return Err(SurfaceAuthorizationError::InvalidBinding),
     })
 }
@@ -777,6 +779,7 @@ fn recovery_action(action: WitnessAction) -> WitnessAction {
         | WitnessAction::ImageReferenceWrite => WitnessAction::ImageDelete,
         WitnessAction::VolumeCreate | WitnessAction::VolumeDelete => WitnessAction::VolumeDelete,
         WitnessAction::NetworkCreate | WitnessAction::NetworkDelete => WitnessAction::NetworkDelete,
+        WitnessAction::RootlessMapping => WitnessAction::RootlessMapping,
         _ => action,
     }
 }

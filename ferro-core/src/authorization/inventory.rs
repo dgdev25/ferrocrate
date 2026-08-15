@@ -67,6 +67,7 @@ pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
     entry("mutation.images", "pull_image_with_store_authorized / pull_manifest_only_with_store_authorized / execute_dockerfile_build_authorized / execute_image_tag_authorized / LocalImageStore authorized reference executors", "authenticated origin -> immutable fetch/build/tag plan -> durable SurfacePermit", "image_fetch::tests::planned_pull_rejects_manifest_swap_before_store_mutation"),
     entry("mutation.volumes", "LocalVolumeStore::create_with_driver_authorized / remove_authorized / restore_authorized", "authenticated origin -> immutable VolumeCreatePlan or exact stored generation -> durable SurfacePermit", "volume_store::tests::preparing_volume_create_is_side_effect_free_and_binds_options"),
     entry("mutation.networks", "private execute_network_create / execute_network_remove", "CLI or authenticated Docker origin -> SurfaceAuthorization::authorize_named", "docker_compat_network_create_list_delete_routes_work"),
+    entry("mutation.rootless-mapping", "apply_user_namespace_mappings_authorized", "authenticated origin -> exact rootless.mapping SurfacePermit -> private procfs mapper", "rootless_configuration_mutates_the_real_runtime_namespaces"),
     entry("mutation.helper-calls", "privileged helper mutation executors", "GrantVerifier::verify -> request-bound grant", "accepts_once_and_correlates_the_result"),
 ];
 

@@ -1,4 +1,8 @@
 use crate::linux_namespaces::{create_namespaces, NamespaceError, NamespaceType};
+use crate::authorization::{
+    surface::{SurfaceAuthorization, SurfaceAuthorizationError, SurfaceExecutionError, SurfacePermit},
+    Action, ResourceKind,
+};
 use nix::unistd::{Gid, Uid, User};
 use std::fs;
 use std::io;
@@ -55,6 +59,10 @@ pub enum RootlessError {
     },
     #[error("{helper} rejected rootless mapping")]
     MappingHelperRejected { helper: &'static str },
+    #[error("rootless mapping authorization failed: {0}")]
+    Authorization(#[from] SurfaceAuthorizationError),
+    #[error("rootless mapping permit does not bind this mapping: {0}")]
+    Permit(#[from] SurfaceExecutionError),
 }
 
 impl RootlessConfig {
@@ -117,7 +125,32 @@ pub fn create_rootless_user_namespaces() -> Result<(), RootlessError> {
 }
 
 /// Apply user namespace mappings for a specific pid under procfs.
-pub fn apply_user_namespace_mappings(
+/// Apply mappings only while consuming an exact `rootless.mapping` permit.
+///
+/// The raw procfs writer is private: callers must first acquire a permit for
+/// the canonical mapping resource and this function rejects permits for any
+/// other action, resource, or generation before opening a mapping file.
+pub fn apply_user_namespace_mappings_authorized(
+    proc_root: &Path,
+    pid: u32,
+    config: &RootlessConfig,
+    canonical_name: &str,
+    generation: u64,
+    permit: SurfacePermit,
+) -> Result<(), RootlessError> {
+    SurfaceAuthorization::validate_execution(
+        &permit,
+        Action::RootlessMapping,
+        ResourceKind::RootlessMapping,
+        canonical_name,
+        generation,
+    )?;
+    let result = apply_user_namespace_mappings(proc_root, pid, config);
+    permit.finish(result.is_ok())?;
+    result
+}
+
+fn apply_user_namespace_mappings(
     proc_root: &Path,
     pid: u32,
     config: &RootlessConfig,

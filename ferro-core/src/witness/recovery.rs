@@ -180,6 +180,10 @@ impl RecoveryRecipe {
                 WitnessAction::NetworkAttach,
                 WitnessResourceKind::Network,
                 WitnessAction::NetworkDetach
+            ) | (
+                WitnessAction::RootlessMapping,
+                WitnessResourceKind::RootlessMapping,
+                WitnessAction::RootlessMapping
             )
         );
         if !valid {
@@ -311,6 +315,7 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         26 => Some(WitnessAction::ImageReferenceWrite),
         27 => Some(WitnessAction::CheckpointRecover),
         28 => Some(WitnessAction::KeyRotate),
+        29 => Some(WitnessAction::RootlessMapping),
         _ => None,
     }
 }
@@ -320,6 +325,7 @@ fn resource_kind_from(value: u8) -> Option<WitnessResourceKind> {
         2 => Some(WitnessResourceKind::Image),
         3 => Some(WitnessResourceKind::Volume),
         4 => Some(WitnessResourceKind::Network),
+        8 => Some(WitnessResourceKind::RootlessMapping),
         _ => None,
     }
 }

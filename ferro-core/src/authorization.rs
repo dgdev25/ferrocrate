@@ -600,6 +600,8 @@ pub enum Action {
     CheckpointRecover,
     #[serde(rename = "witness.key-rotate")]
     KeyRotate,
+    #[serde(rename = "rootless.mapping")]
+    RootlessMapping,
 }
 
 /// The five roles supported by the native policy.
@@ -628,6 +630,7 @@ pub enum ResourceKind {
     Device,
     Policy,
     Administrative,
+    RootlessMapping,
 }
 
 /// An authenticated principal identifier minted by the resolver boundary.

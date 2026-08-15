@@ -311,6 +311,7 @@ fn action(value: u8) -> Result<WitnessAction, WitnessError> {
         26 => ImageReferenceWrite,
         27 => CheckpointRecover,
         28 => KeyRotate,
+        29 => RootlessMapping,
         _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
     };
     Ok(action)
@@ -326,6 +327,7 @@ fn resource_kind(value: u8) -> Result<WitnessResourceKind, WitnessError> {
         5 => Ok(Device),
         6 => Ok(Policy),
         7 => Ok(Administrative),
+        8 => Ok(RootlessMapping),
         _ => Err(WitnessError::UnknownDiscriminant {
             field: "resource kind",
         }),

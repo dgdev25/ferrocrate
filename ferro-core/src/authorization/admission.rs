@@ -354,6 +354,7 @@ mod tests {
             Action::PolicyRollback,
             Action::ContainerStop,
             Action::ContainerDelete,
+            Action::RootlessMapping,
         ] {
             assert!(
                 admission

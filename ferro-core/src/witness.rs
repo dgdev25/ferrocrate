@@ -144,6 +144,7 @@ pub enum WitnessAction {
     ImageReferenceWrite = 26,
     CheckpointRecover = 27,
     KeyRotate = 28,
+    RootlessMapping = 29,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,6 +157,7 @@ pub enum WitnessResourceKind {
     Device = 5,
     Policy = 6,
     Administrative = 7,
+    RootlessMapping = 8,
 }
 
 /// Disclosure-safe, pseudonymous principal correlation value.

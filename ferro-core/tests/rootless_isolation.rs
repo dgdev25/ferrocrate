@@ -4,7 +4,7 @@
 mod qualification_fixture;
 
 use ferro_core::authorization::{Action, RequestOrigin, ResourceKind};
-use ferro_core::rootless::{apply_user_namespace_mappings, RootlessConfig};
+use ferro_core::rootless::{apply_user_namespace_mappings_authorized, RootlessConfig};
 use ferro_core::runtime::ContainerRuntime;
 use std::process::Command;
 
@@ -18,7 +18,7 @@ fn resolves_rootless_config_from_system() {
 /// Uses the host's real `unshare(2)` launcher and `/proc/<pid>` mapping files,
 /// with the production setuid mapping-helper fallback where needed. There is
 /// no proc-shaped substitute. The surrounding production runtime obtains an
-/// authenticated permit before the rootless mapping mutation.
+/// authenticated permit for the exact rootless mapping mutation.
 #[test]
 fn rootless_configuration_mutates_the_real_runtime_namespaces() {
     for mode in ["disabled", "shadow", "enforce"] {
@@ -30,7 +30,11 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
             .with_request_origin(origin.clone());
         let surface = runtime.surface_authorization().expect("surface authorization");
         let permit = surface.authorize_named(
-            &origin, Action::VolumeCreate, ResourceKind::Volume, "rootless-namespace-fixture", 1,
+            &origin,
+            Action::RootlessMapping,
+            ResourceKind::RootlessMapping,
+            "rootless-namespace-fixture",
+            1,
         );
         if mode == "enforce" {
             let error = match permit {
@@ -45,10 +49,16 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
                 .args(["--user", "--fork", "sleep", "30"])
                 .spawn()
                 .expect("launch the real rootless namespace runtime");
-            let result = apply_user_namespace_mappings(std::path::Path::new("/proc"), child.id(), &config);
+            let result = apply_user_namespace_mappings_authorized(
+                std::path::Path::new("/proc"),
+                child.id(),
+                &config,
+                "rootless-namespace-fixture",
+                1,
+                permit,
+            );
             let _ = child.kill();
             let _ = child.wait();
-            permit.finish(result.is_ok()).expect("finish rootless permit");
             result.expect("apply production rootless mapping to real child procfs");
         }
         ferro_core::observability::persist_authorization_fixture_evidence(

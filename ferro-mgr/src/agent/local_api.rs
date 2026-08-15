@@ -12,8 +12,10 @@ use std::{
 
 use thiserror::Error;
 
+use super::delegation_ledger::{ChildIdentity, ClaimOutcome, DelegationLedger, ParentGrantKey};
 use super::ipam::{Allocation, Ipam, IpamError};
 use super::netd_client::{DelegationBridge, NetdResponse, UnixNetdClient};
+use ferro_core::authorization::helper_grant::GrantAction;
 use ferro_core::managed_overlay::{DelegatedManagedOverlayRequest, ManagedOverlayDelegation};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +52,7 @@ pub enum LocalApiError {
 struct DelegatedNetd {
     bridge: DelegationBridge,
     client: UnixNetdClient,
+    ledger: DelegationLedger,
 }
 
 pub struct LocalApi {
@@ -119,10 +122,27 @@ impl LocalApi {
     }
 
     pub fn with_delegation_bridge(self, bridge: DelegationBridge, client: UnixNetdClient) -> Self {
+        let path = std::env::var_os("FERROCRATE_AGENT_DELEGATION_LEDGER")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "/var/lib/ferrocrate/agent-delegations.json".into());
+        let ledger = DelegationLedger::open(path).expect("delegation ledger unavailable");
+        self.with_delegation_ledger(bridge, client, ledger)
+    }
+
+    pub fn with_delegation_ledger(
+        self,
+        bridge: DelegationBridge,
+        client: UnixNetdClient,
+        ledger: DelegationLedger,
+    ) -> Self {
         *self
             .delegated_netd
             .lock()
-            .expect("delegation lock poisoned") = Some(DelegatedNetd { bridge, client });
+            .expect("delegation lock poisoned") = Some(DelegatedNetd {
+            bridge,
+            client,
+            ledger,
+        });
         self
     }
 
@@ -243,30 +263,26 @@ impl LocalApi {
                 overlay_id,
                 container_id,
                 now_unix,
-            } => self
-                .attach_delegated(
-                    caller_uid,
-                    overlay_id,
-                    container_id,
-                    now_unix,
-                    now_monotonic_millis,
-                    &delegated.delegation,
-                )
-                .map(LocalApiResponse::Attached),
+            } => self.attach_delegated(
+                caller_uid,
+                overlay_id,
+                container_id,
+                now_unix,
+                now_monotonic_millis,
+                &delegated.delegation,
+            ),
             ferro_core::managed_overlay::ManagedOverlayRequest::DetachContainer {
                 overlay_id,
                 container_id,
                 now_unix,
-            } => self
-                .detach_delegated(
-                    caller_uid,
-                    overlay_id,
-                    container_id,
-                    now_unix,
-                    now_monotonic_millis,
-                    &delegated.delegation,
-                )
-                .map(|released| LocalApiResponse::Detached { released }),
+            } => self.detach_delegated(
+                caller_uid,
+                overlay_id,
+                container_id,
+                now_unix,
+                now_monotonic_millis,
+                &delegated.delegation,
+            ),
             _ => Err(LocalApiError::InvalidDelegation),
         };
         result.unwrap_or_else(|error| LocalApiResponse::Rejected {
@@ -282,7 +298,7 @@ impl LocalApi {
         now_unix: i64,
         now_monotonic_millis: u64,
         delegation: &ManagedOverlayDelegation,
-    ) -> Result<bool, LocalApiError> {
+    ) -> Result<LocalApiResponse, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
         let request = ferro_core::managed_overlay::ManagedOverlayRequest::DetachContainer {
             overlay_id,
@@ -296,6 +312,32 @@ impl LocalApi {
         let delegated = configured
             .as_mut()
             .ok_or(LocalApiError::MissingDelegation)?;
+        delegated
+            .bridge
+            .validate_parent(
+                &request,
+                delegation,
+                GrantAction::NetworkDetach,
+                now_unix
+                    .try_into()
+                    .map_err(|_| LocalApiError::InvalidDelegation)?,
+                now_monotonic_millis,
+            )
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        let parent_key = parent_key(delegation);
+        let child = proposed_child(&parent_key)?;
+        match delegated
+            .ledger
+            .claim(parent_key.clone(), child.clone())
+            .map_err(|_| LocalApiError::InvalidDelegation)?
+        {
+            ClaimOutcome::Completed { response, .. } => {
+                return serde_json::from_slice(&response)
+                    .map_err(|_| LocalApiError::InvalidDelegation)
+            }
+            ClaimOutcome::InProgress(_) => return Err(LocalApiError::InvalidDelegation),
+            ClaimOutcome::Fresh(_) => {}
+        }
         let envelope = delegated
             .bridge
             .delegate_detach(
@@ -306,6 +348,7 @@ impl LocalApi {
                     .try_into()
                     .map_err(|_| LocalApiError::InvalidDelegation)?,
                 now_monotonic_millis,
+                &child,
             )
             .map_err(|_| LocalApiError::InvalidDelegation)?;
         match delegated
@@ -313,7 +356,32 @@ impl LocalApi {
             .request_granted(&envelope)
             .map_err(|_| LocalApiError::NetdRejected)?
         {
-            NetdResponse::Detached => Ok(self.ipam.release(&container_id)?.is_some()),
+            NetdResponse::Detached => {
+                let response = LocalApiResponse::Detached {
+                    released: self.ipam.release(&container_id)?.is_some(),
+                };
+                delegated
+                    .ledger
+                    .complete(
+                        &parent_key,
+                        serde_json::to_vec(&response)
+                            .map_err(|_| LocalApiError::InvalidDelegation)?,
+                    )
+                    .map_err(|_| LocalApiError::InvalidDelegation)?;
+                Ok(response)
+            }
+            NetdResponse::Rejected { reason, .. } => {
+                let response = LocalApiResponse::Rejected { reason };
+                delegated
+                    .ledger
+                    .complete(
+                        &parent_key,
+                        serde_json::to_vec(&response)
+                            .map_err(|_| LocalApiError::InvalidDelegation)?,
+                    )
+                    .map_err(|_| LocalApiError::InvalidDelegation)?;
+                Ok(response)
+            }
             _ => Err(LocalApiError::NetdRejected),
         }
     }
@@ -326,54 +394,98 @@ impl LocalApi {
         now_unix: i64,
         now_monotonic_millis: u64,
         delegation: &ManagedOverlayDelegation,
-    ) -> Result<Attachment, LocalApiError> {
+    ) -> Result<LocalApiResponse, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
+        let request = ferro_core::managed_overlay::ManagedOverlayRequest::AttachContainer {
+            overlay_id: overlay_id.clone(),
+            container_id: container_id.clone(),
+            now_unix,
+        };
+        let mut configured = self
+            .delegated_netd
+            .lock()
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        let delegated = configured
+            .as_mut()
+            .ok_or(LocalApiError::MissingDelegation)?;
+        delegated
+            .bridge
+            .validate_parent(
+                &request,
+                delegation,
+                GrantAction::NetworkAttach,
+                now_unix
+                    .try_into()
+                    .map_err(|_| LocalApiError::InvalidDelegation)?,
+                now_monotonic_millis,
+            )
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        let parent_key = parent_key(delegation);
+        let child = proposed_child(&parent_key)?;
+        match delegated
+            .ledger
+            .claim(parent_key.clone(), child.clone())
+            .map_err(|_| LocalApiError::InvalidDelegation)?
+        {
+            ClaimOutcome::Completed { response, .. } => {
+                return serde_json::from_slice(&response)
+                    .map_err(|_| LocalApiError::InvalidDelegation)
+            }
+            ClaimOutcome::InProgress(_) => return Err(LocalApiError::InvalidDelegation),
+            ClaimOutcome::Fresh(_) => {}
+        }
         let attachment = self.attach(
             caller_uid,
             overlay_id.clone(),
             container_id.clone(),
             now_unix,
         )?;
-        let request = ferro_core::managed_overlay::ManagedOverlayRequest::AttachContainer {
-            overlay_id,
-            container_id: container_id.clone(),
-            now_unix,
+        let envelope = delegated
+            .bridge
+            .delegate_attach(
+                &request,
+                delegation,
+                &container_id,
+                &attachment.netns,
+                now_unix
+                    .try_into()
+                    .map_err(|_| LocalApiError::InvalidDelegation)?,
+                now_monotonic_millis,
+                &child,
+            )
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        let netd_response = match delegated.client.request_granted(&envelope) {
+            Ok(response) => response,
+            Err(_) => {
+                let _ = self.ipam.release(&container_id);
+                return Err(LocalApiError::NetdRejected);
+            }
         };
-        let outcome = (|| {
-            let mut configured = self
-                .delegated_netd
-                .lock()
-                .map_err(|_| LocalApiError::InvalidDelegation)?;
-            let delegated = configured
-                .as_mut()
-                .ok_or(LocalApiError::MissingDelegation)?;
-            let envelope = delegated
-                .bridge
-                .delegate_attach(
-                    &request,
-                    delegation,
-                    &container_id,
-                    &attachment.netns,
-                    now_unix
-                        .try_into()
-                        .map_err(|_| LocalApiError::InvalidDelegation)?,
-                    now_monotonic_millis,
+        if let NetdResponse::Rejected { reason, .. } = netd_response {
+            let _ = self.ipam.release(&container_id);
+            let response = LocalApiResponse::Rejected { reason };
+            delegated
+                .ledger
+                .complete(
+                    &parent_key,
+                    serde_json::to_vec(&response).map_err(|_| LocalApiError::InvalidDelegation)?,
                 )
                 .map_err(|_| LocalApiError::InvalidDelegation)?;
-            match delegated
-                .client
-                .request_granted(&envelope)
-                .map_err(|_| LocalApiError::NetdRejected)?
-            {
-                NetdResponse::Attached => Ok(()),
-                _ => Err(LocalApiError::NetdRejected),
-            }
-        })();
-        if let Err(error) = outcome {
-            let _ = self.ipam.release(&container_id);
-            return Err(error);
+            return Ok(response);
         }
-        Ok(attachment)
+        if netd_response != NetdResponse::Attached {
+            let _ = self.ipam.release(&container_id);
+            return Err(LocalApiError::NetdRejected);
+        }
+        let response = LocalApiResponse::Attached(attachment);
+        delegated
+            .ledger
+            .complete(
+                &parent_key,
+                serde_json::to_vec(&response).map_err(|_| LocalApiError::InvalidDelegation)?,
+            )
+            .map_err(|_| LocalApiError::InvalidDelegation)?;
+        Ok(response)
     }
 
     pub fn inspect(
@@ -472,6 +584,33 @@ impl LocalApi {
         }
         Ok(())
     }
+}
+
+fn parent_key(delegation: &ManagedOverlayDelegation) -> ParentGrantKey {
+    ParentGrantKey {
+        request_id: delegation.parent.claims.request_id.clone(),
+        operation_id: delegation.parent.claims.operation_id,
+        nonce: delegation.parent.claims.nonce,
+    }
+}
+
+fn proposed_child(parent: &ParentGrantKey) -> Result<ChildIdentity, LocalApiError> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| LocalApiError::InvalidDelegation)?;
+    if nonce == [0; 16] || nonce == parent.nonce {
+        return Err(LocalApiError::InvalidDelegation);
+    }
+    Ok(ChildIdentity {
+        request_id: format!(
+            "{}:child:{}",
+            parent.request_id,
+            nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ),
+        nonce,
+    })
 }
 
 #[cfg(unix)]

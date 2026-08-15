@@ -4,6 +4,7 @@ pub mod ipam;
 pub mod local_api;
 pub mod credentials;
 pub mod netd_client;
+pub mod delegation_ledger;
 
 pub use reconcile::{Agent, AgentError, NetdClient};
 pub use local_api::{LocalApiRequest, LocalApiResponse};

@@ -18,6 +18,7 @@ use prost::Message;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
+use super::delegation_ledger::ChildIdentity;
 use super::reconcile::NetdClient;
 use crate::proto::DesiredState;
 
@@ -148,6 +149,41 @@ impl DelegationBridge {
         }
     }
 
+    pub fn validate_parent(
+        &self,
+        request: &ManagedOverlayRequest,
+        delegation: &ManagedOverlayDelegation,
+        action: GrantAction,
+        now_unix: u64,
+        now_monotonic_millis: u64,
+    ) -> Result<(), DelegationError> {
+        let parent = &delegation.parent;
+        VerifiedHelperGrant::verify(
+            parent.clone(),
+            &self.parent_key,
+            &self.parent_issuer,
+            &self.boot_id,
+        )
+        .map_err(|_| DelegationError::InvalidSignature)?;
+        if parent.claims.key_id != self.parent_key_id
+            || parent.claims.action != action
+            || parent.claims.kind != GrantKind::Mutation
+            || parent.claims.parameter_digest
+                != managed_parameters(request)
+                    .map_err(|_| DelegationError::Binding)?
+                    .digest()
+        {
+            return Err(DelegationError::Binding);
+        }
+        if now_unix > parent.claims.wall_deadline_secs
+            || now_monotonic_millis > parent.claims.monotonic_deadline_millis
+        {
+            return Err(DelegationError::Expired);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn delegate_attach(
         &mut self,
         request: &ManagedOverlayRequest,
@@ -156,6 +192,7 @@ impl DelegationBridge {
         netns: &str,
         now_unix: u64,
         now_monotonic_millis: u64,
+        child: &ChildIdentity,
     ) -> Result<GrantedEnvelope, DelegationError> {
         let ManagedOverlayRequest::AttachContainer { overlay_id, .. } = request else {
             return Err(DelegationError::Unsupported);
@@ -184,9 +221,10 @@ impl DelegationBridge {
         {
             return Err(DelegationError::Expired);
         }
-        let mut nonce = [0_u8; 16];
-        getrandom::fill(&mut nonce).map_err(|_| DelegationError::Random)?;
-        if nonce == [0; 16] || nonce == parent.claims.nonce {
+        if child.nonce == [0; 16]
+            || child.nonce == parent.claims.nonce
+            || child.request_id.is_empty()
+        {
             return Err(DelegationError::Random);
         }
         let child_request = NetdRequest::AttachEndpoint {
@@ -204,12 +242,11 @@ impl DelegationBridge {
             vec![],
         )
         .map_err(|_| DelegationError::Binding)?;
-        let child_request_id = format!("{}:child:{}", parent.claims.request_id, hex_nonce(&nonce));
         let grant = self
             .child_issuer
             .delegate_child(
                 &verified,
-                &child_request_id,
+                &child.request_id,
                 GrantAction::NetworkAttach,
                 ResourceBinding::new(
                     parent.claims.resource.resource_uuid.clone(),
@@ -219,7 +256,7 @@ impl DelegationBridge {
                 &parameters,
                 parent.claims.wall_deadline_secs,
                 parent.claims.monotonic_deadline_millis,
-                nonce,
+                child.nonce,
             )
             .map_err(|_| DelegationError::Binding)?;
         self.revision = self
@@ -256,6 +293,7 @@ impl DelegationBridge {
         endpoint_id: &str,
         now_unix: u64,
         now_monotonic_millis: u64,
+        child: &ChildIdentity,
     ) -> Result<GrantedEnvelope, DelegationError> {
         let ManagedOverlayRequest::DetachContainer { overlay_id, .. } = request else {
             return Err(DelegationError::Unsupported);
@@ -280,9 +318,10 @@ impl DelegationBridge {
         {
             return Err(DelegationError::Binding);
         }
-        let mut nonce = [0_u8; 16];
-        getrandom::fill(&mut nonce).map_err(|_| DelegationError::Random)?;
-        if nonce == [0; 16] || nonce == parent.claims.nonce {
+        if child.nonce == [0; 16]
+            || child.nonce == parent.claims.nonce
+            || child.request_id.is_empty()
+        {
             return Err(DelegationError::Random);
         }
         let child_request = NetdRequest::DetachEndpoint {
@@ -298,12 +337,11 @@ impl DelegationBridge {
             vec![],
         )
         .map_err(|_| DelegationError::Binding)?;
-        let child_request_id = format!("{}:child:{}", parent.claims.request_id, hex_nonce(&nonce));
         let grant = self
             .child_issuer
             .delegate_child(
                 &verified,
-                &child_request_id,
+                &child.request_id,
                 GrantAction::NetworkDetach,
                 ResourceBinding::new(
                     parent.claims.resource.resource_uuid.clone(),
@@ -313,7 +351,7 @@ impl DelegationBridge {
                 &parameters,
                 parent.claims.wall_deadline_secs,
                 parent.claims.monotonic_deadline_millis,
-                nonce,
+                child.nonce,
             )
             .map_err(|_| DelegationError::Binding)?;
         self.revision = self
@@ -341,10 +379,6 @@ impl DelegationBridge {
             grant,
         })
     }
-}
-
-fn hex_nonce(value: &[u8; 16]) -> String {
-    value.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[derive(Debug, Error)]
@@ -375,6 +409,24 @@ impl NetdClient for UnixNetdClient {
             NetdResponse::Rejected { reason, .. } => Err(reason),
             _ => Err("netd returned an unexpected response".into()),
         }
+    }
+
+    fn apply_authorized(
+        &self,
+        _desired_state: &DesiredState,
+        bundle: &super::desired_authorization::DesiredAuthorizationBundle,
+    ) -> Result<(), String> {
+        for operation in &bundle.operations {
+            match self
+                .request_granted(operation)
+                .map_err(|error| error.to_string())?
+            {
+                NetdResponse::Applied | NetdResponse::Removed => {}
+                NetdResponse::Rejected { reason, .. } => return Err(reason),
+                _ => return Err("netd returned an unexpected response".into()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -439,6 +491,7 @@ impl UnixNetdClient {
 #[cfg(test)]
 mod tests {
     use super::{DelegationBridge, NetdRequest, UnixNetdClient};
+    use crate::agent::delegation_ledger::ChildIdentity;
     use base64::Engine;
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
@@ -493,7 +546,18 @@ mod tests {
             "node",
         );
         let child = bridge
-            .delegate_attach(&request, &delegation, "ep1", "ferro-c1", 100, 9_000)
+            .delegate_attach(
+                &request,
+                &delegation,
+                "ep1",
+                "ferro-c1",
+                100,
+                9_000,
+                &ChildIdentity {
+                    request_id: "parent-1:child:1".into(),
+                    nonce: [8; 16],
+                },
+            )
             .unwrap();
         assert!(
             matches!(child.envelope.request, NetdRequest::AttachEndpoint { ref overlay_id, ref endpoint_id, netns: Some(ref netns) } if overlay_id == "wg0" && endpoint_id == "ep1" && netns == "ferro-c1")
@@ -539,7 +603,18 @@ mod tests {
             now_unix: 100,
         };
         assert!(bridge
-            .delegate_attach(&request, &delegation, "ep1", "ferro-c1", 100, 9_000)
+            .delegate_attach(
+                &request,
+                &delegation,
+                "ep1",
+                "ferro-c1",
+                100,
+                9_000,
+                &ChildIdentity {
+                    request_id: "parent-2:child:1".into(),
+                    nonce: [8; 16]
+                }
+            )
             .is_err());
     }
 

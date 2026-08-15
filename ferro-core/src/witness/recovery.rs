@@ -309,6 +309,8 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         24 => Some(WitnessAction::ImageBuild),
         25 => Some(WitnessAction::ImageTag),
         26 => Some(WitnessAction::ImageReferenceWrite),
+        27 => Some(WitnessAction::CheckpointRecover),
+        28 => Some(WitnessAction::KeyRotate),
         _ => None,
     }
 }

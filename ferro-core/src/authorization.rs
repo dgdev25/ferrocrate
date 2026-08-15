@@ -12,6 +12,8 @@ mod helper_grant_encoding;
 mod helper_grant_error;
 pub mod inventory;
 pub mod policy;
+pub mod admission;
+pub mod emergency;
 #[cfg(target_os = "linux")]
 pub mod principal;
 pub(crate) mod runtime;
@@ -124,6 +126,14 @@ fn fanout_action_code(action: Action) -> u8 {
 #[cfg(target_os = "linux")]
 impl RequestOrigin {
     pub fn cli_current() -> std::io::Result<Self> {
+        Self::cli_current_with_request_id(None)
+    }
+
+    pub fn cli_current_for_operation(request_id: [u8; 16]) -> std::io::Result<Self> {
+        Self::cli_current_with_request_id(Some(request_id))
+    }
+
+    fn cli_current_with_request_id(request_id: Option<[u8; 16]>) -> std::io::Result<Self> {
         use std::os::unix::fs::MetadataExt;
         let status = std::fs::read_to_string("/proc/self/status")?;
         let uid = status
@@ -152,7 +162,7 @@ impl RequestOrigin {
                 role,
             ),
             invocation: crate::witness::Invocation::Cli,
-            request_id: None,
+            request_id,
             parent_request_id: None,
             attempt: 0,
             fanout: None,
@@ -364,6 +374,10 @@ pub enum Action {
     PolicyRollback,
     #[serde(rename = "witness.checkpoint-publish")]
     CheckpointPublish,
+    #[serde(rename = "witness.checkpoint-recover")]
+    CheckpointRecover,
+    #[serde(rename = "witness.key-rotate")]
+    KeyRotate,
 }
 
 /// The five roles supported by the native policy.
@@ -746,6 +760,7 @@ pub enum ReasonCode {
     PolicyAdministrationDenied,
     CleanupActionDenied,
     MountSourceDenied,
+    EmergencyOverride,
 }
 
 /// An effective decision and, in shadow mode, its hypothetical denial.

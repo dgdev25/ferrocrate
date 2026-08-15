@@ -1568,11 +1568,14 @@ fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(),
         WitnessCommands::Verify { journal, trust_bundle, minimum_checkpoint, checkpoints, max_age_seconds } => authorization_admin::verify(authorization_admin::VerifyArgs { journal, trust_bundle, minimum_checkpoint, checkpoints, max_age_seconds: *max_age_seconds }),
         WitnessCommands::Checkpoint { journal, journal_id, artifact, key_dir, key_name, predecessor, recover_pending } => {
             let args = authorization_admin::CheckpointArgs { journal, journal_id, artifact, key_dir: key_dir.as_deref(), key_name: key_name.as_deref(), predecessor: predecessor.as_deref(), recover_pending: *recover_pending };
-            administer_witness(runtime_dir, journal, journal_id, artifact, |open| authorization_admin::checkpoint_on(args, open))
+            let action = if *recover_pending { AuthorizationAction::CheckpointRecover } else { AuthorizationAction::CheckpointPublish };
+            administer_witness(runtime_dir, journal, journal_id, artifact, action, &artifact.to_string_lossy(), |open| authorization_admin::checkpoint_on(args, open))
         },
         WitnessCommands::RotateKey { journal, journal_id, artifact, key_dir, old_key, new_key, predecessor } => {
             let args = authorization_admin::RotateArgs { journal, journal_id, artifact, key_dir, old_key, new_key, predecessor };
-            administer_witness(runtime_dir, journal, journal_id, artifact, |open| authorization_admin::rotate_key_on(args, open))
+            let predecessor_digest = Sha256::digest(std::fs::read(predecessor).map_err(|error| error.to_string())?);
+            let binding = format!("old={old_key};new={new_key};predecessor={predecessor_digest:x}");
+            administer_witness(runtime_dir, journal, journal_id, artifact, AuthorizationAction::KeyRotate, &binding, |open| authorization_admin::rotate_key_on(args, open))
         },
     }?;
     println!("{output}");
@@ -1580,7 +1583,7 @@ fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(),
 }
 
 #[cfg(target_os = "linux")]
-fn administer_witness<F>(runtime_dir: &Path, journal: &Path, journal_id: &str, artifact: &Path, execute: F) -> Result<String, String>
+fn administer_witness<F>(runtime_dir: &Path, journal: &Path, journal_id: &str, artifact: &Path, action: AuthorizationAction, resource_binding: &str, execute: F) -> Result<String, String>
 where F: FnOnce(&ferro_core::witness::WitnessJournal) -> Result<String, String> {
     authorization_admin::require_host_admin()?;
     let root = runtime_dir.join("authorization");
@@ -1592,8 +1595,7 @@ where F: FnOnce(&ferro_core::witness::WitnessJournal) -> Result<String, String> 
     let open = authorization_admin::open_required_journal(journal, journal_id)?;
     let surface = ferro_core::authorization::surface::SurfaceAuthorization::local_administrative(gate, open.clone(), [0x41; 16]);
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-    let canonical = artifact.to_string_lossy();
-    let permit = surface.authorize_named(&origin, AuthorizationAction::CheckpointPublish, ResourceKind::Administrative, &canonical, 1).map_err(|error| error.to_string())?;
+    let permit = surface.authorize_named(&origin, action, ResourceKind::Administrative, resource_binding, 1).map_err(|error| error.to_string())?;
     let result = execute(&open);
     permit.finish(result.is_ok()).map_err(|error| error.to_string())?;
     result
@@ -1616,17 +1618,37 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
         }
         EmergencyCommands::Reconcile { sink } => authorization_admin::reconcile_emergency(&runtime_dir.join("authorization"), sink),
         EmergencyCommands::Execute { action, resource, sink } => {
-            let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-            let runtime = ContainerRuntime::new(runtime_dir)
-                .map_err(|error| error.to_string())?
-                .with_request_origin(origin);
             authorization_admin::execute_emergency(
                 &runtime_dir.join("authorization"), sink, action, resource,
-                || match action.as_str() {
-                    "container.stop" => runtime.stop(resource.strip_prefix("container:").ok_or("container resource must use container:ID")?, Duration::from_secs(10)).map_err(|error| error.to_string()),
-                    "container.kill" => runtime.kill(resource.strip_prefix("container:").ok_or("container resource must use container:ID")?).map_err(|error| error.to_string()),
-                    "container.remove" => runtime.remove(resource.strip_prefix("container:").ok_or("container resource must use container:ID")?).map_err(|error| error.to_string()),
+                |operation_id, material| {
+                    let origin = RequestOrigin::cli_current_for_operation(operation_id)
+                        .map_err(|error| error.to_string())?;
+                    let container_id = resource
+                        .strip_prefix("container:")
+                        .ok_or("container resource must use container:ID")?;
+                    let runtime = ContainerRuntime::new(runtime_dir)
+                        .map_err(|error| error.to_string())?
+                        .with_request_origin(origin.clone());
+                    let record = runtime.inspect(container_id).map_err(|error| error.to_string())?;
+                    let emergency_action = match action.as_str() {
+                        "container.stop" => AuthorizationAction::ContainerStop,
+                        "container.kill" => AuthorizationAction::ContainerKill,
+                        "container.remove" => AuthorizationAction::ContainerDelete,
+                        _ => return Err("emergency action has no private executor".into()),
+                    };
+                    let authority = ferro_core::authorization::emergency::EmergencyAuthority::verify(
+                        &material.signed_payload, material.signature, material.recovery_key,
+                        emergency_action, container_id.to_owned(), record.mutation_generation.max(1),
+                        material.boot_id, material.deadline_uptime_ns, origin.principal(),
+                        runtime.policy_binding().1, operation_id,
+                    ).map_err(|error| error.to_string())?;
+                    let runtime = runtime.with_emergency_authority(authority);
+                    match action.as_str() {
+                    "container.stop" => runtime.stop(container_id, Duration::from_secs(10)).map_err(|error| error.to_string()),
+                    "container.kill" => runtime.kill(container_id).map_err(|error| error.to_string()),
+                    "container.remove" => runtime.remove(container_id).map_err(|error| error.to_string()),
                     _ => Err("emergency action has no private executor".into()),
+                    }
                 },
             )
         }

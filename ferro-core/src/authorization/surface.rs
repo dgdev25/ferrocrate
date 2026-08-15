@@ -23,6 +23,8 @@ use crate::witness::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceAuthorizationError {
+    #[error(transparent)]
+    Admission(#[from] super::admission::MutationAdmissionError),
     #[error("request transport identity is stale: {0}")]
     StaleIdentity(#[from] super::PrincipalResolutionError),
     #[error(transparent)]
@@ -493,6 +495,7 @@ impl SurfaceAuthorization {
         action: Action,
         kind: ResourceKind,
     ) -> Result<SurfacePermit, SurfaceAuthorizationError> {
+        self.gate.admit(action)?;
         let operation = OperationId::from_bytes(rand::rng().random());
         let template = self.record_template(origin, &request, operation, action, kind)?;
         if let Some(journal) = self.journal() {
@@ -719,6 +722,9 @@ fn witness_action(action: Action) -> Result<WitnessAction, SurfaceAuthorizationE
         Action::VolumeDelete => WitnessAction::VolumeDelete,
         Action::NetworkCreate => WitnessAction::NetworkCreate,
         Action::NetworkDelete => WitnessAction::NetworkDelete,
+        Action::CheckpointPublish => WitnessAction::CheckpointPublish,
+        Action::CheckpointRecover => WitnessAction::CheckpointRecover,
+        Action::KeyRotate => WitnessAction::KeyRotate,
         _ => return Err(SurfaceAuthorizationError::InvalidBinding),
     })
 }
@@ -728,6 +734,7 @@ fn witness_kind(kind: ResourceKind) -> Result<WitnessResourceKind, SurfaceAuthor
         ResourceKind::Image => WitnessResourceKind::Image,
         ResourceKind::Volume => WitnessResourceKind::Volume,
         ResourceKind::Network => WitnessResourceKind::Network,
+        ResourceKind::Administrative => WitnessResourceKind::Administrative,
         _ => return Err(SurfaceAuthorizationError::InvalidBinding),
     })
 }

@@ -15,8 +15,6 @@ const ALLOWED_ACTIONS: &[&str] = &[
     "container.stop",
     "container.kill",
     "container.remove",
-    "network.detach",
-    "volume.unmount",
 ];
 
 #[derive(Clone, Copy)]
@@ -49,6 +47,13 @@ struct EmergencyState {
     main_witness_first: Option<u64>,
     #[serde(default)]
     main_witness_last: Option<u64>,
+    #[serde(default)]
+    operation_id: Option<String>,
+    #[serde(default)]
+    terminal_event_id: Option<String>,
+    approval_payload: String,
+    approval_signature: String,
+    recovery_public_key: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -62,6 +67,14 @@ enum EmergencyStatus {
 }
 
 struct EmergencyPermit(EmergencyState);
+
+pub struct EmergencyAuthorityMaterial {
+    pub signed_payload: Vec<u8>,
+    pub signature: [u8; 64],
+    pub recovery_key: [u8; 32],
+    pub boot_id: String,
+    pub deadline_uptime_ns: u64,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,7 +120,8 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         "FERROCRATE-EMERGENCY-APPROVAL-V1\n{boot_id}\n{}\n{}\n{}\n{deadline}\n",
         args.action, args.resource, args.nonce
     );
-    verify_approval(args.recovery_public_key, args.recovery_approval, &payload)?;
+    let (approval_signature, recovery_public_key) =
+        verify_approval(args.recovery_public_key, args.recovery_approval, &payload)?;
     let nonce_marker = nonce_marker(args.state_dir, &boot_id, args.nonce);
     if nonce_marker.exists() {
         return Err("emergency recovery approval nonce has already been consumed".into());
@@ -135,6 +149,11 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
         status: EmergencyStatus::Activated,
         main_witness_first: None,
         main_witness_last: None,
+        operation_id: None,
+        terminal_event_id: None,
+        approval_payload: payload,
+        approval_signature: super::hex(&approval_signature),
+        recovery_public_key: super::hex(&recovery_public_key),
     };
     let receipt = serde_json::json!({"type":"activate","schema":1,"boot_id":state.boot_id,"deadline_uptime_ns":deadline,"action":state.action,"resource":state.resource,"nonce":state.nonce});
     append_sink(
@@ -198,7 +217,7 @@ pub fn execute_emergency<F>(
     execute: F,
 ) -> Result<String, String>
 where
-    F: FnOnce() -> Result<(), String>,
+    F: FnOnce([u8; 16], EmergencyAuthorityMaterial) -> Result<(), String>,
 {
     require_host_admin()?;
     require_console()?;
@@ -213,7 +232,7 @@ fn execute_verified<F>(
     execute: F,
 ) -> Result<String, String>
 where
-    F: FnOnce() -> Result<(), String>,
+    F: FnOnce([u8; 16], EmergencyAuthorityMaterial) -> Result<(), String>,
 {
     let path = state_dir.join(STATE_FILE);
     let mut permit = EmergencyPermit(
@@ -233,7 +252,11 @@ where
     let canonical_sink =
         fs::canonicalize(sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
     validate_sink_identity(&canonical_sink, &state)?;
-    let intent = serde_json::json!({"type":"intent","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"uptime_ns":uptime_ns()?});
+    let operation_digest = super::digest(format!("FERROCRATE-EMERGENCY-OP-V1\0{}\0{}\0{}\0{}", state.boot_id, state.nonce, action, resource).as_bytes());
+    let mut operation_id = [0; 16];
+    operation_id.copy_from_slice(&operation_digest[..16]);
+    state.operation_id = Some(super::hex(&operation_id));
+    let intent = serde_json::json!({"type":"intent","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"operation_id":state.operation_id,"uptime_ns":uptime_ns()?});
     append_sink(
         &canonical_sink,
         &serde_json::to_vec(&intent).map_err(|e| e.to_string())?,
@@ -241,7 +264,14 @@ where
     state.status = EmergencyStatus::IntentDurable;
     write_state(&path, &state)?;
     let before = main_witness_head(state_dir)?;
-    let result = execute();
+    let material = EmergencyAuthorityMaterial {
+        signed_payload: state.approval_payload.as_bytes().to_vec(),
+        signature: decode_hex::<64>(&state.approval_signature)?,
+        recovery_key: decode_hex::<32>(&state.recovery_public_key)?,
+        boot_id: state.boot_id.clone(),
+        deadline_uptime_ns: state.deadline_uptime_ns,
+    };
+    let result = execute(operation_id, material);
     let after = main_witness_head(state_dir)?;
     if let (Some(before), Some(after)) = (before, after) {
         if after <= before {
@@ -254,8 +284,9 @@ where
         }
         state.main_witness_first = Some(before.saturating_add(1));
         state.main_witness_last = Some(after);
+        state.terminal_event_id = Some(find_terminal_event(state_dir, operation_id, action)?);
     }
-    let outcome = serde_json::json!({"type":"outcome","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"succeeded":result.is_ok(),"uptime_ns":uptime_ns()?});
+    let outcome = serde_json::json!({"type":"outcome","schema":1,"boot_id":state.boot_id,"action":action,"resource":resource,"nonce":state.nonce,"operation_id":state.operation_id,"terminal_event_id":state.terminal_event_id,"succeeded":result.is_ok(),"uptime_ns":uptime_ns()?});
     if let Err(error) = append_sink(
         &canonical_sink,
         &serde_json::to_vec(&outcome).map_err(|e| e.to_string())?,
@@ -319,12 +350,9 @@ fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), S
             .map_err(|e| e.to_string())?
             .trim(),
     )?;
-    let expected = match state.action.as_str() {
-        "container.stop" => ferro_core::witness::WitnessAction::ContainerStop,
-        "container.kill" => ferro_core::witness::WitnessAction::ContainerKill,
-        "container.remove" => ferro_core::witness::WitnessAction::ContainerDelete,
-        _ => return Err("emergency action has no correlatable main-journal action".into()),
-    };
+    let expected = emergency_witness_action(&state.action)?;
+    let operation_id = decode_hex::<16>(state.operation_id.as_deref().ok_or("emergency state lacks operation ID")?)?;
+    let terminal_event_id = decode_hex::<16>(state.terminal_event_id.as_deref().ok_or("emergency state lacks terminal event ID")?)?;
     let mut reader =
         ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
             .map_err(|e| e.to_string())?;
@@ -334,12 +362,55 @@ fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), S
         terminal |= record.sequence() >= first
             && record.sequence() <= last
             && record.action() == expected
+            && record.request_id() == operation_id
+            && record.event_id() == terminal_event_id
             && record.stage() == ferro_core::witness::WitnessStage::Outcome;
     }
     reader.finish().map_err(|e| e.to_string())?;
     terminal.then_some(()).ok_or_else(|| {
         "independent sink and main journal do not contain matching terminal evidence".into()
     })
+}
+
+fn find_terminal_event(
+    state_dir: &Path,
+    operation_id: [u8; 16],
+    action: &str,
+) -> Result<String, String> {
+    let expected = emergency_witness_action(action)?;
+    let id = decode_hex::<16>(
+        fs::read_to_string(state_dir.join("journal-id"))
+            .map_err(|e| e.to_string())?
+            .trim(),
+    )?;
+    let mut reader = ferro_core::witness::WitnessReader::open_read_only(
+        state_dir.join("witness-journal"), id,
+    ).map_err(|e| e.to_string())?;
+    let mut terminal = None;
+    while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
+        let record = ferro_core::witness::decode_record(&bytes).map_err(|e| e.to_string())?;
+        if record.request_id() == operation_id
+            && record.action() == expected
+            && record.stage() == ferro_core::witness::WitnessStage::Outcome
+        {
+            if terminal.replace(record.event_id()).is_some() {
+                return Err("multiple terminal events exist for the emergency operation ID".into());
+            }
+        }
+    }
+    reader.finish().map_err(|e| e.to_string())?;
+    terminal
+        .map(|event| super::hex(&event))
+        .ok_or_else(|| "main journal lacks exact terminal evidence for emergency operation".into())
+}
+
+fn emergency_witness_action(action: &str) -> Result<ferro_core::witness::WitnessAction, String> {
+    match action {
+        "container.stop" => Ok(ferro_core::witness::WitnessAction::ContainerStop),
+        "container.kill" => Ok(ferro_core::witness::WitnessAction::ContainerKill),
+        "container.remove" => Ok(ferro_core::witness::WitnessAction::ContainerDelete),
+        _ => Err("emergency action has no correlatable main-journal action".into()),
+    }
 }
 
 pub fn ensure_reconciled(state_dir: &Path) -> Result<(), String> {
@@ -350,24 +421,49 @@ pub fn ensure_reconciled(state_dir: &Path) -> Result<(), String> {
     }
 }
 
-fn verify_approval(key_path: &Path, approval_path: &Path, expected: &str) -> Result<(), String> {
-    secure_owner_file(key_path)?;
-    secure_owner_file(approval_path)?;
-    let key_text = fs::read_to_string(key_path).map_err(|e| e.to_string())?;
-    let key = VerifyingKey::from_bytes(&decode_hex::<32>(key_text.trim())?)
+fn verify_approval(
+    key_path: &Path,
+    approval_path: &Path,
+    expected: &str,
+) -> Result<([u8; 64], [u8; 32]), String> {
+    let mut key_file = open_secure_owner_file(key_path)?;
+    let mut key_text = String::new();
+    key_file.read_to_string(&mut key_text).map_err(|e| e.to_string())?;
+    let key_bytes = decode_hex::<32>(key_text.trim())?;
+    let key = VerifyingKey::from_bytes(&key_bytes)
         .map_err(|_| "invalid recovery public key")?;
-    let approval: Approval =
-        serde_json::from_slice(&fs::read(approval_path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+    let mut approval_file = open_secure_owner_file(approval_path)?;
+    let mut approval_bytes = Vec::new();
+    approval_file.read_to_end(&mut approval_bytes).map_err(|e| e.to_string())?;
+    let approval: Approval = serde_json::from_slice(&approval_bytes).map_err(|e| e.to_string())?;
     if approval.payload != expected {
         return Err(
             "recovery approval is not bound to this boot, scope, nonce, and monotonic deadline"
                 .into(),
         );
     }
-    let signature = Signature::from_bytes(&decode_hex::<64>(&approval.signature)?);
+    let signature_bytes = decode_hex::<64>(&approval.signature)?;
+    let signature = Signature::from_bytes(&signature_bytes);
     key.verify(expected.as_bytes(), &signature)
-        .map_err(|_| "invalid offline recovery approval".into())
+        .map_err(|_| "invalid offline recovery approval".to_string())?;
+    Ok((signature_bytes, key_bytes))
+}
+
+fn open_secure_owner_file(path: &Path) -> Result<fs::File, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file()
+        || meta.mode() & 0o077 != 0
+        || meta.uid() != nix::unistd::geteuid().as_raw()
+        || meta.nlink() != 1
+    {
+        return Err(format!("{} is not an owner-only single-link regular file", path.display()));
+    }
+    Ok(file)
 }
 
 fn append_sink(path: &Path, receipt: &[u8]) -> Result<(), String> {
@@ -543,7 +639,7 @@ mod tests {
             .contains("another boot"));
         persisted.boot_id = original_boot;
         write_state(&state_path, &persisted).unwrap();
-        execute_verified(&state_dir, &sink, "container.stop", "container:abc", || {
+        execute_verified(&state_dir, &sink, "container.stop", "container:abc", |_, _| {
             Ok(())
         })
         .unwrap();

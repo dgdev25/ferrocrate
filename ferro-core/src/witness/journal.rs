@@ -79,6 +79,7 @@ pub struct WitnessJournal {
     coordinator: Mutex<()>,
     faults: JournalFaults,
     automation_stopped: AtomicBool,
+    mirror_sequence: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,7 +193,7 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Outcome, OperationId(record.request_id))?;
-        self.publish_read_snapshot()?;
+        self.update_read_mirror_best_effort();
         Ok(())
     }
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
@@ -242,6 +243,7 @@ impl WitnessJournal {
             coordinator: Mutex::new(()),
             faults,
             automation_stopped: AtomicBool::new(false),
+            mirror_sequence: AtomicU64::new(0),
         };
         journal.initialize(config.cleanup_reserve_bytes)?;
         Ok(journal)
@@ -305,7 +307,7 @@ impl WitnessJournal {
             if reserve.metadata()?.len() != stored_reserve {
                 return Err(JournalError::AutomationStopped);
             }
-            self.publish_read_snapshot()?;
+            self.repair_read_mirror();
             return Ok(());
         }
         self.meta.insert(JOURNAL_ID, &self.journal_id)?;
@@ -339,7 +341,7 @@ impl WitnessJournal {
         {
             return Err(JournalError::AutomationStopped);
         }
-        self.publish_read_snapshot()?;
+        self.repair_read_mirror();
         Ok(())
     }
 
@@ -417,7 +419,7 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Received, id)?;
-        self.publish_read_snapshot()?;
+        self.update_read_mirror_best_effort();
         self.post_ack_rotation();
         Ok(())
     }
@@ -450,7 +452,7 @@ impl WitnessJournal {
         let decision_id = record.decision_id.ok_or(JournalError::InvalidStage)?;
         let decision_digest = self.append_decision_record(id, &mut record, &mut state)?;
         self.flush(FlushBoundary::Decision, id)?;
-        self.publish_read_snapshot()?;
+        self.update_read_mirror_best_effort();
         self.post_ack_rotation();
         Ok(DurableIntent {
             journal_id: self.journal_id,
@@ -549,7 +551,7 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         self.flush(FlushBoundary::Decision, id)?;
-        self.publish_read_snapshot()?;
+        self.update_read_mirror_best_effort();
         self.post_ack_rotation();
         Ok(())
     }
@@ -637,11 +639,11 @@ impl WitnessJournal {
             })
             .map_err(transaction_error)?;
         if forced_unknown {
-            self.publish_read_snapshot()?;
+            self.update_read_mirror_best_effort();
             Err(JournalError::Indeterminate { operation_id: id })
         } else {
             self.flush(FlushBoundary::Outcome, id)?;
-            self.publish_read_snapshot()?;
+            self.update_read_mirror_best_effort();
             self.post_ack_rotation();
             Ok(())
         }
@@ -687,7 +689,13 @@ impl WitnessJournal {
         Ok(next_hash)
     }
 
-    fn publish_read_snapshot(&self) -> Result<(), JournalError> {
+    fn repair_read_mirror(&self) {
+        if self.rebuild_read_mirror().is_err() {
+            self.mark_reader_stale();
+        }
+    }
+
+    fn rebuild_read_mirror(&self) -> Result<(), JournalError> {
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
 
@@ -701,9 +709,10 @@ impl WitnessJournal {
         let mut file = options.open(&temporary)?;
         file.write_all(super::reader::READER_MAGIC)?;
         file.write_all(&self.journal_id)?;
-        file.write_all(&(records.len() as u64).to_be_bytes())?;
-        for bytes in records {
+        let mut last = 0;
+        for bytes in &records {
             let decoded = decode_record(&bytes)?;
+            last = decoded.sequence();
             file.write_all(&decoded.sequence().to_be_bytes())?;
             file.write_all(&(bytes.len() as u32).to_be_bytes())?;
             file.write_all(&bytes)?;
@@ -711,7 +720,53 @@ impl WitnessJournal {
         file.sync_all()?;
         fs::rename(&temporary, &target)?;
         File::open(&self.root)?.sync_all()?;
+        self.mirror_sequence.store(last, Ordering::Release);
+        let _ = fs::remove_file(self.root.join("witness.reader-stale"));
         Ok(())
+    }
+
+    fn update_read_mirror_best_effort(&self) {
+        if self.append_read_mirror().is_err() {
+            self.mark_reader_stale();
+        }
+    }
+
+    fn append_read_mirror(&self) -> Result<(), JournalError> {
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        let first = self.mirror_sequence.load(Ordering::Acquire).saturating_add(1);
+        let (head, _) = self.head()?;
+        if first > head {
+            return Ok(());
+        }
+        let mut options = OpenOptions::new();
+        options.append(true);
+        #[cfg(unix)]
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        let mut file = options.open(self.root.join(super::reader::READER_FILE))?;
+        for sequence in first..=head {
+            let bytes = self
+                .records
+                .get(sequence.to_be_bytes())?
+                .ok_or(JournalError::Corrupt)?;
+            let mut frame = Vec::with_capacity(12 + bytes.len());
+            frame.extend_from_slice(&sequence.to_be_bytes());
+            frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            frame.extend_from_slice(&bytes);
+            file.write_all(&frame)?;
+        }
+        file.sync_all()?;
+        self.mirror_sequence.store(head, Ordering::Release);
+        Ok(())
+    }
+
+    fn mark_reader_stale(&self) {
+        let path = self.root.join("witness.reader-stale");
+        if let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(&path) {
+            let _ = file.write_all(b"reader mirror requires explicit maintenance repair\n");
+            let _ = file.sync_all();
+            let _ = File::open(&self.root).and_then(|directory| directory.sync_all());
+        }
     }
 }
 
@@ -753,6 +808,52 @@ mod epoch_lock_tests {
             device_class: None,
             correlation_digest: None,
         }
+    }
+
+    #[test]
+    fn read_mirror_failure_marks_stale_without_misreporting_durable_append() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = WitnessJournal::open(JournalConfig::new(
+            root.path(), [0x61; 16], JournalMode::Required,
+        )).unwrap();
+        fs::remove_file(root.path().join(super::super::reader::READER_FILE)).unwrap();
+        fs::create_dir(root.path().join(super::super::reader::READER_FILE)).unwrap();
+
+        journal.append_checkpoint_publication([8; 32], publication()).unwrap();
+
+        assert_eq!(journal.records().unwrap().len(), 1);
+        assert!(root.path().join("witness.reader-stale").is_file());
+    }
+
+    #[test]
+    fn read_only_mirror_rejects_a_broken_record_hash_chain() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = WitnessJournal::open(JournalConfig::new(
+            root.path(), [0x62; 16], JournalMode::Required,
+        ))
+        .unwrap();
+        journal
+            .append_checkpoint_publication([8; 32], publication())
+            .unwrap();
+        let mut second = publication();
+        second.event_id = [9; 16];
+        second.request_id = [10; 16];
+        journal
+            .append_checkpoint_publication([9; 32], second)
+            .unwrap();
+
+        let mirror = root.path().join(super::super::reader::READER_FILE);
+        let mut bytes = fs::read(&mirror).unwrap();
+        let first_len = u32::from_be_bytes(bytes[32..36].try_into().unwrap()) as usize;
+        let second_record = 24 + 12 + first_len + 12;
+        let previous_hash = second_record + 2 + 16 + 8 + 8;
+        bytes[previous_hash] ^= 0x80;
+        fs::write(&mirror, bytes).unwrap();
+
+        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x62; 16])
+            .unwrap();
+        assert!(reader.next_record().unwrap().is_some());
+        assert!(matches!(reader.next_record(), Err(JournalError::Corrupt)));
     }
 
     #[test]

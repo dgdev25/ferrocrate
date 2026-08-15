@@ -1571,6 +1571,16 @@ impl ContainerRuntime {
         }
     }
 
+    pub fn with_emergency_authority(
+        self,
+        authority: crate::authorization::emergency::EmergencyAuthority,
+    ) -> Self {
+        Self {
+            authorization: self.authorization.with_emergency_authority(authority),
+            ..self
+        }
+    }
+
     pub fn request_origin(&self) -> Option<crate::authorization::RequestOrigin> {
         self.authorization.request_origin()
     }
@@ -3514,8 +3524,9 @@ fn production_authorization(
         crate::authorization::policy::PolicyStore::load(&policy_path)
             .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
     );
-    let gate = Arc::new(AuthorizationGate::new(policies));
-    let journal = if gate.mode() == crate::authorization::AuthorizationMode::Disabled {
+    let enabled = policies.snapshot().document.mode != crate::authorization::AuthorizationMode::Disabled;
+    let mut admission = None;
+    let journal = if !enabled {
         None
     } else {
         let id_path = root.join("journal-id");
@@ -3537,6 +3548,7 @@ fn production_authorization(
                 RuntimeError::Authorization("authorization journal ID is invalid".into())
             })?;
         }
+        admission = Some(load_mutation_admission(&root, id)?);
         Some(Arc::new(
             crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
                 root.join("witness-journal"),
@@ -3546,16 +3558,69 @@ fn production_authorization(
             .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
         ))
     };
-    let authorization = RuntimeAuthorization::new_with_id(gate, journal, runtime_id);
-    if authorization.requires_provenance() {
-        Ok(authorization.require_fresh_checkpoint(
-            root.join("checkpoint.bin"),
-            std::time::Duration::from_secs(300),
-            std::time::Duration::from_secs(60),
-        ))
-    } else {
-        Ok(authorization)
+    let gate = Arc::new(match admission {
+        Some(admission) => AuthorizationGate::with_admission(policies, admission),
+        None => AuthorizationGate::new(policies),
+    });
+    Ok(RuntimeAuthorization::new_with_id(gate, journal, runtime_id))
+}
+
+fn load_mutation_admission(
+    root: &Path,
+    journal_id: [u8; 16],
+) -> Result<crate::authorization::admission::MutationAdmission, RuntimeError> {
+    let trust_path = root.join("trust-bundle.json");
+    let trust_value: serde_json::Value = serde_json::from_slice(&fs::read(&trust_path).map_err(|error| {
+        RuntimeError::Authorization(format!("enabled authorization requires explicit trust bundle: {error}"))
+    })?).map_err(|error| RuntimeError::Authorization(format!("invalid trust bundle: {error}")))?;
+    let pinned_id = trust_value.get("journal_id").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RuntimeError::Authorization("trust bundle lacks journal_id".into()))?;
+    let expected_id = journal_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    if pinned_id != expected_id {
+        return Err(RuntimeError::Authorization("trust bundle journal ID mismatch".into()));
     }
+    let public = trust_value.get("initial_public_key").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RuntimeError::Authorization("trust bundle lacks initial_public_key".into()))?;
+    let public = decode_fixed_hex::<32>(public)?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&public)
+        .map_err(|_| RuntimeError::Authorization("trust bundle public key is invalid".into()))?;
+    let minimum = crate::witness::Checkpoint::decode(&fs::read(root.join("minimum-checkpoint.bin"))
+        .map_err(|error| RuntimeError::Authorization(format!("minimum checkpoint unavailable: {error}")))?)
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    let chain_root = root.join("checkpoint-chain");
+    let mut entries = fs::read_dir(&chain_root)
+        .map_err(|error| RuntimeError::Authorization(format!("checkpoint chain unavailable: {error}")))?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut checkpoints = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() || metadata.len() > 1024 {
+            return Err(RuntimeError::Authorization("checkpoint chain entry is invalid".into()));
+        }
+        checkpoints.push(crate::witness::Checkpoint::decode(&fs::read(entry.path())?)
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))?);
+    }
+    if checkpoints.is_empty() {
+        return Err(RuntimeError::Authorization("checkpoint chain is empty".into()));
+    }
+    Ok(crate::authorization::admission::MutationAdmission::verified(
+        root.join("witness-journal"), journal_id,
+        crate::witness::TrustBundle::new(journal_id, key), minimum, checkpoints,
+        std::time::Duration::from_secs(300), std::time::Duration::from_secs(60),
+    ))
+}
+
+fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], RuntimeError> {
+    if value.len() != N * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RuntimeError::Authorization("invalid hexadecimal trust value".into()));
+    }
+    let mut out = [0; N];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| RuntimeError::Authorization("invalid hexadecimal trust value".into()))?;
+    }
+    Ok(out)
 }
 fn generate_container_id() -> String {
     // Use cryptographic randomness for unpredictable container IDs

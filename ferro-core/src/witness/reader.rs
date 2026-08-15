@@ -1,17 +1,17 @@
 use super::JournalError;
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek},
     path::Path,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-pub(super) const READER_MAGIC: &[u8; 8] = b"FWREAD02";
+pub(super) const READER_MAGIC: &[u8; 8] = b"FWREAD03";
 pub(super) const READER_FILE: &str = "witness.readonly-v2";
-const HEADER_BYTES: u64 = 32;
-const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
+const HEADER_BYTES: u64 = 24;
+const MAX_MIRROR_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// A no-create, no-lock, bounded reader over an atomically published witness
 /// snapshot. Opening this type never initializes sled trees, reserve metadata,
@@ -19,8 +19,9 @@ const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
 pub struct WitnessReader {
     file: File,
     journal_id: [u8; 16],
-    remaining: u64,
+    end_offset: u64,
     last_sequence: u64,
+    last_hash: [u8; 32],
     failed: bool,
 }
 
@@ -30,15 +31,16 @@ impl WitnessReader {
         expected: [u8; 16],
     ) -> Result<Self, JournalError> {
         let path = root.as_ref().join(READER_FILE);
+        if root.as_ref().join("witness.reader-stale").exists() {
+            return Err(JournalError::ReaderStale);
+        }
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
         options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
         let mut file = options.open(path)?;
         let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.len() < HEADER_BYTES
-            || metadata.len() > MAX_SNAPSHOT_BYTES
+        if !metadata.is_file() || metadata.len() < HEADER_BYTES || metadata.len() > MAX_MIRROR_BYTES
         {
             return Err(JournalError::Corrupt);
         }
@@ -51,19 +53,12 @@ impl WitnessReader {
         if &header[..8] != READER_MAGIC || header[8..24] != expected {
             return Err(JournalError::JournalMismatch);
         }
-        let remaining = u64::from_be_bytes(
-            header[24..32]
-                .try_into()
-                .map_err(|_| JournalError::Corrupt)?,
-        );
-        if remaining > 1_000_000 {
-            return Err(JournalError::Corrupt);
-        }
         Ok(Self {
             file,
             journal_id: expected,
-            remaining,
+            end_offset: metadata.len(),
             last_sequence: 0,
+            last_hash: [0; 32],
             failed: false,
         })
     }
@@ -73,8 +68,12 @@ impl WitnessReader {
     }
 
     pub fn next_record(&mut self) -> Result<Option<Vec<u8>>, JournalError> {
-        if self.remaining == 0 {
+        let position = self.file.stream_position()?;
+        if position == self.end_offset {
             return Ok(None);
+        }
+        if position > self.end_offset || self.end_offset - position < 12 {
+            return Err(JournalError::Corrupt);
         }
         let mut header = [0_u8; 12];
         self.file.read_exact(&mut header)?;
@@ -85,19 +84,21 @@ impl WitnessReader {
         if sequence != self.last_sequence.saturating_add(1)
             || length == 0
             || length > super::MAX_RECORD_BYTES
+            || self.file.stream_position()?.saturating_add(length as u64) > self.end_offset
         {
             return Err(JournalError::Corrupt);
         }
         let mut bytes = vec![0; length];
         self.file.read_exact(&mut bytes)?;
-        self.last_sequence = sequence;
-        self.remaining -= 1;
-        if self.remaining == 0 {
-            let end = self.file.stream_position()?;
-            if end != self.file.seek(SeekFrom::End(0))? {
-                return Err(JournalError::Corrupt);
-            }
+        let decoded = super::decode_record(&bytes).map_err(|_| JournalError::Corrupt)?;
+        if decoded.journal_id() != &self.journal_id
+            || decoded.sequence() != sequence
+            || decoded.previous_hash() != self.last_hash
+        {
+            return Err(JournalError::Corrupt);
         }
+        self.last_sequence = sequence;
+        self.last_hash = decoded.record_hash();
         Ok(Some(bytes))
     }
 
@@ -105,8 +106,8 @@ impl WitnessReader {
         WitnessRecords(self)
     }
 
-    pub fn finish(self) -> Result<(), JournalError> {
-        if self.failed || self.remaining != 0 {
+    pub fn finish(mut self) -> Result<(), JournalError> {
+        if self.failed || self.file.stream_position()? != self.end_offset {
             Err(JournalError::Corrupt)
         } else {
             Ok(())

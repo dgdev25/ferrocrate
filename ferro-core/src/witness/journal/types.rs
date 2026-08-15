@@ -142,6 +142,8 @@ pub enum JournalError {
     InvalidStage,
     #[error("corrupt witness journal metadata")]
     Corrupt,
+    #[error("witness read mirror is stale and requires explicit maintenance repair")]
+    ReaderStale,
     #[error("witness journal I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("witness journal storage failed: {0}")]

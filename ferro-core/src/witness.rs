@@ -142,6 +142,8 @@ pub enum WitnessAction {
     ImageBuild = 24,
     ImageTag = 25,
     ImageReferenceWrite = 26,
+    CheckpointRecover = 27,
+    KeyRotate = 28,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,6 +218,7 @@ pub enum ReasonCode {
     ExecutionFailed = 2,
     RecoveryCompleted = 3,
     Quarantined = 4,
+    EmergencyOverride = 5,
 }
 
 impl From<DisclosureClass> for u8 {
@@ -325,6 +328,18 @@ impl DecodedRecord {
 
     pub fn record_hash(&self) -> [u8; 32] {
         hash_record(&self.bytes)
+    }
+    pub fn previous_hash(&self) -> [u8; 32] {
+        self.record.previous_hash
+    }
+    pub fn event_id(&self) -> [u8; 16] {
+        self.record.event_id
+    }
+    pub fn request_id(&self) -> [u8; 16] {
+        self.record.request_id
+    }
+    pub fn outcome(&self) -> WitnessOutcome {
+        self.record.outcome
     }
 
     pub fn principal_pseudonym(&self) -> [u8; 32] {

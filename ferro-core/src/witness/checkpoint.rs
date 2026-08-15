@@ -331,7 +331,7 @@ fn take_array<const N: usize>(
         .try_into()
         .map_err(|_| CheckpointError::InvalidArtifact)
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrustBundle {
     journal_id: [u8; 16],
     starting_epoch: u64,

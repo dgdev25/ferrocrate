@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::{fs, os::unix::fs::PermissionsExt};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn cli(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
@@ -53,6 +54,27 @@ fn protected_write(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+fn provision_admission(auth_dir: &std::path::Path, id: [u8; 16]) {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let checkpoint = ferro_core::witness::Checkpoint::sign(
+        ferro_core::witness::FlushedHead::new(id, 1, 0, [0; 32]),
+        now,
+        &key,
+        ferro_core::witness::CheckpointKind::Periodic,
+    ).unwrap();
+    protected_write(&auth_dir.join("minimum-checkpoint.bin"), checkpoint.encode());
+    let chain = auth_dir.join("checkpoint-chain");
+    fs::create_dir(&chain).unwrap();
+    fs::set_permissions(&chain, fs::Permissions::from_mode(0o700)).unwrap();
+    protected_write(&chain.join("00000000000000000000.bin"), checkpoint.encode());
+    let id_hex = id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let public = key.verifying_key().to_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    protected_write(&auth_dir.join("trust-bundle.json"), serde_json::to_vec(&serde_json::json!({
+        "schema": 1, "journal_id": id_hex, "initial_public_key": public, "starting_epoch": 1
+    })).unwrap());
+}
+
 #[test]
 fn policy_check_prints_stable_version_rule_reason_and_digest() {
     let temp = tempfile::tempdir().unwrap();
@@ -93,6 +115,7 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
         &auth_dir.join("journal-id"),
         b"42424242424242424242424242424242\n",
     );
+    provision_admission(&auth_dir, [0x42; 16]);
     let older = temp.path().join("older.toml");
     protected_write(
         &active,

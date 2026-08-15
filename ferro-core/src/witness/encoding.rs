@@ -309,6 +309,8 @@ fn action(value: u8) -> Result<WitnessAction, WitnessError> {
         24 => ImageBuild,
         25 => ImageTag,
         26 => ImageReferenceWrite,
+        27 => CheckpointRecover,
+        28 => KeyRotate,
         _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
     };
     Ok(action)
@@ -384,6 +386,7 @@ fn reason_optional(decoder: &mut Decoder<'_>) -> Result<Option<ReasonCode>, Witn
         2 => Ok(Some(ReasonCode::ExecutionFailed)),
         3 => Ok(Some(ReasonCode::RecoveryCompleted)),
         4 => Ok(Some(ReasonCode::Quarantined)),
+        5 => Ok(Some(ReasonCode::EmergencyOverride)),
         _ => Err(WitnessError::UnknownDiscriminant { field: "reason" }),
     }
 }

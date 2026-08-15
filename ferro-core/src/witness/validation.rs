@@ -69,7 +69,8 @@ pub(super) fn validate_record(record: &impl SemanticFields) -> Result<(), Witnes
                 && !record.has_recovery_link()
                 && record.outcome() == WitnessOutcome::None
                 && match record.decision() {
-                    Some(true) => record.reason().is_none(),
+                    Some(true) => record.reason().is_none()
+                        || record.reason() == Some(ReasonCode::EmergencyOverride),
                     Some(false) => record.reason() == Some(ReasonCode::PolicyDenied),
                     None => false,
                 }

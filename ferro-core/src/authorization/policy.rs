@@ -51,6 +51,7 @@ pub struct PolicyStore {
     /// Stable production path. Readers opportunistically refresh from this
     /// path so a long-running daemon observes an atomically installed policy.
     source: Option<PathBuf>,
+    source_digest: RwLock<Option<[u8; 32]>>,
 }
 
 /// Proof that the caller passed the separate policy-rollback authorization path.
@@ -118,6 +119,7 @@ impl PolicyStore {
                 document: Arc::new(document),
             }),
             source: None,
+            source_digest: RwLock::new(None),
         }
     }
 
@@ -125,9 +127,11 @@ impl PolicyStore {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
         let path = path.as_ref();
         let snapshot = Self::load_candidate(path)?.snapshot;
+        let digest = snapshot.digest;
         Ok(Self {
             active: RwLock::new(snapshot),
             source: Some(path.to_path_buf()),
+            source_digest: RwLock::new(Some(digest)),
         })
     }
 
@@ -139,6 +143,7 @@ impl PolicyStore {
         Self {
             active: RwLock::new(candidate.snapshot.clone()),
             source: None,
+            source_digest: RwLock::new(None),
         }
     }
 
@@ -176,6 +181,14 @@ impl PolicyStore {
         let Ok(candidate) = Self::load_candidate(path) else {
             return;
         };
+        let observed = self
+            .source_digest
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if observed.as_ref() == Some(&candidate.snapshot.digest) {
+            return;
+        }
+        drop(observed);
         let current = self
             .active
             .read()
@@ -189,6 +202,9 @@ impl PolicyStore {
             // and atomically installed. Rollback authorization is enforced and
             // witnessed by the installer before it replaces that path.
             *active = candidate.snapshot;
+            if let Ok(mut observed) = self.source_digest.write() {
+                *observed = Some(active.digest);
+            }
         }
     }
 

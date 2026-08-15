@@ -395,11 +395,20 @@ impl AuthorizedRequest {
 #[derive(Debug)]
 pub struct AuthorizationGate {
     policies: Arc<PolicyStore>,
+    admission: Option<super::admission::MutationAdmission>,
 }
 
 impl AuthorizationGate {
     pub fn new(policies: Arc<PolicyStore>) -> Self {
-        Self { policies }
+        Self { policies, admission: None }
+    }
+
+    pub fn with_admission(policies: Arc<PolicyStore>, admission: super::admission::MutationAdmission) -> Self {
+        Self { policies, admission: Some(admission) }
+    }
+
+    pub(crate) fn admit(&self, action: super::Action) -> Result<(), super::admission::MutationAdmissionError> {
+        self.admission.as_ref().map_or(Ok(()), |admission| admission.admit(action))
     }
 
     /// Pin the active validated policy before canonicalization or request fan-out.
@@ -432,6 +441,31 @@ impl AuthorizationGate {
             return Err(Denial::policy(&request, &decision));
         }
         Ok(AuthorizedRequest::new(request, decision))
+    }
+
+    pub(crate) fn policy_would_deny(&self, request: &CanonicalRequest) -> Result<bool, Denial> {
+        validate_policy_binding(request)?;
+        validate_canonical_bindings(request)?;
+        Ok(!request.policy.snapshot.document.evaluate(&request.context).allowed)
+    }
+
+    pub(crate) fn authorize_emergency(
+        &self,
+        request: CanonicalRequest,
+    ) -> Result<AuthorizedRequest, Denial> {
+        validate_policy_binding(&request)?;
+        validate_canonical_bindings(&request)?;
+        let policy_generation = request.policy_generation;
+        Ok(AuthorizedRequest::new(
+            request,
+            Decision {
+                allowed: true,
+                reason: super::ReasonCode::EmergencyOverride,
+                matched_rule: "emergency.exact-scope".into(),
+                policy_generation,
+                hypothetical_denial: Some(super::ReasonCode::RoleNotAuthorized),
+            },
+        ))
     }
 }
 

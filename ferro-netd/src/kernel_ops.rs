@@ -211,6 +211,8 @@ impl NetKernelOps for RealNetKernelOps {
                 address.clone(),
                 "dev".into(),
                 interface.into(),
+                "proto".into(),
+                "186".into(),
             ])
             .map_err(|e| e.to_string())?;
         }
@@ -239,6 +241,8 @@ impl NetKernelOps for RealNetKernelOps {
                 route.clone(),
                 "dev".into(),
                 interface.into(),
+                "proto".into(),
+                "186".into(),
             ])
             .map_err(|e| e.to_string())?;
         }
@@ -253,6 +257,8 @@ impl NetKernelOps for RealNetKernelOps {
                 route.clone(),
                 "dev".into(),
                 interface.into(),
+                "proto".into(),
+                "186".into(),
             ])
             .map_err(|e| e.to_string())?;
         }
@@ -335,6 +341,8 @@ fn observe_routes(interface: &str) -> Result<Vec<String>, ()> {
         "show".into(),
         "dev".into(),
         interface.into(),
+        "proto".into(),
+        "186".into(),
     ])
     .map_err(|_| ())?;
     let rows: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|_| ())?;
@@ -383,6 +391,11 @@ fn observe_addresses(interface: &str) -> Result<Vec<String>, ()> {
                 .flatten()
         })
         .filter_map(|address| {
+            if address.get("protocol").and_then(serde_json::Value::as_u64) != Some(186)
+                && address.get("protocol").and_then(serde_json::Value::as_str) != Some("186")
+            {
+                return None;
+            }
             Some(format!(
                 "{}/{}",
                 address.get("local")?.as_str()?,

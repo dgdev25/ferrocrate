@@ -62,6 +62,7 @@ run managed-networking-attribution cargo test -p ferro-mgr --test authorization_
 # and managed-overlay client/server. They deliberately do not call a
 # test-only authorization adapter. The rootless test consumes an exact
 # `rootless.mapping` permit before it can write a mapping.
+run public-network cargo test -p ferro-cli --test docker_compat_integration network_
 run public-cli-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=cli cargo test -p ferro-cli --test cli_integration public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts -- --exact
 run public-docker-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=docker cargo test -p ferro-cli --test docker_compat_integration docker_compat_volume_mutation_preserves_disabled_shadow_and_enforce_contracts -- --exact
 run public-compose-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=compose cargo test -p ferro-cli --test compose_down_integration public_compose_down_preserves_disabled_shadow_and_enforce_contracts -- --exact

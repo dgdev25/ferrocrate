@@ -679,6 +679,29 @@ fn validate_execution_with_comparator<F>(
 where
     F: FnOnce(Result<(), SurfaceExecutionError>) -> Result<(), SurfaceExecutionError>,
 {
+    validate_execution_with_comparator_with_metrics(
+        permit,
+        action,
+        kind,
+        canonical_name,
+        generation,
+        comparator,
+        crate::observability::authorization_metrics(),
+    )
+}
+
+fn validate_execution_with_comparator_with_metrics<F>(
+    permit: &SurfacePermit,
+    action: Action,
+    kind: ResourceKind,
+    canonical_name: &str,
+    generation: u64,
+    comparator: F,
+    metrics: &crate::observability::AuthorizationMetrics,
+) -> Result<(), SurfaceExecutionError>
+where
+    F: FnOnce(Result<(), SurfaceExecutionError>) -> Result<(), SurfaceExecutionError>,
+{
     let proof = permit.proof();
     let expected_mismatch = proof.canonical().context().action() != action
         || proof.canonical().context().resource().kind() != kind
@@ -697,7 +720,7 @@ where
     };
     let result = comparator(actual);
     if expected_mismatch {
-        crate::observability::authorization_metrics().record_bypass_probe(result.is_err());
+        metrics.record_bypass_probe(result.is_err());
     }
     result
 }
@@ -1152,6 +1175,7 @@ mod tests {
 
     #[test]
     fn diagnostic_broken_comparator_records_a_successful_bypass() {
+        let metrics = crate::observability::AuthorizationMetrics::new();
         let auth = SurfaceAuthorization::compatibility();
         let permit = auth
             .authorize_named(
@@ -1162,17 +1186,18 @@ mod tests {
                 1,
             )
             .unwrap();
-        let before = crate::observability::authorization_metrics_snapshot();
-        let result = validate_execution_with_comparator(
+        let before = metrics.snapshot();
+        let result = validate_execution_with_comparator_with_metrics(
             &permit,
             Action::VolumeCreate,
             ResourceKind::Volume,
             "attacker-substitution",
             1,
             |_| Ok(()),
+            &metrics,
         );
         assert!(result.is_ok(), "fault seam intentionally accepts mismatch");
-        let after = crate::observability::authorization_metrics_snapshot();
+        let after = metrics.snapshot();
         assert_eq!(after.bypass_probe_total, before.bypass_probe_total + 1);
         assert_eq!(
             after.successful_bypass_total,

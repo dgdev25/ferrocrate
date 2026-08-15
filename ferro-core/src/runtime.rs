@@ -10261,18 +10261,12 @@ mod tests {
     fn network_backend_startup_reconciles_running_and_paused_records() {
         for status in ["running", "paused"] {
             let temp = tempfile::tempdir().unwrap();
-            let store = crate::container_store::LocalContainerStore::open(
-                temp.path().join("containers.db"),
-            )
-            .unwrap();
-            store
+            let runtime = ContainerRuntime::new(temp.path()).unwrap();
+            runtime
+                .store
                 .put(&fixture_container_record(status, status))
                 .unwrap();
-            drop(store);
-            let error = match ContainerRuntime::new(temp.path()) {
-                Ok(_) => panic!("{status} malformed network unexpectedly reconciled"),
-                Err(error) => error,
-            };
+            let error = runtime.reconcile_persisted_state().unwrap_err();
             assert!(
                 error.to_string().contains("ownership"),
                 "status {status}: {error}"

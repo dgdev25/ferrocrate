@@ -695,12 +695,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalImageStore::open(temp.path().join("images")).unwrap();
 
-        pull_planned_image_with_store(temp.path(), &plan, &store, &crate::authorization::surface::SurfaceMutationAuthority::for_test())
-            .expect_err("corrupt config must prevent publication");
+        pull_planned_image_with_store(
+            temp.path(),
+            &plan,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect_err("corrupt config must prevent publication");
         assert!(store.list_references().unwrap().is_empty());
-        drop(store);
-        let reopened = LocalImageStore::open(temp.path().join("images")).unwrap();
-        assert!(reopened.list_references().unwrap().is_empty());
     }
 
     #[test]

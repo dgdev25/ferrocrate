@@ -1254,54 +1254,58 @@ mod tests {
 
     #[test]
     fn crash_before_execution_reopens_as_pending_and_reconciles_without_replay() {
-        let root = tempfile::tempdir().unwrap();
-        let config = crate::witness::JournalConfig::new(
-            root.path(),
-            [85; 16],
-            crate::witness::JournalMode::Required,
-        );
-        let journal = Arc::new(crate::witness::WitnessJournal::open(config.clone()).unwrap());
-        let auth = SurfaceAuthorization::with_journal(
-            Arc::new(AuthorizationGate::new(Arc::new(
-                PolicyStore::compatibility_disabled(),
-            ))),
-            Arc::clone(&journal),
-            [86; 16],
-        );
-        let permit = auth
-            .authorize_named(
-                &origin(),
-                Action::VolumeDelete,
-                ResourceKind::Volume,
-                "data",
-                9,
-            )
-            .unwrap();
-        let operation = permit.operation_id();
-        drop(permit);
-        drop(auth);
-        drop(journal);
+        for _ in 0..16 {
+            let root = tempfile::tempdir().unwrap();
+            let config = crate::witness::JournalConfig::new(
+                root.path(),
+                [85; 16],
+                crate::witness::JournalMode::Required,
+            );
+            let journal = Arc::new(crate::witness::WitnessJournal::open(config.clone()).unwrap());
+            let auth = SurfaceAuthorization::with_journal(
+                Arc::new(AuthorizationGate::new(Arc::new(
+                    PolicyStore::compatibility_disabled(),
+                ))),
+                Arc::clone(&journal),
+                [86; 16],
+            );
+            let permit = auth
+                .authorize_named(
+                    &origin(),
+                    Action::VolumeDelete,
+                    ResourceKind::Volume,
+                    "data",
+                    9,
+                )
+                .unwrap();
+            let operation = permit.operation_id();
+            drop(permit);
+            drop(auth);
+            let journal = Arc::try_unwrap(journal)
+                .unwrap_or_else(|_| panic!("surface shutdown retained a witness journal owner"));
+            drop(journal);
 
-        let reopened = Arc::new(crate::witness::WitnessJournal::open(config).unwrap());
-        let auth = SurfaceAuthorization::with_journal(
-            Arc::new(AuthorizationGate::new(Arc::new(
-                PolicyStore::compatibility_disabled(),
-            ))),
-            Arc::clone(&reopened),
-            [86; 16],
-        );
-        assert_eq!(reopened.pending().unwrap()[0].operation_id(), operation);
-        let mut observations = 0;
-        assert_eq!(
-            auth.reconcile_pending(|pending| {
-                observations += 1;
-                (*pending.recipe().observation_digest(), true)
-            })
-            .unwrap(),
-            1
-        );
-        assert_eq!(observations, 1);
-        assert!(reopened.pending().unwrap().is_empty());
+            let reopened = Arc::new(crate::witness::WitnessJournal::open(config).unwrap());
+            let auth = SurfaceAuthorization::with_journal(
+                Arc::new(AuthorizationGate::new(Arc::new(
+                    PolicyStore::compatibility_disabled(),
+                ))),
+                Arc::clone(&reopened),
+                [86; 16],
+            );
+            assert_eq!(reopened.pending().unwrap()[0].operation_id(), operation);
+            let mut observations = 0;
+            assert_eq!(
+                auth.reconcile_pending(|pending| {
+                    observations += 1;
+                    (*pending.recipe().observation_digest(), true)
+                })
+                .unwrap(),
+                1
+            );
+            assert_eq!(observations, 1);
+            assert!(reopened.pending().unwrap().is_empty());
+        }
     }
 
     #[test]

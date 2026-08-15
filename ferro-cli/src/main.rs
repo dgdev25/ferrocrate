@@ -474,6 +474,14 @@ pub enum EmergencyCommands {
     Reconcile {
         #[arg(long)] sink: PathBuf,
     },
+    SinkServe {
+        #[arg(long)] socket: PathBuf,
+        #[arg(long)] store: PathBuf,
+        #[arg(long)] signing_key: PathBuf,
+        #[arg(long)] journal_id: String,
+        #[arg(long)] expected_uid: u32,
+        #[arg(long)] requests: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1604,6 +1612,17 @@ where F: FnOnce(&ferro_core::witness::WitnessJournal) -> Result<String, String> 
 #[cfg(target_os = "linux")]
 fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result<(), String> {
     let output = match command {
+        EmergencyCommands::SinkServe { socket, store, signing_key, journal_id, expected_uid, requests } => {
+            if nix::unistd::geteuid().as_raw() != 0 && nix::unistd::geteuid().as_raw() != *expected_uid {
+                return Err("emergency sink service requires host administrator authority".into());
+            }
+            authorization_admin::emergency_sink::serve(authorization_admin::emergency_sink::SinkServeConfig {
+                socket, store, signing_key,
+                journal_id: authorization_admin::decode_hex::<16>(journal_id)?,
+                expected_uid: *expected_uid, requests: *requests,
+            })?;
+            Ok("emergency sink service stopped".into())
+        }
         EmergencyCommands::Activate { origin, sink, recovery_public_key, recovery_approval, action, resource, nonce, deadline_uptime_ns } => {
             if origin != "console" { return Err("emergency activation is local-console-only and unavailable through Docker, CRI, or remote APIs".into()); }
             let default_state_dir = runtime_dir.join("authorization");

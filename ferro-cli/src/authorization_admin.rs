@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod emergency;
+pub mod emergency_sink;
 mod witness;
 
 pub use emergency::{
@@ -162,7 +163,7 @@ pub(crate) fn secure_owner_file(path: &Path) -> Result<(), String> {
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-pub(crate) fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {
+pub fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {
     if value.len() != N * 2 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("expected {} hexadecimal characters", N * 2));
     }

@@ -75,3 +75,14 @@ Additional verification:
 - `cargo test -p ferro-netd` — PASS (15 tests, including real server/granted-wire, ancillary FD rejection, replay/restart, key overlap, and unknown-effect quarantine).
 - `cargo test -p ferro-mgr` — PASS (all unit/integration/doc tests; 14 focused authorization tests).
 - `cargo clippy -p ferro-core -p ferro-mgr -p ferro-netd --all-targets` — PASS with documented pre-existing warnings.
+
+## Cross-stack closure
+
+Netd is now a library plus a composition-only production binary. Every bridge, veth, namespace, route, WireGuard, and observation effect passes through a private `NetKernelOps`; production uses `RealNetKernelOps`, while a non-default test-support feature provides a persistent deterministic backend, bounded one-request Unix service, redacted receipts, and one-shot effect/persistence faults. All netd source modules remain below 500 lines.
+
+Controller reconciliation and local delegated mutations share one fsynced `NetdSequence`. Controller success advances it, each local child durably reserves its next tuple before sending, concurrent reservations remain unique, restart retains the high-water mark, and failed calls may consume a safe gap but cannot reuse a stale revision.
+
+The cross-stack E2E covers controller policy/issuer/store and signed bundle delivery, enforcing agent reconciliation, a real Unix netd connection, a real manager Unix local API connection, endpoint attach, fsynced provenance, cleanup-only detach, distinct parent/child nonces, kernel snapshots, correlated receipts, replay without a new send/sequence, direct legacy bypass rejection, explicit disabled negotiation, and injected post-effect state-persistence failure with durable failure receipt and no orphan endpoint. Netd’s focused restart test separately verifies that an armed grant-ledger unknown effect becomes a correlated quarantine receipt and remains non-replayable.
+
+- `cargo test -p ferro-netd --all-features` — PASS (library, binary, authorization, socket, and doc tests).
+- `cargo test -p ferro-mgr --all-targets` — PASS, including `authorization_cross_stack`.

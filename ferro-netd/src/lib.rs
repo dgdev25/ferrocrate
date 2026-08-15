@@ -1,4 +1,5 @@
 pub mod grants;
+mod grants_recovery;
 mod kernel_ops;
 pub mod policy;
 pub mod protocol;

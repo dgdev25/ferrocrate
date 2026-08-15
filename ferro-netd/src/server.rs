@@ -1,6 +1,7 @@
 use crate::kernel_ops::{NetKernelOps, RealNetKernelOps};
 use crate::policy::Policy;
 use crate::request_binding::{request_overlay_id, request_parameters};
+use crate::server_grants::reject;
 use crate::{
     grants::GrantVerifier,
     protocol::{
@@ -97,6 +98,30 @@ impl NetdServer {
         self.endpoints
             .retain(|endpoint, _| self.kernel.observe_link(endpoint));
         self.persist()?;
+        if let Some(grants) = self.grants.as_mut() {
+            let overlays = &self.overlays;
+            let endpoints = &self.endpoints;
+            let kernel = &self.kernel;
+            grants
+                .reconcile_unknown(|identity| {
+                    use crate::grants_recovery::RecoveryObservation;
+                    let (name, owned) = identity
+                        .strip_prefix("overlay:")
+                        .map(|name| (name, overlays.contains(name)))
+                        .or_else(|| {
+                            identity
+                                .strip_prefix("endpoint:")
+                                .map(|name| (name, endpoints.contains_key(name)))
+                        })
+                        .unwrap_or(("", false));
+                    if name.is_empty() || kernel.observe_link(name) != owned {
+                        RecoveryObservation::Conflict
+                    } else {
+                        RecoveryObservation::Consistent(owned)
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+        }
         Ok(self)
     }
     fn persist(&self) -> Result<(), String> {
@@ -182,6 +207,15 @@ impl NetdServer {
             &granted.resource_uuid,
             granted.resource_generation,
             &params,
+            match &envelope.request {
+                NetdRequest::ApplyOverlay { overlay_id, .. }
+                | NetdRequest::RemoveOverlay { overlay_id }
+                | NetdRequest::Inspect { overlay_id } => format!("overlay:{overlay_id}"),
+                NetdRequest::AttachEndpoint { endpoint_id, .. }
+                | NetdRequest::DetachEndpoint { endpoint_id, .. } => {
+                    format!("endpoint:{endpoint_id}")
+                }
+            },
             now,
         ) {
             self.policy.rollback(
@@ -458,11 +492,5 @@ impl NetdServer {
                 }
             }
         }
-    }
-}
-fn reject(code: RejectionCode, reason: &str) -> NetdResponse {
-    NetdResponse::Rejected {
-        code,
-        reason: reason.to_string(),
     }
 }

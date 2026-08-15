@@ -5,6 +5,13 @@ use crate::{
 };
 use ferro_core::authorization::helper_grant::{GrantAction, GrantParameters, HelperGrant};
 
+pub(crate) fn reject(code: RejectionCode, reason: &str) -> crate::protocol::NetdResponse {
+    crate::protocol::NetdResponse::Rejected {
+        code,
+        reason: reason.to_string(),
+    }
+}
+
 impl NetdServer {
     pub(crate) fn consume_grant(
         &mut self,
@@ -13,6 +20,7 @@ impl NetdServer {
         uuid: &str,
         generation: u64,
         params: &GrantParameters,
+        effect_identity: String,
         now: u64,
     ) -> Result<(), RejectionCode> {
         let verifier = self.grants.as_mut().ok_or(RejectionCode::MissingGrant)?;
@@ -27,7 +35,9 @@ impl NetdServer {
                 monotonic_millis(),
             )
             .map_err(map_grant_error)?;
-        verifier.arm_effect(&consumed).map_err(map_grant_error)
+        verifier
+            .arm_effect_target(&consumed, effect_identity)
+            .map_err(map_grant_error)
     }
 
     pub(crate) fn record_grant_result(

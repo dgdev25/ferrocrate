@@ -44,6 +44,8 @@ pub(crate) enum GrantPhase {
 pub(crate) struct GrantOperation {
     pub(crate) claims: GrantClaims,
     pub(crate) phase: GrantPhase,
+    #[serde(default)]
+    pub(crate) effect_identity: Option<String>,
 }
 
 pub struct GrantLedger {
@@ -95,6 +97,7 @@ impl GrantLedger {
             GrantOperation {
                 claims: grant.claims.clone(),
                 phase: GrantPhase::Pending,
+                effect_identity: None,
             },
         );
         self.persist()?;
@@ -166,48 +169,21 @@ impl GrantLedger {
             )
             && grant.claims.live_identity_digest == Some(live)
     }
-    fn mark_outcome_unknown(&mut self, nonce: [u8; 16]) -> Result<(), GrantError> {
+    fn mark_outcome_unknown(
+        &mut self,
+        nonce: [u8; 16],
+        effect_identity: Option<String>,
+    ) -> Result<(), GrantError> {
         let operation = self
             .state
             .consumed
             .get_mut(&hex(&nonce))
             .ok_or(GrantError::NotConsumed)?;
         operation.phase = GrantPhase::OutcomeUnknown;
+        operation.effect_identity = effect_identity;
         self.persist()
     }
-    fn quarantine_unknown_after_restart(&mut self) -> Result<(), GrantError> {
-        let unknown = self
-            .state
-            .consumed
-            .iter()
-            .filter_map(|(nonce, operation)| {
-                matches!(operation.phase, GrantPhase::OutcomeUnknown)
-                    .then(|| (nonce.clone(), operation.claims.clone()))
-            })
-            .collect::<Vec<_>>();
-        if unknown.is_empty() {
-            return Ok(());
-        }
-        for (nonce, claims) in unknown {
-            self.state
-                .results
-                .entry(claims.request_id.clone())
-                .or_insert(GrantResult {
-                    request_id: claims.request_id,
-                    nonce: claims.nonce,
-                    result_identity: format!(
-                        "quarantine:{}:{:?}",
-                        claims.resource.resource_uuid, claims.action
-                    ),
-                    outcome: "quarantined_after_unknown_effect".into(),
-                });
-            if let Some(operation) = self.state.consumed.get_mut(&nonce) {
-                operation.phase = GrantPhase::Failed;
-            }
-        }
-        self.persist()
-    }
-    fn persist(&self) -> Result<(), GrantError> {
+    pub(crate) fn persist(&self) -> Result<(), GrantError> {
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -459,7 +435,15 @@ impl GrantVerifier {
         )
     }
     pub fn arm_effect(&mut self, consumed: &ConsumedGrant) -> Result<(), GrantError> {
-        self.ledger.mark_outcome_unknown(consumed.nonce)
+        self.ledger.mark_outcome_unknown(consumed.nonce, None)
+    }
+    pub(crate) fn arm_effect_target(
+        &mut self,
+        consumed: &ConsumedGrant,
+        identity: String,
+    ) -> Result<(), GrantError> {
+        self.ledger
+            .mark_outcome_unknown(consumed.nonce, Some(identity))
     }
     pub fn result(&self, request_id: &str) -> Option<&GrantResult> {
         self.ledger.result(request_id)

@@ -4,7 +4,14 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
+    time::Duration,
 };
+
+// A journal that has just been dropped in this process can briefly retain its
+// advisory OS lock while the file descriptor teardown completes. Retry only
+// that close-to-reopen hand-off; a live competing writer still fails closed.
+const LOCK_HANDOFF_RETRIES: usize = 16;
+const LOCK_HANDOFF_DELAY: Duration = Duration::from_millis(1);
 
 pub(super) fn transaction_error(
     error: sled::transaction::TransactionError<JournalError>,
@@ -23,10 +30,16 @@ pub(super) fn lock_journal(root: &Path, journal_id: [u8; 16]) -> Result<File, Jo
         .create(true)
         .truncate(false)
         .open(root.join("witness.lock"))?;
-    file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => JournalError::Locked,
-        std::fs::TryLockError::Error(error) => JournalError::Io(error),
-    })?;
+    for attempt in 0..=LOCK_HANDOFF_RETRIES {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if attempt < LOCK_HANDOFF_RETRIES => {
+                std::thread::sleep(LOCK_HANDOFF_DELAY);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(JournalError::Locked),
+            Err(std::fs::TryLockError::Error(error)) => return Err(JournalError::Io(error)),
+        }
+    }
     let mut existing = Vec::new();
     file.read_to_end(&mut existing)?;
     if !existing.is_empty() && existing != journal_id {

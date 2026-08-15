@@ -149,6 +149,12 @@ impl EffectReceipt {
             Self::Endpoint { .. } => None,
         }
     }
+    pub(crate) fn endpoint_overlay(&self) -> Option<&str> {
+        match self {
+            Self::Endpoint { overlay_id, .. } => Some(overlay_id),
+            Self::Overlay { .. } => None,
+        }
+    }
 
     pub(crate) const fn is_legacy_identity(&self) -> bool {
         match self {

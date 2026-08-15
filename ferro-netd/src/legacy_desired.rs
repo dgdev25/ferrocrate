@@ -145,6 +145,7 @@ impl NetdServer {
                 vec![],
             )
             .map_err(|_| RejectionCode::Busy)?;
+            let identity = format!("overlay:{overlay}");
             if let Some(routes) = self.routes.get(&overlay) {
                 let route_interface = self
                     .effect_receipts
@@ -154,14 +155,27 @@ impl NetdServer {
                 self.kernel
                     .remove_routes(route_interface, &routes)
                     .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "routes_removed")
+                    .map_err(|_| RejectionCode::Busy)?;
+            }
+            if let Some(addresses) = self.addresses.get(&overlay).cloned() {
+                self.kernel
+                    .remove_addresses(&interfaces.bridge, &addresses)
+                    .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "addresses_removed")
+                    .map_err(|_| RejectionCode::Busy)?;
             }
             if self.kernel.observe_link(&interfaces.wireguard) {
                 self.kernel
                     .remove_wireguard(&interfaces.wireguard)
                     .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "wireguard_removed")
+                    .map_err(|_| RejectionCode::Busy)?;
             }
             self.kernel
                 .remove_overlay(&interfaces.bridge)
+                .map_err(|_| RejectionCode::Busy)?;
+            self.mark_overlay_intent(&identity, "bridge_removed")
                 .map_err(|_| RejectionCode::Busy)?;
             self.overlays.remove(&overlay);
             self.routes.remove(&overlay);
@@ -214,6 +228,7 @@ impl NetdServer {
                 overlay.addresses.clone(),
             )
             .map_err(|_| RejectionCode::Busy)?;
+            let identity = format!("overlay:{}", overlay.overlay_id);
             let previous_routes = self
                 .routes
                 .get(&overlay.overlay_id)
@@ -231,13 +246,19 @@ impl NetdServer {
                 self.kernel
                     .create_overlay(&interfaces.bridge)
                     .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "bridge_created")
+                    .map_err(|_| RejectionCode::Busy)?;
             }
             let route_interface = if overlay.wireguard == Some(true) {
                 self.kernel
                     .apply_wireguard(&interfaces.wireguard, &[], &peers)
                     .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "wireguard_configured")
+                    .map_err(|_| RejectionCode::Busy)?;
                 self.kernel
                     .ensure_forwarding()
+                    .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "forwarding_enabled")
                     .map_err(|_| RejectionCode::Busy)?;
                 &interfaces.wireguard
             } else {
@@ -245,6 +266,8 @@ impl NetdServer {
             };
             self.kernel
                 .apply_addresses(&interfaces.bridge, &overlay.addresses)
+                .map_err(|_| RejectionCode::Busy)?;
+            self.mark_overlay_intent(&identity, "addresses_applied")
                 .map_err(|_| RejectionCode::Busy)?;
             let removed = if previous_route_interface.as_deref() == Some(route_interface) {
                 previous_routes
@@ -263,6 +286,8 @@ impl NetdServer {
                     &removed,
                 )
                 .map_err(|_| RejectionCode::Busy)?;
+            self.mark_overlay_intent(&identity, "stale_routes_removed")
+                .map_err(|_| RejectionCode::Busy)?;
             if previous_receipt
                 .as_ref()
                 .and_then(EffectReceipt::overlay_mode)
@@ -272,9 +297,13 @@ impl NetdServer {
                 self.kernel
                     .remove_wireguard(&interfaces.wireguard)
                     .map_err(|_| RejectionCode::Busy)?;
+                self.mark_overlay_intent(&identity, "stale_wireguard_removed")
+                    .map_err(|_| RejectionCode::Busy)?;
             }
             self.kernel
                 .apply_routes(route_interface, &overlay.routes)
+                .map_err(|_| RejectionCode::Busy)?;
+            self.mark_overlay_intent(&identity, "routes_applied")
                 .map_err(|_| RejectionCode::Busy)?;
             self.overlays.insert(overlay.overlay_id.clone());
             self.routes
@@ -288,7 +317,7 @@ impl NetdServer {
                 intent.phase = "succeeded".into();
             }
         }
-        self.persist().map_err(|_| RejectionCode::Busy)?;
+        self.persist_ownership().map_err(|_| RejectionCode::Busy)?;
         Ok(NetdResponse::Applied)
     }
 }

@@ -26,6 +26,100 @@ struct PersistedState {
     overlay_intents: BTreeMap<String, OverlayMutationIntent>,
 }
 
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+    use crate::{
+        policy::Policy,
+        protocol::{NetdRequest, OverlayMode},
+    };
+
+    #[test]
+    fn phase_persist_fault_reopens_to_exact_desired_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let kernel_path = directory.path().join("kernel.json");
+        let journal = directory.path().join("ownership.json");
+        let faults = crate::test_support::FaultHandle::default();
+        let mut server = NetdServer::deterministic_with_faults(
+            1,
+            Policy::new(
+                "c".into(),
+                "n".into(),
+                &base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            )
+            .unwrap(),
+            kernel_path.clone(),
+            faults.clone(),
+        )
+        .load_journal(journal.clone())
+        .unwrap();
+        let request = NetdRequest::ApplyOverlay {
+            overlay_id: "overlay-a".into(),
+            mode: OverlayMode::BridgeOnly,
+            peers: vec![],
+            routes: vec![],
+            addresses: vec![],
+        };
+        let receipt = crate::effect_receipt::EffectReceipt::from_request(&request, 1, 1, 1);
+        server
+            .begin_overlay_intent([1; 16], "apply", receipt, vec![], vec![])
+            .unwrap();
+        let bridge = crate::interface_identity::overlay_interfaces("overlay-a").bridge;
+        server.kernel.create_overlay(&bridge).unwrap();
+        for phase in [
+            "bridge_created",
+            "wireguard_configured",
+            "forwarding_enabled",
+            "address_applied:0",
+            "route_applied:0",
+            "stale_route_removed:0",
+            "stale_address_removed:0",
+            "stale_wireguard_removed",
+            "route_removed:0",
+            "address_removed:0",
+            "wireguard_removed",
+            "bridge_removed",
+            "endpoint_link_created",
+            "endpoint_master_set",
+            "endpoint_netns_moved",
+            "endpoint_link_removed",
+        ] {
+            faults.fail_phase_once(phase);
+            assert!(server
+                .mark_overlay_intent("overlay:overlay-a", phase)
+                .is_err());
+        }
+        drop(server);
+        let reopened = NetdServer::deterministic(
+            1,
+            Policy::new(
+                "c".into(),
+                "n".into(),
+                &base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            )
+            .unwrap(),
+            kernel_path,
+        )
+        .load_journal(journal)
+        .unwrap();
+        assert!(reopened.overlays.contains("overlay-a"));
+        assert_eq!(
+            reopened.overlay_intents["overlay:overlay-a"].phase,
+            "recovered"
+        );
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct OverlayMutationIntent {
     pub(crate) operation_id: [u8; 16],
@@ -37,6 +131,8 @@ pub(crate) struct OverlayMutationIntent {
     pub(crate) routes: Vec<String>,
     #[serde(default)]
     pub(crate) addresses: Vec<String>,
+    #[serde(default)]
+    pub(crate) observed_phases: Vec<String>,
 }
 
 impl NetdServer {
@@ -59,6 +155,7 @@ impl NetdServer {
                 phase: "pending".into(),
                 routes,
                 addresses,
+                observed_phases: Vec::new(),
             },
         );
         self.persist()
@@ -68,8 +165,26 @@ impl NetdServer {
         identity: &str,
         phase: &str,
     ) -> Result<(), String> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .test_faults
+            .take(crate::test_support::FaultPoint::PhasePersist(phase.into()))
+        {
+            return Err("injected mutation phase persistence failure".into());
+        }
         if let Some(intent) = self.overlay_intents.get_mut(identity) {
             intent.phase = phase.into();
+            intent.observed_phases.push(phase.into());
+        }
+        self.persist()
+    }
+    pub(crate) fn persist_ownership(&self) -> Result<(), String> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .test_faults
+            .take(crate::test_support::FaultPoint::OwnershipPersist)
+        {
+            return Err("injected ownership persistence failure".into());
         }
         self.persist()
     }
@@ -200,16 +315,26 @@ impl NetdServer {
                 continue;
             }
             let overlay = identity.strip_prefix("overlay:").unwrap_or("").to_string();
+            let endpoint = identity.strip_prefix("endpoint:").map(str::to_owned);
             match self.kernel.observe_effect(&intent.desired) {
                 LiveEffectObservation::Exact => {
                     self.quarantined.retain(|entry| !entry.ends_with(&identity));
                     if intent.desired.expected_exists() {
-                        self.overlays.insert(overlay.clone());
-                        self.routes.insert(overlay.clone(), intent.routes);
-                        self.addresses.insert(overlay, intent.addresses);
+                        if let Some(endpoint) = endpoint.as_ref() {
+                            if let Some(parent) = intent.desired.endpoint_overlay() {
+                                self.endpoints.insert(endpoint.clone(), parent.into());
+                            }
+                        } else {
+                            self.overlays.insert(overlay.clone());
+                            self.routes.insert(overlay.clone(), intent.routes);
+                            self.addresses.insert(overlay, intent.addresses);
+                        }
                         self.effect_receipts
                             .insert(identity.clone(), intent.desired);
                     } else {
+                        if let Some(endpoint) = endpoint.as_ref() {
+                            self.endpoints.remove(endpoint);
+                        }
                         self.overlays.remove(&overlay);
                         self.routes.remove(&overlay);
                         self.addresses.remove(&overlay);
@@ -225,7 +350,13 @@ impl NetdServer {
                 {
                     self.quarantined.retain(|entry| !entry.ends_with(&identity));
                     if let Some(prior) = intent.prior {
-                        self.overlays.insert(overlay);
+                        if let Some(endpoint) = endpoint {
+                            if let Some(parent) = prior.endpoint_overlay() {
+                                self.endpoints.insert(endpoint, parent.into());
+                            }
+                        } else {
+                            self.overlays.insert(overlay);
+                        }
                         self.effect_receipts.insert(identity.clone(), prior);
                     }
                     if let Some(value) = self.overlay_intents.get_mut(&identity) {

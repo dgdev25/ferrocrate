@@ -418,7 +418,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         now_unix: 100,
     };
     let ambiguous = authorize_attach(gate, journal, "container-b", 7, "wg0").unwrap();
-    faults.fail_once(FaultPoint::StatePersist);
+    faults.fail_once(FaultPoint::OwnershipPersist);
     serve_next(listener.try_clone().unwrap(), server.clone(), uid, 101);
     let (proof, intent) = ambiguous.parts();
     assert!(matches!(
@@ -438,7 +438,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         ManagedOverlayResponse::Rejected { .. }
     ));
     let snapshot = server.lock().unwrap().test_snapshot();
-    assert!(!snapshot.endpoints.contains_key("container-b"));
+    assert_eq!(snapshot.endpoints.get("container-b").map(String::as_str), Some("wg0"));
     let failure = snapshot
         .receipts
         .iter()

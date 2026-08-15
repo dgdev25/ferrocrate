@@ -90,11 +90,13 @@ impl NetdServer {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FaultPoint {
     Effect,
     StatePersist,
+    OwnershipPersist,
     ResultPersist,
+    PhasePersist(String),
 }
 
 #[derive(Clone, Default)]
@@ -102,6 +104,9 @@ pub struct FaultHandle(std::sync::Arc<std::sync::Mutex<VecDeque<FaultPoint>>>);
 impl FaultHandle {
     pub fn fail_once(&self, point: FaultPoint) {
         self.0.lock().expect("fault lock").push_back(point);
+    }
+    pub fn fail_phase_once(&self, phase: impl Into<String>) {
+        self.fail_once(FaultPoint::PhasePersist(phase.into()));
     }
     pub(crate) fn take(&self, point: FaultPoint) -> bool {
         let mut faults = self.0.lock().expect("fault lock");

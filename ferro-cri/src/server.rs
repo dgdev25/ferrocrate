@@ -215,6 +215,8 @@ pub enum CriError {
     Transport(#[from] tonic::transport::Error),
     #[error("image store error: {0}")]
     ImageStore(#[from] ImageStoreError),
+    #[error("runtime authorization error: {0}")]
+    Runtime(#[from] ferro_core::runtime::RuntimeError),
 }
 
 pub struct CriRuntime {
@@ -231,26 +233,30 @@ impl std::fmt::Debug for CriRuntime {
 }
 
 impl CriRuntime {
-    pub fn new(store: Arc<LocalImageStore>) -> Self {
+    pub fn new(
+        store: Arc<LocalImageStore>,
+        authorization: Arc<SurfaceAuthorization>,
+    ) -> Self {
         let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
             .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
         Self {
             store,
             runtime_dir: std::path::PathBuf::from(runtime_dir),
             identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
-            authorization: Arc::new(SurfaceAuthorization::compatibility()),
+            authorization,
         }
     }
 
     pub fn with_runtime_dir(
         store: Arc<LocalImageStore>,
         runtime_dir: impl Into<std::path::PathBuf>,
+        authorization: Arc<SurfaceAuthorization>,
     ) -> Self {
         Self {
             store,
             runtime_dir: runtime_dir.into(),
             identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
-            authorization: Arc::new(SurfaceAuthorization::compatibility()),
+            authorization,
         }
     }
 
@@ -434,16 +440,28 @@ impl ImageService for CriRuntime {
             return Err(Status::invalid_argument("image spec is required"));
         }
         trusted_transport(&request)?;
-        // The typed identity is resolved against the exact action/resource and
-        // becomes the principal presented to the authorization gate.
-        let binding = ferro_core::image_fetch::inspect_image_binding(&image)
-            .map_err(map_image_fetch_error)?;
+        // Resolve delegation before registry I/O. The canonical reference is
+        // the exact scoped resource; the later inspection pins its digest.
+        let canonical = ferro_core::image_tagging::canonicalize_reference(&image)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let identity = resolve_request_identity(
             &self.identity_policy,
             &request,
             Action::ImagePull,
-            &binding.reference,
+            &canonical,
         )?;
+        let inspect_image = image.clone();
+        let binding = tokio::task::spawn_blocking(move || {
+            ferro_core::image_fetch::inspect_image_binding(&inspect_image)
+        })
+        .await
+        .map_err(|error| Status::internal(format!("image inspection task failed: {error}")))?
+        .map_err(map_image_fetch_error)?;
+        if binding.reference != canonical {
+            return Err(Status::failed_precondition(
+                "registry binding changed canonical image reference",
+            ));
+        }
         let origin = identity.request_origin();
         let proof = self
             .authorization
@@ -456,14 +474,20 @@ impl ImageService for CriRuntime {
             )
             .map_err(|denial| Status::permission_denied(denial.to_string()))?;
 
-        let pulled = ferro_core::image_fetch::pull_image_with_store_authorized(
-            &self.runtime_dir,
-            &image,
-            &binding.reference,
-            &binding.digest,
-            &self.store,
-            proof,
-        )
+        let runtime_dir = self.runtime_dir.clone();
+        let store = self.store.clone();
+        let pulled = tokio::task::spawn_blocking(move || {
+            ferro_core::image_fetch::pull_image_with_store_authorized(
+                &runtime_dir,
+                &image,
+                &binding.reference,
+                &binding.digest,
+                &store,
+                proof,
+            )
+        })
+        .await
+        .map_err(|error| Status::internal(format!("image pull task failed: {error}")))?
         .map_err(map_image_fetch_error)?;
 
         Ok(Response::new(PullImageResponse {
@@ -632,6 +656,17 @@ fn measure_tree_usage(path: &Path) -> Result<(u64, u64), std::io::Error> {
 }
 
 pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
+    serve_with_identity_policy(
+        socket_path,
+        CriIdentityPolicy::transport_only("cri:local-transport"),
+    )
+    .await
+}
+
+pub async fn serve_with_identity_policy(
+    socket_path: impl AsRef<Path>,
+    identity_policy: CriIdentityPolicy,
+) -> Result<(), CriError> {
     let socket_path = socket_path.as_ref();
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
@@ -655,11 +690,16 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
         .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
     let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))?;
     let store = Arc::new(store);
-    let runtime = CriRuntime::new(store.clone());
+    let control_runtime = ferro_core::runtime::ContainerRuntime::new(Path::new(&runtime_dir))?;
+    let authorization = Arc::new(control_runtime.surface_authorization()?);
+    let runtime = CriRuntime::new(store.clone(), Arc::clone(&authorization))
+        .with_identity_policy(identity_policy.clone());
 
     tonic::transport::Server::builder()
         .add_service(RuntimeServiceServer::new(runtime))
-        .add_service(ImageServiceServer::new(CriRuntime::new(store)))
+        .add_service(ImageServiceServer::new(
+            CriRuntime::new(store, authorization).with_identity_policy(identity_policy),
+        ))
         .serve_with_incoming(incoming)
         .await?;
 
@@ -675,6 +715,12 @@ mod tests {
     };
     use tonic::Request;
 
+    fn test_surface_authorization() -> Arc<SurfaceAuthorization> {
+        let root = tempfile::tempdir().expect("authorization runtime").keep();
+        let runtime = ferro_core::runtime::ContainerRuntime::new(&root).expect("test runtime");
+        Arc::new(runtime.surface_authorization().expect("surface authorization"))
+    }
+
     fn authenticated<T>(message: T) -> Request<T> {
         let (peer, _other) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         let principal = PrincipalResolver::from_cri_peer_credentials(&peer)
@@ -688,7 +734,7 @@ mod tests {
     async fn create_test_runtime() -> CriRuntime {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("open test store");
-        CriRuntime::new(Arc::new(store))
+        CriRuntime::new(Arc::new(store), test_surface_authorization())
     }
 
     // Helper to populate test store with sample images
@@ -820,7 +866,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ListImagesRequest::default());
 
         let response = runtime
@@ -860,7 +906,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
 
         let request = Request::new(ListImagesRequest {
             filter: "alpine".to_string(),
@@ -916,7 +962,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ImageStatusRequest {
             image: Some(ImageSpec {
                 image: "alpine:latest".to_string(),
@@ -947,7 +993,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ImageStatusRequest {
             image: Some(ImageSpec {
                 image: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -978,7 +1024,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ImageStatusRequest {
             image: Some(ImageSpec {
                 image: "digest-only".to_string(),
@@ -1025,7 +1071,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
 
         let request = authenticated(RemoveImageRequest {
             image: Some(ImageSpec {
@@ -1080,7 +1126,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         let arc_store = Arc::new(store);
 
-        let runtime = CriRuntime::new(arc_store.clone());
+        let runtime = CriRuntime::new(arc_store.clone(), test_surface_authorization());
         let request = Request::new(VersionRequest::default());
 
         // Verify runtime works with Arc store
@@ -1106,7 +1152,7 @@ mod tests {
             )
             .expect("put digest");
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ListImagesRequest::default());
 
         let response = runtime
@@ -1126,7 +1172,7 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).expect("open test store");
         populate_test_store(&store).await;
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ImageStatusRequest {
             image: Some(ImageSpec {
                 image: "alpine:latest".to_string(),
@@ -1183,7 +1229,7 @@ mod tests {
             )
             .expect("put mongo");
 
-        let runtime = CriRuntime::new(Arc::new(store));
+        let runtime = CriRuntime::new(Arc::new(store), test_surface_authorization());
         let request = Request::new(ListImagesRequest::default());
 
         let response = runtime
@@ -1208,7 +1254,11 @@ mod tests {
         fs::write(images_root.join("sub/blob-b"), b"123456").expect("write blob-b");
 
         let store = LocalImageStore::open(images_root.clone()).expect("open store");
-        let runtime = CriRuntime::with_runtime_dir(Arc::new(store), temp.path());
+        let runtime = CriRuntime::with_runtime_dir(
+            Arc::new(store),
+            temp.path(),
+            test_surface_authorization(),
+        );
 
         let response = runtime
             .image_fs_info(Request::new(ImageFsInfoRequest {}))

@@ -10,6 +10,7 @@ use super::{Action, ResolvedPrincipal, Role};
 const MAX_TEXT_BYTES: usize = 512;
 const MAX_SCOPE_ITEMS: usize = 64;
 const MAX_CANONICAL_BYTES: usize = 64 * 1024;
+const WIRE_DOMAIN: &[u8] = b"ferrocrate/cri-delegation/v1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CriDelegationClaims {
@@ -95,7 +96,7 @@ impl CriDelegationClaims {
             out.extend_from_slice(&(value.len() as u32).to_be_bytes());
             out.extend_from_slice(value.as_bytes());
         }
-        let mut out = b"ferrocrate/cri-delegation/v1\0".to_vec();
+        let mut out = WIRE_DOMAIN.to_vec();
         for value in [
             &self.issuer,
             &self.key_id,
@@ -150,6 +151,128 @@ impl DelegationAssertion {
     pub fn claims(&self) -> &CriDelegationClaims {
         &self.claims
     }
+
+    pub fn wire_bytes(&self) -> Vec<u8> {
+        let canonical = self.claims.signing_bytes();
+        let mut wire = Vec::with_capacity(4 + canonical.len() + self.signature.len());
+        wire.extend_from_slice(&(canonical.len() as u32).to_be_bytes());
+        wire.extend_from_slice(&canonical);
+        wire.extend_from_slice(&self.signature);
+        wire
+    }
+
+    pub fn from_wire_bytes(wire: &[u8]) -> Result<Self, DelegationError> {
+        if wire.len() < 4 + WIRE_DOMAIN.len() + 64 || wire.len() > 4 + MAX_CANONICAL_BYTES + 64 {
+            return Err(DelegationError::Malformed);
+        }
+        let canonical_len = usize::try_from(u32::from_be_bytes(
+            wire[..4]
+                .try_into()
+                .map_err(|_| DelegationError::Malformed)?,
+        ))
+        .map_err(|_| DelegationError::Malformed)?;
+        if canonical_len > MAX_CANONICAL_BYTES || wire.len() != 4 + canonical_len + 64 {
+            return Err(DelegationError::Malformed);
+        }
+        let canonical = &wire[4..4 + canonical_len];
+        let claims = parse_canonical_claims(canonical)?;
+        if claims.signing_bytes() != canonical {
+            return Err(DelegationError::Malformed);
+        }
+        let signature = wire[4 + canonical_len..]
+            .try_into()
+            .map_err(|_| DelegationError::Malformed)?;
+        Self::new(claims, signature)
+    }
+}
+
+fn parse_canonical_claims(bytes: &[u8]) -> Result<CriDelegationClaims, DelegationError> {
+    struct Cursor<'a> {
+        bytes: &'a [u8],
+        position: usize,
+    }
+    impl<'a> Cursor<'a> {
+        fn take(&mut self, count: usize) -> Result<&'a [u8], DelegationError> {
+            let end = self
+                .position
+                .checked_add(count)
+                .ok_or(DelegationError::Malformed)?;
+            let value = self
+                .bytes
+                .get(self.position..end)
+                .ok_or(DelegationError::Malformed)?;
+            self.position = end;
+            Ok(value)
+        }
+        fn u32(&mut self) -> Result<u32, DelegationError> {
+            Ok(u32::from_be_bytes(
+                self.take(4)?
+                    .try_into()
+                    .map_err(|_| DelegationError::Malformed)?,
+            ))
+        }
+        fn text(&mut self) -> Result<String, DelegationError> {
+            let length = usize::try_from(self.u32()?).map_err(|_| DelegationError::Malformed)?;
+            if length == 0 || length > MAX_TEXT_BYTES {
+                return Err(DelegationError::Bounds);
+            }
+            String::from_utf8(self.take(length)?.to_vec()).map_err(|_| DelegationError::Malformed)
+        }
+    }
+    let mut cursor = Cursor { bytes, position: 0 };
+    if cursor.take(WIRE_DOMAIN.len())? != WIRE_DOMAIN {
+        return Err(DelegationError::Malformed);
+    }
+    let issuer = cursor.text()?;
+    let key_id = cursor.text()?;
+    let transport_subject = cursor.text()?;
+    let audience = cursor.text()?;
+    let delegated_principal = cursor.text()?;
+    let action_count = usize::try_from(cursor.u32()?).map_err(|_| DelegationError::Malformed)?;
+    if action_count == 0 || action_count > MAX_SCOPE_ITEMS {
+        return Err(DelegationError::Bounds);
+    }
+    let mut allowed_actions = Vec::with_capacity(action_count);
+    for _ in 0..action_count {
+        allowed_actions
+            .push(serde_json::from_str(&cursor.text()?).map_err(|_| DelegationError::Malformed)?);
+    }
+    let resource_count = usize::try_from(cursor.u32()?).map_err(|_| DelegationError::Malformed)?;
+    if resource_count == 0 || resource_count > MAX_SCOPE_ITEMS {
+        return Err(DelegationError::Bounds);
+    }
+    let mut allowed_resources = Vec::with_capacity(resource_count);
+    for _ in 0..resource_count {
+        allowed_resources.push(cursor.text()?);
+    }
+    let nonce = cursor.text()?;
+    let deadline_unix_ms = u64::from_be_bytes(
+        cursor
+            .take(8)?
+            .try_into()
+            .map_err(|_| DelegationError::Malformed)?,
+    );
+    let boot_id = cursor.text()?;
+    let policy_digest = cursor
+        .take(32)?
+        .try_into()
+        .map_err(|_| DelegationError::Malformed)?;
+    if cursor.position != bytes.len() {
+        return Err(DelegationError::Malformed);
+    }
+    CriDelegationClaims::new(
+        issuer,
+        key_id,
+        transport_subject,
+        audience,
+        delegated_principal,
+        allowed_actions,
+        allowed_resources,
+        nonce,
+        deadline_unix_ms,
+        boot_id,
+        policy_digest,
+    )
 }
 
 #[derive(Clone)]
@@ -270,6 +393,8 @@ impl CriDelegationVerifier {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum DelegationError {
+    #[error("delegation wire value is malformed")]
+    Malformed,
     #[error("delegation value exceeds its bound")]
     Bounds,
     #[error("delegation signing key is not trusted")]

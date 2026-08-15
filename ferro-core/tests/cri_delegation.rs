@@ -46,6 +46,10 @@ fn signed_delegation_is_single_use_and_expires() {
         signing.sign(&valid_claims.signing_bytes()).to_bytes(),
     )
     .unwrap();
+    assert_eq!(
+        DelegationAssertion::from_wire_bytes(&assertion.wire_bytes()).unwrap(),
+        assertion
+    );
 
     let verified = verifier
         .verify(

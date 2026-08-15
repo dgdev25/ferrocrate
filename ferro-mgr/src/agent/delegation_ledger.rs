@@ -21,6 +21,17 @@ pub struct ChildIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreationProvenance {
+    pub container_id: String,
+    pub overlay_id: String,
+    pub resource_uuid: String,
+    pub resource_generation: u64,
+    pub origin_request_id: String,
+    pub live_identity_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ClaimOutcome {
     Fresh(ChildIdentity),
     InProgress(ChildIdentity),
@@ -36,6 +47,8 @@ enum PersistedClaim {
     Completed {
         child: ChildIdentity,
         response: Vec<u8>,
+        #[serde(default)]
+        provenance: Option<CreationProvenance>,
     },
 }
 
@@ -107,7 +120,9 @@ impl DelegationLedger {
         if let Some((_, existing)) = self.state.claims.iter().find(|(key, _)| key == &parent) {
             return Ok(match existing {
                 PersistedClaim::InProgress(child) => ClaimOutcome::InProgress(child.clone()),
-                PersistedClaim::Completed { child, response } => ClaimOutcome::Completed {
+                PersistedClaim::Completed {
+                    child, response, ..
+                } => ClaimOutcome::Completed {
                     child: child.clone(),
                     response: response.clone(),
                 },
@@ -139,8 +154,54 @@ impl DelegationLedger {
                 child.clone()
             }
         };
-        self.state.claims[position].1 = PersistedClaim::Completed { child, response };
+        self.state.claims[position].1 = PersistedClaim::Completed {
+            child,
+            response,
+            provenance: None,
+        };
         self.persist()
+    }
+
+    pub fn complete_creation(
+        &mut self,
+        parent: &ParentGrantKey,
+        response: Vec<u8>,
+        provenance: CreationProvenance,
+    ) -> Result<(), LedgerError> {
+        if response.len() > 256 * 1024 {
+            return Err(LedgerError::Oversized);
+        }
+        let position = self
+            .state
+            .claims
+            .iter()
+            .position(|(key, _)| key == parent)
+            .ok_or(LedgerError::NotClaimed)?;
+        let child = match &self.state.claims[position].1 {
+            PersistedClaim::InProgress(child) | PersistedClaim::Completed { child, .. } => {
+                child.clone()
+            }
+        };
+        self.state.claims[position].1 = PersistedClaim::Completed {
+            child,
+            response,
+            provenance: Some(provenance),
+        };
+        self.persist()
+    }
+
+    pub fn creation_provenance(&self, container_id: &str) -> Option<CreationProvenance> {
+        self.state
+            .claims
+            .iter()
+            .rev()
+            .find_map(|(_, claim)| match claim {
+                PersistedClaim::Completed {
+                    provenance: Some(value),
+                    ..
+                } if value.container_id == container_id => Some(value.clone()),
+                _ => None,
+            })
     }
 
     fn persist(&mut self) -> Result<(), LedgerError> {
@@ -169,7 +230,10 @@ fn sync_parent(path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChildIdentity, ClaimOutcome, DelegationLedger, LedgerError, ParentGrantKey};
+    use super::{
+        ChildIdentity, ClaimOutcome, CreationProvenance, DelegationLedger, LedgerError,
+        ParentGrantKey,
+    };
 
     fn parent() -> ParentGrantKey {
         ParentGrantKey {
@@ -248,6 +312,58 @@ mod tests {
                 response: br#"{"Attached":{"container_id":"c1"}}"#.to_vec()
             }
         );
+    }
+
+    #[test]
+    fn creation_provenance_survives_restart_and_is_container_scoped() {
+        let _guard = test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("delegations.json");
+        let child = ChildIdentity {
+            request_id: "child-1".into(),
+            nonce: [4; 16],
+        };
+        let provenance = CreationProvenance {
+            container_id: "c1".into(),
+            overlay_id: "wg0".into(),
+            resource_uuid: "123e4567-e89b-12d3-a456-426614174000".into(),
+            resource_generation: 7,
+            origin_request_id: "parent-1".into(),
+            live_identity_digest: [8; 32],
+        };
+        let mut first = DelegationLedger::open(path.clone()).unwrap();
+        first.claim(parent(), child).unwrap();
+        first
+            .complete_creation(&parent(), b"attached".to_vec(), provenance.clone())
+            .unwrap();
+        drop(first);
+        let reopened = DelegationLedger::open(path).unwrap();
+        assert_eq!(reopened.creation_provenance("c1"), Some(provenance));
+        assert_eq!(reopened.creation_provenance("c2"), None);
+    }
+
+    #[test]
+    fn failed_attach_result_never_creates_cleanup_provenance() {
+        let _guard = test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("delegations.json");
+        let mut ledger = DelegationLedger::open(path).unwrap();
+        ledger
+            .claim(
+                parent(),
+                ChildIdentity {
+                    request_id: "child-1".into(),
+                    nonce: [4; 16],
+                },
+            )
+            .unwrap();
+        ledger
+            .complete(
+                &parent(),
+                br#"{"Rejected":{"reason":"netd rejected"}}"#.to_vec(),
+            )
+            .unwrap();
+        assert_eq!(ledger.creation_provenance("c1"), None);
     }
 
     #[test]

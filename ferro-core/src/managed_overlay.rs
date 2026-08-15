@@ -46,6 +46,22 @@ pub struct DelegatedManagedOverlayRequest {
     pub delegation: ManagedOverlayDelegation,
 }
 
+pub const MANAGED_OVERLAY_PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedOverlayCompatibilityMode {
+    Disabled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyManagedOverlayRequest {
+    pub schema_version: u16,
+    pub mode: ManagedOverlayCompatibilityMode,
+    pub request: ManagedOverlayRequest,
+}
+
 impl ManagedOverlayRef {
     pub fn parse(value: &str) -> Result<Self, ManagedOverlayError> {
         let id = value
@@ -151,7 +167,11 @@ impl ManagedOverlayClient {
         _mode: &LegacyManagedOverlayMode,
         request: &ManagedOverlayRequest,
     ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
-        self.send(request)
+        self.send(&LegacyManagedOverlayRequest {
+            schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
+            mode: ManagedOverlayCompatibilityMode::Disabled,
+            request: request.clone(),
+        })
     }
     #[allow(clippy::too_many_arguments)]
     pub fn request_authorized(

@@ -12,11 +12,18 @@ use std::{
 
 use thiserror::Error;
 
-use super::delegation_ledger::{ChildIdentity, ClaimOutcome, DelegationLedger, ParentGrantKey};
+use super::delegation_ledger::{
+    ChildIdentity, ClaimOutcome, CreationProvenance, DelegationLedger, ParentGrantKey,
+};
 use super::ipam::{Allocation, Ipam, IpamError};
-use super::netd_client::{DelegationBridge, NetdResponse, UnixNetdClient};
+use super::netd_client::{
+    endpoint_live_identity_digest, DelegationBridge, NetdResponse, UnixNetdClient,
+};
 use ferro_core::authorization::helper_grant::GrantAction;
-use ferro_core::managed_overlay::{DelegatedManagedOverlayRequest, ManagedOverlayDelegation};
+use ferro_core::managed_overlay::{
+    DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest, ManagedOverlayCompatibilityMode,
+    ManagedOverlayDelegation, MANAGED_OVERLAY_PROTOCOL_VERSION,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Attachment {
@@ -301,7 +308,7 @@ impl LocalApi {
     ) -> Result<LocalApiResponse, LocalApiError> {
         self.authorize(caller_uid, now_unix)?;
         let request = ferro_core::managed_overlay::ManagedOverlayRequest::DetachContainer {
-            overlay_id,
+            overlay_id: overlay_id.clone(),
             container_id: container_id.clone(),
             now_unix,
         };
@@ -312,12 +319,19 @@ impl LocalApi {
         let delegated = configured
             .as_mut()
             .ok_or(LocalApiError::MissingDelegation)?;
+        let provenance = delegated
+            .ledger
+            .creation_provenance(&container_id)
+            .ok_or(LocalApiError::InvalidDelegation)?;
+        if provenance.overlay_id != overlay_id || provenance.container_id != container_id {
+            return Err(LocalApiError::InvalidDelegation);
+        }
         delegated
             .bridge
-            .validate_parent(
+            .validate_cleanup_parent(
                 &request,
                 delegation,
-                GrantAction::NetworkDetach,
+                &provenance,
                 now_unix
                     .try_into()
                     .map_err(|_| LocalApiError::InvalidDelegation)?,
@@ -349,6 +363,7 @@ impl LocalApi {
                     .map_err(|_| LocalApiError::InvalidDelegation)?,
                 now_monotonic_millis,
                 &child,
+                &provenance,
             )
             .map_err(|_| LocalApiError::InvalidDelegation)?;
         match delegated
@@ -478,11 +493,20 @@ impl LocalApi {
             return Err(LocalApiError::NetdRejected);
         }
         let response = LocalApiResponse::Attached(attachment);
+        let provenance = CreationProvenance {
+            container_id: container_id.clone(),
+            overlay_id: overlay_id.clone(),
+            resource_uuid: delegation.parent.claims.resource.resource_uuid.clone(),
+            resource_generation: delegation.parent.claims.resource.generation,
+            origin_request_id: child.request_id.clone(),
+            live_identity_digest: endpoint_live_identity_digest(&container_id),
+        };
         delegated
             .ledger
-            .complete(
+            .complete_creation(
                 &parent_key,
                 serde_json::to_vec(&response).map_err(|_| LocalApiError::InvalidDelegation)?,
+                provenance,
             )
             .map_err(|_| LocalApiError::InvalidDelegation)?;
         Ok(response)
@@ -546,11 +570,9 @@ impl LocalApi {
                     },
                 }
             } else {
-                match serde_json::from_slice::<LocalApiRequest>(&body) {
+                match decode_disabled_legacy(&body) {
                     Ok(request) => self.handle(caller_uid, request),
-                    Err(error) => LocalApiResponse::Rejected {
-                        reason: format!("invalid local API request: {error}"),
-                    },
+                    Err(reason) => LocalApiResponse::Rejected { reason },
                 }
             };
             let body = match serde_json::to_vec(&response) {
@@ -586,6 +608,21 @@ impl LocalApi {
     }
 }
 
+fn decode_disabled_legacy(body: &[u8]) -> Result<LocalApiRequest, String> {
+    let legacy: LegacyManagedOverlayRequest = serde_json::from_slice(body)
+        .map_err(|error| format!("invalid local API request: {error}"))?;
+    if legacy.schema_version != MANAGED_OVERLAY_PROTOCOL_VERSION
+        || legacy.mode != ManagedOverlayCompatibilityMode::Disabled
+    {
+        return Err("unsupported local API compatibility mode".into());
+    }
+    serde_json::from_value(
+        serde_json::to_value(legacy.request)
+            .map_err(|_| "invalid disabled compatibility request")?,
+    )
+    .map_err(|_| "invalid disabled compatibility request".into())
+}
+
 fn parent_key(delegation: &ManagedOverlayDelegation) -> ParentGrantKey {
     ParentGrantKey {
         request_id: delegation.parent.claims.request_id.clone(),
@@ -619,4 +656,49 @@ fn monotonic_millis() -> u64 {
         .ok()
         .and_then(|value| value.split_whitespace().next()?.parse::<f64>().ok())
         .map_or(0, |seconds| (seconds * 1000.0) as u64)
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::{decode_disabled_legacy, LocalApiRequest};
+    use ferro_core::managed_overlay::{
+        LegacyManagedOverlayRequest, ManagedOverlayCompatibilityMode, ManagedOverlayRequest,
+        MANAGED_OVERLAY_PROTOCOL_VERSION,
+    };
+
+    #[test]
+    fn disabled_compatibility_requires_explicit_versioned_negotiation() {
+        let bare = LocalApiRequest::AttachContainer {
+            overlay_id: "wg0".into(),
+            container_id: "c1".into(),
+            now_unix: 1,
+        };
+        assert!(decode_disabled_legacy(&serde_json::to_vec(&bare).unwrap()).is_err());
+        let negotiated = LegacyManagedOverlayRequest {
+            schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
+            mode: ManagedOverlayCompatibilityMode::Disabled,
+            request: ManagedOverlayRequest::AttachContainer {
+                overlay_id: "wg0".into(),
+                container_id: "c1".into(),
+                now_unix: 1,
+            },
+        };
+        assert!(matches!(
+            decode_disabled_legacy(&serde_json::to_vec(&negotiated).unwrap()),
+            Ok(LocalApiRequest::AttachContainer { .. })
+        ));
+    }
+
+    #[test]
+    fn disabled_compatibility_rejects_unknown_versions() {
+        let negotiated = LegacyManagedOverlayRequest {
+            schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION + 1,
+            mode: ManagedOverlayCompatibilityMode::Disabled,
+            request: ManagedOverlayRequest::InspectOverlay {
+                overlay_id: "wg0".into(),
+                now_unix: 1,
+            },
+        };
+        assert!(decode_disabled_legacy(&serde_json::to_vec(&negotiated).unwrap()).is_err());
+    }
 }

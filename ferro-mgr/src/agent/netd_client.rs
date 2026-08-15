@@ -16,13 +16,26 @@ use ferro_core::{
 };
 use prost::Message;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::delegation_ledger::ChildIdentity;
+use super::delegation_ledger::{ChildIdentity, CreationProvenance};
 use super::reconcile::NetdClient;
 use crate::proto::DesiredState;
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+pub fn endpoint_live_identity_digest(endpoint_id: &str) -> [u8; 32] {
+    Sha256::digest(
+        [
+            b"ferrocrate.helper-live-identity.v1\0".as_slice(),
+            b"endpoint:",
+            endpoint_id.as_bytes(),
+        ]
+        .concat(),
+    )
+    .into()
+}
 
 #[derive(Serialize)]
 struct DesiredStateEnvelope<'a> {
@@ -183,6 +196,41 @@ impl DelegationBridge {
         Ok(())
     }
 
+    pub fn validate_cleanup_parent(
+        &self,
+        request: &ManagedOverlayRequest,
+        delegation: &ManagedOverlayDelegation,
+        provenance: &CreationProvenance,
+        now_unix: u64,
+        now_monotonic_millis: u64,
+    ) -> Result<(), DelegationError> {
+        let parent = &delegation.parent;
+        VerifiedHelperGrant::verify(
+            parent.clone(),
+            &self.parent_key,
+            &self.parent_issuer,
+            &self.boot_id,
+        )
+        .map_err(|_| DelegationError::InvalidSignature)?;
+        if parent.claims.key_id != self.parent_key_id
+            || parent.claims.action != GrantAction::NetworkDetach
+            || parent.claims.kind != GrantKind::Cleanup
+            || parent.claims.parameter_digest
+                != managed_parameters(request)
+                    .map_err(|_| DelegationError::Binding)?
+                    .digest()
+            || parent.claims.resource.resource_uuid != provenance.resource_uuid
+            || parent.claims.resource.generation != provenance.resource_generation
+            || parent.claims.origin_request_id.as_deref() != Some(&provenance.origin_request_id)
+            || parent.claims.live_identity_digest != Some(provenance.live_identity_digest)
+            || now_unix > parent.claims.wall_deadline_secs
+            || now_monotonic_millis > parent.claims.monotonic_deadline_millis
+        {
+            return Err(DelegationError::Binding);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn delegate_attach(
         &mut self,
@@ -294,6 +342,7 @@ impl DelegationBridge {
         now_unix: u64,
         now_monotonic_millis: u64,
         child: &ChildIdentity,
+        provenance: &CreationProvenance,
     ) -> Result<GrantedEnvelope, DelegationError> {
         let ManagedOverlayRequest::DetachContainer { overlay_id, .. } = request else {
             return Err(DelegationError::Unsupported);
@@ -308,7 +357,7 @@ impl DelegationBridge {
         .map_err(|_| DelegationError::InvalidSignature)?;
         if parent.claims.key_id != self.parent_key_id
             || parent.claims.action != GrantAction::NetworkDetach
-            || parent.claims.kind != GrantKind::Mutation
+            || parent.claims.kind != GrantKind::Cleanup
             || parent.claims.parameter_digest
                 != managed_parameters(request)
                     .map_err(|_| DelegationError::Binding)?
@@ -339,7 +388,7 @@ impl DelegationBridge {
         .map_err(|_| DelegationError::Binding)?;
         let grant = self
             .child_issuer
-            .delegate_child(
+            .delegate_cleanup(
                 &verified,
                 &child.request_id,
                 GrantAction::NetworkDetach,
@@ -349,6 +398,8 @@ impl DelegationBridge {
                 )
                 .map_err(|_| DelegationError::Binding)?,
                 &parameters,
+                &provenance.origin_request_id,
+                provenance.live_identity_digest,
                 parent.claims.wall_deadline_secs,
                 parent.claims.monotonic_deadline_millis,
                 child.nonce,
@@ -491,7 +542,7 @@ impl UnixNetdClient {
 #[cfg(test)]
 mod tests {
     use super::{DelegationBridge, NetdRequest, UnixNetdClient};
-    use crate::agent::delegation_ledger::ChildIdentity;
+    use crate::agent::delegation_ledger::{ChildIdentity, CreationProvenance};
     use base64::Engine;
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
@@ -615,6 +666,114 @@ mod tests {
                     nonce: [8; 16]
                 }
             )
+            .is_err());
+    }
+
+    #[test]
+    fn detach_requires_cleanup_parent_with_persisted_creation_provenance() {
+        let parent_key = SigningKey::from_bytes(&[15; 32]);
+        let child_key = SigningKey::from_bytes(&[16; 32]);
+        let request = ManagedOverlayRequest::DetachContainer {
+            overlay_id: "wg0".into(),
+            container_id: "c1".into(),
+            now_unix: 100,
+        };
+        let digest = ferro_core::managed_overlay::managed_parameters(&request)
+            .unwrap()
+            .digest();
+        let provenance = CreationProvenance {
+            container_id: "c1".into(),
+            overlay_id: "wg0".into(),
+            resource_uuid: "123e4567-e89b-12d3-a456-426614174000".into(),
+            resource_generation: 7,
+            origin_request_id: "attach-child-1".into(),
+            live_identity_digest: super::endpoint_live_identity_digest("c1"),
+        };
+        let mut claims = parent_claims("cleanup-parent", digest, 7, [6; 16]);
+        claims.action = GrantAction::NetworkDetach;
+        claims.kind = GrantKind::Cleanup;
+        claims.origin_request_id = Some(provenance.origin_request_id.clone());
+        claims.live_identity_digest = Some(provenance.live_identity_digest);
+        let delegation = ManagedOverlayDelegation::new(sign_parent(&parent_key, claims));
+        let mut bridge = DelegationBridge::new(
+            parent_key.verifying_key(),
+            "runtime",
+            "parent-key",
+            "boot-a",
+            issuer_from_key("child-key", &child_key),
+            SigningKey::from_bytes(&[23; 32]),
+            "cluster",
+            "node",
+        );
+        bridge
+            .validate_cleanup_parent(&request, &delegation, &provenance, 100, 9_000)
+            .unwrap();
+        let envelope = bridge
+            .delegate_detach(
+                &request,
+                &delegation,
+                "c1",
+                100,
+                9_000,
+                &ChildIdentity {
+                    request_id: "cleanup-child".into(),
+                    nonce: [9; 16],
+                },
+                &provenance,
+            )
+            .unwrap();
+        assert_eq!(envelope.grant.claims.kind, GrantKind::Cleanup);
+        assert_eq!(
+            envelope.grant.claims.origin_request_id.as_deref(),
+            Some("attach-child-1")
+        );
+        assert_eq!(
+            envelope.grant.claims.live_identity_digest,
+            Some(super::endpoint_live_identity_digest("c1"))
+        );
+    }
+
+    #[test]
+    fn mutation_detach_and_wrong_provenance_are_rejected() {
+        let parent_key = SigningKey::from_bytes(&[17; 32]);
+        let request = ManagedOverlayRequest::DetachContainer {
+            overlay_id: "wg0".into(),
+            container_id: "c1".into(),
+            now_unix: 100,
+        };
+        let digest = ferro_core::managed_overlay::managed_parameters(&request)
+            .unwrap()
+            .digest();
+        let mut claims = parent_claims("detach-parent", digest, 7, [7; 16]);
+        claims.action = GrantAction::NetworkDetach;
+        let mutation = ManagedOverlayDelegation::new(sign_parent(&parent_key, claims.clone()));
+        let provenance = CreationProvenance {
+            container_id: "c1".into(),
+            overlay_id: "wg0".into(),
+            resource_uuid: "123e4567-e89b-12d3-a456-426614174000".into(),
+            resource_generation: 7,
+            origin_request_id: "attach-child-1".into(),
+            live_identity_digest: super::endpoint_live_identity_digest("c1"),
+        };
+        let bridge = DelegationBridge::new(
+            parent_key.verifying_key(),
+            "runtime",
+            "parent-key",
+            "boot-a",
+            issuer_from_key("child-key", &SigningKey::from_bytes(&[18; 32])),
+            SigningKey::from_bytes(&[24; 32]),
+            "cluster",
+            "node",
+        );
+        assert!(bridge
+            .validate_cleanup_parent(&request, &mutation, &provenance, 100, 9_000)
+            .is_err());
+        claims.kind = GrantKind::Cleanup;
+        claims.origin_request_id = Some("wrong-origin".into());
+        claims.live_identity_digest = Some(provenance.live_identity_digest);
+        let wrong = ManagedOverlayDelegation::new(sign_parent(&parent_key, claims));
+        assert!(bridge
+            .validate_cleanup_parent(&request, &wrong, &provenance, 100, 9_000)
             .is_err());
     }
 

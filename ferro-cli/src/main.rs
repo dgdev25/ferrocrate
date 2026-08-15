@@ -1,7 +1,9 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(missing_docs)]
 
-use crate::network_lifecycle::NetworkRecord;
+use crate::network_lifecycle::{
+    canonical_bridge_name, last_committed_bridge_identity, NetworkCreateRecord, NetworkRecord,
+};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 #[cfg(target_os = "linux")]
@@ -4174,21 +4176,17 @@ fn default_gateway_for_subnet(subnet: Ipv4Addr) -> Ipv4Addr {
 }
 
 fn bridge_name_for_network(name: &str) -> String {
-    let normalized = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let mut bridge = format!("fc-{normalized}");
-    if bridge.len() > 15 {
-        bridge.truncate(15);
-    }
-    bridge
+    canonical_bridge_name(name)
+}
+
+#[cfg(test)]
+fn reset_network_kernel_effect_count() {
+    crate::network_lifecycle::reset_network_kernel_effect_count();
+}
+
+#[cfg(test)]
+fn network_kernel_effect_count() -> u32 {
+    crate::network_lifecycle::network_kernel_effect_count()
 }
 
 fn create_network_record(
@@ -4262,11 +4260,19 @@ fn handle_network_authorized(
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
             }
-            let mut records = load_networks(runtime_dir)?;
+            let records = load_networks(runtime_dir)?;
             if records.iter().any(|record| record.name == name) {
                 return Err(format!("network: already exists {name}"));
             }
             let record = create_network_record(&name, subnet.as_deref(), gateway.as_deref())?;
+            if records.iter().any(|existing| {
+                existing.bridge_name == record.bridge_name && existing.name != record.name
+            }) {
+                return Err(format!(
+                    "network: bridge name collision {}",
+                    record.bridge_name
+                ));
+            }
             let proof = authorization
                 .authorize_named(
                     origin,
@@ -4276,7 +4282,7 @@ fn handle_network_authorized(
                     record.generation,
                 )
                 .map_err(|error| error.to_string())?;
-            execute_network_create(runtime_dir, &mut records, &record, proof)?;
+            execute_network_create(runtime_dir, &record, proof)?;
             println!(
                 "network create: name={} driver={} subnet={} gateway={}",
                 record.name, record.driver, record.subnet, record.gateway
@@ -4297,82 +4303,125 @@ fn handle_network_authorized(
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: cannot remove builtin network {name}"));
             }
-            let running = runtime.list().map_err(|err| err.to_string())?;
-            if running.iter().any(|record| {
-                record.status == "running" && record.network_name.as_deref() == Some(name.as_str())
-            }) {
-                return Err(format!("network: in use by running containers {name}"));
-            }
-            let mut records = load_networks(runtime_dir)?;
-            let generation = records
+            let associations = runtime.list().map_err(|err| err.to_string())?;
+            let records = load_networks(runtime_dir)?;
+            let stored = records
                 .iter()
                 .find(|record| record.name == name)
-                .map(|record| record.generation)
-                .ok_or_else(|| format!("network: not found {name}"))?;
+                .ok_or_else(|| format!("network: not found {name}"))?
+                .clone();
             let proof = authorization
                 .authorize_named(
                     origin,
                     AuthorizationAction::NetworkDelete,
                     ResourceKind::Network,
                     &name,
-                    generation,
+                    stored.generation,
                 )
                 .map_err(|error| error.to_string())?;
-            execute_network_remove(runtime_dir, &mut records, &name, generation, proof)?;
+            execute_network_remove(runtime_dir, &stored, &associations, proof)?;
             println!("network rm: {name}");
         }
     }
     Ok(())
 }
 
+fn cli_network_kernel() -> Box<dyn crate::network_lifecycle::NetworkKernel> {
+    // Explicit opt-in for the file-backed emulator (Docker/CLI harnesses).
+    // Default production path remains SystemBridgeKernel.
+    if let Some(kernel) = crate::network_lifecycle::FileBackedNetworkKernel::from_env() {
+        return Box::new(kernel);
+    }
+    #[cfg(test)]
+    {
+        Box::new(CliKernelProxy)
+    }
+    #[cfg(not(test))]
+    {
+        Box::new(crate::network_lifecycle::SystemBridgeKernel)
+    }
+}
+
+#[cfg(test)]
+struct CliKernelProxy;
+
+#[cfg(test)]
+impl crate::network_lifecycle::NetworkKernel for CliKernelProxy {
+    fn create_bridge(
+        &self,
+        config: &ferro_net::BridgeConfig,
+    ) -> Result<(), crate::network_lifecycle::NetworkKernelError> {
+        crate::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.create_bridge(config))
+    }
+
+    fn destroy_bridge(
+        &self,
+        identity: &crate::network_lifecycle::BridgeIdentity,
+    ) -> Result<(), crate::network_lifecycle::NetworkKernelError> {
+        crate::network_lifecycle::CliTestKernel::with_current(|kernel| {
+            kernel.destroy_bridge(identity)
+        })
+    }
+
+    fn observe_bridge(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::network_lifecycle::BridgeIdentity>, crate::network_lifecycle::NetworkKernelError>
+    {
+        crate::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.observe_bridge(name))
+    }
+}
+
 fn execute_network_create(
     runtime_dir: &Path,
-    records: &mut Vec<NetworkRecord>,
     record: &NetworkRecord,
     permit: SurfacePermit,
 ) -> Result<(), String> {
-    SurfaceAuthorization::validate_execution(
-        &permit,
-        AuthorizationAction::NetworkCreate,
-        ResourceKind::Network,
-        &record.name,
-        record.generation,
+    let create = NetworkCreateRecord::from_record(record.clone()).map_err(|error| error.to_string())?;
+    crate::network_lifecycle::create_authorized(
+        runtime_dir,
+        &create,
+        permit,
+        cli_network_kernel().as_ref(),
     )
-    .map_err(|error| error.to_string())?;
-    records.push(record.clone());
-    records.sort_by(|a, b| a.name.cmp(&b.name));
-    let result = save_networks(runtime_dir, records);
-    permit
-        .finish(result.is_ok())
-        .map_err(|error| error.to_string())?;
-    result
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 fn execute_network_remove(
     runtime_dir: &Path,
-    records: &mut Vec<NetworkRecord>,
-    name: &str,
-    generation: u64,
+    record: &NetworkRecord,
+    associations: &[ferro_core::container_store::ContainerRecord],
     permit: SurfacePermit,
 ) -> Result<(), String> {
-    SurfaceAuthorization::validate_execution(
-        &permit,
-        AuthorizationAction::NetworkDelete,
-        ResourceKind::Network,
-        name,
-        generation,
+    // Exact BridgeIdentity deletion authority requires the last StoreCommitted
+    // observed identity. Synthesizing from the store record (ifindex: None)
+    // would allow an inexact or absent-bridge path to unpublish without that
+    // authority; fail closed before delete, unpublish, or any kernel effect.
+    let expected = match last_committed_bridge_identity(runtime_dir, &record.name)
+        .map_err(|error| error.to_string())?
+    {
+        Some(identity) => identity,
+        None => {
+            permit
+                .finish(false)
+                .map_err(|error| error.to_string())?;
+            return Err(format!(
+                "network: missing committed bridge identity for {}",
+                record.name
+            ));
+        }
+    };
+    crate::network_lifecycle::delete_authorized(
+        runtime_dir,
+        &record.name,
+        &expected,
+        associations,
+        record.generation,
+        permit,
+        cli_network_kernel().as_ref(),
     )
-    .map_err(|error| error.to_string())?;
-    let before = records.len();
-    records.retain(|record| record.name != name);
-    if records.len() == before {
-        return Err(format!("network: not found {name}"));
-    }
-    let result = save_networks(runtime_dir, records);
-    permit
-        .finish(result.is_ok())
-        .map_err(|error| error.to_string())?;
-    result
+    .map_err(|error| error.to_string())
 }
 
 fn parse_driver_opts(opts: &[String]) -> Result<BTreeMap<String, String>, String> {
@@ -7346,6 +7395,607 @@ mod tests {
             &authorization,
         )
         .expect("rm network");
+    }
+
+    fn configured_cli_runtime(mode: &str) -> tempfile::TempDir {
+        use ed25519_dalek::SigningKey;
+        use ferro_core::authorization::admission::{
+            AdmissionArtifact, AdmissionSnapshotManifest,
+        };
+        use ferro_core::witness::{
+            Checkpoint, CheckpointKind, FlushedHead, Invocation, JournalConfig, JournalMode,
+            PrincipalSummary, ResourceSummary, WitnessAction, WitnessJournal, WitnessOutcome,
+            WitnessRecord, WitnessResourceKind, WitnessStage,
+        };
+        use sha2::Digest;
+        use std::os::unix::fs::PermissionsExt;
+
+        assert!(matches!(mode, "disabled" | "shadow" | "enforce"));
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("protect runtime directory");
+        if mode == "disabled" {
+            return runtime;
+        }
+        let auth = runtime.path().join("authorization");
+        std::fs::create_dir(&auth).expect("create authorization directory");
+        std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o700))
+            .expect("protect authorization directory");
+        let journal_id = [0x44u8; 16];
+        let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let protected = |path: &std::path::Path, bytes: &[u8]| {
+            std::fs::write(path, bytes).expect("write protected fixture");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("protect fixture");
+        };
+        protected(
+            &auth.join("active-policy.toml"),
+            format!("schema_version = 1\ngeneration = 1\nmode = \"{mode}\"\n").as_bytes(),
+        );
+        protected(&auth.join("journal-id"), format!("{}\n", hex(&journal_id)).as_bytes());
+
+        let key = SigningKey::from_bytes(&[0x54; 32]);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs();
+        let journal = WitnessJournal::open(JournalConfig::new(
+            auth.join("witness-journal"),
+            journal_id,
+            JournalMode::Required,
+        ))
+        .expect("open production witness journal");
+        let checkpoint = Checkpoint::sign(
+            FlushedHead::new(journal_id, 1, 0, [0; 32]),
+            now.saturating_sub(1),
+            &key,
+            CheckpointKind::Periodic,
+        )
+        .expect("sign checkpoint");
+        let checkpoint_bytes = checkpoint.encode();
+        let checkpoint_digest: [u8; 32] = sha2::Sha256::digest(&checkpoint_bytes).into();
+        journal
+            .append_checkpoint_publication(
+                checkpoint_digest,
+                WitnessRecord {
+                    epoch: 1,
+                    sequence: 1,
+                    previous_hash: [0; 32],
+                    event_id: [0x54; 16],
+                    request_id: [0x55; 16],
+                    runtime_instance_id: [0x56; 16],
+                    boot_id: [0x57; 16],
+                    principal: PrincipalSummary::pseudonymize(&[0x58; 32], b"qualification")
+                        .expect("pseudonymize principal"),
+                    invocation: Invocation::Manager,
+                    action: WitnessAction::CheckpointPublish,
+                    resource_kind: WitnessResourceKind::Administrative,
+                    resource: ResourceSummary::pseudonymize(&[0x59; 32], b"checkpoint")
+                        .expect("pseudonymize resource"),
+                    resource_generation: 1,
+                    policy_version: 0,
+                    policy_digest: [0; 32],
+                    decision_id: None,
+                    rule: None,
+                    decision: None,
+                    reason: None,
+                    request_digest: checkpoint_digest,
+                    result_digest: Some(checkpoint_digest),
+                    wall_time_ns: 0,
+                    monotonic_ns: 0,
+                    stage: WitnessStage::CheckpointPublished,
+                    outcome: WitnessOutcome::Succeeded,
+                    recovery_link: None,
+                    path_class: None,
+                    device_class: None,
+                    correlation_digest: None,
+                },
+            )
+            .expect("record checkpoint publication");
+        let admission = auth.join("admission");
+        std::fs::create_dir(&admission).expect("create admission directory");
+        std::fs::set_permissions(&admission, std::fs::Permissions::from_mode(0o700))
+            .expect("protect admission directory");
+        protected(&admission.join("minimum.bin"), &checkpoint_bytes);
+        protected(&admission.join("checkpoint-0001.bin"), &checkpoint_bytes);
+        let trust = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "journal_id": hex(&journal_id),
+            "initial_public_key": hex(key.verifying_key().as_bytes()),
+            "starting_epoch": 1
+        }))
+        .expect("serialize trust bundle");
+        protected(&admission.join("trust.json"), &trust);
+        let digest = |bytes: &[u8]| hex(&sha2::Sha256::digest(bytes));
+        let manifest = AdmissionSnapshotManifest {
+            schema: 1,
+            generation: 1,
+            journal_id: hex(&journal_id),
+            trust_bundle: AdmissionArtifact {
+                file: "trust.json".into(),
+                sha256: digest(&trust),
+            },
+            minimum_checkpoint: AdmissionArtifact {
+                file: "minimum.bin".into(),
+                sha256: digest(&checkpoint_bytes),
+            },
+            checkpoint_chain: vec![AdmissionArtifact {
+                file: "checkpoint-0001.bin".into(),
+                sha256: digest(&checkpoint_bytes),
+            }],
+            trust_key_ids: vec![digest(key.verifying_key().as_bytes())],
+            latest_checkpoint: "checkpoint-0001.bin".into(),
+            latest_created_at_secs: now.saturating_sub(1),
+        };
+        protected(
+            &admission.join("manifest.json"),
+            &serde_json::to_vec(&manifest).expect("serialize admission manifest"),
+        );
+        drop(journal);
+        runtime
+    }
+
+    fn create_and_remove_named_network(runtime_dir: &std::path::Path, name: &str) {
+        let runtime = ContainerRuntime::new(runtime_dir).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        handle_network(
+            runtime_dir,
+            &runtime,
+            NetworkCommands::Create {
+                name: name.to_string(),
+                subnet: Some("172.30.0.0/16".to_string()),
+                gateway: Some("172.30.0.1".to_string()),
+            },
+            &authorization,
+        )
+        .expect("create network");
+        let stored = super::load_networks(runtime_dir).expect("load networks");
+        let record = stored
+            .iter()
+            .find(|record| record.name == name)
+            .expect("created record");
+        assert_eq!(record.bridge_name.len(), 15);
+        assert!(record.bridge_name.starts_with("fc-"));
+        handle_network(
+            runtime_dir,
+            &runtime,
+            NetworkCommands::Rm {
+                name: name.to_string(),
+            },
+            &authorization,
+        )
+        .expect("rm network");
+        assert!(super::load_networks(runtime_dir)
+            .expect("load networks")
+            .iter()
+            .all(|record| record.name != name));
+    }
+
+    #[test]
+    fn network_create_remove_succeeds_in_disabled_mode() {
+        let temp = configured_cli_runtime("disabled");
+        super::reset_network_kernel_effect_count();
+        create_and_remove_named_network(temp.path(), "disabled-net");
+        assert!(super::network_kernel_effect_count() > 0);
+    }
+
+    #[test]
+    fn network_create_remove_succeeds_in_shadow_mode() {
+        let temp = configured_cli_runtime("shadow");
+        super::reset_network_kernel_effect_count();
+        create_and_remove_named_network(temp.path(), "shadow-net");
+        assert!(super::network_kernel_effect_count() > 0);
+    }
+
+    #[test]
+    fn network_create_enforce_denies_before_kernel_effects() {
+        let temp = configured_cli_runtime("enforce");
+        super::reset_network_kernel_effect_count();
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        let dropped_admin = nix::unistd::geteuid().as_raw() == 0
+            && nix::unistd::seteuid(nix::unistd::Uid::from_raw(65534)).is_ok();
+        let result = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "enforce-net".to_string(),
+                subnet: Some("172.31.0.0/16".to_string()),
+                gateway: Some("172.31.0.1".to_string()),
+            },
+            &authorization,
+        );
+        if dropped_admin {
+            let _ = nix::unistd::seteuid(nix::unistd::Uid::from_raw(0));
+        }
+        let err = result.expect_err("enforce must deny create");
+        assert!(
+            err.contains("denied") || err.contains("authorization"),
+            "stable denial shape, got {err}"
+        );
+        assert_eq!(
+            super::network_kernel_effect_count(),
+            0,
+            "enforce denial must not call kernel: {err}"
+        );
+        assert!(super::load_networks(temp.path())
+            .expect("load networks")
+            .is_empty());
+        assert!(!temp.path().join("network-operations.journal").exists());
+    }
+
+    /// Public create handler post-effect fault (not a private lifecycle-only test):
+    /// crosses `handle_network`, fails during store publication after an observed
+    /// kernel bridge, retains OutcomeUnknown + IdentityObserved, blocks replacement
+    /// with zero new kernel effects, then recovery commits the original operation.
+    #[test]
+    fn network_create_post_effect_store_fault_is_outcome_unknown_and_blocks_replacement() {
+        use ferro_core::witness::{
+            decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessOutcome, WitnessStage,
+        };
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = configured_cli_runtime("shadow");
+        let networks_dir = temp.path().join("networks");
+        std::fs::create_dir_all(&networks_dir).expect("networks dir");
+        // Deny store publication after IdentityObserved; journal + kernel stay writable.
+        std::fs::set_permissions(&networks_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("lock networks dir");
+
+        super::reset_network_kernel_effect_count();
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "fault-net".to_string(),
+                subnet: Some("172.34.0.0/16".to_string()),
+                gateway: Some("172.34.0.1".to_string()),
+            },
+            &authorization,
+        )
+        .expect_err("store fault after kernel effect must not report success");
+        assert!(
+            err.contains("store publication")
+                || err.contains("journal io")
+                || err.contains("operation journal io")
+                || err.contains("Permission")
+                || err.contains("failed to write"),
+            "post-effect store fault shape, got {err}"
+        );
+        assert!(
+            super::network_kernel_effect_count() > 0,
+            "kernel effect must occur before store fault"
+        );
+        assert!(
+            super::load_networks(temp.path())
+                .expect("load networks")
+                .is_empty(),
+            "store must remain empty after publication fault (not a success lie)"
+        );
+
+        let pending = crate::network_lifecycle::read_pending_operations(temp.path())
+            .expect("read pending lifecycle");
+        assert_eq!(pending.len(), 1, "retain one nonterminal lifecycle op");
+        assert_eq!(pending[0].resource.name, "fault-net");
+        assert_eq!(
+            pending[0].phase,
+            crate::network_lifecycle::NetworkLifecyclePhase::IdentityObserved,
+            "must not terminal-lie as StoreCommitted"
+        );
+        let observed = pending[0]
+            .observed
+            .clone()
+            .expect("IdentityObserved retains exact kernel identity");
+        assert!(observed.ifindex.is_some_and(|idx| idx != 0));
+        let retained_op_id = pending[0].op_id.clone();
+
+        // Do not reset the in-process kernel adapter: recovery must observe the
+        // same bridge the public create effect recorded.
+        std::fs::set_permissions(&networks_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("unlock networks dir");
+        let effects_before_replacement = super::network_kernel_effect_count();
+        let replacement_err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "fault-net".to_string(),
+                subnet: Some("172.34.0.0/16".to_string()),
+                gateway: Some("172.34.0.1".to_string()),
+            },
+            &authorization,
+        )
+        .expect_err("OutcomeUnknown/pending lifecycle must block replacement");
+        assert!(
+            !replacement_err.is_empty(),
+            "replacement must fail closed"
+        );
+        assert_eq!(
+            super::network_kernel_effect_count(),
+            effects_before_replacement,
+            "replacement must not invoke kernel effects: {replacement_err}"
+        );
+        let pending_blocked = crate::network_lifecycle::read_pending_operations(temp.path())
+            .expect("pending after replacement attempt");
+        assert_eq!(
+            pending_blocked.len(),
+            1,
+            "replacement must not open a second lifecycle operation"
+        );
+        assert_eq!(pending_blocked[0].op_id, retained_op_id);
+        assert_eq!(
+            pending_blocked[0].phase,
+            crate::network_lifecycle::NetworkLifecyclePhase::IdentityObserved
+        );
+        assert!(
+            super::load_networks(temp.path())
+                .expect("load")
+                .is_empty(),
+            "blocked replacement must not publish a store record"
+        );
+
+        let recovery = crate::network_lifecycle::recover_network_lifecycles(
+            temp.path(),
+            super::cli_network_kernel().as_ref(),
+        )
+        .expect("recover pending IdentityObserved");
+        assert_eq!(recovery.entries.len(), 1);
+        assert_eq!(
+            recovery.entries[0].verdict,
+            crate::network_lifecycle::NetworkRecoveryVerdict::AppliedAndCommitted
+        );
+        assert!(recovery.entries[0].committed);
+        assert!(
+            crate::network_lifecycle::read_pending_operations(temp.path())
+                .expect("pending after recovery")
+                .is_empty(),
+            "recovery must clear nonterminal lifecycle"
+        );
+        let stored = super::load_networks(temp.path()).expect("store after recovery");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "fault-net");
+        assert_eq!(stored[0].bridge_name, observed.name);
+
+        let reconciled = authorization
+            .reconcile_pending(|pending| (*pending.recipe().observation_digest(), true))
+            .expect("reconcile OutcomeUnknown surface op");
+        assert_eq!(reconciled, 1, "exactly one OutcomeUnknown surface op recovered");
+
+        let effects_before_duplicate = super::network_kernel_effect_count();
+        let after_recovery = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "fault-net".to_string(),
+                subnet: Some("172.34.0.0/16".to_string()),
+                gateway: Some("172.34.0.1".to_string()),
+            },
+            &authorization,
+        )
+        .expect_err("recovered original must occupy the name");
+        assert!(
+            after_recovery.contains("already exists"),
+            "post-recovery must see original publication, got {after_recovery}"
+        );
+        assert_eq!(
+            super::network_kernel_effect_count(),
+            effects_before_duplicate,
+            "post-recovery duplicate create must not re-effect the kernel"
+        );
+
+        drop(authorization);
+        drop(runtime);
+
+        let journal = WitnessJournal::open(JournalConfig::new(
+            temp.path().join("authorization/witness-journal"),
+            [0x44u8; 16],
+            JournalMode::Required,
+        ))
+        .expect("reopen witness journal");
+        assert!(
+            journal.pending().expect("pending surface ops").is_empty(),
+            "surface OutcomeUnknown must be reconciled after recovery"
+        );
+        let records = journal.records().expect("witness records");
+        let outcomes: Vec<_> = records
+            .iter()
+            .filter_map(|bytes| decode_record(bytes).ok())
+            .filter(|decoded| decoded.stage() == WitnessStage::Outcome)
+            .map(|decoded| decoded.outcome())
+            .collect();
+        assert!(
+            outcomes.contains(&WitnessOutcome::OutcomeUnknown),
+            "post-effect fault must have witnessed OutcomeUnknown, got {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn network_bridge_identity_is_deterministic_15_chars_and_refuses_collision() {
+        let first = super::canonical_bridge_name("alpha-network");
+        let second = super::canonical_bridge_name("alpha-network");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 15);
+        assert!(first.starts_with("fc-"));
+        assert_ne!(first, super::canonical_bridge_name("beta-network"));
+
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        let colliding = super::NetworkRecord {
+            name: "other-logical".to_string(),
+            driver: "bridge".to_string(),
+            subnet: "172.32.0.0/16".to_string(),
+            gateway: "172.32.0.1".to_string(),
+            bridge_name: first.clone(),
+            bridge_cidr: "172.32.0.1/16".to_string(),
+            created_at_unix: 1,
+            generation: 1,
+        };
+        super::save_networks(temp.path(), &[colliding]).expect("seed colliding bridge name");
+        assert_eq!(
+            super::load_networks(temp.path())
+                .expect("reload seed")
+                .len(),
+            1
+        );
+        super::reset_network_kernel_effect_count();
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "alpha-network".to_string(),
+                subnet: Some("172.30.0.0/16".to_string()),
+                gateway: Some("172.30.0.1".to_string()),
+            },
+            &authorization,
+        )
+        .expect_err("stored bridge-name collision must be refused");
+        assert!(
+            err.contains("collision") || err.contains("bridge"),
+            "collision refusal, got {err}"
+        );
+        assert_eq!(super::network_kernel_effect_count(), 0);
+    }
+
+    #[test]
+    fn network_remove_refuses_any_extant_container_association() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "assoc-net".to_string(),
+                subnet: Some("172.33.0.0/16".to_string()),
+                gateway: Some("172.33.0.1".to_string()),
+            },
+            &authorization,
+        )
+        .expect("create network");
+        drop(runtime);
+        drop(authorization);
+
+        let store = ferro_core::container_store::LocalContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        for (id, status) in [("stopped-assoc", "stopped"), ("exited-assoc", "exited")] {
+            let mut record = serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
+                serde_json::json!({
+                    "id": id,
+                    "pid": 0,
+                    "image": "example.invalid/app:latest",
+                    "command": ["true"],
+                    "created_at_unix": 1,
+                    "stdout_path": "",
+                    "stderr_path": "",
+                    "status": status,
+                    "network_name": "assoc-net"
+                }),
+            )
+            .expect("container record");
+            record.status = status.to_string();
+            store.put(&record).expect("put associated container");
+        }
+        drop(store);
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime reopen");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        super::reset_network_kernel_effect_count();
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Rm {
+                name: "assoc-net".to_string(),
+            },
+            &authorization,
+        )
+        .expect_err("must refuse extant container association");
+        assert!(
+            err.contains("in use") || err.contains("association"),
+            "association refusal, got {err}"
+        );
+        assert_eq!(super::network_kernel_effect_count(), 0);
+        assert!(super::load_networks(temp.path())
+            .expect("load")
+            .iter()
+            .any(|record| record.name == "assoc-net"));
+    }
+
+    /// Public-path: store record without a StoreCommitted observed identity
+    /// must fail closed. No synthesized BridgeIdentity, no unpublish, no
+    /// kernel effect.
+    #[test]
+    fn network_remove_missing_committed_bridge_identity_fails_closed() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        let orphaned = super::NetworkRecord {
+            name: "orphan-net".to_string(),
+            driver: "bridge".to_string(),
+            subnet: "172.35.0.0/16".to_string(),
+            gateway: "172.35.0.1".to_string(),
+            bridge_name: super::canonical_bridge_name("orphan-net"),
+            bridge_cidr: "172.35.0.1/16".to_string(),
+            created_at_unix: 1,
+            generation: 1,
+        };
+        super::save_networks(temp.path(), &[orphaned]).expect("seed store without journal");
+        assert!(
+            crate::network_lifecycle::last_committed_bridge_identity(temp.path(), "orphan-net")
+                .expect("read committed identity")
+                .is_none(),
+            "fixture must lack a committed observed BridgeIdentity"
+        );
+
+        super::reset_network_kernel_effect_count();
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Rm {
+                name: "orphan-net".to_string(),
+            },
+            &authorization,
+        )
+        .expect_err("missing committed identity must fail closed");
+        assert!(
+            err.contains("missing committed bridge identity")
+                || err.contains("committed bridge identity"),
+            "missing-identity refusal, got {err}"
+        );
+        assert_eq!(
+            super::network_kernel_effect_count(),
+            0,
+            "must not call kernel when committed identity is missing: {err}"
+        );
+        assert!(
+            super::load_networks(temp.path())
+                .expect("load")
+                .iter()
+                .any(|record| record.name == "orphan-net"),
+            "store record must remain published"
+        );
+        assert!(
+            !temp.path().join("network-operations.journal").exists(),
+            "must not open a delete lifecycle without exact identity authority"
+        );
     }
 
     #[test]

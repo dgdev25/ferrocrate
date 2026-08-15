@@ -5,15 +5,46 @@ mod cli_fixture;
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Snapshot of the file-backed emulated network kernel used by the daemon
+/// under `FERROCRATE_NETWORK_KERNEL_STATE`. Mirrors the production state file
+/// shape so tests can prove create/delete effects without CAP_NET_ADMIN.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct KernelStateFile {
+    #[serde(default)]
+    effect_count: u32,
+    #[serde(default)]
+    bridges: std::collections::BTreeMap<String, KernelBridgeIdentity>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+struct KernelBridgeIdentity {
+    name: String,
+    ifindex: Option<u32>,
+    cidr: Option<String>,
+    ipv6_cidr: Option<String>,
+}
+
+fn load_kernel_state(path: &Path) -> KernelStateFile {
+    if !path.exists() {
+        return KernelStateFile::default();
+    }
+    let raw = std::fs::read_to_string(path).expect("read kernel state file");
+    if raw.trim().is_empty() {
+        return KernelStateFile::default();
+    }
+    serde_json::from_str(&raw).expect("parse kernel state file")
+}
 
 struct DaemonHarness {
     child: Child,
     _runtime_dir: tempfile::TempDir,
     socket_path: PathBuf,
+    kernel_state_path: PathBuf,
 }
 
 impl Drop for DaemonHarness {
@@ -31,9 +62,15 @@ impl DaemonHarness {
     fn spawn_mode(mode: &str) -> Self {
         let runtime_dir = cli_fixture::configured_runtime(mode);
         let socket_path = runtime_dir.path().join("docker.sock");
+        // Private per-daemon state file: only active because the env var is set.
+        let kernel_state_path = runtime_dir.path().join("network-kernel-state.json");
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env(
+                "FERROCRATE_NETWORK_KERNEL_STATE",
+                kernel_state_path.as_os_str(),
+            )
             .env(
                 "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
                 format!("docker-{mode}"),
@@ -56,6 +93,7 @@ impl DaemonHarness {
                     child,
                     _runtime_dir: runtime_dir,
                     socket_path,
+                    kernel_state_path,
                 };
             }
             thread::sleep(Duration::from_millis(25));
@@ -67,6 +105,10 @@ impl DaemonHarness {
             "daemon socket did not become ready: {}",
             socket_path.display()
         );
+    }
+
+    fn kernel_state(&self) -> KernelStateFile {
+        load_kernel_state(&self.kernel_state_path)
     }
 
     fn request(&self, method: &str, path: &str) -> (u16, String) {
@@ -178,6 +220,121 @@ fn docker_compat_network_create_list_delete_routes_work() {
 
     let (delete_status, delete_resp) = harness.request("DELETE", "/v1.45/networks/compat-net");
     assert_eq!(delete_status, 204, "delete body={delete_resp}");
+}
+
+/// Docker create/delete must drive the shared lifecycle kernel adapter and leave
+/// durable exact-identity effects in the emulated state file.
+#[test]
+fn docker_compat_network_create_delete_cause_kernel_effects() {
+    let harness = DaemonHarness::spawn();
+    let before = harness.kernel_state();
+    assert_eq!(before.effect_count, 0, "no effects before create");
+    assert!(before.bridges.is_empty(), "no bridges before create");
+
+    let create_body = r#"{
+        "Name":"kernel-effect-net",
+        "Driver":"bridge",
+        "IPAM":{"Config":[{"Subnet":"172.45.0.0/16","Gateway":"172.45.0.1"}]}
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/networks/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (create_status, create_resp) = harness.request_raw(&create_request);
+    assert_eq!(create_status, 201, "create body={create_resp}");
+
+    let after_create = harness.kernel_state();
+    assert!(
+        after_create.effect_count >= 1,
+        "create must record at least one kernel effect, state={after_create:?}"
+    );
+    assert_eq!(
+        after_create.bridges.len(),
+        1,
+        "create must persist one bridge identity, state={after_create:?}"
+    );
+    let (bridge_name, identity) = after_create
+        .bridges
+        .iter()
+        .next()
+        .expect("created bridge identity");
+    assert!(
+        bridge_name.starts_with("fc-") && bridge_name.len() == 15,
+        "canonical bridge name, got {bridge_name}"
+    );
+    assert_eq!(identity.name, *bridge_name);
+    assert!(
+        identity.ifindex.is_some_and(|idx| idx != 0),
+        "exact observed ifindex required, got {identity:?}"
+    );
+    // Kernel bridge identity carries bridge_cidr (gateway/prefix), not the
+    // logical subnet alone.
+    assert_eq!(
+        identity.cidr.as_deref(),
+        Some("172.45.0.1/16"),
+        "exact bridge cidr persisted, got {identity:?}"
+    );
+    let create_effects = after_create.effect_count;
+    let created_identity = identity.clone();
+
+    let (delete_status, delete_resp) =
+        harness.request("DELETE", "/v1.45/networks/kernel-effect-net");
+    assert_eq!(delete_status, 204, "delete body={delete_resp}");
+
+    let after_delete = harness.kernel_state();
+    assert!(
+        after_delete.effect_count > create_effects,
+        "delete must record an additional kernel effect ({create_effects} -> {})",
+        after_delete.effect_count
+    );
+    assert!(
+        after_delete.bridges.is_empty(),
+        "delete must remove exact identity {:?}, remaining={:?}",
+        created_identity,
+        after_delete.bridges
+    );
+}
+
+/// Enforce-mode denial must reject Docker network create before any kernel
+/// mutation, leaving the emulated state file empty of effects.
+#[test]
+fn docker_compat_network_enforce_denial_causes_zero_kernel_effects() {
+    let harness = DaemonHarness::spawn_mode("enforce");
+    let before = harness.kernel_state();
+    assert_eq!(before.effect_count, 0);
+    assert!(before.bridges.is_empty());
+
+    let create_body = r#"{
+        "Name":"enforce-kernel-net",
+        "Driver":"bridge",
+        "IPAM":{"Config":[{"Subnet":"172.46.0.0/16","Gateway":"172.46.0.1"}]}
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/networks/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create_request);
+    assert_eq!(status, 500, "stable enforce response: {response}");
+    assert!(
+        response.contains("PolicyDenied"),
+        "stable enforce response: {response}"
+    );
+
+    let after = harness.kernel_state();
+    assert_eq!(
+        after.effect_count, 0,
+        "enforce denial must leave zero kernel effects, state={after:?}"
+    );
+    assert!(
+        after.bridges.is_empty(),
+        "enforce denial must leave no bridge identities, state={after:?}"
+    );
+    assert!(
+        !harness.kernel_state_path.exists() || after.effect_count == 0,
+        "no mutation path may create effects under enforce denial"
+    );
 }
 
 #[test]

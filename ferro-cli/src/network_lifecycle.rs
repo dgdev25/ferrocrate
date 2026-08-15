@@ -14,13 +14,18 @@
 //!   original.
 //! - Ambiguous or unmarked state is quarantined (journaled, never destroyed).
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
+use ferro_core::authorization::{Action as AuthorizationAction, ResourceKind};
+use ferro_core::container_store::ContainerRecord;
 use ferro_net::BridgeObservation;
 
 // ---------------------------------------------------------------------------
@@ -112,6 +117,10 @@ impl NetworkCreateRecord {
     /// Kernel bridge name (`BridgeConfig` / `BridgeIdentity`).
     fn bridge_name(&self) -> &str {
         &self.config.name
+    }
+
+    pub(crate) fn published_record(&self) -> &NetworkRecord {
+        &self.record
     }
 
     fn snapshot(&self) -> RecordSnapshot {
@@ -301,6 +310,11 @@ pub(crate) enum NetworkLifecycleError {
     /// Operation quarantined; the detail carries retained evidence.
     Quarantined(String),
     Kernel(NetworkKernelError),
+    Authorization(String),
+    Collision(String),
+    InUse(String),
+    /// A nonterminal lifecycle still owns the logical or bridge identity.
+    Pending(String),
 }
 
 impl std::fmt::Display for NetworkLifecycleError {
@@ -316,6 +330,14 @@ impl std::fmt::Display for NetworkLifecycleError {
             NetworkLifecycleError::JournalBusy => write!(f, "operation journal is locked"),
             NetworkLifecycleError::Quarantined(m) => write!(f, "quarantined: {}", m),
             NetworkLifecycleError::Kernel(e) => write!(f, "kernel effect: {}", e),
+            NetworkLifecycleError::Authorization(m) => write!(f, "authorization: {}", m),
+            NetworkLifecycleError::Collision(m) => write!(f, "network: bridge name collision {}", m),
+            NetworkLifecycleError::InUse(m) => {
+                write!(f, "network: in use by extant container association {m}")
+            }
+            NetworkLifecycleError::Pending(m) => {
+                write!(f, "network: pending lifecycle blocks replacement {m}")
+            }
         }
     }
 }
@@ -380,6 +402,159 @@ impl NetworkKernel for SystemBridgeKernel {
         ferro_net::bridge::observe_bridge_identity(name)
             .map(|o| o.map(BridgeIdentity::from))
             .map_err(|e| NetworkKernelError::Failed(e.to_string()))
+    }
+}
+
+/// Environment variable that selects the file-backed emulated kernel.
+///
+/// When set to a non-empty path, the daemon/CLI uses
+/// [`FileBackedNetworkKernel`] instead of [`SystemBridgeKernel`]. Production
+/// and unprivileged default paths leave this unset so the real kernel adapter
+/// remains the default.
+pub(crate) const NETWORK_KERNEL_STATE_ENV: &str = "FERROCRATE_NETWORK_KERNEL_STATE";
+
+/// Persistent state for the file-backed emulated kernel.
+///
+/// Stores exact [`BridgeIdentity`] values (including observed `ifindex`) so a
+/// daemon subprocess can create, observe, and delete across requests without
+/// `CAP_NET_ADMIN`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileBackedKernelState {
+    #[serde(default = "default_next_ifindex")]
+    pub next_ifindex: u32,
+    #[serde(default)]
+    pub effect_count: u32,
+    #[serde(default)]
+    pub bridges: BTreeMap<String, BridgeIdentity>,
+}
+
+fn default_next_ifindex() -> u32 {
+    1
+}
+
+impl Default for FileBackedKernelState {
+    fn default() -> Self {
+        Self {
+            next_ifindex: 1,
+            effect_count: 0,
+            bridges: BTreeMap::new(),
+        }
+    }
+}
+
+/// File-backed emulated [`NetworkKernel`] for deterministic Docker/CLI tests.
+///
+/// Enabled only when [`NETWORK_KERNEL_STATE_ENV`] points at a state file path.
+/// Mutation methods increment `effect_count` and rewrite the full state file
+/// with exact identities. Observation never counts as an effect.
+pub(crate) struct FileBackedNetworkKernel {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FileBackedNetworkKernel {
+    pub(crate) fn open(path: PathBuf) -> Self {
+        Self {
+            path,
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// Construct from `FERROCRATE_NETWORK_KERNEL_STATE` when explicitly set.
+    pub(crate) fn from_env() -> Option<Self> {
+        match std::env::var(NETWORK_KERNEL_STATE_ENV) {
+            Ok(path) if !path.is_empty() => Some(Self::open(PathBuf::from(path))),
+            _ => None,
+        }
+    }
+
+    /// Load the current state file (or an empty state when absent).
+    pub(crate) fn load_state(path: &Path) -> Result<FileBackedKernelState, NetworkKernelError> {
+        if !path.exists() {
+            return Ok(FileBackedKernelState::default());
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|e| NetworkKernelError::Failed(format!("read state {}: {e}", path.display())))?;
+        if bytes.is_empty() {
+            return Ok(FileBackedKernelState::default());
+        }
+        serde_json::from_slice(&bytes).map_err(|e| {
+            NetworkKernelError::Failed(format!("parse state {}: {e}", path.display()))
+        })
+    }
+
+    fn store_state(&self, state: &FileBackedKernelState) -> Result<(), NetworkKernelError> {
+        let bytes = serde_json::to_vec_pretty(state)
+            .map_err(|e| NetworkKernelError::Failed(format!("encode state: {e}")))?;
+        ferro_core::fs_atomic::write_atomic(&self.path, &bytes)
+            .map_err(|e| NetworkKernelError::Failed(format!("write state {}: {e}", self.path.display())))
+    }
+
+    /// Apply a mutation and always rewrite the state file so effect counters
+    /// and identity maps survive process boundaries even when the call fails.
+    fn with_mut<R>(
+        &self,
+        f: impl FnOnce(&mut FileBackedKernelState) -> Result<R, NetworkKernelError>,
+    ) -> Result<R, NetworkKernelError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| NetworkKernelError::Failed("kernel state lock poisoned".into()))?;
+        let mut state = Self::load_state(&self.path)?;
+        let result = f(&mut state);
+        self.store_state(&state)?;
+        result
+    }
+}
+
+impl NetworkKernel for FileBackedNetworkKernel {
+    fn create_bridge(&self, config: &ferro_net::BridgeConfig) -> Result<(), NetworkKernelError> {
+        self.with_mut(|state| {
+            let ifindex = state.next_ifindex;
+            state.next_ifindex = state.next_ifindex.saturating_add(1).max(1);
+            let identity = BridgeIdentity {
+                name: config.name.clone(),
+                ifindex: Some(ifindex),
+                cidr: if config.cidr.is_empty() {
+                    None
+                } else {
+                    Some(config.cidr.clone())
+                },
+                ipv6_cidr: match config.ipv6_cidr.as_deref() {
+                    Some(v) if !v.is_empty() => Some(v.to_string()),
+                    _ => None,
+                },
+            };
+            state.bridges.insert(identity.name.clone(), identity);
+            state.effect_count = state.effect_count.saturating_add(1);
+            Ok(())
+        })
+    }
+
+    fn destroy_bridge(&self, identity: &BridgeIdentity) -> Result<(), NetworkKernelError> {
+        self.with_mut(|state| {
+            state.effect_count = state.effect_count.saturating_add(1);
+            match state.bridges.remove(&identity.name) {
+                None => Err(NetworkKernelError::NotFound),
+                Some(actual) if actual == *identity => Ok(()),
+                Some(actual) => {
+                    // Put the mismatched identity back; destroy must be exact.
+                    state.bridges.insert(actual.name.clone(), actual);
+                    Err(NetworkKernelError::Failed(
+                        "identity mismatch at destroy time".into(),
+                    ))
+                }
+            }
+        })
+    }
+
+    fn observe_bridge(&self, name: &str) -> Result<Option<BridgeIdentity>, NetworkKernelError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| NetworkKernelError::Failed("kernel state lock poisoned".into()))?;
+        let state = Self::load_state(&self.path)?;
+        Ok(state.bridges.get(name).cloned())
     }
 }
 
@@ -1222,14 +1397,20 @@ fn run_network_create_and_publish(
     };
     if let Err(error) = publish_network_record(runtime_dir, &published) {
         let detail = format!("network store publication failed after observation: {error}");
-        append_lifecycle_checkpoint(
-            runtime_dir,
-            operation,
-            NetworkLifecyclePhase::Quarantined,
-            Some(observed),
-            Some(detail.clone()),
-        )?;
-        return Err(NetworkLifecycleError::Quarantined(detail));
+        // Semantic store conflict is terminal quarantine evidence.
+        // Persistence faults keep IdentityObserved so recovery can finish
+        // StoreCommitted; callers must finish_unknown() and refuse replacement.
+        if error.contains("store conflict") {
+            append_lifecycle_checkpoint(
+                runtime_dir,
+                operation,
+                NetworkLifecyclePhase::Quarantined,
+                Some(observed),
+                Some(detail.clone()),
+            )?;
+            return Err(NetworkLifecycleError::Quarantined(detail));
+        }
+        return Err(NetworkLifecycleError::JournalIo(detail));
     }
 
     append_lifecycle_checkpoint(
@@ -1240,6 +1421,260 @@ fn run_network_create_and_publish(
         None,
     )?;
     Ok(observed)
+}
+
+/// `fc-` plus a 12-hex digest of the canonical logical name (15 characters).
+pub(crate) fn canonical_bridge_name(logical_name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ferro-net-bridge-v1");
+    hasher.update(logical_name.as_bytes());
+    let digest = hasher.finalize();
+    let suffix: String = digest.iter().take(6).map(|b| format!("{:02x}", b)).collect();
+    format!("fc-{suffix}")
+}
+
+pub(crate) fn last_committed_bridge_identity(
+    runtime_dir: &Path,
+    logical_name: &str,
+) -> Result<Option<BridgeIdentity>, NetworkLifecycleError> {
+    let ops = read_operations(runtime_dir)?;
+    Ok(ops.into_iter().rev().find_map(|op| {
+        if op.resource.name == logical_name
+            && op.action == NetworkAction::Create
+            && op.phase == NetworkLifecyclePhase::StoreCommitted
+        {
+            op.observed
+        } else {
+            None
+        }
+    }))
+}
+
+fn finish_permit(
+    permit: SurfacePermit,
+    succeeded: bool,
+) -> Result<(), NetworkLifecycleError> {
+    permit
+        .finish(succeeded)
+        .map_err(|error| NetworkLifecycleError::Authorization(error.to_string()))
+}
+
+fn finish_permit_unknown(permit: SurfacePermit) -> Result<(), NetworkLifecycleError> {
+    permit
+        .finish_unknown()
+        .map_err(|error| NetworkLifecycleError::Authorization(error.to_string()))
+}
+
+fn validate_network_permit(
+    permit: &SurfacePermit,
+    action: AuthorizationAction,
+    name: &str,
+    generation: u64,
+) -> Result<(), NetworkLifecycleError> {
+    SurfaceAuthorization::validate_execution(
+        permit,
+        action,
+        ResourceKind::Network,
+        name,
+        generation,
+    )
+    .map_err(|error| NetworkLifecycleError::Authorization(error.to_string()))
+}
+
+/// Permit-consuming create executor. Collision and pending-lifecycle checks
+/// run before any journal or kernel effect. Post-intent failures call
+/// `finish_unknown()`.
+pub(crate) fn create_authorized(
+    runtime_dir: &Path,
+    record: &NetworkCreateRecord,
+    permit: SurfacePermit,
+    kernel: &dyn NetworkKernel,
+) -> Result<BridgeIdentity, NetworkLifecycleError> {
+    let published = record.published_record();
+    validate_network_permit(
+        &permit,
+        AuthorizationAction::NetworkCreate,
+        &published.name,
+        published.generation,
+    )?;
+
+    let pending = read_pending_operations(runtime_dir)?;
+    if pending.iter().any(|op| {
+        op.resource.name == published.name
+            || op.record.record.bridge_name == published.bridge_name
+    }) {
+        finish_permit(permit, false)?;
+        return Err(NetworkLifecycleError::Pending(published.name.clone()));
+    }
+
+    let stored = load_networks(runtime_dir).map_err(NetworkLifecycleError::JournalIo)?;
+    if stored.iter().any(|existing| {
+        existing.bridge_name == published.bridge_name && existing.name != published.name
+    }) {
+        finish_permit(permit, false)?;
+        return Err(NetworkLifecycleError::Collision(published.bridge_name.clone()));
+    }
+
+    match run_network_create_and_publish(runtime_dir, record, kernel) {
+        Ok(identity) => {
+            finish_permit(permit, true)?;
+            Ok(identity)
+        }
+        Err(error) => {
+            finish_permit_unknown(permit)?;
+            Err(error)
+        }
+    }
+}
+
+fn unpublish_network_record(runtime_dir: &Path, name: &str) -> Result<(), String> {
+    let mut records = load_networks(runtime_dir)?;
+    records.retain(|record| record.name != name);
+    save_networks(runtime_dir, &records)
+}
+
+/// Permit-consuming exact-identity delete executor. Any extant
+/// `ContainerRecord` that names the network is refused before kernel effects.
+pub(crate) fn delete_authorized(
+    runtime_dir: &Path,
+    logical_name: &str,
+    expected_bridge_identity: &BridgeIdentity,
+    associations: &[ContainerRecord],
+    generation: u64,
+    permit: SurfacePermit,
+    kernel: &dyn NetworkKernel,
+) -> Result<(), NetworkLifecycleError> {
+    validate_network_permit(
+        &permit,
+        AuthorizationAction::NetworkDelete,
+        logical_name,
+        generation,
+    )?;
+
+    if associations
+        .iter()
+        .any(|record| record.network_name.as_deref() == Some(logical_name))
+    {
+        finish_permit(permit, false)?;
+        return Err(NetworkLifecycleError::InUse(logical_name.to_string()));
+    }
+
+    match run_network_delete(runtime_dir, logical_name, expected_bridge_identity, kernel) {
+        Ok(()) => {
+            if let Err(error) = unpublish_network_record(runtime_dir, logical_name) {
+                finish_permit_unknown(permit)?;
+                return Err(NetworkLifecycleError::JournalIo(error));
+            }
+            finish_permit(permit, true)?;
+            Ok(())
+        }
+        Err(error) => {
+            finish_permit_unknown(permit)?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_network_kernel_effect_count() {
+    CLI_TEST_KERNEL.with(|kernel| kernel.reset());
+}
+
+#[cfg(test)]
+pub(crate) fn network_kernel_effect_count() -> u32 {
+    CLI_TEST_KERNEL.with(|kernel| kernel.effect_count())
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLI_TEST_KERNEL: CliTestKernel = CliTestKernel::new();
+}
+
+#[cfg(test)]
+pub(crate) struct CliTestKernel {
+    state: std::sync::Mutex<std::collections::HashMap<String, BridgeIdentity>>,
+    next_ifindex: std::sync::atomic::AtomicU32,
+    effect_count: std::sync::atomic::AtomicU32,
+}
+
+#[cfg(test)]
+impl CliTestKernel {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_ifindex: std::sync::atomic::AtomicU32::new(1),
+            effect_count: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.state.lock().expect("cli test kernel").clear();
+        self.next_ifindex
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        self.effect_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn effect_count(&self) -> u32 {
+        self.effect_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn record_effect(&self) {
+        self.effect_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> R {
+        CLI_TEST_KERNEL.with(f)
+    }
+}
+
+#[cfg(test)]
+impl NetworkKernel for CliTestKernel {
+    fn create_bridge(
+        &self,
+        config: &ferro_net::BridgeConfig,
+    ) -> Result<(), NetworkKernelError> {
+        self.record_effect();
+        let ifindex = self
+            .next_ifindex
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let identity = BridgeIdentity {
+            name: config.name.clone(),
+            ifindex: Some(ifindex),
+            cidr: if config.cidr.is_empty() {
+                None
+            } else {
+                Some(config.cidr.clone())
+            },
+            ipv6_cidr: match config.ipv6_cidr.as_deref() {
+                Some(v) if !v.is_empty() => Some(v.to_string()),
+                _ => None,
+            },
+        };
+        self.state
+            .lock()
+            .expect("cli test kernel")
+            .insert(identity.name.clone(), identity);
+        Ok(())
+    }
+
+    fn destroy_bridge(&self, identity: &BridgeIdentity) -> Result<(), NetworkKernelError> {
+        self.record_effect();
+        let mut state = self.state.lock().expect("cli test kernel");
+        match state.remove(&identity.name) {
+            None => Err(NetworkKernelError::NotFound),
+            Some(actual) if actual == *identity => Ok(()),
+            Some(_) => Err(NetworkKernelError::Failed(
+                "identity mismatch at destroy time".into(),
+            )),
+        }
+    }
+
+    fn observe_bridge(&self, name: &str) -> Result<Option<BridgeIdentity>, NetworkKernelError> {
+        Ok(self.state.lock().expect("cli test kernel").get(name).cloned())
+    }
 }
 
 /// Drive recovery for every pending network lifecycle and durably commit a
@@ -1466,6 +1901,65 @@ pub(crate) fn classify_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_backed_kernel_persists_exact_identity_across_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kernel-state.json");
+        let config = ferro_net::BridgeConfig {
+            name: "fc-aabbccddeeff".into(),
+            cidr: "172.50.0.1/16".into(),
+            ipv6_cidr: None,
+        };
+
+        {
+            let kernel = FileBackedNetworkKernel::open(path.clone());
+            kernel.create_bridge(&config).expect("create");
+            let observed = kernel
+                .observe_bridge(&config.name)
+                .expect("observe")
+                .expect("present");
+            assert_eq!(observed.name, config.name);
+            assert_eq!(observed.cidr.as_deref(), Some("172.50.0.1/16"));
+            assert!(observed.ifindex.is_some_and(|idx| idx != 0));
+        }
+
+        // Fresh instance models a new process reading the same state file.
+        let kernel = FileBackedNetworkKernel::open(path.clone());
+        let state = FileBackedNetworkKernel::load_state(&path).expect("load");
+        assert_eq!(state.effect_count, 1);
+        let observed = kernel
+            .observe_bridge(&config.name)
+            .expect("observe after reopen")
+            .expect("identity survives reopen");
+        assert_eq!(state.bridges.get(&config.name), Some(&observed));
+        assert!(observed.ifindex.is_some());
+        kernel
+            .destroy_bridge(&observed)
+            .expect("exact-identity destroy after reopen");
+        let after = FileBackedNetworkKernel::load_state(&path).expect("load after destroy");
+        assert!(after.bridges.is_empty());
+        assert_eq!(after.effect_count, 2);
+    }
+
+    #[test]
+    fn file_backed_kernel_from_env_requires_explicit_path() {
+        // Safety: this unit test process is single-threaded for env mutation here.
+        let original = std::env::var_os(NETWORK_KERNEL_STATE_ENV);
+        std::env::remove_var(NETWORK_KERNEL_STATE_ENV);
+        assert!(FileBackedNetworkKernel::from_env().is_none());
+        std::env::set_var(NETWORK_KERNEL_STATE_ENV, "");
+        assert!(FileBackedNetworkKernel::from_env().is_none());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        std::env::set_var(NETWORK_KERNEL_STATE_ENV, &path);
+        let kernel = FileBackedNetworkKernel::from_env().expect("explicit path enables emulator");
+        drop(kernel);
+        match original {
+            Some(value) => std::env::set_var(NETWORK_KERNEL_STATE_ENV, value),
+            None => std::env::remove_var(NETWORK_KERNEL_STATE_ENV),
+        }
+    }
 
     /// Deterministic kernel adapter that fails the test if `create_bridge`
     /// is invoked before the operation journal durably records

@@ -390,15 +390,12 @@ fn validate_sink_identity(path: &Path, state: &EmergencyState) -> Result<(), Str
 
 fn main_witness_head(state_dir: &Path) -> Result<Option<u64>, String> {
     let id_path = state_dir.join("journal-id");
-    if !id_path.exists() {
+    if !secure_exists(&id_path)? {
         return Ok(None);
     }
     secure_owner_file(&id_path)?;
-    let id = decode_hex::<16>(
-        fs::read_to_string(&id_path)
-            .map_err(|e| e.to_string())?
-            .trim(),
-    )?;
+    let id_text = String::from_utf8(secure_read(&id_path, 4096)?).map_err(|e| e.to_string())?;
+    let id = decode_hex::<16>(id_text.trim())?;
     let mut reader =
         ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
             .map_err(|e| e.to_string())?;
@@ -416,17 +413,15 @@ fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), S
     let (Some(first), Some(last)) = (state.main_witness_first, state.main_witness_last) else {
         // Recovery-only unit/offline mode has no configured main journal. A
         // production activation with journal-id always records the range.
-        return if state_dir.join("journal-id").exists() {
+        return if secure_exists(&state_dir.join("journal-id"))? {
             Err("emergency state lacks its main-journal correlation range".into())
         } else {
             Ok(())
         };
     };
-    let id = decode_hex::<16>(
-        fs::read_to_string(state_dir.join("journal-id"))
-            .map_err(|e| e.to_string())?
-            .trim(),
-    )?;
+    let id_text = String::from_utf8(secure_read(&state_dir.join("journal-id"), 4096)?)
+        .map_err(|e| e.to_string())?;
+    let id = decode_hex::<16>(id_text.trim())?;
     let expected = emergency_witness_action(&state.action)?;
     let operation_id = decode_hex::<16>(
         state
@@ -465,11 +460,9 @@ fn find_terminal_event(
     action: &str,
 ) -> Result<String, String> {
     let expected = emergency_witness_action(action)?;
-    let id = decode_hex::<16>(
-        fs::read_to_string(state_dir.join("journal-id"))
-            .map_err(|e| e.to_string())?
-            .trim(),
-    )?;
+    let id_text = String::from_utf8(secure_read(&state_dir.join("journal-id"), 4096)?)
+        .map_err(|e| e.to_string())?;
+    let id = decode_hex::<16>(id_text.trim())?;
     let mut reader =
         ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
             .map_err(|e| e.to_string())?;

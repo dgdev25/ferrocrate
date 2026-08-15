@@ -111,7 +111,8 @@ pub fn show(args: ShowArgs<'_>) -> Result<String, String> {
 }
 
 pub fn verify(args: VerifyArgs<'_>) -> Result<String, String> {
-    let trust_bytes = fs::read(args.trust_bundle).map_err(|e| format!("trust bundle: {e}"))?;
+    let trust_bytes =
+        secure_read(args.trust_bundle, 1024 * 1024).map_err(|e| format!("trust bundle: {e}"))?;
     let trust_file: TrustFile =
         serde_json::from_slice(&trust_bytes).map_err(|e| format!("trust bundle: {e}"))?;
     if trust_file.schema != 1 || trust_file.starting_epoch != 1 {
@@ -298,8 +299,31 @@ fn publication_record(checkpoint: &Checkpoint) -> WitnessRecord {
 }
 
 fn read_checkpoint(path: &Path) -> Result<Checkpoint, String> {
-    Checkpoint::decode(&fs::read(path).map_err(|e| format!("checkpoint {}: {e}", path.display()))?)
-        .map_err(|e| format!("checkpoint {}: {e}", path.display()))
+    Checkpoint::decode(
+        &secure_read(path, 16 * 1024 * 1024)
+            .map_err(|e| format!("checkpoint {}: {e}", path.display()))?,
+    )
+    .map_err(|e| format!("checkpoint {}: {e}", path.display()))
+}
+
+fn secure_read(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut file = ferro_core::authorization::open_path_no_symlinks(path, nix::libc::O_RDONLY, 0)
+        .map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return Err("file is not regular or exceeds its bound".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err("file has multiple hard links".into());
+        }
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 fn now_secs() -> Result<u64, String> {
     SystemTime::now()

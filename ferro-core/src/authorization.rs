@@ -35,6 +35,54 @@ pub fn file_is_kernel_append_only(file: &std::fs::File) -> std::io::Result<bool>
     }
     Ok(flags & FS_APPEND_FL != 0)
 }
+
+/// Open a path by walking from the process root without permitting symlink or
+/// magic-link traversal in any component.
+#[cfg(target_os = "linux")]
+pub fn open_path_no_symlinks(
+    path: &std::path::Path,
+    flags: i32,
+    mode: u32,
+) -> std::io::Result<std::fs::File> {
+    use std::{ffi::CString, os::fd::FromRawFd, os::unix::ffi::OsStrExt};
+    #[repr(C)]
+    struct OpenHow { flags: u64, mode: u64, resolve: u64 }
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let relative = absolute.strip_prefix("/").map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not beneath root")
+    })?;
+    let name = CString::new(relative.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL")
+    })?;
+    let root = std::fs::File::open("/")?;
+    use std::os::fd::AsRawFd;
+    let how = OpenHow {
+        flags: (flags | nix::libc::O_CLOEXEC) as u64,
+        mode: mode as u64,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+    };
+    // SAFETY: all pointers reference initialized values for the duration of
+    // the openat2 syscall; a successful return transfers ownership of a new fd.
+    let fd = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_openat2,
+            root.as_raw_fd(),
+            name.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        ) as i32
+    };
+    if fd < 0 { return Err(std::io::Error::last_os_error()); }
+    // SAFETY: `fd` is a newly owned descriptor returned by openat2.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
 #[cfg(feature = "test-support")]
 pub use runtime::test_support;
 

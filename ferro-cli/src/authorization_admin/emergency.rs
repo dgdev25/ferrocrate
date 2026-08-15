@@ -64,6 +64,75 @@ enum EmergencyStatus {
 
 struct EmergencyPermit(EmergencyState);
 
+pub trait AppendOnlySink {
+    fn durable_append_capable(&self) -> bool;
+    fn identity(&self) -> (u64, u64);
+    fn append_durable(&mut self, receipt: &[u8]) -> Result<(), String>;
+}
+
+struct FsAppendOnlySink {
+    file: fs::File,
+    identity: (u64, u64),
+}
+
+impl AppendOnlySink for FsAppendOnlySink {
+    fn durable_append_capable(&self) -> bool {
+        ferro_core::authorization::file_is_kernel_append_only(&self.file).unwrap_or(false)
+    }
+
+    fn identity(&self) -> (u64, u64) {
+        self.identity
+    }
+
+    fn append_durable(&mut self, receipt: &[u8]) -> Result<(), String> {
+        let meta = validate_sink_file(&self.file)?;
+        if (meta.dev(), meta.ino()) != self.identity {
+            return Err("emergency sink descriptor identity changed".into());
+        }
+        #[cfg(not(test))]
+        if !self.durable_append_capable() {
+            return Err(
+                "emergency sink backend cannot prove FS_APPEND_FL append-only durability".into(),
+            );
+        }
+        let mut header = vec![0; SINK_HEADER.len()];
+        (&self.file)
+            .read_exact(&mut header)
+            .map_err(|e| e.to_string())?;
+        if header != SINK_HEADER {
+            return Err("emergency sink has an invalid framing header".into());
+        }
+        (&self.file)
+            .write_all(receipt)
+            .and_then(|_| (&self.file).write_all(b"\n"))
+            .and_then(|_| self.file.sync_all())
+            .map_err(|e| format!("emergency sink unavailable: {e}"))
+    }
+}
+
+#[cfg(test)]
+struct DeterministicAppendOnlySink {
+    capable: bool,
+    receipts: Vec<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl AppendOnlySink for DeterministicAppendOnlySink {
+    fn durable_append_capable(&self) -> bool {
+        self.capable
+    }
+    fn identity(&self) -> (u64, u64) {
+        (1, 1)
+    }
+    fn append_durable(&mut self, receipt: &[u8]) -> Result<(), String> {
+        if !self.capable {
+            return Err("append-only capability unavailable".into());
+        }
+        self.receipts.push(receipt.to_vec());
+        Ok(())
+    }
+}
+
 pub struct EmergencyAuthorityMaterial {
     pub signed_payload: Vec<u8>,
     pub signature: [u8; 64],
@@ -85,6 +154,7 @@ pub fn activate_emergency(args: EmergencyActivate<'_>) -> Result<String, String>
     }
     require_host_admin()?;
     require_console()?;
+    require_preprovisioned_state_dir(args.state_dir)?;
     require_append_only_sink(args.sink)?;
     activate_verified(args)
 }
@@ -168,6 +238,7 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
 pub fn reconcile_emergency(state_dir: &Path, sink: &Path) -> Result<String, String> {
     require_host_admin()?;
     require_console()?;
+    require_preprovisioned_state_dir(state_dir)?;
     require_append_only_sink(sink)?;
     reconcile_verified(state_dir, sink)
 }
@@ -219,6 +290,7 @@ where
 {
     require_host_admin()?;
     require_console()?;
+    require_preprovisioned_state_dir(state_dir)?;
     require_append_only_sink(sink)?;
     execute_verified(state_dir, sink, action, resource, execute)
 }
@@ -468,10 +540,7 @@ fn verify_approval(
 }
 
 fn open_secure_owner_file(path: &Path) -> Result<fs::File, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
+    let file = ferro_core::authorization::open_path_no_symlinks(path, nix::libc::O_RDONLY, 0)
         .map_err(|e| e.to_string())?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file()
@@ -488,12 +557,12 @@ fn open_secure_owner_file(path: &Path) -> Result<fs::File, String> {
 }
 
 fn require_append_only_sink(path: &Path) -> Result<(), String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    let file = ferro_core::authorization::open_path_no_symlinks(
+        path,
+        nix::libc::O_RDWR | nix::libc::O_APPEND,
+        0,
+    )
+    .map_err(|e| format!("emergency sink unavailable: {e}"))?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
     if !metadata.is_file()
         || metadata.uid() != nix::unistd::geteuid().as_raw()
@@ -513,12 +582,27 @@ fn require_append_only_sink(path: &Path) -> Result<(), String> {
 }
 
 fn append_sink(path: &Path, receipt: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    let file = ferro_core::authorization::open_path_no_symlinks(
+        path,
+        nix::libc::O_RDWR | nix::libc::O_APPEND,
+        0,
+    )
+    .map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    let meta = validate_sink_file(&file)?;
+    if meta.len() < SINK_HEADER.len() as u64 {
+        return Err("emergency sink is not pre-provisioned".into());
+    }
+    let mut sink = FsAppendOnlySink {
+        file,
+        identity: (meta.dev(), meta.ino()),
+    };
+    if sink.identity() != (meta.dev(), meta.ino()) {
+        return Err("emergency sink descriptor identity changed".into());
+    }
+    sink.append_durable(receipt)
+}
+
+fn validate_sink_file(file: &fs::File) -> Result<fs::Metadata, String> {
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file()
         || meta.uid() != nix::unistd::geteuid().as_raw()
@@ -529,18 +613,7 @@ fn append_sink(path: &Path, receipt: &[u8]) -> Result<(), String> {
             "emergency sink descriptor owner, mode, type, or link count is insecure".into(),
         );
     }
-    if meta.len() < SINK_HEADER.len() as u64 {
-        return Err("emergency sink is not pre-provisioned".into());
-    }
-    let mut header = vec![0; SINK_HEADER.len()];
-    file.read_exact(&mut header).map_err(|e| e.to_string())?;
-    if header != SINK_HEADER {
-        return Err("emergency sink has an invalid framing header".into());
-    }
-    file.write_all(receipt)
-        .and_then(|_| file.write_all(b"\n"))
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("emergency sink unavailable: {e}"))
+    Ok(meta)
 }
 
 fn prepare_state_dir(path: &Path) -> Result<(), String> {
@@ -548,6 +621,23 @@ fn prepare_state_dir(path: &Path) -> Result<(), String> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let m = fs::metadata(path).map_err(|e| e.to_string())?;
     if !m.is_dir() || m.uid() != nix::unistd::geteuid().as_raw() || m.mode() & 0o077 != 0 {
+        return Err("emergency state directory is insecure".into());
+    }
+    Ok(())
+}
+
+fn require_preprovisioned_state_dir(path: &Path) -> Result<(), String> {
+    let directory = ferro_core::authorization::open_path_no_symlinks(
+        path,
+        nix::libc::O_RDONLY | nix::libc::O_DIRECTORY,
+        0,
+    )
+    .map_err(|e| format!("emergency state directory must be preprovisioned: {e}"))?;
+    let metadata = directory.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
         return Err("emergency state directory is insecure".into());
     }
     Ok(())
@@ -762,5 +852,36 @@ mod tests {
         assert!(require_append_only_sink(&sink)
             .unwrap_err()
             .contains("FS_APPEND_FL"));
+    }
+
+    #[test]
+    fn deterministic_append_only_backend_advertises_and_enforces_capability() {
+        let mut sink = DeterministicAppendOnlySink {
+            capable: true,
+            receipts: Vec::new(),
+        };
+        assert!(sink.durable_append_capable());
+        sink.append_durable(b"intent").unwrap();
+        assert_eq!(sink.receipts, vec![b"intent".to_vec()]);
+        let mut unavailable = DeterministicAppendOnlySink {
+            capable: false,
+            receipts: Vec::new(),
+        };
+        assert!(unavailable.append_durable(b"intent").is_err());
+    }
+
+    #[test]
+    fn secure_emergency_file_open_rejects_symlink_ancestors_and_final_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let key = real.join("key");
+        protected(&key, b"protected");
+        let ancestor = temp.path().join("ancestor");
+        std::os::unix::fs::symlink(&real, &ancestor).unwrap();
+        assert!(open_secure_owner_file(&ancestor.join("key")).is_err());
+        let final_link = temp.path().join("key-link");
+        std::os::unix::fs::symlink(&key, &final_link).unwrap();
+        assert!(open_secure_owner_file(&final_link).is_err());
     }
 }

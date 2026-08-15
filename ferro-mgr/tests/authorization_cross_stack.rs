@@ -16,6 +16,7 @@ use ferro_core::{
         gate::AuthorizationGate,
         policy::PolicyStore,
         test_support::{authorize_attach, authorize_cleanup},
+        AuthorizationMode, AuthorizationServiceMode,
     },
     managed_overlay::{
         LegacyManagedOverlayRequest, ManagedOverlayClient, ManagedOverlayCompatibilityMode,
@@ -160,6 +161,8 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     );
 
     let ledger_path = directory.path().join("manager-delegations.json");
+    let service_mode =
+        AuthorizationServiceMode::new(AuthorizationMode::Shadow, Some([9; 32])).unwrap();
     let local = LocalApi::new(
         uid,
         1_000,
@@ -172,6 +175,7 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         .unwrap(),
     )
     .with_runtime_executable(std::env::current_exe().unwrap())
+    .with_authorization_identity(service_mode, "boot-a")
     .with_delegation_ledger(
         DelegationBridge::new(
             helper_key.verifying_key(),
@@ -213,7 +217,8 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     let attach_authority =
         authorize_attach(gate.clone(), journal.clone(), "container-a", 7, "wg0").unwrap();
     serve_next(listener.try_clone().unwrap(), server.clone(), uid, 101);
-    let client = ManagedOverlayClient::new(&local_socket);
+    let client = ManagedOverlayClient::new(&local_socket)
+        .with_authorization_identity(service_mode, "boot-a");
     let (proof, intent) = attach_authority.parts();
     assert_eq!(
         proof.canonical().context().action(),
@@ -314,6 +319,8 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
     let bypass = LegacyManagedOverlayRequest {
         schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
         mode: ManagedOverlayCompatibilityMode::Disabled,
+        policy_digest: None,
+        instance_boot: "boot-a".into(),
         request: ManagedOverlayRequest::InspectOverlay {
             overlay_id: "wg0".into(),
             now_unix: 100,
@@ -441,7 +448,11 @@ fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
             )
             .unwrap(),
         )
-        .with_runtime_executable(std::env::current_exe().unwrap()),
+        .with_runtime_executable(std::env::current_exe().unwrap())
+        .with_authorization_identity(
+            AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+            "boot-disabled",
+        ),
     );
     local
         .register_overlay(
@@ -470,6 +481,8 @@ fn disabled_mode_requires_the_authenticated_versioned_negotiation_frame() {
             &LegacyManagedOverlayRequest {
                 schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
                 mode: ManagedOverlayCompatibilityMode::Disabled,
+                policy_digest: None,
+                instance_boot: "boot-disabled".into(),
                 request: request.clone(),
             }
         ),

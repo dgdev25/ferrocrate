@@ -38,6 +38,9 @@ fn now_unix() -> i64 {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service_mode = authorization_service_mode()?;
+    let instance_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim()
+        .to_owned();
     let runtime_uid = required("FERROCRATE_AGENT_RUNTIME_UID")?.parse::<u32>()?;
     let lease_expiry = required("FERROCRATE_AGENT_LEASE_EXPIRY_UNIX")?.parse::<i64>()?;
     let pool = required("FERROCRATE_AGENT_IPV4_POOL")?.parse::<Ipv4Net>()?;
@@ -102,7 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let ipam = Ipam::with_state(pool, gateway, reserved, ipam_state)?;
     let local_api = LocalApi::new(runtime_uid, lease_expiry, ipam)
-        .with_runtime_executable(required("FERROCRATE_RUNTIME_EXE")?);
+        .with_runtime_executable(required("FERROCRATE_RUNTIME_EXE")?)
+        .with_authorization_identity(service_mode, instance_boot.clone());
     let mut netd_envelope_signer = None;
     let local_api =
         match service_mode.mode() {
@@ -123,14 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "FERROCRATE_AGENT_NETD_ENVELOPE_SIGNING_KEY_FILE",
                 )?)?;
                 netd_envelope_signer = Some(SigningKey::from_bytes(&envelope_key_bytes));
-                let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-                    .trim()
-                    .to_owned();
                 let bridge = DelegationBridge::new(
                     parent_key,
                     required("FERROCRATE_RUNTIME_GRANT_ISSUER")?,
                     required("FERROCRATE_RUNTIME_GRANT_KEY_ID")?,
-                    boot_id,
+                    instance_boot.clone(),
                     child_issuer,
                     netd_envelope_signer.clone().expect("signer initialized"),
                     cluster_id.clone(),

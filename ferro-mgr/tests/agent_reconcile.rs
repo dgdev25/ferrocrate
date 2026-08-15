@@ -54,11 +54,36 @@ fn desired(revision: u64, now_unix: i64) -> ferro_mgr::proto::DesiredState {
     )
 }
 
+fn empty_desired(revision: u64, now_unix: i64) -> ferro_mgr::proto::DesiredState {
+    DesiredStateBuilder::new("cluster-a", 2, vec![4; 32]).snapshot(revision, vec![], now_unix)
+}
+
 fn verifying_key() -> Vec<u8> {
     SigningKey::from_bytes(&[4; 32])
         .verifying_key()
         .to_bytes()
         .to_vec()
+}
+
+#[test]
+fn disabled_agent_reconciles_nonempty_then_empty_without_grants() {
+    let directory = tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        "cluster-a",
+        verifying_key(),
+        StateStore::new(directory.path().join("state.json")),
+        FakeNetd {
+            calls: calls.clone(),
+            fail: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(agent.reconcile(desired(1, 100), 101).unwrap(), 1);
+    assert_eq!(agent.reconcile(empty_desired(2, 102), 103).unwrap(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(agent.state().overlays.is_empty());
 }
 
 #[test]

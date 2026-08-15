@@ -22,7 +22,9 @@ use super::ipam::{Allocation, Ipam, IpamError};
 use super::netd_client::{
     endpoint_live_identity_digest, DelegationBridge, NetdResponse, UnixNetdClient,
 };
-use ferro_core::authorization::helper_grant::GrantAction;
+use ferro_core::authorization::{
+    helper_grant::GrantAction, AuthorizationMode, AuthorizationServiceMode,
+};
 use ferro_core::managed_overlay::{
     DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest, ManagedCleanupProvenance,
     ManagedOverlayCompatibilityMode, ManagedOverlayDelegation, MANAGED_OVERLAY_PROTOCOL_VERSION,
@@ -75,6 +77,7 @@ pub struct LocalApi {
     enforce_overlays: Mutex<bool>,
     delegated_netd: Mutex<Option<DelegatedNetd>>,
     runtime_executable: Option<std::path::PathBuf>,
+    authorization_identity: Option<(AuthorizationServiceMode, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,11 +135,21 @@ impl LocalApi {
             enforce_overlays: Mutex::new(false),
             delegated_netd: Mutex::new(None),
             runtime_executable: None,
+            authorization_identity: None,
         }
     }
 
     pub fn with_runtime_executable(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.runtime_executable = Some(path.into());
+        self
+    }
+
+    pub fn with_authorization_identity(
+        mut self,
+        mode: AuthorizationServiceMode,
+        instance_boot: impl Into<String>,
+    ) -> Self {
+        self.authorization_identity = Some((mode, instance_boot.into()));
         self
     }
 
@@ -594,13 +607,18 @@ impl LocalApi {
                 .is_ok_and(|value| value.is_some());
             let response = if enforced {
                 match serde_json::from_slice::<DelegatedManagedOverlayRequest>(&body) {
-                    Ok(request) => self.handle_delegated(caller_uid, request, monotonic_millis()),
+                    Ok(request) if self.matches_delegated_identity(&request) => {
+                        self.handle_delegated(caller_uid, request, monotonic_millis())
+                    }
                     Err(_) => LocalApiResponse::Rejected {
                         reason: LocalApiError::MissingDelegation.to_string(),
                     },
+                    Ok(_) => LocalApiResponse::Rejected {
+                        reason: LocalApiError::InvalidDelegation.to_string(),
+                    },
                 }
             } else {
-                match decode_disabled_legacy(&body) {
+                match decode_disabled_legacy(&body, self.authorization_identity.as_ref()) {
                     Ok(request) => self.handle(caller_uid, request),
                     Err(reason) => LocalApiResponse::Rejected { reason },
                 }
@@ -617,6 +635,17 @@ impl LocalApi {
                 .and_then(|_| stream.write_all(&body));
         }
         Ok(())
+    }
+
+    fn matches_delegated_identity(&self, request: &DelegatedManagedOverlayRequest) -> bool {
+        let Some((expected, boot)) = &self.authorization_identity else {
+            return false;
+        };
+        if expected.mode() == AuthorizationMode::Disabled || request.instance_boot != *boot {
+            return false;
+        }
+        AuthorizationServiceMode::parse(&request.mode, request.policy_digest)
+            .is_ok_and(|peer| expected.require_match(peer).is_ok())
     }
 
     pub fn renew_lease(&self, caller_uid: u32, expiry: i64) -> Result<(), LocalApiError> {
@@ -714,13 +743,27 @@ fn receive_without_descriptors(
     Ok(())
 }
 
-fn decode_disabled_legacy(body: &[u8]) -> Result<LocalApiRequest, String> {
+fn decode_disabled_legacy(
+    body: &[u8],
+    expected_identity: Option<&(AuthorizationServiceMode, String)>,
+) -> Result<LocalApiRequest, String> {
     let legacy: LegacyManagedOverlayRequest = serde_json::from_slice(body)
         .map_err(|error| format!("invalid local API request: {error}"))?;
     if legacy.schema_version != MANAGED_OVERLAY_PROTOCOL_VERSION
         || legacy.mode != ManagedOverlayCompatibilityMode::Disabled
     {
         return Err("unsupported local API compatibility mode".into());
+    }
+    let Some((expected, boot)) = expected_identity else {
+        return Err("authorization service identity is not configured".into());
+    };
+    let peer = AuthorizationServiceMode::new(AuthorizationMode::Disabled, legacy.policy_digest)
+        .map_err(|_| "invalid disabled compatibility identity")?;
+    expected
+        .require_match(peer)
+        .map_err(|_| "local API authorization identity mismatch")?;
+    if legacy.instance_boot != *boot {
+        return Err("local API instance boot mismatch".into());
     }
     serde_json::from_value(
         serde_json::to_value(legacy.request)
@@ -767,6 +810,7 @@ fn monotonic_millis() -> u64 {
 #[cfg(test)]
 mod compatibility_tests {
     use super::{decode_disabled_legacy, LocalApiRequest};
+    use ferro_core::authorization::{AuthorizationMode, AuthorizationServiceMode};
     use ferro_core::managed_overlay::{
         LegacyManagedOverlayRequest, ManagedOverlayCompatibilityMode, ManagedOverlayRequest,
         MANAGED_OVERLAY_PROTOCOL_VERSION,
@@ -779,10 +823,12 @@ mod compatibility_tests {
             container_id: "c1".into(),
             now_unix: 1,
         };
-        assert!(decode_disabled_legacy(&serde_json::to_vec(&bare).unwrap()).is_err());
+        assert!(decode_disabled_legacy(&serde_json::to_vec(&bare).unwrap(), None).is_err());
         let negotiated = LegacyManagedOverlayRequest {
             schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
             mode: ManagedOverlayCompatibilityMode::Disabled,
+            policy_digest: None,
+            instance_boot: "boot-a".into(),
             request: ManagedOverlayRequest::AttachContainer {
                 overlay_id: "wg0".into(),
                 container_id: "c1".into(),
@@ -790,7 +836,13 @@ mod compatibility_tests {
             },
         };
         assert!(matches!(
-            decode_disabled_legacy(&serde_json::to_vec(&negotiated).unwrap()),
+            decode_disabled_legacy(
+                &serde_json::to_vec(&negotiated).unwrap(),
+                Some(&(
+                    AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+                    "boot-a".into()
+                ))
+            ),
             Ok(LocalApiRequest::AttachContainer { .. })
         ));
     }
@@ -800,11 +852,42 @@ mod compatibility_tests {
         let negotiated = LegacyManagedOverlayRequest {
             schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION + 1,
             mode: ManagedOverlayCompatibilityMode::Disabled,
+            policy_digest: None,
+            instance_boot: "boot-a".into(),
             request: ManagedOverlayRequest::InspectOverlay {
                 overlay_id: "wg0".into(),
                 now_unix: 1,
             },
         };
-        assert!(decode_disabled_legacy(&serde_json::to_vec(&negotiated).unwrap()).is_err());
+        assert!(decode_disabled_legacy(
+            &serde_json::to_vec(&negotiated).unwrap(),
+            Some(&(
+                AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+                "boot-a".into()
+            ))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn disabled_compatibility_rejects_boot_or_policy_contradictions() {
+        let request = LegacyManagedOverlayRequest {
+            schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
+            mode: ManagedOverlayCompatibilityMode::Disabled,
+            policy_digest: Some([7; 32]),
+            instance_boot: "other-boot".into(),
+            request: ManagedOverlayRequest::InspectOverlay {
+                overlay_id: "wg0".into(),
+                now_unix: 1,
+            },
+        };
+        assert!(decode_disabled_legacy(
+            &serde_json::to_vec(&request).unwrap(),
+            Some(&(
+                AuthorizationServiceMode::new(AuthorizationMode::Disabled, None).unwrap(),
+                "boot-a".into()
+            ))
+        )
+        .is_err());
     }
 }

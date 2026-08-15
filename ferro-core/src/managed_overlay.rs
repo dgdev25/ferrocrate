@@ -42,6 +42,9 @@ impl ManagedOverlayDelegation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedManagedOverlayRequest {
+    pub mode: String,
+    pub policy_digest: Option<[u8; 32]>,
+    pub instance_boot: String,
     pub request: ManagedOverlayRequest,
     pub delegation: ManagedOverlayDelegation,
 }
@@ -59,6 +62,8 @@ pub enum ManagedOverlayCompatibilityMode {
 pub struct LegacyManagedOverlayRequest {
     pub schema_version: u16,
     pub mode: ManagedOverlayCompatibilityMode,
+    pub policy_digest: Option<[u8; 32]>,
+    pub instance_boot: String,
     pub request: ManagedOverlayRequest,
 }
 
@@ -147,6 +152,7 @@ pub enum ManagedOverlayResponse {
 pub struct ManagedOverlayClient {
     socket: std::path::PathBuf,
     timeout: Duration,
+    identity: Option<(String, Option<[u8; 32]>, String)>,
 }
 
 /// Explicit compatibility authority for the pre-authorization agent protocol.
@@ -184,7 +190,25 @@ impl ManagedOverlayClient {
         Self {
             socket: socket.into(),
             timeout: Duration::from_secs(5),
+            identity: None,
         }
+    }
+    pub fn with_authorization_identity(
+        mut self,
+        mode: crate::authorization::AuthorizationServiceMode,
+        instance_boot: impl Into<String>,
+    ) -> Self {
+        self.identity = Some((
+            match mode.mode() {
+                crate::authorization::AuthorizationMode::Enforce => "enforce",
+                crate::authorization::AuthorizationMode::Shadow => "shadow",
+                crate::authorization::AuthorizationMode::Disabled => "disabled",
+            }
+            .into(),
+            mode.policy_digest(),
+            instance_boot.into(),
+        ));
+        self
     }
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -195,9 +219,15 @@ impl ManagedOverlayClient {
         _mode: &LegacyManagedOverlayMode,
         request: &ManagedOverlayRequest,
     ) -> Result<ManagedOverlayResponse, ManagedOverlayError> {
+        let (mode, policy_digest, instance_boot) = self.wire_identity()?;
+        if mode != "disabled" {
+            return Err(ManagedOverlayError::Grant(GrantBuildError::IntentMismatch));
+        }
         self.send(&LegacyManagedOverlayRequest {
             schema_version: MANAGED_OVERLAY_PROTOCOL_VERSION,
             mode: ManagedOverlayCompatibilityMode::Disabled,
+            policy_digest,
+            instance_boot,
             request: request.clone(),
         })
     }
@@ -239,7 +269,11 @@ impl ManagedOverlayClient {
             nonce,
             issuer_name,
         )?;
+        let (mode, policy_digest, instance_boot) = self.wire_identity()?;
         self.send(&DelegatedManagedOverlayRequest {
+            mode,
+            policy_digest,
+            instance_boot,
             request: request.clone(),
             delegation: ManagedOverlayDelegation::new(grant),
         })
@@ -276,7 +310,11 @@ impl ManagedOverlayClient {
             nonce,
             issuer_name,
         )?;
+        let (mode, policy_digest, instance_boot) = self.wire_identity()?;
         self.send(&DelegatedManagedOverlayRequest {
+            mode,
+            policy_digest,
+            instance_boot,
             request: request.clone(),
             delegation: ManagedOverlayDelegation::new(grant),
         })
@@ -315,6 +353,41 @@ impl ManagedOverlayClient {
             .map_err(|_| ManagedOverlayError::InvalidReference)?;
         serde_json::from_slice(&response).map_err(|_| ManagedOverlayError::InvalidReference)
     }
+    fn wire_identity(&self) -> Result<(String, Option<[u8; 32]>, String), ManagedOverlayError> {
+        if let Some(identity) = &self.identity {
+            return Ok(identity.clone());
+        }
+        Ok((
+            authorization_mode()?,
+            authorization_policy_digest()?,
+            instance_boot()?,
+        ))
+    }
+}
+
+fn authorization_mode() -> Result<String, ManagedOverlayError> {
+    std::env::var("FERROCRATE_AUTHORIZATION_MODE")
+        .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))
+}
+
+fn authorization_policy_digest() -> Result<Option<[u8; 32]>, ManagedOverlayError> {
+    use base64::Engine as _;
+    std::env::var("FERROCRATE_AUTHORIZATION_POLICY_DIGEST")
+        .ok()
+        .map(|value| {
+            base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))?
+                .try_into()
+                .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))
+        })
+        .transpose()
+}
+
+fn instance_boot() -> Result<String, ManagedOverlayError> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|value| value.trim().to_owned())
+        .map_err(|_| ManagedOverlayError::Grant(GrantBuildError::IntentMismatch))
 }
 
 pub fn managed_parameters(

@@ -88,6 +88,9 @@ fn dependent_delete_is_bound_to_stop_receipt_and_committed_graph_position() {
             ServiceMutation::new("web", FanoutAction::ContainerDelete, [8; 32]),
         )
         .unwrap();
+    assert_eq!(first.children()[0].parent_request_id(), stop.parent_request_id());
+    assert_eq!(first.children()[0].ordinal(), 1);
+    assert_eq!(first.children()[0].policy_digest(), stop.policy_digest());
     assert_ne!(first.children()[0].child_id(), changed_receipt.children()[0].child_id());
     assert!(matches!(
         root.derive_dependent(

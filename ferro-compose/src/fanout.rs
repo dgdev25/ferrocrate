@@ -152,23 +152,54 @@ impl FanoutPlan {
                 template.service == mutation.service && template.action == mutation.action
             })
             .ok_or(FanoutError::Replay)?;
-        let mut parent = Sha256::new();
-        parent.update(b"ferrocrate/compose-dependent-parent/v1");
-        parent.update(self.digest);
-        parent.update(predecessor.child_id);
-        parent.update(predecessor_outcome);
-        parent.update(template.ordinal.to_be_bytes());
-        let parent_hash: [u8; 32] = parent.finalize().into();
-        let mut parent_id = [0; 16];
-        parent_id.copy_from_slice(&parent_hash[..16]);
-        Self::derive(
-            parent_id,
-            predecessor.policy_generation,
-            predecessor.policy_digest,
-            predecessor.deadline_unix_ms,
-            predecessor.attempt,
-            [mutation],
-        )
+        let mut plan = Sha256::new();
+        plan.update(b"ferrocrate/compose-dependent-plan/v1");
+        plan.update(self.digest);
+        plan.update(predecessor.parent_request_id);
+        plan.update(predecessor.child_id);
+        plan.update(predecessor_outcome);
+        plan.update(template.ordinal.to_be_bytes());
+        plan.update([mutation.action.code()]);
+        plan.update((mutation.service.len() as u64).to_be_bytes());
+        plan.update(mutation.service.as_bytes());
+        plan.update(mutation.request_digest);
+        let digest: [u8; 32] = plan.finalize().into();
+        let mut idem = Sha256::new();
+        idem.update(b"ferrocrate/compose-dependent-idempotency/v1");
+        idem.update(predecessor.parent_request_id);
+        idem.update(self.digest);
+        idem.update(predecessor.child_id);
+        idem.update(predecessor_outcome);
+        idem.update(template.ordinal.to_be_bytes());
+        idem.update([mutation.action.code()]);
+        idem.update((mutation.service.len() as u64).to_be_bytes());
+        idem.update(mutation.service.as_bytes());
+        idem.update(mutation.request_digest);
+        let idempotency_key: [u8; 32] = idem.finalize().into();
+        let mut id = Sha256::new();
+        id.update(b"ferrocrate/compose-dependent-child/v1");
+        id.update(idempotency_key);
+        id.update(predecessor.attempt.to_be_bytes());
+        let id_hash: [u8; 32] = id.finalize().into();
+        let mut child_id = [0; 16];
+        child_id.copy_from_slice(&id_hash[..16]);
+        Ok(Self {
+            digest,
+            children: vec![FanoutChild {
+                parent_request_id: predecessor.parent_request_id,
+                child_id,
+                idempotency_key,
+                service: mutation.service,
+                action: mutation.action,
+                request_digest: mutation.request_digest,
+                deadline_unix_ms: predecessor.deadline_unix_ms,
+                policy_generation: predecessor.policy_generation,
+                policy_digest: predecessor.policy_digest,
+                attempt: predecessor.attempt,
+                ordinal: template.ordinal,
+                plan_digest: digest,
+            }],
+        })
     }
 
     pub fn derive<I>(
@@ -250,7 +281,8 @@ impl FanoutPlan {
             return Err(FanoutError::Expired);
         }
         self.children
-            .get(child.ordinal as usize)
+            .iter()
+            .find(|expected| expected.ordinal == child.ordinal)
             .filter(|expected| *expected == child && child.plan_digest == self.digest)
             .map(|_| ())
             .ok_or(FanoutError::Replay)

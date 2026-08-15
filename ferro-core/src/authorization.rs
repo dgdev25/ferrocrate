@@ -18,6 +18,23 @@ pub mod emergency;
 pub mod principal;
 pub(crate) mod runtime;
 pub mod surface;
+
+/// Query the Linux immutable-file append-only bit on an already opened file.
+/// The path must be validated by the caller before this descriptor is passed.
+#[cfg(target_os = "linux")]
+pub fn file_is_kernel_append_only(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    const FS_APPEND_FL: nix::libc::c_long = 0x0000_0020;
+    const FS_IOC_GETFLAGS: nix::libc::c_ulong = 0x8008_6601;
+    let mut flags: nix::libc::c_long = 0;
+    // SAFETY: the ioctl only writes one machine word to the valid pointer and
+    // operates on the caller's held regular-file descriptor.
+    let result = unsafe { nix::libc::ioctl(file.as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(flags & FS_APPEND_FL != 0)
+}
 #[cfg(feature = "test-support")]
 pub use runtime::test_support;
 

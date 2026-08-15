@@ -1,5 +1,6 @@
 use super::JournalError;
 use std::{
+    collections::VecDeque,
     fs::{File, OpenOptions},
     io::{Read, Seek},
     path::Path,
@@ -10,6 +11,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 pub(super) const READER_MAGIC: &[u8; 8] = b"FWREAD03";
 pub(super) const READER_FILE: &str = "witness.readonly-v2";
+pub(super) const READER_SEGMENT_PREFIX: &str = "witness.readonly-v2.segment-";
 const HEADER_BYTES: u64 = 24;
 const MAX_MIRROR_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -18,6 +20,7 @@ const MAX_MIRROR_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// directories, or writer state.
 pub struct WitnessReader {
     file: File,
+    pending: VecDeque<(File, u64)>,
     journal_id: [u8; 16],
     end_offset: u64,
     last_sequence: u64,
@@ -34,29 +37,33 @@ impl WitnessReader {
         if root.as_ref().join("witness.reader-stale").exists() {
             return Err(JournalError::ReaderStale);
         }
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-        let mut file = options.open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() < HEADER_BYTES || metadata.len() > MAX_MIRROR_BYTES
-        {
-            return Err(JournalError::Corrupt);
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(root.as_ref())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(range) = name.strip_prefix(READER_SEGMENT_PREFIX) {
+                let (first, last) = range.split_once('-').ok_or(JournalError::Corrupt)?;
+                paths.push((
+                    first.parse::<u64>().map_err(|_| JournalError::Corrupt)?,
+                    last.parse::<u64>().map_err(|_| JournalError::Corrupt)?,
+                    entry.path(),
+                ));
+            }
         }
-        #[cfg(unix)]
-        if metadata.nlink() != 1 {
-            return Err(JournalError::Corrupt);
+        paths.sort_by_key(|part| part.0);
+        paths.push((u64::MAX, u64::MAX, path));
+        let mut opened = VecDeque::new();
+        for (_, _, path) in paths {
+            let (file, length) = open_part(&path, expected)?;
+            opened.push_back((file, length));
         }
-        let mut header = [0_u8; HEADER_BYTES as usize];
-        file.read_exact(&mut header)?;
-        if &header[..8] != READER_MAGIC || header[8..24] != expected {
-            return Err(JournalError::JournalMismatch);
-        }
+        let (file, end_offset) = opened.pop_front().ok_or(JournalError::Corrupt)?;
         Ok(Self {
             file,
+            pending: opened,
             journal_id: expected,
-            end_offset: metadata.len(),
+            end_offset,
             last_sequence: 0,
             last_hash: [0; 32],
             failed: false,
@@ -68,6 +75,13 @@ impl WitnessReader {
     }
 
     pub fn next_record(&mut self) -> Result<Option<Vec<u8>>, JournalError> {
+        while self.file.stream_position()? == self.end_offset {
+            let Some((file, end)) = self.pending.pop_front() else {
+                return Ok(None);
+            };
+            self.file = file;
+            self.end_offset = end;
+        }
         let position = self.file.stream_position()?;
         if position == self.end_offset {
             return Ok(None);
@@ -107,12 +121,37 @@ impl WitnessReader {
     }
 
     pub fn finish(mut self) -> Result<(), JournalError> {
-        if self.failed || self.file.stream_position()? != self.end_offset {
+        if self.failed
+            || self.file.stream_position()? != self.end_offset
+            || !self.pending.is_empty()
+        {
             Err(JournalError::Corrupt)
         } else {
             Ok(())
         }
     }
+}
+
+fn open_part(path: &Path, expected: [u8; 16]) -> Result<(File, u64), JournalError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() < HEADER_BYTES || metadata.len() > MAX_MIRROR_BYTES {
+        return Err(JournalError::Corrupt);
+    }
+    #[cfg(unix)]
+    if metadata.nlink() != 1 {
+        return Err(JournalError::Corrupt);
+    }
+    let mut header = [0_u8; HEADER_BYTES as usize];
+    file.read_exact(&mut header)?;
+    if &header[..8] != READER_MAGIC || header[8..24] != expected {
+        return Err(JournalError::JournalMismatch);
+    }
+    Ok((file, metadata.len()))
 }
 
 pub struct WitnessRecords<'a>(&'a mut WitnessReader);

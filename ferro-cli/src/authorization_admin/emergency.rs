@@ -11,11 +11,7 @@ use std::{
 const STATE_FILE: &str = "emergency-active.json";
 const SINK_HEADER: &[u8] = b"FERROCRATE-EMERGENCY-SINK-V1\n";
 const MAX_DURATION: u64 = 900;
-const ALLOWED_ACTIONS: &[&str] = &[
-    "container.stop",
-    "container.kill",
-    "container.remove",
-];
+const ALLOWED_ACTIONS: &[&str] = &["container.stop", "container.kill", "container.remove"];
 
 #[derive(Clone, Copy)]
 pub struct EmergencyActivate<'a> {
@@ -89,6 +85,7 @@ pub fn activate_emergency(args: EmergencyActivate<'_>) -> Result<String, String>
     }
     require_host_admin()?;
     require_console()?;
+    require_append_only_sink(args.sink)?;
     activate_verified(args)
 }
 
@@ -171,6 +168,7 @@ fn activate_verified(args: EmergencyActivate<'_>) -> Result<String, String> {
 pub fn reconcile_emergency(state_dir: &Path, sink: &Path) -> Result<String, String> {
     require_host_admin()?;
     require_console()?;
+    require_append_only_sink(sink)?;
     reconcile_verified(state_dir, sink)
 }
 
@@ -221,6 +219,7 @@ where
 {
     require_host_admin()?;
     require_console()?;
+    require_append_only_sink(sink)?;
     execute_verified(state_dir, sink, action, resource, execute)
 }
 
@@ -252,7 +251,13 @@ where
     let canonical_sink =
         fs::canonicalize(sink).map_err(|e| format!("emergency sink unavailable: {e}"))?;
     validate_sink_identity(&canonical_sink, &state)?;
-    let operation_digest = super::digest(format!("FERROCRATE-EMERGENCY-OP-V1\0{}\0{}\0{}\0{}", state.boot_id, state.nonce, action, resource).as_bytes());
+    let operation_digest = super::digest(
+        format!(
+            "FERROCRATE-EMERGENCY-OP-V1\0{}\0{}\0{}\0{}",
+            state.boot_id, state.nonce, action, resource
+        )
+        .as_bytes(),
+    );
     let mut operation_id = [0; 16];
     operation_id.copy_from_slice(&operation_digest[..16]);
     state.operation_id = Some(super::hex(&operation_id));
@@ -351,8 +356,18 @@ fn verify_main_witness(state_dir: &Path, state: &EmergencyState) -> Result<(), S
             .trim(),
     )?;
     let expected = emergency_witness_action(&state.action)?;
-    let operation_id = decode_hex::<16>(state.operation_id.as_deref().ok_or("emergency state lacks operation ID")?)?;
-    let terminal_event_id = decode_hex::<16>(state.terminal_event_id.as_deref().ok_or("emergency state lacks terminal event ID")?)?;
+    let operation_id = decode_hex::<16>(
+        state
+            .operation_id
+            .as_deref()
+            .ok_or("emergency state lacks operation ID")?,
+    )?;
+    let terminal_event_id = decode_hex::<16>(
+        state
+            .terminal_event_id
+            .as_deref()
+            .ok_or("emergency state lacks terminal event ID")?,
+    )?;
     let mut reader =
         ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
             .map_err(|e| e.to_string())?;
@@ -383,9 +398,9 @@ fn find_terminal_event(
             .map_err(|e| e.to_string())?
             .trim(),
     )?;
-    let mut reader = ferro_core::witness::WitnessReader::open_read_only(
-        state_dir.join("witness-journal"), id,
-    ).map_err(|e| e.to_string())?;
+    let mut reader =
+        ferro_core::witness::WitnessReader::open_read_only(state_dir.join("witness-journal"), id)
+            .map_err(|e| e.to_string())?;
     let mut terminal = None;
     while let Some(bytes) = reader.next_record().map_err(|e| e.to_string())? {
         let record = ferro_core::witness::decode_record(&bytes).map_err(|e| e.to_string())?;
@@ -428,13 +443,16 @@ fn verify_approval(
 ) -> Result<([u8; 64], [u8; 32]), String> {
     let mut key_file = open_secure_owner_file(key_path)?;
     let mut key_text = String::new();
-    key_file.read_to_string(&mut key_text).map_err(|e| e.to_string())?;
+    key_file
+        .read_to_string(&mut key_text)
+        .map_err(|e| e.to_string())?;
     let key_bytes = decode_hex::<32>(key_text.trim())?;
-    let key = VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|_| "invalid recovery public key")?;
+    let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| "invalid recovery public key")?;
     let mut approval_file = open_secure_owner_file(approval_path)?;
     let mut approval_bytes = Vec::new();
-    approval_file.read_to_end(&mut approval_bytes).map_err(|e| e.to_string())?;
+    approval_file
+        .read_to_end(&mut approval_bytes)
+        .map_err(|e| e.to_string())?;
     let approval: Approval = serde_json::from_slice(&approval_bytes).map_err(|e| e.to_string())?;
     if approval.payload != expected {
         return Err(
@@ -461,9 +479,37 @@ fn open_secure_owner_file(path: &Path) -> Result<fs::File, String> {
         || meta.uid() != nix::unistd::geteuid().as_raw()
         || meta.nlink() != 1
     {
-        return Err(format!("{} is not an owner-only single-link regular file", path.display()));
+        return Err(format!(
+            "{} is not an owner-only single-link regular file",
+            path.display()
+        ));
     }
     Ok(file)
+}
+
+fn require_append_only_sink(path: &Path) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| format!("emergency sink unavailable: {e}"))?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.nlink() != 1
+    {
+        return Err(
+            "emergency sink descriptor owner, mode, type, or link count is insecure".into(),
+        );
+    }
+    if !ferro_core::authorization::file_is_kernel_append_only(&file).unwrap_or(false) {
+        return Err(
+            "emergency sink backend cannot prove FS_APPEND_FL append-only durability".into(),
+        );
+    }
+    Ok(())
 }
 
 fn append_sink(path: &Path, receipt: &[u8]) -> Result<(), String> {
@@ -639,9 +685,13 @@ mod tests {
             .contains("another boot"));
         persisted.boot_id = original_boot;
         write_state(&state_path, &persisted).unwrap();
-        execute_verified(&state_dir, &sink, "container.stop", "container:abc", |_, _| {
-            Ok(())
-        })
+        execute_verified(
+            &state_dir,
+            &sink,
+            "container.stop",
+            "container:abc",
+            |_, _| Ok(()),
+        )
         .unwrap();
         reconcile_verified(&state_dir, &sink).unwrap();
         assert!(ensure_reconciled(&state_dir).is_ok());
@@ -701,5 +751,16 @@ mod tests {
             .unwrap_err()
             .contains("sink unavailable"));
         assert!(!state.join(STATE_FILE).exists());
+    }
+
+    #[test]
+    fn production_sink_requires_kernel_proven_append_only_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let sink = temp.path().join("sink");
+        protected(&sink, SINK_HEADER);
+
+        assert!(require_append_only_sink(&sink)
+            .unwrap_err()
+            .contains("FS_APPEND_FL"));
     }
 }

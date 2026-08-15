@@ -51,3 +51,9 @@ Review verification: `cargo check -p ferro-cli` passed; `witness_cli` passed 8/8
 - Hardened recovery approval reads to use one held `O_NOFOLLOW` descriptor with owner/mode/type/link checks; retained sink identity correlation uses the activation-bound device and inode.
 
 Fresh round-2 verification: `cargo check -p ferro-cli` passed; `cargo test -p ferro-cli --test witness_cli` passed 8/8; the mirror chain-corruption regression failed before the reader validation and passed after it. Repository-global `cargo fmt --check` remains unavailable as a completion gate because unrelated pre-existing files are not rustfmt-clean; no broad formatting rewrite was applied.
+
+## Residual hardening
+
+The incremental read mirror now rotates before a 128 MiB production bound into ordered read-only segments. The reader snapshots all segment descriptors plus the active descriptor, validates framing and journal identity for every part, and uses global sequence and record-hash continuity to reject missing, overlapping, reordered, or substituted evidence. Startup validates and reuses retained segments rather than deleting them or rebuilding overlapping evidence. A reduced test bound exercises multiple rotations, restart, complete streaming, and deletion-gap rejection without a 128 MiB allocation.
+
+Production emergency activation, execution, and reconciliation now require the held sink file to prove Linux `FS_APPEND_FL` via `FS_IOC_GETFLAGS`; an unsupported filesystem or ordinary appendable file fails closed. Existing descriptor owner/mode/type/link and activation-bound device/inode checks remain mandatory. A regression test proves an otherwise valid preprovisioned file is rejected when the kernel append-only capability is absent.

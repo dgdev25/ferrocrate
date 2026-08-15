@@ -699,6 +699,25 @@ impl WitnessJournal {
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
 
+        let has_segments = fs::read_dir(&self.root)?.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(super::reader::READER_SEGMENT_PREFIX)
+        });
+        if has_segments {
+            let mut reader = super::WitnessReader::open_read_only(&self.root, self.journal_id)?;
+            let mut last = 0;
+            while let Some(bytes) = reader.next_record()? {
+                last = decode_record(&bytes)?.sequence();
+            }
+            reader.finish()?;
+            self.mirror_sequence.store(last, Ordering::Release);
+            self.append_read_mirror()?;
+            let _ = fs::remove_file(self.root.join("witness.reader-stale"));
+            return Ok(());
+        }
+
         let records = self.records()?;
         let temporary = self.root.join(".witness.readonly-v2.tmp");
         let target = self.root.join(super::reader::READER_FILE);
@@ -739,11 +758,12 @@ impl WitnessJournal {
         if first > head {
             return Ok(());
         }
+        let active = self.root.join(super::reader::READER_FILE);
         let mut options = OpenOptions::new();
         options.append(true);
         #[cfg(unix)]
         options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-        let mut file = options.open(self.root.join(super::reader::READER_FILE))?;
+        let mut file = options.open(&active)?;
         for sequence in first..=head {
             let bytes = self
                 .records
@@ -753,10 +773,49 @@ impl WitnessJournal {
             frame.extend_from_slice(&sequence.to_be_bytes());
             frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             frame.extend_from_slice(&bytes);
+            if file.metadata()?.len() > 24
+                && file.metadata()?.len().saturating_add(frame.len() as u64)
+                    > read_mirror_segment_limit()
+            {
+                file.sync_all()?;
+                drop(file);
+                self.rotate_read_mirror(&active, sequence.saturating_sub(1))?;
+                file = options.open(&active)?;
+            }
             file.write_all(&frame)?;
         }
         file.sync_all()?;
         self.mirror_sequence.store(head, Ordering::Release);
+        Ok(())
+    }
+
+    fn rotate_read_mirror(&self, active: &std::path::Path, last: u64) -> Result<(), JournalError> {
+        use std::io::Read;
+        #[cfg(unix)]
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut source = File::open(active)?;
+        let mut header = [0_u8; 32];
+        source.read_exact(&mut header)?;
+        let first = u64::from_be_bytes(header[24..32].try_into().map_err(|_| JournalError::Corrupt)?);
+        if first == 0 || last < first {
+            return Err(JournalError::Corrupt);
+        }
+        let segment = self.root.join(format!(
+            "{}{first}-{last}",
+            super::reader::READER_SEGMENT_PREFIX
+        ));
+        fs::rename(active, &segment)?;
+        #[cfg(unix)]
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o400))?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut next = options.open(active)?;
+        next.write_all(super::reader::READER_MAGIC)?;
+        next.write_all(&self.journal_id)?;
+        next.sync_all()?;
+        File::open(&self.root)?.sync_all()?;
         Ok(())
     }
 
@@ -768,6 +827,16 @@ impl WitnessJournal {
             let _ = File::open(&self.root).and_then(|directory| directory.sync_all());
         }
     }
+}
+
+#[cfg(not(test))]
+const fn read_mirror_segment_limit() -> u64 {
+    128 * 1024 * 1024
+}
+
+#[cfg(test)]
+const fn read_mirror_segment_limit() -> u64 {
+    4 * 1024
 }
 
 #[cfg(test)]
@@ -854,6 +923,97 @@ mod epoch_lock_tests {
             .unwrap();
         assert!(reader.next_record().unwrap().is_some());
         assert!(matches!(reader.next_record(), Err(JournalError::Corrupt)));
+    }
+
+    #[test]
+    fn read_mirror_rotates_bounded_segments_and_reader_rejects_a_gap() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = WitnessJournal::open(JournalConfig::new(
+            root.path(), [0x63; 16], JournalMode::Required,
+        ))
+        .unwrap();
+        for index in 1_u8..=40 {
+            let mut record = publication();
+            record.event_id = [index; 16];
+            record.request_id = [index.wrapping_add(80); 16];
+            journal
+                .append_checkpoint_publication([index; 32], record)
+                .unwrap();
+        }
+        let segments: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(super::super::reader::READER_SEGMENT_PREFIX)
+            })
+            .collect();
+        assert!(segments.len() > 1);
+        assert!(segments
+            .iter()
+            .all(|entry| entry.metadata().unwrap().len() <= read_mirror_segment_limit()));
+        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x63; 16])
+            .unwrap();
+        assert_eq!(reader.records().count(), 40);
+        reader.finish().unwrap();
+
+        drop(journal);
+        let reopened = WitnessJournal::open(JournalConfig::new(
+            root.path(), [0x63; 16], JournalMode::Required,
+        ))
+        .unwrap();
+        drop(reopened);
+
+        fs::remove_file(segments.first().unwrap().path()).unwrap();
+        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x63; 16])
+            .unwrap();
+        let mut rejected = false;
+        loop {
+            match reader.next_record() {
+                Err(JournalError::Corrupt) => {
+                    rejected = true;
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert!(rejected);
+    }
+
+    #[test]
+    fn read_only_snapshot_remains_bounded_across_concurrent_rotation() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = WitnessJournal::open(JournalConfig::new(
+            root.path(), [0x64; 16], JournalMode::Required,
+        ))
+        .unwrap();
+        let mut first = publication();
+        first.event_id = [41; 16];
+        first.request_id = [42; 16];
+        journal
+            .append_checkpoint_publication([41; 32], first)
+            .unwrap();
+        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x64; 16])
+            .unwrap();
+
+        for index in 43_u8..=80 {
+            let mut record = publication();
+            record.event_id = [index; 16];
+            record.request_id = [index.wrapping_add(90); 16];
+            journal
+                .append_checkpoint_publication([index; 32], record)
+                .unwrap();
+        }
+
+        assert_eq!(reader.records().count(), 1);
+        reader.finish().unwrap();
+        let mut current = super::super::WitnessReader::open_read_only(root.path(), [0x64; 16])
+            .unwrap();
+        assert_eq!(current.records().count(), 39);
+        current.finish().unwrap();
     }
 
     #[test]

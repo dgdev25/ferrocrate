@@ -14,6 +14,7 @@ skip() {
 [[ "$(uname -s)" == Linux ]] || fail "Linux is required"
 command -v ip >/dev/null || fail "ip is required"
 command -v jq >/dev/null || fail "jq is required"
+command -v ping >/dev/null || fail "ping is required"
 
 [[ "${EUID}" -eq 0 ]] || skip "root (EUID=0) is required"
 cap_eff="$(awk '/^CapEff:/{print $2}' /proc/self/status)"
@@ -47,6 +48,9 @@ subnet="172.30.203.0/24"
 expected_cidr="172.30.203.1/24"
 endpoint_cidr="172.30.203.2/24"
 gateway="172.30.203.1"
+ipv6_subnet="fd42:203::/64"
+ipv6_gateway="fd42:203::1"
+endpoint_ipv6="fd42:203::2/64"
 bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$net_name" | sha256sum | awk '{print substr($1,1,12)}')"
 bridge_name="fc-${bridge_suffix}"
 
@@ -145,7 +149,8 @@ run_killed_create IntentDurable
 run_killed_create IdentityObserved
 run_killed_create StoreCommitted
 
-ferro_net network create --subnet "$subnet" "$net_name"
+ferro_net network create --subnet "$subnet" --ipv6-subnet "$ipv6_subnet" \
+  --ipv6-gateway "$ipv6_gateway" "$net_name"
 
 # -d is required: plain `ip -j link` omits linkinfo.info_kind.
 link_json="$(ip -n "$ns_name" -j -d link show "$bridge_name")"
@@ -196,6 +201,12 @@ jq -e --arg cidr "$expected_cidr" '
 ' <<<"$addr_json" >/dev/null \
   || fail "bridge CIDR assertion failed for ${bridge_name} expected ${expected_cidr}: ${addr_diag}"
 
+jq -e --arg addr "$ipv6_gateway" '
+  (type == "array") and (length == 1)
+  and ((.[0].addr_info | map(select(.family == "inet6") | .local) | index($addr)) != null)
+' <<<"$addr_json" >/dev/null \
+  || fail "bridge IPv6 address assertion failed for ${bridge_name} expected ${ipv6_gateway}"
+
 printf 'privileged network lifecycle: create observed %s cidr=%s\n' "$bridge_name" "$expected_cidr"
 
 ip netns add "$ep_ns"
@@ -206,10 +217,14 @@ ip -n "$ns_name" link set "$veth_host" master "$bridge_name"
 ip -n "$ns_name" link set "$veth_host" up
 ip -n "$ep_ns" link set lo up
 ip -n "$ep_ns" addr add "$endpoint_cidr" dev "$veth_ep"
+ip -n "$ep_ns" addr add "$endpoint_ipv6" dev "$veth_ep" nodad
 ip -n "$ep_ns" link set "$veth_ep" up
+ip -n "$ep_ns" -6 route add "$ipv6_subnet" dev "$veth_ep"
 
 ip netns exec "$ep_ns" ping -c 1 -W 2 "$gateway" >/dev/null \
   || fail "endpoint ${endpoint_cidr} failed to ping gateway ${gateway}"
+ip netns exec "$ep_ns" ping -6 -c 1 -W 2 "$ipv6_gateway" >/dev/null \
+  || fail "endpoint ${endpoint_ipv6} failed to ping gateway ${ipv6_gateway}"
 
 printf 'privileged network lifecycle: endpoint %s pinged gateway %s\n' "$endpoint_cidr" "$gateway"
 

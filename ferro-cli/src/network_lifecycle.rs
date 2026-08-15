@@ -87,7 +87,7 @@ impl NetworkCreateRecord {
         let config = ferro_net::BridgeConfig {
             name: record.bridge_name.clone(),
             cidr: record.bridge_cidr.clone(),
-            ipv6_cidr: None,
+            ipv6_cidr: record.ipv6_cidr.clone(),
         };
         validate_bridge_config(&config)?;
         Ok(NetworkCreateRecord { config, record })
@@ -188,6 +188,7 @@ pub(crate) fn create_network_record_with_bridge(
         gateway,
         bridge_name: config.name.clone(),
         bridge_cidr: config.cidr.clone(),
+        ipv6_cidr: config.ipv6_cidr.clone(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -261,6 +262,8 @@ pub(crate) struct NetworkRecord {
     pub gateway: String,
     pub bridge_name: String,
     pub bridge_cidr: String,
+    #[serde(default)]
+    pub ipv6_cidr: Option<String>,
     pub created_at_unix: u64,
     #[serde(default = "default_resource_generation")]
     pub generation: u64,
@@ -1368,6 +1371,7 @@ fn network_record_from_identity(logical_name: &str, identity: &BridgeIdentity) -
         gateway,
         bridge_name: identity.name.clone(),
         bridge_cidr: identity.cidr.clone().unwrap_or_default(),
+        ipv6_cidr: identity.ipv6_cidr.clone(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2536,6 +2540,7 @@ mod tests {
             gateway: "10.0.0.1/24".to_string(),
             bridge_name: "net0".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
+            ipv6_cidr: None,
             created_at_unix: 0,
             generation: 1,
         };
@@ -2582,6 +2587,7 @@ mod tests {
             gateway: "10.0.0.1/24".to_string(),
             bridge_name: "net0".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
+            ipv6_cidr: None,
             created_at_unix: 0,
             generation: 1,
         };
@@ -3046,6 +3052,7 @@ mod tests {
             gateway: "10.0.0.1/24".to_string(),
             bridge_name: "net0".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
+            ipv6_cidr: None,
             created_at_unix: 0,
             generation: 1,
         };
@@ -3107,6 +3114,7 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
             bridge_name: "fc-blue-012345".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
+            ipv6_cidr: None,
             created_at_unix: 1_700_000_000,
             generation: 1,
         }

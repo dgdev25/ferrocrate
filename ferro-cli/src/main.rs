@@ -599,6 +599,10 @@ pub enum NetworkCommands {
         subnet: Option<String>,
         #[arg(long)]
         gateway: Option<String>,
+        #[arg(long = "ipv6-subnet")]
+        ipv6_subnet: Option<String>,
+        #[arg(long = "ipv6-gateway")]
+        ipv6_gateway: Option<String>,
     },
     Ls,
     Rm {
@@ -4126,6 +4130,35 @@ fn parse_ipv4_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
     Ok((ip, prefix))
 }
 
+fn parse_ipv6_cidr(cidr: &str) -> Result<(std::net::Ipv6Addr, u8), String> {
+    let (ip_part, prefix_part) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("network: invalid IPv6 CIDR {cidr}"))?;
+    let ip = ip_part
+        .parse::<std::net::Ipv6Addr>()
+        .map_err(|_| format!("network: invalid IPv6 CIDR {cidr}"))?;
+    let prefix = prefix_part
+        .parse::<u8>()
+        .map_err(|_| format!("network: invalid IPv6 prefix {prefix_part}"))?;
+    if prefix > 128 {
+        return Err(format!("network: invalid IPv6 CIDR {cidr}"));
+    }
+    Ok((ip, prefix))
+}
+
+fn ipv6_network_addr(addr: std::net::Ipv6Addr, prefix: u8) -> std::net::Ipv6Addr {
+    let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+    std::net::Ipv6Addr::from(u128::from(addr) & mask)
+}
+
+fn ipv6_in_subnet(addr: std::net::Ipv6Addr, subnet: std::net::Ipv6Addr, prefix: u8) -> bool {
+    ipv6_network_addr(addr, prefix) == ipv6_network_addr(subnet, prefix)
+}
+
+fn default_ipv6_gateway(subnet: std::net::Ipv6Addr, prefix: u8) -> std::net::Ipv6Addr {
+    std::net::Ipv6Addr::from(u128::from(ipv6_network_addr(subnet, prefix)).saturating_add(1))
+}
+
 fn ipv4_to_u32(addr: Ipv4Addr) -> u32 {
     u32::from(addr)
 }
@@ -4169,6 +4202,8 @@ fn create_network_record(
     name: &str,
     subnet: Option<&str>,
     gateway: Option<&str>,
+    ipv6_subnet: Option<&str>,
+    ipv6_gateway: Option<&str>,
 ) -> Result<NetworkRecord, String> {
     validate_network_name(name)?;
     let subnet = subnet.unwrap_or("172.20.0.0/16");
@@ -4185,6 +4220,25 @@ fn create_network_record(
             "network: gateway {gateway_ip} is outside subnet {network_ip}/{prefix}"
         ));
     }
+    let ipv6_cidr = match ipv6_subnet {
+        Some(value) => {
+            let (addr, prefix) = parse_ipv6_cidr(value)?;
+            let gateway = match ipv6_gateway {
+                Some(gateway) => gateway
+                    .parse::<std::net::Ipv6Addr>()
+                    .map_err(|_| format!("network: invalid IPv6 gateway {gateway}"))?,
+                None => default_ipv6_gateway(addr, prefix),
+            };
+            if !ipv6_in_subnet(gateway, addr, prefix) {
+                return Err(format!("network: IPv6 gateway {gateway} is outside subnet {addr}/{prefix}"));
+            }
+            Some(format!("{gateway}/{prefix}"))
+        }
+        None if ipv6_gateway.is_some() => {
+            return Err("network: --ipv6-gateway requires --ipv6-subnet".into())
+        }
+        None => None,
+    };
     Ok(NetworkRecord {
         name: name.to_string(),
         driver: "bridge".to_string(),
@@ -4192,6 +4246,7 @@ fn create_network_record(
         gateway: gateway_ip.to_string(),
         bridge_name: bridge_name_for_network(name),
         bridge_cidr: format!("{gateway_ip}/{prefix}"),
+        ipv6_cidr,
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -4294,6 +4349,8 @@ fn handle_network_authorized(
             name,
             subnet,
             gateway,
+            ipv6_subnet,
+            ipv6_gateway,
         } => {
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
@@ -4302,7 +4359,13 @@ fn handle_network_authorized(
             if records.iter().any(|record| record.name == name) {
                 return Err(format!("network: already exists {name}"));
             }
-            let record = create_network_record(&name, subnet.as_deref(), gateway.as_deref())?;
+            let record = create_network_record(
+                &name,
+                subnet.as_deref(),
+                gateway.as_deref(),
+                ipv6_subnet.as_deref(),
+                ipv6_gateway.as_deref(),
+            )?;
             if records.iter().any(|existing| {
                 existing.bridge_name == record.bridge_name && existing.name != record.name
             }) {
@@ -6347,6 +6410,8 @@ fn handle_docker_compat_connection(
                         name: spec.name.clone(),
                         subnet,
                         gateway,
+                        ipv6_subnet: None,
+                        ipv6_gateway: None,
                     },
                     &origin,
                     &surface_authorization,
@@ -7296,7 +7361,13 @@ mod tests {
     #[test]
     fn bind_run_network_named_keeps_bridge_mode_and_logical_association() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let record = super::create_network_record("app-net", Some("10.88.0.0/24"), None)
+        let record = super::create_network_record(
+            "app-net",
+            Some("10.88.0.0/24"),
+            None,
+            None,
+            None,
+        )
             .expect("record");
         super::save_networks(temp.path(), &[record.clone()]).expect("save");
         let binding = bind_run_network(temp.path(), "app-net", None, None).expect("bind");
@@ -7337,6 +7408,7 @@ mod tests {
                     name,
                     subnet,
                     gateway,
+                    ..
                 } => {
                     assert_eq!(name, "custom-net");
                     assert_eq!(subnet.as_deref(), Some("172.20.0.0/16"));
@@ -7361,6 +7433,25 @@ mod tests {
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn creates_dual_stack_network_record_with_canonical_ipv6_gateway() {
+        let record = super::create_network_record(
+            "dual-net",
+            Some("10.88.0.0/24"),
+            Some("10.88.0.1"),
+            Some("fd42:4242::/64"),
+            None,
+        )
+        .expect("dual-stack record");
+        assert_eq!(record.ipv6_cidr.as_deref(), Some("fd42:4242::1/64"));
+        let intent = crate::network_lifecycle::NetworkCreateRecord::from_record(record)
+            .expect("lifecycle intent");
+        assert_eq!(
+            intent.intended_identity().ipv6_cidr.as_deref(),
+            Some("fd42:4242::1/64")
+        );
     }
 
     #[test]
@@ -7443,6 +7534,8 @@ mod tests {
                 name: "test-net".to_string(),
                 subnet: Some("172.30.0.0/16".to_string()),
                 gateway: Some("172.30.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -7610,6 +7703,8 @@ mod tests {
                 name: name.to_string(),
                 subnet: Some("172.30.0.0/16".to_string()),
                 gateway: Some("172.30.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -7669,6 +7764,8 @@ mod tests {
                 name: "enforce-net".to_string(),
                 subnet: Some("172.31.0.0/16".to_string()),
                 gateway: Some("172.31.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         );
@@ -7722,6 +7819,8 @@ mod tests {
                 name: "fault-net".to_string(),
                 subnet: Some("172.34.0.0/16".to_string()),
                 gateway: Some("172.34.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -7773,6 +7872,8 @@ mod tests {
                 name: "fault-net".to_string(),
                 subnet: Some("172.34.0.0/16".to_string()),
                 gateway: Some("172.34.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -7840,6 +7941,8 @@ mod tests {
                 name: "fault-net".to_string(),
                 subnet: Some("172.34.0.0/16".to_string()),
                 gateway: Some("172.34.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -7901,6 +8004,7 @@ mod tests {
             gateway: "172.32.0.1".to_string(),
             bridge_name: first.clone(),
             bridge_cidr: "172.32.0.1/16".to_string(),
+            ipv6_cidr: None,
             created_at_unix: 1,
             generation: 1,
         };
@@ -7919,6 +8023,8 @@ mod tests {
                 name: "alpha-network".to_string(),
                 subnet: Some("172.30.0.0/16".to_string()),
                 gateway: Some("172.30.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -7944,6 +8050,8 @@ mod tests {
                 name: "assoc-net".to_string(),
                 subnet: Some("172.33.0.0/16".to_string()),
                 gateway: Some("172.33.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
             },
             &authorization,
         )
@@ -8017,6 +8125,7 @@ mod tests {
             gateway: "172.35.0.1".to_string(),
             bridge_name: super::canonical_bridge_name("orphan-net"),
             bridge_cidr: "172.35.0.1/16".to_string(),
+            ipv6_cidr: None,
             created_at_unix: 1,
             generation: 1,
         };

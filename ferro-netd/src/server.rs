@@ -13,22 +13,8 @@ use ferro_net::{
     bridge::build_ip_link_set_master_cmd,
     veth::{VethConfig, VethPair},
 };
-use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::PermissionsExt,
-};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedState {
-    overlays: BTreeSet<String>,
-    endpoints: BTreeMap<String, String>,
-    #[serde(default)]
-    routes: BTreeMap<String, Vec<String>>,
-}
 
 pub struct NetdServer {
     uid: u32,
@@ -37,7 +23,8 @@ pub struct NetdServer {
     pub(crate) overlays: BTreeSet<String>,
     pub(crate) endpoints: BTreeMap<String, String>,
     pub(crate) routes: BTreeMap<String, Vec<String>>,
-    journal: Option<PathBuf>,
+    pub(crate) effect_receipts: BTreeMap<String, crate::effect_receipt::EffectReceipt>,
+    pub(crate) journal: Option<PathBuf>,
     pub(crate) kernel: Box<dyn NetKernelOps>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_faults: crate::test_support::FaultHandle,
@@ -51,6 +38,7 @@ impl NetdServer {
             overlays: BTreeSet::new(),
             endpoints: BTreeMap::new(),
             routes: BTreeMap::new(),
+            effect_receipts: BTreeMap::new(),
             journal: None,
             kernel: Box::new(RealNetKernelOps::new()),
             #[cfg(any(test, feature = "test-support"))]
@@ -74,6 +62,7 @@ impl NetdServer {
             overlays: BTreeSet::new(),
             endpoints: BTreeMap::new(),
             routes: BTreeMap::new(),
+            effect_receipts: BTreeMap::new(),
             journal: None,
             kernel: Box::new(RealNetKernelOps::with_wireguard(
                 private_key_path,
@@ -82,78 +71,6 @@ impl NetdServer {
             #[cfg(any(test, feature = "test-support"))]
             test_faults: Default::default(),
         }
-    }
-    pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
-        if path.exists() {
-            let state: PersistedState =
-                serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
-                    .map_err(|error| error.to_string())?;
-            self.overlays = state.overlays;
-            self.endpoints = state.endpoints;
-            self.routes = state.routes;
-        }
-        self.journal = Some(path);
-        self.overlays
-            .retain(|overlay| self.kernel.observe_link(overlay));
-        self.endpoints
-            .retain(|endpoint, _| self.kernel.observe_link(endpoint));
-        self.persist()?;
-        if let Some(grants) = self.grants.as_mut() {
-            let overlays = &self.overlays;
-            let endpoints = &self.endpoints;
-            let kernel = &self.kernel;
-            grants
-                .reconcile_unknown(|identity| {
-                    use crate::grants_recovery::RecoveryObservation;
-                    let (name, owned) = identity
-                        .strip_prefix("overlay:")
-                        .map(|name| (name, overlays.contains(name)))
-                        .or_else(|| {
-                            identity
-                                .strip_prefix("endpoint:")
-                                .map(|name| (name, endpoints.contains_key(name)))
-                        })
-                        .unwrap_or(("", false));
-                    if name.is_empty() || kernel.observe_link(name) != owned {
-                        RecoveryObservation::Conflict
-                    } else {
-                        RecoveryObservation::Consistent(owned)
-                    }
-                })
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(self)
-    }
-    fn persist(&self) -> Result<(), String> {
-        #[cfg(any(test, feature = "test-support"))]
-        if self
-            .test_faults
-            .take(crate::test_support::FaultPoint::StatePersist)
-        {
-            return Err("injected state persistence failure".into());
-        }
-        let Some(path) = &self.journal else {
-            return Ok(());
-        };
-        let temporary = path.with_extension("tmp");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| error.to_string())?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
-        file.write_all(
-            &serde_json::to_vec(&PersistedState {
-                overlays: self.overlays.clone(),
-                endpoints: self.endpoints.clone(),
-                routes: self.routes.clone(),
-            })
-            .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        fs::rename(temporary, path).map_err(|error| error.to_string())
     }
     pub fn handle_peer(&mut self, uid: u32, frame: &[u8], now: u64) -> NetdResponse {
         if uid != self.uid {
@@ -201,21 +118,19 @@ impl NetdServer {
             Ok(value) => value,
             Err(code) => return reject(code, "invalid normalized parameters"),
         };
+        let effect_receipt = crate::effect_receipt::EffectReceipt::from_request(
+            &envelope.request,
+            granted.resource_generation,
+            envelope.epoch,
+            envelope.revision,
+        );
         if let Err(code) = self.consume_grant(
             &granted.grant,
             action,
             &granted.resource_uuid,
             granted.resource_generation,
             &params,
-            match &envelope.request {
-                NetdRequest::ApplyOverlay { overlay_id, .. }
-                | NetdRequest::RemoveOverlay { overlay_id }
-                | NetdRequest::Inspect { overlay_id } => format!("overlay:{overlay_id}"),
-                NetdRequest::AttachEndpoint { endpoint_id, .. }
-                | NetdRequest::DetachEndpoint { endpoint_id, .. } => {
-                    format!("endpoint:{endpoint_id}")
-                }
-            },
+            effect_receipt.clone(),
             now,
         ) {
             self.policy.rollback(
@@ -276,10 +191,14 @@ impl NetdServer {
                 }
                 self.overlays.insert(overlay_id.clone());
                 self.routes.insert(overlay_id.clone(), routes);
+                self.effect_receipts
+                    .insert(format!("overlay:{overlay_id}"), effect_receipt);
                 if self.persist().is_err() {
                     self.policy
                         .rollback(&overlay_id, envelope.epoch, envelope.revision);
                     self.overlays.remove(&overlay_id);
+                    self.effect_receipts
+                        .remove(&format!("overlay:{overlay_id}"));
                     let _ = self.kernel.remove_overlay(&overlay_id);
                     reject_effect!(
                         RejectionCode::Busy,
@@ -328,6 +247,8 @@ impl NetdServer {
                         );
                     }
                 }
+                self.effect_receipts
+                    .remove(&format!("overlay:{overlay_id}"));
                 if self.persist().is_err() {
                     reject_effect!(
                         RejectionCode::Busy,
@@ -426,8 +347,12 @@ impl NetdServer {
                     }
                 }
                 self.endpoints.insert(endpoint_id.clone(), overlay_id);
+                self.effect_receipts
+                    .insert(format!("endpoint:{endpoint_id}"), effect_receipt);
                 if self.persist().is_err() {
                     let _ = self.endpoints.remove(&endpoint_id);
+                    self.effect_receipts
+                        .remove(&format!("endpoint:{endpoint_id}"));
                     let _ = self.kernel.remove_endpoint(&endpoint_id);
                     reject_effect!(
                         RejectionCode::Busy,
@@ -458,6 +383,8 @@ impl NetdServer {
                         format!("endpoint:{endpoint_id}")
                     );
                 }
+                self.effect_receipts
+                    .remove(&format!("endpoint:{endpoint_id}"));
                 if self.persist().is_err() {
                     reject_effect!(
                         RejectionCode::Busy,

@@ -21,7 +21,7 @@ impl NetdServer {
         uuid: &str,
         generation: u64,
         params: &GrantParameters,
-        effect_identity: String,
+        effect_receipt: crate::effect_receipt::EffectReceipt,
         now: u64,
     ) -> Result<(), RejectionCode> {
         let verifier = self.grants.as_mut().ok_or(RejectionCode::MissingGrant)?;
@@ -37,7 +37,7 @@ impl NetdServer {
             )
             .map_err(map_grant_error)?;
         verifier
-            .arm_effect_target(&consumed, effect_identity)
+            .arm_effect_target(&consumed, effect_receipt)
             .map_err(map_grant_error)
     }
 

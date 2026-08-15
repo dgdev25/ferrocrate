@@ -1,5 +1,4 @@
 use crate::grants::{GrantError, GrantLedger, GrantPhase, GrantResult, GrantVerifier};
-use ferro_core::authorization::helper_grant::GrantAction;
 
 pub(crate) enum RecoveryObservation {
     Consistent(bool),
@@ -39,7 +38,7 @@ impl GrantLedger {
     }
     pub(crate) fn reconcile_unknown<F>(&mut self, mut observe: F) -> Result<(), GrantError>
     where
-        F: FnMut(&str) -> RecoveryObservation,
+        F: FnMut(&crate::effect_receipt::EffectReceipt) -> RecoveryObservation,
     {
         let unknown = self
             .state
@@ -50,17 +49,15 @@ impl GrantLedger {
                 (
                     nonce.clone(),
                     operation.claims.clone(),
-                    operation.effect_identity.clone(),
+                    operation.expected_receipt.clone(),
                 )
             })
             .collect::<Vec<_>>();
-        for (nonce, claims, identity) in unknown {
-            let Some(identity) = identity else { continue };
-            let expected_exists = matches!(
-                claims.action,
-                GrantAction::NetworkCreate | GrantAction::NetworkAttach
-            );
-            let (phase, outcome) = match observe(&identity) {
+        for (nonce, claims, receipt) in unknown {
+            let Some(receipt) = receipt else { continue };
+            let identity = receipt.identity();
+            let expected_exists = receipt.expected_exists();
+            let (phase, outcome) = match observe(&receipt) {
                 RecoveryObservation::Consistent(exists) if exists == expected_exists => {
                     (GrantPhase::Succeeded, "recovered_after_unknown_effect")
                 }
@@ -91,7 +88,7 @@ impl GrantLedger {
 impl GrantVerifier {
     pub(crate) fn reconcile_unknown<F>(&mut self, observe: F) -> Result<(), GrantError>
     where
-        F: FnMut(&str) -> RecoveryObservation,
+        F: FnMut(&crate::effect_receipt::EffectReceipt) -> RecoveryObservation,
     {
         self.ledger.reconcile_unknown(observe)
     }

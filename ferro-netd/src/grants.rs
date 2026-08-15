@@ -46,6 +46,8 @@ pub(crate) struct GrantOperation {
     pub(crate) phase: GrantPhase,
     #[serde(default)]
     pub(crate) effect_identity: Option<String>,
+    #[serde(default)]
+    pub(crate) expected_receipt: Option<crate::effect_receipt::EffectReceipt>,
 }
 
 pub struct GrantLedger {
@@ -99,6 +101,7 @@ impl GrantLedger {
                 claims: grant.claims.clone(),
                 phase: GrantPhase::Pending,
                 effect_identity: None,
+                expected_receipt: None,
             },
         );
         self.persist()?;
@@ -174,6 +177,7 @@ impl GrantLedger {
         &mut self,
         nonce: [u8; 16],
         effect_identity: Option<String>,
+        expected_receipt: Option<crate::effect_receipt::EffectReceipt>,
     ) -> Result<(), GrantError> {
         let operation = self
             .state
@@ -182,6 +186,7 @@ impl GrantLedger {
             .ok_or(GrantError::NotConsumed)?;
         operation.phase = GrantPhase::OutcomeUnknown;
         operation.effect_identity = effect_identity;
+        operation.expected_receipt = expected_receipt;
         self.persist()
     }
     pub(crate) fn persist(&self) -> Result<(), GrantError> {
@@ -436,15 +441,15 @@ impl GrantVerifier {
         )
     }
     pub fn arm_effect(&mut self, consumed: &ConsumedGrant) -> Result<(), GrantError> {
-        self.ledger.mark_outcome_unknown(consumed.nonce, None)
+        self.ledger.mark_outcome_unknown(consumed.nonce, None, None)
     }
     pub(crate) fn arm_effect_target(
         &mut self,
         consumed: &ConsumedGrant,
-        identity: String,
+        receipt: crate::effect_receipt::EffectReceipt,
     ) -> Result<(), GrantError> {
         self.ledger
-            .mark_outcome_unknown(consumed.nonce, Some(identity))
+            .mark_outcome_unknown(consumed.nonce, Some(receipt.identity()), Some(receipt))
     }
     pub fn result(&self, request_id: &str) -> Option<&GrantResult> {
         self.ledger.result(request_id)

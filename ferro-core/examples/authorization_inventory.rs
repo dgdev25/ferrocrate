@@ -8,6 +8,8 @@ struct Entry<'a> {
 }
 
 fn main() {
+    ferro_core::authorization::inventory::validate_inventory(MUTATION_INVENTORY)
+        .expect("unique complete inventory");
     let entries: Vec<_> = MUTATION_INVENTORY
         .iter()
         .map(|entry| Entry {

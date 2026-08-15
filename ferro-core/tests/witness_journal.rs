@@ -533,7 +533,13 @@ fn outcome_unknown_remains_pending_until_linked_recovery() {
     unknown.result_digest = Some([2; 32]);
     unknown.reason = Some(ferro_core::witness::ReasonCode::ExecutionFailed);
     unknown.outcome = WitnessOutcome::OutcomeUnknown;
+    let metrics_before = ferro_core::observability::authorization_metrics_snapshot();
     journal.complete(intent, unknown).unwrap();
+    let metrics_after = ferro_core::observability::authorization_metrics_snapshot();
+    assert_eq!(
+        metrics_after.outcome_unknown_total,
+        metrics_before.outcome_unknown_total + 1
+    );
     assert_eq!(journal.recover(id).unwrap().execution_generation(), 9);
     let mut recovery = record(WitnessStage::Recovery);
     recovery.event_id = [53; 16];

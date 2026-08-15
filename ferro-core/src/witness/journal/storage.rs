@@ -9,6 +9,7 @@ use std::{
 pub(super) fn transaction_error(
     error: sled::transaction::TransactionError<JournalError>,
 ) -> JournalError {
+    authorization_metrics().record(AuthorizationMetric::Journal(JournalMetric::AppendFailure));
     match error {
         sled::transaction::TransactionError::Abort(error) => error,
         sled::transaction::TransactionError::Storage(error) => JournalError::Storage(error),

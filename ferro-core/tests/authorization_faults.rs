@@ -62,6 +62,8 @@ fn production_metrics_have_a_machine_readable_snapshot() {
         after.bypass_detected_total,
         before.bypass_detected_total + 1
     );
+    assert_eq!(after.bypass_probe_total, before.bypass_probe_total);
+    assert_eq!(after.successful_bypass_total, before.successful_bypass_total);
     assert!(!serde_json::to_string(&after).unwrap().contains(SECRET));
 }
 

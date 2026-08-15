@@ -49,6 +49,8 @@ pub struct AuthorizationMetrics {
     would_deny: AtomicU64,
     enforced_denial: AtomicU64,
     bypass_detected: AtomicU64,
+    bypass_probe: AtomicU64,
+    successful_bypass: AtomicU64,
     append_failure: AtomicU64,
     flush_failure: AtomicU64,
     pending_intent: AtomicU64,
@@ -65,6 +67,8 @@ pub struct AuthorizationMetricsSnapshot {
     pub would_deny_total: u64,
     pub enforced_denial_total: u64,
     pub bypass_detected_total: u64,
+    pub bypass_probe_total: u64,
+    pub successful_bypass_total: u64,
     pub append_failure_total: u64,
     pub flush_failure_total: u64,
     pub pending_intent_total: u64,
@@ -111,6 +115,15 @@ impl AuthorizationMetrics {
             .store(seconds, Ordering::Relaxed);
     }
 
+    pub fn record_bypass_probe(&self, rejected: bool) {
+        self.bypass_probe.fetch_add(1, Ordering::Relaxed);
+        if rejected {
+            self.bypass_detected.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.successful_bypass.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn snapshot(&self) -> AuthorizationMetricsSnapshot {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         AuthorizationMetricsSnapshot {
@@ -119,6 +132,8 @@ impl AuthorizationMetrics {
             would_deny_total: load(&self.would_deny),
             enforced_denial_total: load(&self.enforced_denial),
             bypass_detected_total: load(&self.bypass_detected),
+            bypass_probe_total: load(&self.bypass_probe),
+            successful_bypass_total: load(&self.successful_bypass),
             append_failure_total: load(&self.append_failure),
             flush_failure_total: load(&self.flush_failure),
             pending_intent_total: load(&self.pending_intent),
@@ -144,6 +159,8 @@ impl AuthorizationMetrics {
                 "ferro_authorization_would_deny_total {}\n",
                 "ferro_authorization_enforced_denial_total {}\n",
                 "ferro_authorization_bypass_detected_total {}\n",
+                "ferro_authorization_bypass_probe_total {}\n",
+                "ferro_authorization_successful_bypass_total {}\n",
                 "ferro_witness_append_failure_total {}\n",
                 "ferro_witness_flush_failure_total {}\n",
                 "ferro_witness_pending_intent_total {}\n",
@@ -157,6 +174,8 @@ impl AuthorizationMetrics {
             load(&self.would_deny),
             load(&self.enforced_denial),
             load(&self.bypass_detected),
+            load(&self.bypass_probe),
+            load(&self.successful_bypass),
             load(&self.append_failure),
             load(&self.flush_failure),
             load(&self.pending_intent),

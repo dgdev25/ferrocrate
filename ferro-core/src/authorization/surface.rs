@@ -474,18 +474,21 @@ impl SurfaceAuthorization {
         generation: u64,
     ) -> Result<(), SurfaceExecutionError> {
         let proof = permit.proof();
-        if proof.canonical().context().action() != action {
-            return Err(SurfaceExecutionError::ActionMismatch);
-        }
-        if proof.canonical().context().resource().kind() != kind
+        let result = if proof.canonical().context().action() != action {
+            Err(SurfaceExecutionError::ActionMismatch)
+        } else if proof.canonical().context().resource().kind() != kind
             || proof.canonical().resource_id() != stable_resource_id(kind, canonical_name)
         {
-            return Err(SurfaceExecutionError::ResourceMismatch);
+            Err(SurfaceExecutionError::ResourceMismatch)
+        } else if proof.canonical().resource_generation() != generation {
+            Err(SurfaceExecutionError::GenerationMismatch)
+        } else {
+            Ok(())
+        };
+        if result.is_err() {
+            crate::observability::authorization_metrics().record_bypass_probe(true);
         }
-        if proof.canonical().resource_generation() != generation {
-            return Err(SurfaceExecutionError::GenerationMismatch);
-        }
-        Ok(())
+        result
     }
 
     fn authorize(
@@ -1027,11 +1030,17 @@ mod tests {
 
     #[test]
     fn production_surface_canary_is_absent_from_witness_mirror_errors_logs_and_metrics() {
-        const CANARY: &str = "surface-secret-canary-30c8";
-        let root = tempfile::tempdir().unwrap();
+        let canary = std::env::var("FERRO_AUTHORIZATION_QUALIFICATION_CANARY")
+            .unwrap_or_else(|_| "surface-secret-canary-30c8".to_owned());
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::env::var_os("FERRO_AUTHORIZATION_QUALIFICATION_OUTPUT")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        std::fs::create_dir_all(&root).unwrap();
         let journal = Arc::new(
             crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
-                root.path().join("journal"),
+                root.join("journal"),
                 [91; 16],
                 crate::witness::JournalMode::Required,
             ))
@@ -1049,7 +1058,7 @@ mod tests {
                 &origin(),
                 Action::VolumeCreate,
                 ResourceKind::Volume,
-                CANARY,
+                &canary,
                 1,
             )
             .unwrap();
@@ -1064,10 +1073,10 @@ mod tests {
         .to_string();
         permit.finish(false).unwrap();
         crate::observability::authorization_metrics()
-            .export_json(&root.path().join("metrics.json"))
+            .export_json(&root.join("metrics.json"))
             .unwrap();
         crate::observability::log_event(
-            root.path(),
+            &root,
             crate::observability::make_event(
                 "authorization.evaluate",
                 None,
@@ -1077,23 +1086,27 @@ mod tests {
             ),
         )
         .unwrap();
+        std::fs::write(root.join("captured-error.txt"), &error).unwrap();
         drop(journal);
 
-        let mut stack = vec![root.path().to_path_buf()];
+        let mut stack = vec![root.clone()];
         while let Some(path) = stack.pop() {
-            for entry in std::fs::read_dir(path).unwrap() {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                continue;
+            };
+            for entry in entries {
                 let entry = entry.unwrap();
                 if entry.file_type().unwrap().is_dir() {
                     stack.push(entry.path());
                 } else {
                     let bytes = std::fs::read(entry.path()).unwrap();
                     assert!(!bytes
-                        .windows(CANARY.len())
-                        .any(|window| window == CANARY.as_bytes()));
+                        .windows(canary.len())
+                        .any(|window| window == canary.as_bytes()));
                 }
             }
         }
-        assert!(!error.contains(CANARY));
+        assert!(!error.contains(&canary));
     }
 
     #[test]

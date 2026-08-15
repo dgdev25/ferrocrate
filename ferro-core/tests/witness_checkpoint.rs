@@ -339,6 +339,43 @@ fn key_loss_requires_explicit_new_epoch_discontinuity() {
 }
 
 #[test]
+fn provisioned_signing_key_disappearance_requires_new_named_key_and_trust_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let key_root = dir.path().join("keys");
+    fs::create_dir(&key_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let store = KeyStore::new(&key_root);
+    let old = store.create("active").unwrap();
+    let root = Checkpoint::sign(
+        FlushedHead::new([0x66; 16], 1, 0, [0; 32]),
+        40,
+        old.signing_key(),
+        CheckpointKind::Periodic,
+    )
+    .unwrap();
+    fs::remove_file(key_root.join("active.key")).unwrap();
+    assert!(store.load("active").is_err());
+    let replacement = store.create("recovery-epoch-2").unwrap();
+    let reset = Checkpoint::trust_reset_after(
+        FlushedHead::new([0x66; 16], 2, 1, publication_hash(&root)),
+        41,
+        &root,
+        replacement.signing_key(),
+    )
+    .unwrap();
+    let trust = TrustBundle::new([0x66; 16], old.verifying_key())
+        .allow_epoch_reset(2, replacement.verifying_key());
+    let report = CheckpointVerifier::new(trust)
+        .verify(&lineage_evidence(&root, &reset), &[root, reset], 41, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(report.discontinuities, 1);
+}
+
+#[test]
 fn verifier_rejects_missing_corrupt_reordered_and_future_evidence() {
     let key = SigningKey::from_bytes(&[21; 32]);
     let cp = Checkpoint::sign(

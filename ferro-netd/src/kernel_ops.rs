@@ -166,6 +166,7 @@ pub(crate) mod deterministic {
     pub(crate) struct PersistentKernelOps {
         path: PathBuf,
         links: BTreeSet<String>,
+        faults: crate::test_support::FaultHandle,
     }
     impl PersistentKernelOps {
         pub(crate) fn open(path: PathBuf) -> Self {
@@ -173,7 +174,23 @@ pub(crate) mod deterministic {
                 .ok()
                 .and_then(|v| serde_json::from_slice(&v).ok())
                 .unwrap_or_default();
-            Self { path, links }
+            Self {
+                path,
+                links,
+                faults: Default::default(),
+            }
+        }
+        pub(crate) fn with_faults(path: PathBuf, faults: crate::test_support::FaultHandle) -> Self {
+            let mut value = Self::open(path);
+            value.faults = faults;
+            value
+        }
+        fn effect(&self) -> Result<(), String> {
+            if self.faults.take(crate::test_support::FaultPoint::Effect) {
+                Err("injected effect failure".into())
+            } else {
+                Ok(())
+            }
         }
         fn save(&self) -> Result<(), String> {
             std::fs::write(
@@ -188,38 +205,42 @@ pub(crate) mod deterministic {
             self.links.contains(name)
         }
         fn create_overlay(&mut self, name: &str) -> Result<(), String> {
+            self.effect()?;
             self.links.insert(name.into());
             self.save()
         }
         fn remove_overlay(&mut self, name: &str) -> Result<(), String> {
+            self.effect()?;
             self.links.remove(name);
             self.save()
         }
         fn create_endpoint(&mut self, config: &VethConfig) -> Result<(), String> {
+            self.effect()?;
             self.links.insert(config.pair.host.clone());
             self.save()
         }
         fn attach_endpoint(&mut self, _: &str, _: &str) -> Result<(), String> {
-            Ok(())
+            self.effect()
         }
         fn move_endpoint(&mut self, _: &str, _: &str) -> Result<(), String> {
-            Ok(())
+            self.effect()
         }
         fn remove_endpoint(&mut self, endpoint: &str) -> Result<(), String> {
+            self.effect()?;
             self.links.remove(endpoint);
             self.save()
         }
         fn apply_routes(&mut self, _: &str, _: &[String]) -> Result<(), String> {
-            Ok(())
+            self.effect()
         }
         fn remove_routes(&mut self, _: &str, _: &[String]) -> Result<(), String> {
-            Ok(())
+            self.effect()
         }
         fn apply_wireguard(&mut self, _: &str, _: &[String], _: &[PeerSpec]) -> Result<(), String> {
-            Ok(())
+            self.effect()
         }
         fn remove_wireguard(&mut self, _: &str) -> Result<(), String> {
-            Ok(())
+            self.effect()
         }
     }
 
@@ -231,5 +252,17 @@ pub(crate) mod deterministic {
         first.create_overlay("overlay-a").unwrap();
         drop(first);
         assert!(PersistentKernelOps::open(path).observe_link("overlay-a"));
+    }
+
+    #[test]
+    fn injected_effect_failure_is_one_shot() {
+        let directory = tempfile::tempdir().unwrap();
+        let faults = crate::test_support::FaultHandle::default();
+        faults.fail_once(crate::test_support::FaultPoint::Effect);
+        let mut kernel =
+            PersistentKernelOps::with_faults(directory.path().join("kernel.json"), faults);
+        assert!(kernel.create_overlay("overlay-a").is_err());
+        kernel.create_overlay("overlay-a").unwrap();
+        assert!(kernel.observe_link("overlay-a"));
     }
 }

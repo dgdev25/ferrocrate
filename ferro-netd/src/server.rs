@@ -39,6 +39,8 @@ pub struct NetdServer {
     routes: BTreeMap<String, Vec<String>>,
     journal: Option<PathBuf>,
     kernel: Box<dyn NetKernelOps>,
+    #[cfg(feature = "test-support")]
+    test_faults: crate::test_support::FaultHandle,
 }
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +48,7 @@ pub struct NetdTestSnapshot {
     pub overlays: Vec<String>,
     pub endpoints: BTreeMap<String, String>,
     pub routes: BTreeMap<String, Vec<String>>,
+    pub receipts: Vec<crate::grants::GrantReceiptSummary>,
 }
 impl NetdServer {
     pub fn new(uid: u32, policy: Policy) -> Self {
@@ -58,6 +61,8 @@ impl NetdServer {
             routes: BTreeMap::new(),
             journal: None,
             kernel: Box::new(RealNetKernelOps::new()),
+            #[cfg(feature = "test-support")]
+            test_faults: Default::default(),
         }
     }
     pub fn with_grants(mut self, grants: GrantVerifier) -> Self {
@@ -66,10 +71,23 @@ impl NetdServer {
     }
     #[cfg(feature = "test-support")]
     pub fn deterministic(uid: u32, policy: Policy, kernel_state: PathBuf) -> Self {
+        Self::deterministic_with_faults(uid, policy, kernel_state, Default::default())
+    }
+    #[cfg(feature = "test-support")]
+    pub fn deterministic_with_faults(
+        uid: u32,
+        policy: Policy,
+        kernel_state: PathBuf,
+        faults: crate::test_support::FaultHandle,
+    ) -> Self {
         let mut server = Self::new(uid, policy);
-        server.kernel = Box::new(crate::kernel_ops::deterministic::PersistentKernelOps::open(
-            kernel_state,
-        ));
+        server.kernel = Box::new(
+            crate::kernel_ops::deterministic::PersistentKernelOps::with_faults(
+                kernel_state,
+                faults.clone(),
+            ),
+        );
+        server.test_faults = faults;
         server
     }
     #[cfg(feature = "test-support")]
@@ -78,6 +96,11 @@ impl NetdServer {
             overlays: self.overlays.iter().cloned().collect(),
             endpoints: self.endpoints.clone(),
             routes: self.routes.clone(),
+            receipts: self
+                .grants
+                .as_ref()
+                .map(|v| v.receipt_summaries())
+                .unwrap_or_default(),
         }
     }
     pub fn with_wireguard(
@@ -98,6 +121,8 @@ impl NetdServer {
                 private_key_path,
                 listen_port,
             )),
+            #[cfg(feature = "test-support")]
+            test_faults: Default::default(),
         }
     }
     pub fn load_journal(mut self, path: PathBuf) -> Result<Self, String> {
@@ -118,6 +143,13 @@ impl NetdServer {
         Ok(self)
     }
     fn persist(&self) -> Result<(), String> {
+        #[cfg(feature = "test-support")]
+        if self
+            .test_faults
+            .take(crate::test_support::FaultPoint::StatePersist)
+        {
+            return Err("injected state persistence failure".into());
+        }
         let Some(path) = &self.journal else {
             return Ok(());
         };

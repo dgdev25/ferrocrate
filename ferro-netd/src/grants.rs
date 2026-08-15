@@ -40,6 +40,16 @@ enum GrantPhase {
     OutcomeUnknown,
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantReceiptSummary {
+    pub request_id: String,
+    pub nonce: [u8; 16],
+    pub result_identity: Option<String>,
+    pub outcome: Option<String>,
+    pub phase: String,
+}
+
 #[derive(Deserialize, Serialize)]
 struct GrantOperation {
     claims: GrantClaims,
@@ -287,6 +297,31 @@ pub struct GrantVerifier {
     ledger: GrantLedger,
 }
 impl GrantVerifier {
+    #[cfg(feature = "test-support")]
+    pub fn receipt_summaries(&self) -> Vec<GrantReceiptSummary> {
+        self.ledger
+            .state
+            .consumed
+            .values()
+            .map(|operation| {
+                let result = self.ledger.state.results.get(&operation.claims.request_id);
+                GrantReceiptSummary {
+                    request_id: operation.claims.request_id.clone(),
+                    nonce: operation.claims.nonce,
+                    result_identity: result.map(|v| v.result_identity.clone()),
+                    outcome: result.map(|v| v.outcome.clone()),
+                    phase: match operation.phase {
+                        GrantPhase::Pending => "pending",
+                        GrantPhase::ConsumedBeforeEffect => "consumed-before-effect",
+                        GrantPhase::Succeeded => "succeeded",
+                        GrantPhase::Failed => "failed",
+                        GrantPhase::OutcomeUnknown => "outcome-unknown",
+                    }
+                    .into(),
+                }
+            })
+            .collect()
+    }
     pub fn add_verification_key(
         &mut self,
         key_id: impl Into<String>,

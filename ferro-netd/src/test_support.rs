@@ -6,9 +6,33 @@ use nix::sys::socket::{
     getsockopt, recvmsg, sockopt::PeerCredentials, ControlMessageOwned, MsgFlags,
 };
 use std::{
+    collections::VecDeque,
     io::Write,
     os::{fd::AsRawFd, unix::net::UnixListener},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultPoint {
+    Effect,
+    StatePersist,
+}
+
+#[derive(Clone, Default)]
+pub struct FaultHandle(std::sync::Arc<std::sync::Mutex<VecDeque<FaultPoint>>>);
+impl FaultHandle {
+    pub fn fail_once(&self, point: FaultPoint) {
+        self.0.lock().expect("fault lock").push_back(point);
+    }
+    pub(crate) fn take(&self, point: FaultPoint) -> bool {
+        let mut faults = self.0.lock().expect("fault lock");
+        if faults.front() == Some(&point) {
+            faults.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Serves exactly one bounded request. UID is checked before any request bytes are read.
 pub fn serve_one(

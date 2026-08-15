@@ -48,6 +48,10 @@ name = "e2e_container_lifecycle"
 path = "../tests/e2e_container_lifecycle.rs"
 
 [[test]]
+name = "authorization_compatibility"
+path = "../tests/authorization_compatibility.rs"
+
+[[test]]
 name = "emergency_unix_e2e"
 path = "tests/emergency_unix_e2e.rs"
 required-features = ["test-console"]

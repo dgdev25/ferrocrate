@@ -61,6 +61,7 @@
 - ✅ **No-new-privileges** — Prevent privilege escalation via setuid/setgid
 - ✅ **Image signature verification** — Cosign/Sigstore integration
 - ✅ **Audit logging** — Structured JSON logs for compliance
+- ✅ **Optional authorization and witness journal** — Explicit disabled, shadow, and enforce rollout modes; enforcement remains opt-in until an operator promotes it with local evidence
 - ⚠️ **AppArmor/SELinux** — MAC enforcement (in progress)
 - ⚠️ **eBPF security monitoring** — Runtime syscall auditing (planned)
 
@@ -254,6 +255,18 @@ ferrocrate run --security-opt seccomp=/path/to/profile.json alpine
 # Read-only rootfs
 ferrocrate run --read-only alpine:latest
 ```
+
+### Authorization rollout and witness evidence
+
+Authorization is disabled by default to preserve existing OCI and Docker-compatible behavior. Operators can explicitly choose a rollout mode:
+
+- `disabled` preserves mutation outcomes without requiring authorization evidence.
+- `shadow` evaluates and durably records a policy decision, including a hypothetical denial, while preserving the mutation outcome.
+- `enforce` applies the policy and requires a pinned policy digest, authenticated external principal, required witness journal, and current checkpoint admission evidence.
+
+The gate covers the runtime, CLI, Docker Unix socket, Compose fan-out, CRI image mutations, managed-networking, and privileged helper inventory. Stable denial fields remain within the documented channel error shape. Metrics expose attributed/unknown principals, would-deny and enforced decisions, bypass probes, witness failures, and recovery state. `scripts/test-authorization-witness.sh` is the promotion qualification command; it must report complete inventory evidence, 100% attribution for its enforced fixtures, and zero successful bypasses before an operator enables enforcement.
+
+The journal establishes integrity and lifecycle consistency relative to independently retained trust material and a checkpoint. It does not make a host controlled by an attacker tamper-proof, and it does not enable enforcement by default. Biscuit-style delegated credentials, Merkle inclusion/consistency proofs, external transparency, and RVM/coherence scheduling are deferred. See [the operations runbook](docs/security/authorization-operations.md) for policy reload, checkpoint, key-loss, emergency, and recovery procedures.
 
 ## Architecture
 

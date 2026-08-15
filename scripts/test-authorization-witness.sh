@@ -25,6 +25,7 @@ verify_bypass_artifact() {
 }
 
 run metrics-and-matrices cargo test -p ferro-core --test authorization_faults
+run compatibility-promotion cargo test -p ferro-cli --test authorization_compatibility
 run bypass-regression-diagnostic cargo test -p ferro-core --lib authorization::surface::tests::diagnostic_broken_comparator_records_a_successful_bypass -- --exact
 run production-canary-scan cargo test -p ferro-core --lib production_surface_canary_is_absent_from_witness_mirror_errors_logs_and_metrics
 run inventory-and-bypass cargo test -p ferro-core --test authorization_gate

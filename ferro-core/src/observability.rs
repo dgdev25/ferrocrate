@@ -78,6 +78,18 @@ pub struct AuthorizationMetricsSnapshot {
     pub checkpoint_age_seconds: u64,
 }
 
+impl AuthorizationMetricsSnapshot {
+    /// Percentage of externally evaluated mutations that had an authenticated
+    /// principal. `None` means this snapshot contains no external evaluations
+    /// and therefore cannot establish an attribution claim.
+    pub fn attributed_percent(self) -> Option<u8> {
+        let total = self
+            .attributed_total
+            .checked_add(self.unknown_principal_total)?;
+        (total != 0).then(|| ((u128::from(self.attributed_total) * 100) / u128::from(total)) as u8)
+    }
+}
+
 static AUTHORIZATION_METRICS: OnceLock<AuthorizationMetrics> = OnceLock::new();
 
 pub fn authorization_metrics() -> &'static AuthorizationMetrics {

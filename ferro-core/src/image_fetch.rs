@@ -219,7 +219,7 @@ pub(crate) fn pull_image_with_store(
 /// Execute an already inspected plan by addressing the manifest through its
 /// digest. The complete immutable binding is checked before any directory,
 /// blob, or store record is written.
-pub(crate) fn pull_planned_image_with_store(
+fn pull_planned_image_with_store(
     runtime_dir: &Path,
     plan: &ImageFetchPlan,
     store: &LocalImageStore,

@@ -199,7 +199,7 @@ impl LocalImageStore {
         Ok(None)
     }
 
-    pub(crate) fn remove_reference(&self, reference: &str) -> Result<bool, ImageStoreError> {
+    fn remove_reference(&self, reference: &str) -> Result<bool, ImageStoreError> {
         let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
         let removed = tree.remove(reference.as_bytes())?.is_some();
         tree.flush()?;

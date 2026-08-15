@@ -103,6 +103,16 @@ impl NetdServer {
                 routes: overlay.routes.clone(),
                 addresses: Vec::new(),
             };
+            if let Some(previous) = self.routes.get(&overlay.overlay_id) {
+                let removed = previous
+                    .iter()
+                    .filter(|route| !overlay.routes.contains(route))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.kernel
+                    .remove_routes(&overlay.overlay_id, &removed)
+                    .map_err(|_| RejectionCode::Busy)?;
+            }
             self.kernel
                 .apply_wireguard(&overlay.overlay_id, &[], &peers)
                 .map_err(|_| RejectionCode::Busy)?;

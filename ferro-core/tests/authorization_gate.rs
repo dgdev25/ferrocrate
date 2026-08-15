@@ -2,7 +2,9 @@ use ferro_core::authorization::gate::{
     AuthorizationGate, AuthorizedRequest, CanonicalRequest, Denial,
 };
 use ferro_core::authorization::inventory::MUTATION_INVENTORY;
-use ferro_core::authorization::inventory::{validate_inventory, InventoryError, MutationInventoryEntry};
+use ferro_core::authorization::inventory::{
+    validate_inventory, InventoryError, MutationInventoryEntry,
+};
 
 #[test]
 fn authorization_gate_exposes_the_proof_contract() {
@@ -19,12 +21,30 @@ fn authorization_gate_exposes_the_proof_contract() {
 #[test]
 fn authorization_inventory_rejects_missing_and_duplicate_evidence() {
     let base = MUTATION_INVENTORY[0];
-    let missing = MutationInventoryEntry { mediation_test: "", ..base };
-    assert_eq!(validate_inventory(&[missing]), Err(InventoryError::EmptyField));
-    let duplicate_id = MutationInventoryEntry { mediation_test: "other_test", ..base };
-    assert_eq!(validate_inventory(&[base, duplicate_id]), Err(InventoryError::DuplicateId));
-    let duplicate_test = MutationInventoryEntry { id: "mutation.other", ..base };
-    assert_eq!(validate_inventory(&[base, duplicate_test]), Err(InventoryError::DuplicateTest));
+    let missing = MutationInventoryEntry {
+        mediation_test: "",
+        ..base
+    };
+    assert_eq!(
+        validate_inventory(&[missing]),
+        Err(InventoryError::EmptyField)
+    );
+    let duplicate_id = MutationInventoryEntry {
+        mediation_test: "other_test",
+        ..base
+    };
+    assert_eq!(
+        validate_inventory(&[base, duplicate_id]),
+        Err(InventoryError::DuplicateId)
+    );
+    let duplicate_test = MutationInventoryEntry {
+        id: "mutation.other",
+        ..base
+    };
+    assert_eq!(
+        validate_inventory(&[base, duplicate_test]),
+        Err(InventoryError::DuplicateTest)
+    );
 }
 
 #[test]

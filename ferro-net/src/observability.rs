@@ -47,7 +47,10 @@ pub fn format_backend_metrics(metrics: &BackendMetrics) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_backend_metrics, format_conntrack_event, format_metrics, BackendMetrics, ConntrackEvent, NetworkMetrics};
+    use super::{
+        format_backend_metrics, format_conntrack_event, format_metrics, BackendMetrics,
+        ConntrackEvent, NetworkMetrics,
+    };
     use crate::NetworkBackend;
 
     #[test]

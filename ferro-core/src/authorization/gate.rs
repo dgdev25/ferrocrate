@@ -405,6 +405,7 @@ pub struct AuthorizationGate {
 #[derive(Debug)]
 enum GateMetrics {
     Global,
+    #[allow(dead_code)]
     Isolated(Arc<AuthorizationMetrics>),
 }
 
@@ -468,6 +469,7 @@ impl AuthorizationGate {
             .map_or(Ok(()), |admission| admission.admit(action, class))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_reserved_cleanup(
         &self,
         action: super::Action,

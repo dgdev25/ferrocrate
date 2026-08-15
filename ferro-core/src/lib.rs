@@ -39,10 +39,10 @@ pub mod image_security;
 pub mod image_store;
 pub mod image_tagging;
 pub mod layer_compression;
-pub mod managed_overlay;
 #[cfg(target_os = "linux")]
 pub mod layer_mount;
 pub mod mac_profiles;
+pub mod managed_overlay;
 #[cfg(target_os = "linux")]
 pub mod mount_cleanup;
 #[cfg(target_os = "linux")]

@@ -29,8 +29,8 @@ fn main() {
     let mut oom_hits = 0_u64;
     let mut oom_checks = 0_u64;
 
-    for idx in 0..(samples.len() - 1) {
-        predictor.push(samples[idx]);
+    for (idx, sample) in samples.iter().copied().enumerate().take(samples.len() - 1) {
+        predictor.push(sample);
         if let Some(pred) = predictor.predict() {
             let err = (pred.memory_growth_rate - expected_growth_bps).abs();
             growth_mae_bps += err;

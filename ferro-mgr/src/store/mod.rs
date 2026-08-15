@@ -270,6 +270,7 @@ impl ManagerStore {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn latest_authorized_revision(
         &self,
         node_id: &str,

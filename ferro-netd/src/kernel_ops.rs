@@ -57,7 +57,7 @@ impl RealNetKernelOps {
 }
 impl NetKernelOps for RealNetKernelOps {
     fn observe_link(&self, name: &str) -> bool {
-        exec_cmd_capture(&vec![
+        exec_cmd_capture(&[
             "ip".into(),
             "link".into(),
             "show".into(),
@@ -73,7 +73,7 @@ impl NetKernelOps for RealNetKernelOps {
         use crate::effect_receipt::{digest_sorted, peer_digest, EffectReceipt};
         match receipt {
             EffectReceipt::Overlay {
-                overlay_id,
+                overlay_id: _,
                 bridge_ifname,
                 wireguard_ifname,
                 mode,
@@ -204,7 +204,7 @@ impl NetKernelOps for RealNetKernelOps {
     }
     fn apply_addresses(&mut self, interface: &str, addresses: &[String]) -> Result<(), String> {
         for address in addresses {
-            exec_cmd(&vec![
+            exec_cmd(&[
                 "ip".into(),
                 "address".into(),
                 "replace".into(),
@@ -220,7 +220,7 @@ impl NetKernelOps for RealNetKernelOps {
     }
     fn remove_addresses(&mut self, interface: &str, addresses: &[String]) -> Result<(), String> {
         for address in addresses {
-            exec_cmd(&vec![
+            exec_cmd(&[
                 "ip".into(),
                 "address".into(),
                 "del".into(),
@@ -234,7 +234,7 @@ impl NetKernelOps for RealNetKernelOps {
     }
     fn apply_routes(&mut self, interface: &str, routes: &[String]) -> Result<(), String> {
         for route in routes {
-            exec_cmd(&vec![
+            exec_cmd(&[
                 "ip".into(),
                 "route".into(),
                 "replace".into(),
@@ -250,7 +250,7 @@ impl NetKernelOps for RealNetKernelOps {
     }
     fn remove_routes(&mut self, interface: &str, routes: &[String]) -> Result<(), String> {
         for route in routes {
-            exec_cmd(&vec![
+            exec_cmd(&[
                 "ip".into(),
                 "route".into(),
                 "del".into(),
@@ -318,12 +318,8 @@ impl NetKernelOps for RealNetKernelOps {
             .map_err(|e| e.to_string())
     }
     fn ensure_forwarding(&mut self) -> Result<(), String> {
-        exec_cmd(&vec![
-            "sysctl".into(),
-            "-w".into(),
-            "net.ipv4.ip_forward=1".into(),
-        ])
-        .map_err(|e| e.to_string())
+        exec_cmd(&["sysctl".into(), "-w".into(), "net.ipv4.ip_forward=1".into()])
+            .map_err(|e| e.to_string())
     }
 }
 

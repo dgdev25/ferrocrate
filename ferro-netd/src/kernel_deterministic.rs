@@ -77,7 +77,7 @@ impl NetKernelOps for PersistentKernelOps {
         use crate::effect_receipt::{digest_sorted, peer_digest, EffectReceipt};
         match receipt {
             EffectReceipt::Overlay {
-                overlay_id,
+                overlay_id: _,
                 bridge_ifname,
                 wireguard_ifname,
                 mode,

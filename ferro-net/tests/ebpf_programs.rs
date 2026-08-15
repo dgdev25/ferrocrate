@@ -1,14 +1,15 @@
 #![cfg(target_os = "linux")]
+#![allow(clippy::duplicate_mod)]
 
 #[path = "../../ferro-net-ebpf/src/abi.rs"]
 #[allow(dead_code)]
 mod abi;
-#[path = "../../ferro-net-ebpf/src/packet.rs"]
-mod packet;
 #[path = "../../ferro-net-ebpf/src/datapath.rs"]
 mod datapath;
 #[path = "../src/ebpf_abi.rs"]
 mod host_abi;
+#[path = "../../ferro-net-ebpf/src/packet.rs"]
+mod packet;
 
 use std::{
     cell::{Cell, RefCell},
@@ -19,8 +20,8 @@ use datapath::{
     action_for_parse_failure, actual_disposition, apply_decision, decide_egress, decide_ingress,
     decision_error_counter, snat_candidate, Action, ConntrackPair, ConntrackRecord,
     ConntrackReservation, Counter, DatapathState, DecisionError, Direction, Endpoint,
-    ExternalNetwork, FlowKey, NatTarget, Packet, ParseFailure, PolicyAction, PolicyKey,
-    PortTarget, Socket, Translation, IP_PROTOCOL_TCP, IP_PROTOCOL_UDP, SNAT_PROBE_LIMIT,
+    ExternalNetwork, FlowKey, NatTarget, Packet, ParseFailure, PolicyAction, PolicyKey, PortTarget,
+    Socket, Translation, IP_PROTOCOL_TCP, IP_PROTOCOL_UDP, SNAT_PROBE_LIMIT,
 };
 use ferro_net::ebpf::{build_bpftool_load_cmd, EbpfProgram};
 
@@ -66,8 +67,7 @@ impl FixtureState {
     fn contains_record(&self, record: ConntrackRecord) -> bool {
         self.conntrack
             .borrow()
-            .iter()
-            .any(|entry| *entry == (record.key, record.target))
+            .contains(&(record.key, record.target))
     }
 }
 
@@ -336,8 +336,8 @@ fn mirrored_metadata_abi_uses_one_coherent_fixed_width_config() {
         flags: host_abi::META_FLAG_SNAT_RANGE_RESERVED,
     };
     let expected = [
-        0, 0, 0, 2, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
-        0xd6, 0xd8, 0xd6, 0xf7, 0, 1, 0, 0, 0, 1,
+        0, 0, 0, 2, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xd6, 0xd8, 0xd6,
+        0xf7, 0, 1, 0, 0, 0, 1,
     ];
     assert_eq!(config.encode(), expected);
     assert_eq!(host_abi::MetaConfig::decode(expected), config);
@@ -385,9 +385,7 @@ fn conntrack_abi_and_kernel_flow_key_have_identical_network_order() {
     };
     assert_eq!(
         value.encode(),
-        [
-            203, 0, 113, 8, 0xc0, 0x01, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8,
-        ]
+        [203, 0, 113, 8, 0xc0, 0x01, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8,]
     );
     assert_eq!(host_abi::ConntrackValue::decode(value.encode()), value);
 }
@@ -403,7 +401,10 @@ fn generic_snat_and_reverse_restore_mutate_complete_tcp_packets() {
 
     assert_eq!(egress.action, Action::Redirect);
     assert_eq!(egress.ifindex, Some(9));
-    assert_eq!(egress.destination_mac, Some([2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]));
+    assert_eq!(
+        egress.destination_mac,
+        Some([2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+    );
     assert_eq!(egress.source.address, [203, 0, 113, 8]);
     assert!((55_000..=55_031).contains(&egress.source.port));
     assert_eq!(egress.translation, Translation::Source);
@@ -438,8 +439,13 @@ fn snat_collision_probing_uses_noexist_and_selects_the_next_port() {
     let outbound = tcp_packet(internal, 32_000, [192, 0, 2, 10], 443);
     let state = FixtureState::with_external_endpoint(internal);
     let external = state.external.unwrap();
-    let first = snat_candidate(&outbound, 0, external.snat_port_start, external.snat_port_end)
-        .unwrap();
+    let first = snat_candidate(
+        &outbound,
+        0,
+        external.snat_port_start,
+        external.snat_port_end,
+    )
+    .unwrap();
     state.insert_existing(
         FlowKey {
             protocol: outbound.protocol,
@@ -494,7 +500,7 @@ fn snat_probe_exhaustion_drops_without_overwriting_collisions() {
                 .unwrap(),
             },
             NatTarget {
-                address: [10, 44, 9, probe as u8],
+                address: [10, 44, 9, probe],
                 port: probe as u16 + 1,
             },
         );
@@ -505,7 +511,10 @@ fn snat_probe_exhaustion_drops_without_overwriting_collisions() {
         decide_egress(&outbound, &state),
         Err(DecisionError::SnatExhausted)
     );
-    assert_eq!(state.reserve_attempts.borrow().len(), SNAT_PROBE_LIMIT as usize);
+    assert_eq!(
+        state.reserve_attempts.borrow().len(),
+        SNAT_PROBE_LIMIT as usize
+    );
     assert_eq!(*state.conntrack.borrow(), before);
 }
 
@@ -596,7 +605,10 @@ fn committed_pair_survives_concurrent_return_use_and_installer_failure() {
     assert!(apply_decision(&mut malformed, &outbound, &egress).is_err());
     assert!(state.contains_record(pair.forward));
     assert!(state.contains_record(pair.reverse));
-    assert_eq!(decide_ingress(&reply, &state).unwrap().destination, outbound.source);
+    assert_eq!(
+        decide_ingress(&reply, &state).unwrap().destination,
+        outbound.source
+    );
 }
 
 #[test]
@@ -681,7 +693,13 @@ fn published_port_dnat_carries_endpoint_mac_and_reverse_tuple() {
 
     let decision = decide_ingress(&ingress_packet, &state).unwrap();
 
-    assert_eq!(decision.destination, Socket { address: endpoint_address, port: 80 });
+    assert_eq!(
+        decision.destination,
+        Socket {
+            address: endpoint_address,
+            port: 80
+        }
+    );
     assert_eq!(decision.destination_mac, Some([2, 0, 0, 0, 0, 17]));
     assert_eq!(
         decision.reverse_conntrack,
@@ -706,16 +724,18 @@ fn localhost_published_port_response_returns_through_loopback() {
     let localhost = [127, 0, 0, 1];
     let endpoint_address = [10, 44, 1, 2];
     let request = tcp_packet(localhost, 51_000, localhost, 8080);
-    let mut state = FixtureState::default();
-    state.external = Some(ExternalNetwork {
-        address: [203, 0, 113, 8],
-        ifindex: 9,
-        loopback_ifindex: 1,
-        next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
-        snat_port_start: 55_000,
-        snat_port_end: 55_031,
-        snat_range_reserved: true,
-    });
+    let mut state = FixtureState {
+        external: Some(ExternalNetwork {
+            address: [203, 0, 113, 8],
+            ifindex: 9,
+            loopback_ifindex: 1,
+            next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            snat_port_start: 55_000,
+            snat_port_end: 55_031,
+            snat_range_reserved: true,
+        }),
+        ..FixtureState::default()
+    };
     state.ports.push((
         (request.protocol, 8080),
         PortTarget {
@@ -734,12 +754,25 @@ fn localhost_published_port_response_returns_through_loopback() {
 
     let ingress = decide_ingress(&request, &state).unwrap();
     let reverse = ingress.reverse_conntrack.expect("reverse DNAT record");
-    state.conntrack.borrow_mut().push((reverse.key, reverse.target));
+    state
+        .conntrack
+        .borrow_mut()
+        .push((reverse.key, reverse.target));
     let response = tcp_packet(endpoint_address, 80, localhost, 51_000);
     let egress = decide_egress(&response, &state).unwrap();
 
-    assert_eq!(egress.source, Socket { address: localhost, port: 8080 });
-    assert_eq!(egress.ifindex, Some(1), "localhost response must use loopback");
+    assert_eq!(
+        egress.source,
+        Socket {
+            address: localhost,
+            port: 8080
+        }
+    );
+    assert_eq!(
+        egress.ifindex,
+        Some(1),
+        "localhost response must use loopback"
+    );
     assert_eq!(egress.destination_mac, None);
 }
 

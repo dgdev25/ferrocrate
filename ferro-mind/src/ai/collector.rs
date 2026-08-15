@@ -69,7 +69,7 @@ impl TelemetryEvent {
                 *cpu_mean_percent / 100.0,
                 (*memory_peak_bytes as f32) / (4.0 * 1024.0 * 1024.0 * 1024.0), // normalize to 4 GiB
                 (*uptime_secs as f32) / 86400.0, // normalize to 1 day
-                0.0, // label: healthy
+                0.0,                             // label: healthy
             ],
             TelemetryEvent::OomKilled {
                 memory_at_kill_bytes,
@@ -250,7 +250,7 @@ mod tests {
         };
         let vec = event.to_feature_vector();
         assert_eq!(vec.len(), 4);
-        assert!(vec.iter().all(|&v| v >= 0.0 && v <= 1.0));
+        assert!(vec.iter().all(|&v| (0.0..=1.0).contains(&v)));
     }
 
     #[test]

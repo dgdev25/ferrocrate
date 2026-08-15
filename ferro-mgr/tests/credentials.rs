@@ -19,5 +19,8 @@ fn truncated_credentials_are_rejected() {
     let path = directory.path().join("node.key");
     std::fs::write(&path, [1_u8; 4]).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(matches!(CredentialStore::new(path).load_or_generate(), Err(CredentialError::Truncated)));
+    assert!(matches!(
+        CredentialStore::new(path).load_or_generate(),
+        Err(CredentialError::Truncated)
+    ));
 }

@@ -713,12 +713,14 @@ impl WitnessJournal {
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
 
-        let has_segments = fs::read_dir(&self.root)?.filter_map(Result::ok).any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(super::reader::READER_SEGMENT_PREFIX)
-        });
+        let has_segments = fs::read_dir(&self.root)?
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(super::reader::READER_SEGMENT_PREFIX)
+            });
         if has_segments {
             let mut reader = super::WitnessReader::open_read_only(&self.root, self.journal_id)?;
             let mut last = 0;
@@ -744,11 +746,11 @@ impl WitnessJournal {
         file.write_all(&self.journal_id)?;
         let mut last = 0;
         for bytes in &records {
-            let decoded = decode_record(&bytes)?;
+            let decoded = decode_record(bytes)?;
             last = decoded.sequence();
             file.write_all(&decoded.sequence().to_be_bytes())?;
             file.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
         }
         file.sync_all()?;
         fs::rename(&temporary, &target)?;
@@ -767,7 +769,10 @@ impl WitnessJournal {
     fn append_read_mirror(&self) -> Result<(), JournalError> {
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
-        let first = self.mirror_sequence.load(Ordering::Acquire).saturating_add(1);
+        let first = self
+            .mirror_sequence
+            .load(Ordering::Acquire)
+            .saturating_add(1);
         let (head, _) = self.head()?;
         if first > head {
             return Ok(());
@@ -810,7 +815,11 @@ impl WitnessJournal {
         let mut source = File::open(active)?;
         let mut header = [0_u8; 32];
         source.read_exact(&mut header)?;
-        let first = u64::from_be_bytes(header[24..32].try_into().map_err(|_| JournalError::Corrupt)?);
+        let first = u64::from_be_bytes(
+            header[24..32]
+                .try_into()
+                .map_err(|_| JournalError::Corrupt)?,
+        );
         if first == 0 || last < first {
             return Err(JournalError::Corrupt);
         }
@@ -897,12 +906,17 @@ mod epoch_lock_tests {
     fn read_mirror_failure_marks_stale_without_misreporting_durable_append() {
         let root = tempfile::tempdir().unwrap();
         let journal = WitnessJournal::open(JournalConfig::new(
-            root.path(), [0x61; 16], JournalMode::Required,
-        )).unwrap();
+            root.path(),
+            [0x61; 16],
+            JournalMode::Required,
+        ))
+        .unwrap();
         fs::remove_file(root.path().join(super::super::reader::READER_FILE)).unwrap();
         fs::create_dir(root.path().join(super::super::reader::READER_FILE)).unwrap();
 
-        journal.append_checkpoint_publication([8; 32], publication()).unwrap();
+        journal
+            .append_checkpoint_publication([8; 32], publication())
+            .unwrap();
 
         assert_eq!(journal.records().unwrap().len(), 1);
         assert!(root.path().join("witness.reader-stale").is_file());
@@ -912,7 +926,9 @@ mod epoch_lock_tests {
     fn read_only_mirror_rejects_a_broken_record_hash_chain() {
         let root = tempfile::tempdir().unwrap();
         let journal = WitnessJournal::open(JournalConfig::new(
-            root.path(), [0x62; 16], JournalMode::Required,
+            root.path(),
+            [0x62; 16],
+            JournalMode::Required,
         ))
         .unwrap();
         journal
@@ -933,8 +949,8 @@ mod epoch_lock_tests {
         bytes[previous_hash] ^= 0x80;
         fs::write(&mirror, bytes).unwrap();
 
-        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x62; 16])
-            .unwrap();
+        let mut reader =
+            super::super::WitnessReader::open_read_only(root.path(), [0x62; 16]).unwrap();
         assert!(reader.next_record().unwrap().is_some());
         assert!(matches!(reader.next_record(), Err(JournalError::Corrupt)));
     }
@@ -943,7 +959,9 @@ mod epoch_lock_tests {
     fn read_mirror_rotates_bounded_segments_and_reader_rejects_a_gap() {
         let root = tempfile::tempdir().unwrap();
         let journal = WitnessJournal::open(JournalConfig::new(
-            root.path(), [0x63; 16], JournalMode::Required,
+            root.path(),
+            [0x63; 16],
+            JournalMode::Required,
         ))
         .unwrap();
         for index in 1_u8..=40 {
@@ -968,21 +986,23 @@ mod epoch_lock_tests {
         assert!(segments
             .iter()
             .all(|entry| entry.metadata().unwrap().len() <= read_mirror_segment_limit()));
-        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x63; 16])
-            .unwrap();
+        let mut reader =
+            super::super::WitnessReader::open_read_only(root.path(), [0x63; 16]).unwrap();
         assert_eq!(reader.records().count(), 40);
         reader.finish().unwrap();
 
         drop(journal);
         let reopened = WitnessJournal::open(JournalConfig::new(
-            root.path(), [0x63; 16], JournalMode::Required,
+            root.path(),
+            [0x63; 16],
+            JournalMode::Required,
         ))
         .unwrap();
         drop(reopened);
 
         fs::remove_file(segments.first().unwrap().path()).unwrap();
-        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x63; 16])
-            .unwrap();
+        let mut reader =
+            super::super::WitnessReader::open_read_only(root.path(), [0x63; 16]).unwrap();
         let mut rejected = false;
         loop {
             match reader.next_record() {
@@ -1001,7 +1021,9 @@ mod epoch_lock_tests {
     fn read_only_snapshot_remains_bounded_across_concurrent_rotation() {
         let root = tempfile::tempdir().unwrap();
         let journal = WitnessJournal::open(JournalConfig::new(
-            root.path(), [0x64; 16], JournalMode::Required,
+            root.path(),
+            [0x64; 16],
+            JournalMode::Required,
         ))
         .unwrap();
         let mut first = publication();
@@ -1010,8 +1032,8 @@ mod epoch_lock_tests {
         journal
             .append_checkpoint_publication([41; 32], first)
             .unwrap();
-        let mut reader = super::super::WitnessReader::open_read_only(root.path(), [0x64; 16])
-            .unwrap();
+        let mut reader =
+            super::super::WitnessReader::open_read_only(root.path(), [0x64; 16]).unwrap();
 
         for index in 43_u8..=80 {
             let mut record = publication();
@@ -1024,8 +1046,8 @@ mod epoch_lock_tests {
 
         assert_eq!(reader.records().count(), 1);
         reader.finish().unwrap();
-        let mut current = super::super::WitnessReader::open_read_only(root.path(), [0x64; 16])
-            .unwrap();
+        let mut current =
+            super::super::WitnessReader::open_read_only(root.path(), [0x64; 16]).unwrap();
         assert_eq!(current.records().count(), 39);
         current.finish().unwrap();
     }

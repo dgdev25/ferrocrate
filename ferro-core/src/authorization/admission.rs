@@ -65,6 +65,7 @@ impl ReservedCleanupAuthority {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn matches(
         &self,
         action: Action,
@@ -95,6 +96,7 @@ pub struct MutationAdmission {
     grace: Duration,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 enum AdmissionEvidence {
     Timestamp {
@@ -153,7 +155,8 @@ impl MutationAdmission {
         {
             return Ok(());
         }
-        if matches!(authority, AdmissionAuthority::ReservedCleanup(_)) {
+        if let AdmissionAuthority::ReservedCleanup(authority) = authority {
+            let _ = authority;
             return Ok(());
         }
         let now = SystemTime::now()

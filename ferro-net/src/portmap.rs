@@ -1,5 +1,8 @@
 use crate::backend::NetworkBackend;
-use crate::validate::{validate_cidr, validate_interface_name, validate_ip, validate_port, validate_protocol, ValidationError};
+use crate::validate::{
+    validate_cidr, validate_interface_name, validate_ip, validate_port, validate_protocol,
+    ValidationError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortMapping {
@@ -255,27 +258,95 @@ fn build_owned_nftables_plan(
     let mut commands = vec![
         nft_cmd(&["add", "table", "ip", &firewall_id]),
         nft_cmd(&[
-            "add", "chain", "ip", &firewall_id, "prerouting", "{", "type", "nat", "hook",
-            "prerouting", "priority", "dstnat", ";", "}",
+            "add",
+            "chain",
+            "ip",
+            &firewall_id,
+            "prerouting",
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "prerouting",
+            "priority",
+            "dstnat",
+            ";",
+            "}",
         ]),
         nft_cmd(&[
-            "add", "chain", "ip", &firewall_id, "output", "{", "type", "nat", "hook",
-            "output", "priority", "dstnat", ";", "}",
+            "add",
+            "chain",
+            "ip",
+            &firewall_id,
+            "output",
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "output",
+            "priority",
+            "dstnat",
+            ";",
+            "}",
         ]),
         nft_cmd(&[
-            "add", "chain", "ip", &firewall_id, "postrouting", "{", "type", "nat", "hook",
-            "postrouting", "priority", "srcnat", ";", "}",
+            "add",
+            "chain",
+            "ip",
+            &firewall_id,
+            "postrouting",
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "postrouting",
+            "priority",
+            "srcnat",
+            ";",
+            "}",
         ]),
         nft_cmd(&[
-            "add", "chain", "ip", &firewall_id, "forward", "{", "type", "filter", "hook",
-            "forward", "priority", "filter", ";", "policy", "accept", ";", "}",
+            "add",
+            "chain",
+            "ip",
+            &firewall_id,
+            "forward",
+            "{",
+            "type",
+            "filter",
+            "hook",
+            "forward",
+            "priority",
+            "filter",
+            ";",
+            "policy",
+            "accept",
+            ";",
+            "}",
         ]),
         nft_cmd(&[
-            "add", "rule", "ip", &firewall_id, "forward", "counter", "comment", &marker,
+            "add",
+            "rule",
+            "ip",
+            &firewall_id,
+            "forward",
+            "counter",
+            "comment",
+            &marker,
         ]),
         nft_cmd(&[
-            "add", "rule", "ip", &firewall_id, "postrouting", "ip", "saddr", source_cidr,
-            "oifname", "!=", bridge, "masquerade",
+            "add",
+            "rule",
+            "ip",
+            &firewall_id,
+            "postrouting",
+            "ip",
+            "saddr",
+            source_cidr,
+            "oifname",
+            "!=",
+            bridge,
+            "masquerade",
         ]),
     ];
     for mapping in mappings {
@@ -373,9 +444,18 @@ pub fn build_iptables_masquerade_cmd(
     validate_cidr(source_cidr)?;
     validate_interface_name(bridge)?;
     Ok(vec![
-        "iptables".into(), "-t".into(), "nat".into(), "-A".into(), "POSTROUTING".into(),
-        "-s".into(), source_cidr.into(), "!".into(), "-o".into(), bridge.into(),
-        "-j".into(), "MASQUERADE".into(),
+        "iptables".into(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        source_cidr.into(),
+        "!".into(),
+        "-o".into(),
+        bridge.into(),
+        "-j".into(),
+        "MASQUERADE".into(),
     ])
 }
 
@@ -388,10 +468,20 @@ pub fn build_iptables_output_dnat_cmd(
     validate_protocol(&mapping.protocol)?;
     validate_ip(container_ip)?;
     Ok(vec![
-        "iptables".into(), "-t".into(), "nat".into(), "-A".into(), "OUTPUT".into(),
-        "-o".into(), "lo".into(), "-p".into(), mapping.protocol.clone(),
-        "--dport".into(), mapping.host_port.to_string(),
-        "-j".into(), "DNAT".into(), "--to-destination".into(),
+        "iptables".into(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "OUTPUT".into(),
+        "-o".into(),
+        "lo".into(),
+        "-p".into(),
+        mapping.protocol.clone(),
+        "--dport".into(),
+        mapping.host_port.to_string(),
+        "-j".into(),
+        "DNAT".into(),
+        "--to-destination".into(),
         format!("{container_ip}:{}", mapping.container_port),
     ])
 }
@@ -468,8 +558,18 @@ mod tests {
         assert_eq!(
             cmd,
             vec![
-                "iptables", "-t", "nat", "-A", "POSTROUTING",
-                "-s", "10.0.0.0/24", "!", "-o", "ferro0", "-j", "MASQUERADE"
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-s",
+                "10.0.0.0/24",
+                "!",
+                "-o",
+                "ferro0",
+                "-j",
+                "MASQUERADE"
             ]
         );
     }
@@ -485,9 +585,21 @@ mod tests {
         assert_eq!(
             cmd,
             vec![
-                "iptables", "-t", "nat", "-A", "OUTPUT",
-                "-o", "lo", "-p", "tcp", "--dport", "8080",
-                "-j", "DNAT", "--to-destination", "10.0.0.2:80"
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "OUTPUT",
+                "-o",
+                "lo",
+                "-p",
+                "tcp",
+                "--dport",
+                "8080",
+                "-j",
+                "DNAT",
+                "--to-destination",
+                "10.0.0.2:80"
             ]
         );
     }
@@ -558,9 +670,11 @@ mod tests {
         let marker = plan.ownership_marker().unwrap();
 
         assert_eq!(marker, format!("ferrocrate:{firewall_id}"));
-        assert!(plan.commands().iter().filter(|command| {
-            command.iter().any(|argument| argument == "--comment")
-        }).all(|command| command.iter().any(|argument| argument == &marker)));
+        assert!(plan
+            .commands()
+            .iter()
+            .filter(|command| { command.iter().any(|argument| argument == "--comment") })
+            .all(|command| command.iter().any(|argument| argument == &marker)));
         assert!(plan.commands().iter().all(|command| {
             command
                 .iter()
@@ -585,10 +699,7 @@ mod tests {
             let rollback = plan.rollback_commands_for(index);
             assert_eq!(rollback.len(), 1);
             assert_eq!(rollback[0][..3], command[..3]);
-            assert_eq!(
-                rollback[0][3],
-                if command[3] == "-N" { "-X" } else { "-D" }
-            );
+            assert_eq!(rollback[0][3], if command[3] == "-N" { "-X" } else { "-D" });
         }
     }
 }

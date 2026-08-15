@@ -411,10 +411,22 @@ mod tests {
         let old = format!("sha256:{}", "a".repeat(64));
         let new = format!("sha256:{}", "b".repeat(64));
         store
-            .put_reference(&crate::authorization::surface::SurfaceMutationAuthority::for_test(), "repo/app:latest", &old, "test", "{}")
+            .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                "repo/app:latest",
+                &old,
+                "test",
+                "{}",
+            )
             .unwrap();
         store
-            .put_reference(&crate::authorization::surface::SurfaceMutationAuthority::for_test(), "repo/app:latest", &new, "test", "{}")
+            .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                "repo/app:latest",
+                &new,
+                "test",
+                "{}",
+            )
             .unwrap();
         assert_eq!(
             store
@@ -498,9 +510,7 @@ mod tests {
             .expect("store record");
 
         let removed = store
-            .prune_references(
-                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
-            )
+            .prune_references(&crate::authorization::surface::SurfaceMutationAuthority::for_test())
             .expect("prune");
         assert_eq!(removed, 2);
         let listed = store.list_references().expect("list");

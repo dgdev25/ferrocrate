@@ -166,7 +166,7 @@ impl NetdServer {
                     .and_then(EffectReceipt::route_interface)
                     .unwrap_or(&interfaces.wireguard);
                 self.kernel
-                    .remove_routes(route_interface, &routes)
+                    .remove_routes(route_interface, routes)
                     .map_err(|_| RejectionCode::Busy)?;
                 self.mark_overlay_intent(&identity, "routes_removed")
                     .map_err(|_| RejectionCode::Busy)?;

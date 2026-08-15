@@ -78,10 +78,7 @@ where
     }
     require_bytes(packet_len, ETHERNET_HEADER_LEN, ipv4_header_len)?;
 
-    let total_len = usize::from(read_be_u16(
-        &mut read_byte,
-        ETHERNET_HEADER_LEN + 2,
-    )?);
+    let total_len = usize::from(read_be_u16(&mut read_byte, ETHERNET_HEADER_LEN + 2)?);
     if total_len < ipv4_header_len {
         return Err(PacketError::InvalidIpv4Header);
     }
@@ -175,9 +172,7 @@ fn read_slice_u16(packet: &[u8], offset: usize) -> Result<u16, PacketError> {
 
 fn write_slice_u16(packet: &mut [u8], offset: usize, value: u16) -> Result<(), PacketError> {
     let end = checked_end(offset, 2)?;
-    let bytes = packet
-        .get_mut(offset..end)
-        .ok_or(PacketError::Truncated)?;
+    let bytes = packet.get_mut(offset..end).ok_or(PacketError::Truncated)?;
     bytes.copy_from_slice(&value.to_be_bytes());
     Ok(())
 }
@@ -213,29 +208,23 @@ fn rewrite_ipv4_address(
 
     let ipv4_checksum_offset = view.ipv4_offset + 10;
     let old_ipv4_checksum = read_slice_u16(packet, ipv4_checksum_offset)?;
-    let new_ipv4_checksum =
-        update_ipv4_checksum(old_ipv4_checksum, old_address, new_address);
+    let new_ipv4_checksum = update_ipv4_checksum(old_ipv4_checksum, old_address, new_address);
 
     let transport_checksum_offset = transport_checksum_offset(view);
     let old_transport_checksum = read_slice_u16(packet, transport_checksum_offset)?;
-    let new_transport_checksum = if view.transport == TransportProtocol::Udp
-        && old_transport_checksum == 0
-    {
-        0
-    } else {
-        normalize_udp_checksum(
-            view.transport,
-            update_transport_checksum(old_transport_checksum, old_address, new_address),
-        )
-    };
+    let new_transport_checksum =
+        if view.transport == TransportProtocol::Udp && old_transport_checksum == 0 {
+            0
+        } else {
+            normalize_udp_checksum(
+                view.transport,
+                update_transport_checksum(old_transport_checksum, old_address, new_address),
+            )
+        };
 
     packet[address_offset..address_end].copy_from_slice(&new_address);
     write_slice_u16(packet, ipv4_checksum_offset, new_ipv4_checksum)?;
-    write_slice_u16(
-        packet,
-        transport_checksum_offset,
-        new_transport_checksum,
-    )
+    write_slice_u16(packet, transport_checksum_offset, new_transport_checksum)
 }
 
 pub fn rewrite_ipv4_destination(
@@ -245,10 +234,7 @@ pub fn rewrite_ipv4_destination(
     rewrite_ipv4_address(packet, 16, new_address)
 }
 
-pub fn rewrite_ipv4_source(
-    packet: &mut [u8],
-    new_address: [u8; 4],
-) -> Result<(), PacketError> {
+pub fn rewrite_ipv4_source(packet: &mut [u8], new_address: [u8; 4]) -> Result<(), PacketError> {
     rewrite_ipv4_address(packet, 12, new_address)
 }
 

@@ -20,7 +20,10 @@ fn compose_project(root: &std::path::Path) -> std::path::PathBuf {
 fn live_web_record(
     root: &std::path::Path,
     witnessed: bool,
-) -> (ContainerRecord, std::thread::JoinHandle<std::process::ExitStatus>) {
+) -> (
+    ContainerRecord,
+    std::thread::JoinHandle<std::process::ExitStatus>,
+) {
     let child = Command::new("sleep").arg("60").spawn().unwrap();
     let pid = child.id();
     let reaper = std::thread::spawn(move || {
@@ -191,7 +194,10 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
             String::from_utf8_lossy(&output.stderr)
         );
         let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
-        assert!(store.get(&record.id).unwrap().is_none(), "{mode} retained record");
+        assert!(
+            store.get(&record.id).unwrap().is_none(),
+            "{mode} retained record"
+        );
     }
 
     let root = cli_fixture::configured_runtime("enforce");
@@ -203,7 +209,10 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .current_dir(&project)
         .env("FERROCRATE_RUNTIME_DIR", root.path())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "compose-enforce")
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "compose-enforce",
+        )
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
         .unwrap();
@@ -214,9 +223,14 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
-    assert!(store.get(&record.id).unwrap().is_some(), "enforce changed state");
+    assert!(
+        store.get(&record.id).unwrap().is_some(),
+        "enforce changed state"
+    );
     // The rejected mutation must not stop the real process either.
     assert!(std::path::Path::new(&format!("/proc/{}", record.pid)).exists());
-    let _ = Command::new("kill").args(["-TERM", &record.pid.to_string()]).status();
+    let _ = Command::new("kill")
+        .args(["-TERM", &record.pid.to_string()])
+        .status();
     reaper.join().unwrap();
 }

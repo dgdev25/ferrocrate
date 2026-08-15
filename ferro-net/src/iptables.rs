@@ -1,4 +1,6 @@
 /// Allowed iptables tables for security validation
+use crate::executor::{exec_cmd, ExecError};
+
 const ALLOWED_TABLES: &[&str] = &["filter", "nat", "mangle", "raw", "security"];
 
 /// Allowed iptables chains for security validation
@@ -152,4 +154,3 @@ mod tests {
         assert!(build_iptables_cmd(&rule).is_err());
     }
 }
-use crate::executor::{ExecError, exec_cmd};

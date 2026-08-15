@@ -370,7 +370,12 @@ fn provisioned_signing_key_disappearance_requires_new_named_key_and_trust_reset(
     let trust = TrustBundle::new([0x66; 16], old.verifying_key())
         .allow_epoch_reset(2, replacement.verifying_key());
     let report = CheckpointVerifier::new(trust)
-        .verify(&lineage_evidence(&root, &reset), &[root, reset], 41, Duration::from_secs(1))
+        .verify(
+            &lineage_evidence(&root, &reset),
+            &[root, reset],
+            41,
+            Duration::from_secs(1),
+        )
         .unwrap();
     assert_eq!(report.discontinuities, 1);
 }
@@ -1041,7 +1046,12 @@ fn independently_pinned_chunks_enforce_exact_boundary() {
     .unwrap();
     let first_evidence = publication_evidence(&first);
     CheckpointVerifier::new(TrustBundle::new([71; 16], key.verifying_key()).with_max_records(1))
-        .verify(&first_evidence, &[first.clone()], 1, Duration::from_secs(5))
+        .verify(
+            &first_evidence,
+            std::slice::from_ref(&first),
+            1,
+            Duration::from_secs(5),
+        )
         .unwrap();
     let predecessor = publication_hash(&first);
     let second = Checkpoint::sign_chunk_after(
@@ -1065,7 +1075,7 @@ fn independently_pinned_chunks_enforce_exact_boundary() {
     CheckpointVerifier::new(trust)
         .verify(
             &publication_evidence(&second),
-            &[second.clone()],
+            std::slice::from_ref(&second),
             2,
             Duration::from_secs(5),
         )

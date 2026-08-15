@@ -27,7 +27,5 @@ fn peer_accepts_only_routes_inside_the_assigned_overlay() {
         "198.51.100.7:51820".parse().unwrap(),
         vec!["10.44.0.2/32".parse().unwrap()],
     );
-    assert!(peer
-        .validate(&["10.44.0.0/24".parse().unwrap()])
-        .is_ok());
+    assert!(peer.validate(&["10.44.0.0/24".parse().unwrap()]).is_ok());
 }

@@ -34,7 +34,10 @@ pub struct CriIdentityPolicy {
 }
 impl CriIdentityPolicy {
     pub fn transport_only(id: impl Into<String>) -> Self {
-        Self { verifier: None, channel: id.into() }
+        Self {
+            verifier: None,
+            channel: id.into(),
+        }
     }
     pub fn with_signed_verifier(
         id: impl Into<String>,
@@ -685,7 +688,9 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
 pub async fn serve_disabled(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
     let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
         .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
-    let runtime = Arc::new(ferro_core::runtime::ContainerRuntime::new(Path::new(&runtime_dir))?);
+    let runtime = Arc::new(ferro_core::runtime::ContainerRuntime::new(Path::new(
+        &runtime_dir,
+    ))?);
     serve_configured(
         socket_path,
         CriIdentityPolicy::transport_only("cri:local-transport"),
@@ -734,7 +739,9 @@ async fn serve_configured(
     let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))?;
     let store = Arc::new(store);
     if delegation_enabled && identity_policy.verifier.is_none() {
-        return Err(CriError::Configuration("delegation verifier unavailable".into()));
+        return Err(CriError::Configuration(
+            "delegation verifier unavailable".into(),
+        ));
     }
     let authorization = Arc::new(control_runtime.surface_authorization()?);
     let runtime = CriRuntime::new(store.clone(), Arc::clone(&authorization))

@@ -13,16 +13,21 @@ fn parse_image_reference(input: &str) -> Result<ImageRef, String> {
     }
 
     // Check for invalid characters
-    if input.chars().any(|c| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_' && c != '/' && c != ':' && c != '@') {
+    if input.chars().any(|c| {
+        !c.is_alphanumeric() && c != '.' && c != '-' && c != '_' && c != '/' && c != ':' && c != '@'
+    }) {
         return Err("invalid character".to_string());
     }
 
     // Parse registry/host
     let (registry, rest) = if input.contains('/') {
         let parts: Vec<&str> = input.splitn(2, '/').collect();
-        if parts[0].contains(':') || parts[0].contains('.') {
-            (Some(parts[0].to_string()), parts[1])
-        } else if !parts[0].chars().all(|c| c.is_lowercase() || c.is_numeric() || c == '-' || c == '_') {
+        if parts[0].contains(':')
+            || parts[0].contains('.')
+            || !parts[0]
+                .chars()
+                .all(|c| c.is_lowercase() || c.is_numeric() || c == '-' || c == '_')
+        {
             (Some(parts[0].to_string()), parts[1])
         } else {
             (None, input)
@@ -100,7 +105,7 @@ proptest! {
         };
 
         let parsed = parse_image_reference(&original)
-            .map_err(|e| TestCaseError::fail(e))?;
+            .map_err(TestCaseError::fail)?;
         let roundtripped = parsed.to_string_ref();
 
         prop_assert_eq!(roundtripped, original);

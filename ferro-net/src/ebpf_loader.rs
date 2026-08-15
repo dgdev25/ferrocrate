@@ -1669,7 +1669,7 @@ fn create_directory_in(
         .expect("created directory guard")
         .capture_identity()?;
     inject_creation_failure(failure, CreationFailurePoint::AfterCapture)?;
-    let fd = match open_secure_child(
+    let fd = open_secure_child(
         parent.as_ref(),
         name,
         DirectoryPolicy {
@@ -1677,15 +1677,12 @@ fn create_directory_in(
             gid: policy.gid,
             mode: 0,
         },
-    ) {
-        Ok(fd) => fd,
-        Err(error) => return Err(error),
-    };
+    )?;
     slot.as_mut().expect("creation guard installed").fd = Some(Arc::new(fd));
     inject_creation_failure(failure, CreationFailurePoint::AfterOpen)?;
     let directory = slot.as_mut().expect("creation guard installed");
     let fd = directory.fd()?;
-    let opened = fstat(&fd).map_err(|error| directory_policy(name, error))?;
+    let opened = fstat(fd).map_err(|error| directory_policy(name, error))?;
     inject_creation_failure(failure, CreationFailurePoint::AfterFstat)?;
     let created = directory.created.as_ref().expect("created directory guard");
     if (FileIdentity {
@@ -1834,11 +1831,12 @@ fn directory_policy(path: impl ToString, reason: impl ToString) -> EbpfError {
 
 fn validate_attach_interface(interface: &str, expected_ifindex: u32) -> Result<(), EbpfError> {
     validate_component(interface)?;
-    let actual_ifindex = fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))
-        .map_err(|error| loader_error("read additional interface ifindex", error))?
-        .trim()
-        .parse::<u32>()
-        .map_err(|error| loader_error("parse additional interface ifindex", error))?;
+    let actual_ifindex =
+        fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))
+            .map_err(|error| loader_error("read additional interface ifindex", error))?
+            .trim()
+            .parse::<u32>()
+            .map_err(|error| loader_error("parse additional interface ifindex", error))?;
     if actual_ifindex != expected_ifindex {
         return Err(EbpfError::InterfaceMismatch {
             interface: interface.to_string(),

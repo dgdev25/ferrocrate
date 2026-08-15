@@ -19,11 +19,18 @@ pub struct RevocationService {
 }
 
 impl RevocationService {
-    pub fn new(store: Arc<ManagerStore>) -> Self { Self { store, revoked: Mutex::new(HashSet::new()) } }
+    pub fn new(store: Arc<ManagerStore>) -> Self {
+        Self {
+            store,
+            revoked: Mutex::new(HashSet::new()),
+        }
+    }
 
     pub fn revoke_node(&self, node_id: &str, reason: &str) -> Result<bool, RevocationError> {
         let mut revoked = self.revoked.lock().map_err(|_| RevocationError::Poisoned)?;
-        if !revoked.insert(node_id.into()) { return Ok(false); }
+        if !revoked.insert(node_id.into()) {
+            return Ok(false);
+        }
         if let Err(error) = self.store.revoke_node(node_id, reason) {
             revoked.remove(node_id);
             return Err(error.into());
@@ -31,5 +38,11 @@ impl RevocationService {
         Ok(true)
     }
 
-    pub fn is_revoked(&self, node_id: &str) -> Result<bool, RevocationError> { Ok(self.revoked.lock().map_err(|_| RevocationError::Poisoned)?.contains(node_id)) }
+    pub fn is_revoked(&self, node_id: &str) -> Result<bool, RevocationError> {
+        Ok(self
+            .revoked
+            .lock()
+            .map_err(|_| RevocationError::Poisoned)?
+            .contains(node_id))
+    }
 }

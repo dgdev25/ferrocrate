@@ -218,6 +218,7 @@ fn read_private_key(path: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> 
         .map_err(|_| "netd envelope signing key must contain exactly 32 bytes")?)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_control_stream(
     node_id: String,
     cluster_id: String,

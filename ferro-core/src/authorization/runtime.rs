@@ -753,6 +753,7 @@ fn lifecycle_state(status: &str) -> Option<ResourceState> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod recovery_tests {
     use super::*;
     use crate::authorization::policy::PolicyStore;
@@ -803,7 +804,7 @@ mod recovery_tests {
             ),
         ));
 
-        assert!(matches!(gate.admit(Action::ContainerRun), Err(_)));
+        assert!(gate.admit(Action::ContainerRun).is_err());
         assert!(gate.admit(Action::ContainerDelete).is_err());
         assert!(gate.admit(Action::ContainerStop).is_err());
         let operation = crate::witness::OperationId::from_bytes([1; 16]);

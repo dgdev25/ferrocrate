@@ -1135,7 +1135,9 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                         .parent()
                         .unwrap_or_else(|| Path::new("."))
                         .join("ferro-desktop-vm.log");
-                    command.arg("-serial").arg(format!("file:{}", log_path.display()));
+                    command
+                        .arg("-serial")
+                        .arg(format!("file:{}", log_path.display()));
                     let log_file = OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -1178,10 +1180,8 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     if !pid_alive(pid) {
                         state.pid = None;
                         state.status = "stopped".to_string();
-                        state.last_error = Some(format!(
-                            "vm exited early; see {}",
-                            log_path.display()
-                        ));
+                        state.last_error =
+                            Some(format!("vm exited early; see {}", log_path.display()));
                         save_vm_state(&state_path, &state)?;
                     }
                     Ok(())

@@ -77,6 +77,7 @@ pub fn resolve_reference(
     Ok(record)
 }
 
+#[allow(dead_code)]
 fn tag_image(
     store: &LocalImageStore,
     authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
@@ -182,7 +183,13 @@ mod tests {
             )
             .expect("seed source image");
 
-        tag_image(&store, &crate::authorization::surface::SurfaceMutationAuthority::for_test(), "alpine", "ghcr.io/acme/alpine:stable").expect("tag image");
+        tag_image(
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            "alpine",
+            "ghcr.io/acme/alpine:stable",
+        )
+        .expect("tag image");
 
         let resolved = resolve_reference(&store, "ghcr.io/acme/alpine:stable")
             .expect("resolve should succeed")
@@ -199,8 +206,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("open store");
 
-        let err = tag_image(&store, &crate::authorization::surface::SurfaceMutationAuthority::for_test(), "missing:latest", "acme/new:latest")
-            .expect_err("tagging should fail");
+        let err = tag_image(
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            "missing:latest",
+            "acme/new:latest",
+        )
+        .expect_err("tagging should fail");
 
         assert!(err.to_string().contains("source image not found"));
     }

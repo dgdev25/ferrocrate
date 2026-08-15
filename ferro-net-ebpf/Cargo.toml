@@ -5,11 +5,18 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# The eBPF binary is built only by ferro-net's aya-build invocation for the
+# bpfel/bpfeb no-std target.  Keeping it opt-in prevents host-only lint and
+# test commands from trying to link a no-std kernel program.
+bpf = []
+
 [[bin]]
 name = "ferro-net-ebpf"
 path = "src/main.rs"
 test = false
 bench = false
+required-features = ["bpf"]
 
 [dependencies]
 aya-ebpf = { workspace = true }

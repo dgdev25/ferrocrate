@@ -167,6 +167,7 @@ struct BuildCacheEntry {
     manifest_json: String,
 }
 
+#[allow(dead_code)]
 fn build_from_dockerfile(
     dockerfile_path: &Path,
     tag: Option<&str>,
@@ -182,6 +183,7 @@ fn build_from_dockerfile(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn build_from_dockerfile_with_compression(
     dockerfile_path: &Path,
     tag: Option<&str>,

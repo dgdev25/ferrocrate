@@ -241,8 +241,7 @@ impl Decision {
         DecisionMetrics {
             packet: direction.packet_counter(),
             outcome: actual.counter(),
-            translated: actual != Action::Drop
-                && !matches!(self.translation, Translation::None),
+            translated: actual != Action::Drop && !matches!(self.translation, Translation::None),
         }
     }
 }
@@ -321,18 +320,11 @@ fn valid_target(address: [u8; 4], port: u16) -> bool {
 }
 
 fn valid_external(external: ExternalNetwork) -> bool {
-    external.address != [0; 4]
-        && external.ifindex != 0
-        && external.next_hop_mac != [0; 6]
+    external.address != [0; 4] && external.ifindex != 0 && external.next_hop_mac != [0; 6]
 }
 
 #[inline(always)]
-pub fn snat_candidate(
-    packet: &Packet,
-    probe: u8,
-    range_start: u16,
-    range_end: u16,
-) -> Option<u16> {
+pub fn snat_candidate(packet: &Packet, probe: u8, range_start: u16, range_end: u16) -> Option<u16> {
     if !valid_snat_range(range_start, range_end) || probe >= SNAT_PROBE_LIMIT {
         return None;
     }

@@ -1,8 +1,10 @@
-use crate::linux_namespaces::{create_namespaces, NamespaceError, NamespaceType};
 use crate::authorization::{
-    surface::{SurfaceAuthorization, SurfaceAuthorizationError, SurfaceExecutionError, SurfacePermit},
+    surface::{
+        SurfaceAuthorization, SurfaceAuthorizationError, SurfaceExecutionError, SurfacePermit,
+    },
     Action, ResourceKind,
 };
+use crate::linux_namespaces::{create_namespaces, NamespaceError, NamespaceType};
 use nix::unistd::{Gid, Uid, User};
 use std::fs;
 use std::io;

@@ -37,6 +37,7 @@ struct BuildSpec {
     tag: Option<String>,
 }
 
+#[allow(dead_code)]
 fn build_from_ferrofile(
     ferrofile_path: &Path,
     runtime_dir: &Path,
@@ -46,6 +47,7 @@ fn build_from_ferrofile(
     build_from_ferrofile_with_store(ferrofile_path, runtime_dir, compression, None, authority)
 }
 
+#[allow(dead_code)]
 fn build_from_ferrofile_with_store(
     ferrofile_path: &Path,
     runtime_dir: &Path,
@@ -89,7 +91,13 @@ fn build_from_ferrofile_with_store(
             authority,
         )
     } else {
-        build_from_dockerfile_with_compression(&dockerfile_path, tag, runtime_dir, compression, authority)
+        build_from_dockerfile_with_compression(
+            &dockerfile_path,
+            tag,
+            runtime_dir,
+            compression,
+            authority,
+        )
     };
     result.map_err(Into::into)
 }

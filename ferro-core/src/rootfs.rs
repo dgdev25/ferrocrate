@@ -430,7 +430,10 @@ mod tests {
 
         let orig = rootfs.join("usr/bin/orig");
         let link = rootfs.join("usr/bin/link");
-        assert!(link.exists(), "hard link must be materialized inside the rootfs");
+        assert!(
+            link.exists(),
+            "hard link must be materialized inside the rootfs"
+        );
         assert_eq!(fs::read(&link).expect("read link"), b"shared-content");
         assert_eq!(
             fs::metadata(&orig).expect("orig meta").ino(),

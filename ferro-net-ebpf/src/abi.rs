@@ -179,10 +179,7 @@ impl MetaConfig {
                 bytes[META_SNAT_RANGE_END_OFFSET],
                 bytes[META_SNAT_RANGE_END_OFFSET + 1],
             ]),
-            flags: u16::from_be_bytes([
-                bytes[META_FLAGS_OFFSET],
-                bytes[META_FLAGS_OFFSET + 1],
-            ]),
+            flags: u16::from_be_bytes([bytes[META_FLAGS_OFFSET], bytes[META_FLAGS_OFFSET + 1]]),
         }
     }
 

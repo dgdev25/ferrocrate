@@ -1205,7 +1205,7 @@ mod tests {
         requests: u64,
     ) -> std::thread::JoinHandle<()> {
         let uid = nix::unistd::geteuid().as_raw();
-        let handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             super::super::emergency_sink::serve(super::super::emergency_sink::SinkServeConfig {
                 socket: &socket,
                 store: &store,
@@ -1215,8 +1215,7 @@ mod tests {
                 requests: Some(requests),
             })
             .unwrap();
-        });
-        handle
+        })
     }
 
     fn wait_for_socket(path: &Path) {

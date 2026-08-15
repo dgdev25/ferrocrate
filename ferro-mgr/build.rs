@@ -5,6 +5,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_with_config(config, &["proto/ferro/manager/v1/manager.proto"], &["proto"])?;
+        .compile_with_config(
+            config,
+            &["proto/ferro/manager/v1/manager.proto"],
+            &["proto"],
+        )?;
     Ok(())
 }

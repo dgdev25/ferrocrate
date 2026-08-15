@@ -138,12 +138,11 @@ pub fn delete_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
             stderr: err,
         })?;
     let output = exec_cmd_capture(&list_cmd)?;
-    let handles = nft_rule_handles_from_list(&output, rule).map_err(|err| {
-        ExecError::CommandFailed {
+    let handles =
+        nft_rule_handles_from_list(&output, rule).map_err(|err| ExecError::CommandFailed {
             cmd: "nft handle parse".to_string(),
             stderr: err,
-        }
-    })?;
+        })?;
     for handle in handles {
         let cmd = build_nft_delete_rule_handle_cmd(rule, handle).map_err(|err| {
             ExecError::CommandFailed {

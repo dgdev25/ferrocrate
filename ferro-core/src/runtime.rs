@@ -147,6 +147,7 @@ trait KernelResourceOps: Send + Sync {
         source: Option<(u64, u64, Option<u64>)>,
         fs_type: Option<&str>,
     ) -> Result<Option<ResourceIdentity>, ()>;
+    #[allow(clippy::too_many_arguments)]
     fn setup_network(
         &self,
         proof: &AuthorizedRequest,
@@ -797,7 +798,7 @@ impl CreationRollback {
         ) {
             retain_container_dir = true;
             log::warn!("[rollback] failed to clean network resources: {error}");
-            if let Some(container_dir) = self.container_dir.as_ref() {
+            if self.container_dir.is_some() {
                 let _ = self.persist_cleanup_journal();
             }
         }
@@ -862,10 +863,8 @@ impl CreationRollback {
             }
         }
 
-        if retain_container_dir {
-            if let Some(container_dir) = self.container_dir.as_ref() {
-                let _ = self.persist_cleanup_journal();
-            }
+        if retain_container_dir && self.container_dir.is_some() {
+            let _ = self.persist_cleanup_journal();
         }
 
         // Rollback container directory
@@ -3524,7 +3523,8 @@ fn production_authorization(
         crate::authorization::policy::PolicyStore::load(&policy_path)
             .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
     );
-    let enabled = policies.snapshot().document.mode != crate::authorization::AuthorizationMode::Disabled;
+    let enabled =
+        policies.snapshot().document.mode != crate::authorization::AuthorizationMode::Disabled;
     let mut admission = None;
     let journal = if !enabled {
         None
@@ -3570,80 +3570,139 @@ fn load_mutation_admission(
     journal_id: [u8; 16],
 ) -> Result<crate::authorization::admission::MutationAdmission, RuntimeError> {
     use sha2::Digest;
-    let directory = crate::authorization::SecureDirectory::open(&root.join("admission"))
-        .map_err(|error| RuntimeError::Authorization(format!("admission directory unavailable: {error}")))?;
-    let manifest_bytes = directory.read_bounded("manifest.json", 1024 * 1024)
-        .map_err(|error| RuntimeError::Authorization(format!("admission manifest unavailable: {error}")))?;
+    let directory =
+        crate::authorization::SecureDirectory::open(&root.join("admission")).map_err(|error| {
+            RuntimeError::Authorization(format!("admission directory unavailable: {error}"))
+        })?;
+    let manifest_bytes = directory
+        .read_bounded("manifest.json", 1024 * 1024)
+        .map_err(|error| {
+            RuntimeError::Authorization(format!("admission manifest unavailable: {error}"))
+        })?;
     let manifest: crate::authorization::admission::AdmissionSnapshotManifest =
-        serde_json::from_slice(&manifest_bytes)
-            .map_err(|error| RuntimeError::Authorization(format!("invalid admission manifest: {error}")))?;
+        serde_json::from_slice(&manifest_bytes).map_err(|error| {
+            RuntimeError::Authorization(format!("invalid admission manifest: {error}"))
+        })?;
     if manifest.schema != 1 || manifest.generation == 0 {
-        return Err(RuntimeError::Authorization("unsupported admission manifest".into()));
+        return Err(RuntimeError::Authorization(
+            "unsupported admission manifest".into(),
+        ));
     }
-    let expected_id = journal_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let expected_id = journal_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     if manifest.journal_id != expected_id || manifest.checkpoint_chain.is_empty() {
-        return Err(RuntimeError::Authorization("admission manifest journal/chain mismatch".into()));
+        return Err(RuntimeError::Authorization(
+            "admission manifest journal/chain mismatch".into(),
+        ));
     }
     let read_artifact = |artifact: &crate::authorization::admission::AdmissionArtifact, maximum| {
-        let bytes = directory.read_bounded(&artifact.file, maximum)
-            .map_err(|error| RuntimeError::Authorization(format!("admission artifact unavailable: {error}")))?;
-        let digest = sha2::Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let bytes = directory
+            .read_bounded(&artifact.file, maximum)
+            .map_err(|error| {
+                RuntimeError::Authorization(format!("admission artifact unavailable: {error}"))
+            })?;
+        let digest = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         if digest != artifact.sha256 {
-            return Err(RuntimeError::Authorization("admission artifact digest mismatch".into()));
+            return Err(RuntimeError::Authorization(
+                "admission artifact digest mismatch".into(),
+            ));
         }
         Ok(bytes)
     };
     let trust_bytes = read_artifact(&manifest.trust_bundle, 1024 * 1024)?;
     let trust_value: serde_json::Value = serde_json::from_slice(&trust_bytes)
         .map_err(|error| RuntimeError::Authorization(format!("invalid trust bundle: {error}")))?;
-    let pinned_id = trust_value.get("journal_id").and_then(serde_json::Value::as_str)
+    let pinned_id = trust_value
+        .get("journal_id")
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| RuntimeError::Authorization("trust bundle lacks journal_id".into()))?;
     if pinned_id != expected_id {
-        return Err(RuntimeError::Authorization("trust bundle journal ID mismatch".into()));
+        return Err(RuntimeError::Authorization(
+            "trust bundle journal ID mismatch".into(),
+        ));
     }
-    let public = trust_value.get("initial_public_key").and_then(serde_json::Value::as_str)
-        .ok_or_else(|| RuntimeError::Authorization("trust bundle lacks initial_public_key".into()))?;
+    let public = trust_value
+        .get("initial_public_key")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Authorization("trust bundle lacks initial_public_key".into())
+        })?;
     let public = decode_fixed_hex::<32>(public)?;
     let initial_key_id = sha2::Sha256::digest(public)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    if !manifest.trust_key_ids.iter().any(|key_id| key_id == &initial_key_id) {
-        return Err(RuntimeError::Authorization("admission manifest omits the initial trust key ID".into()));
+    if !manifest
+        .trust_key_ids
+        .iter()
+        .any(|key_id| key_id == &initial_key_id)
+    {
+        return Err(RuntimeError::Authorization(
+            "admission manifest omits the initial trust key ID".into(),
+        ));
     }
     let key = ed25519_dalek::VerifyingKey::from_bytes(&public)
         .map_err(|_| RuntimeError::Authorization("trust bundle public key is invalid".into()))?;
-    let minimum = crate::witness::Checkpoint::decode(&read_artifact(&manifest.minimum_checkpoint, 16 * 1024 * 1024)?)
-        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    let minimum = crate::witness::Checkpoint::decode(&read_artifact(
+        &manifest.minimum_checkpoint,
+        16 * 1024 * 1024,
+    )?)
+    .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
     let mut checkpoints = Vec::with_capacity(manifest.checkpoint_chain.len());
     for artifact in &manifest.checkpoint_chain {
-        checkpoints.push(crate::witness::Checkpoint::decode(&read_artifact(artifact, 16 * 1024 * 1024)?)
-            .map_err(|error| RuntimeError::Authorization(error.to_string()))?);
+        checkpoints.push(
+            crate::witness::Checkpoint::decode(&read_artifact(artifact, 16 * 1024 * 1024)?)
+                .map_err(|error| RuntimeError::Authorization(error.to_string()))?,
+        );
     }
-    let latest = checkpoints.last().ok_or_else(|| RuntimeError::Authorization("checkpoint chain is empty".into()))?;
-    if manifest.checkpoint_chain.last().map(|entry| entry.file.as_str())
+    let latest = checkpoints
+        .last()
+        .ok_or_else(|| RuntimeError::Authorization("checkpoint chain is empty".into()))?;
+    if manifest
+        .checkpoint_chain
+        .last()
+        .map(|entry| entry.file.as_str())
         != Some(manifest.latest_checkpoint.as_str())
         || latest.created_at_secs != manifest.latest_created_at_secs
     {
-        return Err(RuntimeError::Authorization("admission manifest latest checkpoint binding mismatch".into()));
+        return Err(RuntimeError::Authorization(
+            "admission manifest latest checkpoint binding mismatch".into(),
+        ));
     }
-    let confirmation = directory.read_bounded("manifest.json", 1024 * 1024)
+    let confirmation = directory
+        .read_bounded("manifest.json", 1024 * 1024)
         .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
-    let confirmed: crate::authorization::admission::AdmissionSnapshotManifest = serde_json::from_slice(&confirmation)
-        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    let confirmed: crate::authorization::admission::AdmissionSnapshotManifest =
+        serde_json::from_slice(&confirmation)
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
     if confirmed.generation != manifest.generation || confirmation != manifest_bytes {
-        return Err(RuntimeError::Authorization("admission manifest changed during load".into()));
+        return Err(RuntimeError::Authorization(
+            "admission manifest changed during load".into(),
+        ));
     }
-    Ok(crate::authorization::admission::MutationAdmission::verified(
-        root.join("witness-journal"), journal_id,
-        crate::witness::TrustBundle::new(journal_id, key), minimum, checkpoints,
-        std::time::Duration::from_secs(300), std::time::Duration::from_secs(60),
-    ))
+    Ok(
+        crate::authorization::admission::MutationAdmission::verified(
+            root.join("witness-journal"),
+            journal_id,
+            crate::witness::TrustBundle::new(journal_id, key),
+            minimum,
+            checkpoints,
+            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(60),
+        ),
+    )
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], RuntimeError> {
     if value.len() != N * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(RuntimeError::Authorization("invalid hexadecimal trust value".into()));
+        return Err(RuntimeError::Authorization(
+            "invalid hexadecimal trust value".into(),
+        ));
     }
     let mut out = [0; N];
     for (index, byte) in out.iter_mut().enumerate() {
@@ -4805,6 +4864,7 @@ impl NetworkSetup {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_network(
     proof: &AuthorizedRequest,
     intent: Option<&crate::witness::DurableIntent>,
@@ -5726,6 +5786,7 @@ fn observe_owned_ebpf_state(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_ebpf_backend(
     mut preparation: SharedEbpfPreparation,
     container_id: &str,
@@ -5751,7 +5812,7 @@ fn setup_ebpf_backend(
     };
 
     if let Some(prepared) = preparation.prepared.take() {
-        let mut network = prepared
+        let network = prepared
             .attach()
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
         let mut filters = shared_tc_filter_snapshot(&preparation.route.interface)?;
@@ -8070,6 +8131,7 @@ fn wireguard_peer_config() -> Result<Option<WireGuardPeerConfig>, RuntimeError> 
     }))
 }
 
+#[allow(dead_code)]
 fn run_cmd_capture_stdout(args: &[String]) -> Result<String, RuntimeError> {
     let (bin, rest) = parse_cmd_args(args)?;
     let output = Command::new(bin).args(rest).output()?;
@@ -8083,6 +8145,7 @@ fn run_cmd_capture_stdout(args: &[String]) -> Result<String, RuntimeError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[allow(dead_code)]
 fn run_cmd_with_stdin_capture_stdout(
     args: &[String],
     stdin_data: &str,
@@ -10102,9 +10165,11 @@ mod tests {
         let source = temp.path().join("source");
         std::fs::create_dir_all(&rootfs).unwrap();
         std::fs::create_dir_all(&source).unwrap();
-        let mut provenance = crate::container_store::CreationProvenance::default();
-        provenance.creator_operation_id = Some([8; 16]);
-        provenance.resource_generation = 1;
+        let provenance = crate::container_store::CreationProvenance {
+            creator_operation_id: Some([8; 16]),
+            resource_generation: 1,
+            ..crate::container_store::CreationProvenance::default()
+        };
         let mut rollback = super::CreationRollback::new(
             "mount-ledger",
             temp.path().into(),
@@ -11403,7 +11468,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             record.stdout_path = container_dir.join("stdout").display().to_string();
             record.stderr_path = container_dir.join("stderr").display().to_string();
             runtime.store.put(&record).unwrap();
-            if let Err(error) = runtime.restart(container_id, std::time::Duration::from_millis(10)) {
+            if let Err(error) = runtime.restart(container_id, std::time::Duration::from_millis(10))
+            {
                 let _ = signal_barrier(&signal_socket, &format!("error:{error}"));
             }
             let _ = old.kill();

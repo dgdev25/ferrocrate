@@ -199,7 +199,9 @@ pub fn is_rvf_image(path: &Path) -> bool {
         Err(_) => return false,
     };
     let mut magic = [0u8; 4];
-    f.read_exact(&mut magic).map(|_| &magic == RVF_MAGIC).unwrap_or(false)
+    f.read_exact(&mut magic)
+        .map(|_| &magic == RVF_MAGIC)
+        .unwrap_or(false)
 }
 
 /// Build an `.rvf` image from an already-completed OCI build result.

@@ -2,8 +2,8 @@
 //!
 //! Tests full workflows from pull to cleanup.
 
-use std::process::Command;
 use std::net::TcpListener;
+use std::process::Command;
 use std::time::Duration;
 
 /// Helper to run ferro-cli
@@ -69,7 +69,13 @@ fn wait_for_container(container_id: &str, state: &str, timeout: Duration) -> boo
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         let output = ferro_cli()
-            .args(["ps", "--filter", &format!("id={}", container_id), "--format", "{{.Status}}"])
+            .args([
+                "ps",
+                "--filter",
+                &format!("id={}", container_id),
+                "--format",
+                "{{.Status}}",
+            ])
             .output()
             .ok();
 
@@ -118,8 +124,14 @@ mod tests {
             normalize_netfilter_snapshot(before),
             normalize_netfilter_snapshot(counters_only)
         );
-        assert_ne!(normalize_netfilter_snapshot(before), normalize_netfilter_snapshot(added));
-        assert_ne!(normalize_netfilter_snapshot(before), normalize_netfilter_snapshot(deleted));
+        assert_ne!(
+            normalize_netfilter_snapshot(before),
+            normalize_netfilter_snapshot(added)
+        );
+        assert_ne!(
+            normalize_netfilter_snapshot(before),
+            normalize_netfilter_snapshot(deleted)
+        );
     }
 
     #[test]
@@ -153,12 +165,21 @@ CMD ["cat", "/hello.txt"]
         let build_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .current_dir(temp_dir.path())
-            .args(["build", "--dockerfile", "Dockerfile", "--tag", "test/cycle:latest"])
+            .args([
+                "build",
+                "--dockerfile",
+                "Dockerfile",
+                "--tag",
+                "test/cycle:latest",
+            ])
             .output()
             .expect("build");
 
-        assert!(build_output.status.success(), "Build should succeed: {}",
-            String::from_utf8_lossy(&build_output.stderr));
+        assert!(
+            build_output.status.success(),
+            "Build should succeed: {}",
+            String::from_utf8_lossy(&build_output.stderr)
+        );
 
         // Step 2: List images - should contain our image
         let images_output = ferro_cli()
@@ -178,7 +199,10 @@ CMD ["cat", "/hello.txt"]
             .expect("run");
 
         let run_stdout = String::from_utf8_lossy(&run_output.stdout);
-        assert!(run_stdout.contains("Hello from FerroCrate"), "Should see output");
+        assert!(
+            run_stdout.contains("Hello from FerroCrate"),
+            "Should see output"
+        );
 
         // Step 4: Verify cleanup (--rm should remove container)
         let ps_output = ferro_cli()
@@ -188,7 +212,10 @@ CMD ["cat", "/hello.txt"]
             .expect("ps");
 
         let containers = String::from_utf8_lossy(&ps_output.stdout);
-        assert!(!containers.contains("test/cycle"), "Container should be removed");
+        assert!(
+            !containers.contains("test/cycle"),
+            "Container should be removed"
+        );
     }
 
     #[test]
@@ -207,10 +234,14 @@ CMD ["cat", "/hello.txt"]
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "run",
-                "--name", "restart-test",
-                "-v", &format!("{}:/data", temp_dir.path().display()),
+                "--name",
+                "restart-test",
+                "-v",
+                &format!("{}:/data", temp_dir.path().display()),
                 "alpine:3.19",
-                "sh", "-c", "echo 'persistent' > /data/test.txt && sleep 60"
+                "sh",
+                "-c",
+                "echo 'persistent' > /data/test.txt && sleep 60",
             ])
             .output()
             .expect("run");
@@ -246,7 +277,10 @@ CMD ["cat", "/hello.txt"]
             .expect("exec");
 
         let content = String::from_utf8_lossy(&exec_output.stdout);
-        assert!(content.contains("persistent"), "Data should persist across restarts");
+        assert!(
+            content.contains("persistent"),
+            "Data should persist across restarts"
+        );
 
         // Cleanup
         let _ = ferro_cli()
@@ -270,9 +304,12 @@ CMD ["cat", "/hello.txt"]
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "run",
-                "--name", "commit-test",
+                "--name",
+                "commit-test",
                 "alpine:3.19",
-                "sh", "-c", "echo 'modified' > /modified.txt && sleep 60"
+                "sh",
+                "-c",
+                "echo 'modified' > /modified.txt && sleep 60",
             ])
             .output()
             .expect("run");
@@ -297,7 +334,10 @@ CMD ["cat", "/hello.txt"]
             .expect("images");
 
         let images = String::from_utf8_lossy(&images_output.stdout);
-        assert!(images.contains("test/committed:v1"), "Committed image should exist");
+        assert!(
+            images.contains("test/committed:v1"),
+            "Committed image should exist"
+        );
 
         // Cleanup
         let _ = ferro_cli()
@@ -326,10 +366,14 @@ CMD ["cat", "/hello.txt"]
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "run",
-                "--name", "ferro-e2e-web",
-                "--network", "bridge",
-                "--network-backend", "iptables",
-                "-p", "8080:80",
+                "--name",
+                "ferro-e2e-web",
+                "--network",
+                "bridge",
+                "--network-backend",
+                "iptables",
+                "-p",
+                "8080:80",
                 "docker.io/library/nginx:alpine",
             ])
             .output()
@@ -349,7 +393,13 @@ CMD ["cat", "/hello.txt"]
         let mut last_curl = None;
         while start.elapsed() < Duration::from_secs(12) {
             let curl_host = Command::new("curl")
-                .args(["--silent", "--fail", "--max-time", "2", "http://127.0.0.1:8080/"])
+                .args([
+                    "--silent",
+                    "--fail",
+                    "--max-time",
+                    "2",
+                    "http://127.0.0.1:8080/",
+                ])
                 .output()
                 .expect("curl must be present on host");
             if curl_host.status.success() {
@@ -371,8 +421,14 @@ CMD ["cat", "/hello.txt"]
         let exec_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
-                "exec", "ferro-e2e-web",
-                "wget", "-q", "-O", "-", "--timeout=5", "http://1.1.1.1/",
+                "exec",
+                "ferro-e2e-web",
+                "wget",
+                "-q",
+                "-O",
+                "-",
+                "--timeout=5",
+                "http://1.1.1.1/",
             ])
             .output()
             .expect("exec wget");
@@ -466,8 +522,14 @@ CMD ["cat", "/hello.txt"]
         );
 
         let during = netfilter_snapshot();
-        assert_eq!(before.0, during.0, "eBPF setup changed the iptables ruleset");
-        assert_eq!(before.1, during.1, "eBPF setup changed the nftables ruleset");
+        assert_eq!(
+            before.0, during.0,
+            "eBPF setup changed the iptables ruleset"
+        );
+        assert_eq!(
+            before.1, during.1,
+            "eBPF setup changed the nftables ruleset"
+        );
 
         let egress = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
@@ -500,7 +562,13 @@ CMD ["cat", "/hello.txt"]
             String::from_utf8_lossy(&cleanup.stderr)
         );
         let after = netfilter_snapshot();
-        assert_eq!(before.0, after.0, "eBPF cleanup changed the iptables ruleset");
-        assert_eq!(before.1, after.1, "eBPF cleanup changed the nftables ruleset");
+        assert_eq!(
+            before.0, after.0,
+            "eBPF cleanup changed the iptables ruleset"
+        );
+        assert_eq!(
+            before.1, after.1,
+            "eBPF cleanup changed the nftables ruleset"
+        );
     }
 }

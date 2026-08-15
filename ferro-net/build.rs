@@ -40,6 +40,7 @@ fn main() {
         [Package {
             name: BPF_PACKAGE,
             root_dir: "../ferro-net-ebpf",
+            features: &["bpf"],
             ..Package::default()
         }],
         Toolchain::Custom(BPF_TOOLCHAIN),

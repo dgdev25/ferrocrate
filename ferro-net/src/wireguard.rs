@@ -54,10 +54,15 @@ impl WireGuardPeer {
             return Err(WireGuardError::InvalidPeer("invalid endpoint".to_string()));
         }
         if self.allowed_ips.is_empty() {
-            return Err(WireGuardError::InvalidPeer("peer has no allowed IPs".to_string()));
+            return Err(WireGuardError::InvalidPeer(
+                "peer has no allowed IPs".to_string(),
+            ));
         }
         for route in &self.allowed_ips {
-            if !assigned_subnets.iter().any(|assigned| subnet_contains(assigned, route)) {
+            if !assigned_subnets
+                .iter()
+                .any(|assigned| subnet_contains(assigned, route))
+            {
                 return Err(WireGuardError::RouteOutsideAllocation(route.to_string()));
             }
         }
@@ -120,8 +125,22 @@ impl WireGuardManager {
             let _ = fs::remove_file(&path);
             apply?;
             for address in &config.addresses {
-                self.run(&["ip", "address", "replace", &address.to_string(), "dev", &config.name])?;
-                self.run(&["ip", "route", "replace", &address.to_string(), "dev", &config.name])?;
+                self.run(&[
+                    "ip",
+                    "address",
+                    "replace",
+                    &address.to_string(),
+                    "dev",
+                    &config.name,
+                ])?;
+                self.run(&[
+                    "ip",
+                    "route",
+                    "replace",
+                    &address.to_string(),
+                    "dev",
+                    &config.name,
+                ])?;
             }
             self.run(&["ip", "link", "set", &config.name, "up"])
         })();
@@ -198,8 +217,17 @@ impl WireGuardManager {
         self.write_private_file(interface, "conf", contents)
     }
 
-    fn write_private_file(&self, interface: &str, extension: &str, contents: &str) -> Result<PathBuf, WireGuardError> {
-        let path = std::env::temp_dir().join(format!("ferrocrate-{interface}-{}.{}", std::process::id(), extension));
+    fn write_private_file(
+        &self,
+        interface: &str,
+        extension: &str,
+        contents: &str,
+    ) -> Result<PathBuf, WireGuardError> {
+        let path = std::env::temp_dir().join(format!(
+            "ferrocrate-{interface}-{}.{}",
+            std::process::id(),
+            extension
+        ));
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -215,7 +243,9 @@ impl WireGuardManager {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
-            Err(WireGuardError::Command(String::from_utf8_lossy(&output.stderr).trim().to_string()))
+            Err(WireGuardError::Command(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
         }
     }
 
@@ -238,22 +268,31 @@ impl WireGuardManager {
     }
 }
 
-fn validate_config(config: &WireGuardInterfaceConfig, peers: &[WireGuardPeer]) -> Result<(), WireGuardError> {
+fn validate_config(
+    config: &WireGuardInterfaceConfig,
+    peers: &[WireGuardPeer],
+) -> Result<(), WireGuardError> {
     validate_interface_name(&config.name)
         .map_err(|error| WireGuardError::InvalidInterface(error.to_string()))?;
     if config.listen_port == 0 || config.addresses.is_empty() {
-        return Err(WireGuardError::InvalidInterface("missing listen port or addresses".to_string()));
+        return Err(WireGuardError::InvalidInterface(
+            "missing listen port or addresses".to_string(),
+        ));
     }
     validate_private_key_path(&config.private_key_path)?;
     if peers.len() > MAX_PEERS {
-        return Err(WireGuardError::InvalidPeer("peer limit exceeded".to_string()));
+        return Err(WireGuardError::InvalidPeer(
+            "peer limit exceeded".to_string(),
+        ));
     }
     let mut routes = std::collections::BTreeSet::new();
     for peer in peers {
         peer.validate(&config.addresses)?;
         for route in &peer.allowed_ips {
             if !routes.insert(route.to_string()) {
-                return Err(WireGuardError::InvalidPeer(format!("duplicate allowed IP {route}")));
+                return Err(WireGuardError::InvalidPeer(format!(
+                    "duplicate allowed IP {route}"
+                )));
             }
         }
     }
@@ -261,27 +300,54 @@ fn validate_config(config: &WireGuardInterfaceConfig, peers: &[WireGuardPeer]) -
 }
 
 fn validate_private_key_path(path: &Path) -> Result<(), WireGuardError> {
-    let metadata = fs::metadata(path).map_err(|_| WireGuardError::UnsafeKeyPath(path.display().to_string()))?;
-    if !metadata.is_file() || metadata.mode() & 0o077 != 0 || metadata.uid() != nix::unistd::Uid::effective().as_raw() {
+    let metadata = fs::metadata(path)
+        .map_err(|_| WireGuardError::UnsafeKeyPath(path.display().to_string()))?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o077 != 0
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+    {
         return Err(WireGuardError::UnsafeKeyPath(path.display().to_string()));
     }
     validate_key(fs::read_to_string(path)?.trim())
 }
 
 fn validate_key(key: &str) -> Result<(), WireGuardError> {
-    if key.len() != 44 || !key.ends_with('=') || !key[..43].chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/') {
-        return Err(WireGuardError::InvalidKey("expected base64-encoded Curve25519 key".to_string()));
+    if key.len() != 44
+        || !key.ends_with('=')
+        || !key[..43]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/')
+    {
+        return Err(WireGuardError::InvalidKey(
+            "expected base64-encoded Curve25519 key".to_string(),
+        ));
     }
     Ok(())
 }
 
-fn render_syncconf(config: &WireGuardInterfaceConfig, peers: &[WireGuardPeer]) -> Result<String, WireGuardError> {
+fn render_syncconf(
+    config: &WireGuardInterfaceConfig,
+    peers: &[WireGuardPeer],
+) -> Result<String, WireGuardError> {
     let private_key = fs::read_to_string(&config.private_key_path)?;
     validate_key(private_key.trim())?;
-    let mut rendered = format!("[Interface]\nPrivateKey = {}\nListenPort = {}\n", private_key.trim(), config.listen_port);
+    let mut rendered = format!(
+        "[Interface]\nPrivateKey = {}\nListenPort = {}\n",
+        private_key.trim(),
+        config.listen_port
+    );
     for peer in peers {
         rendered.push_str("\n[Peer]\n");
-        rendered.push_str(&format!("PublicKey = {}\nEndpoint = {}\nAllowedIPs = {}\n", peer.public_key, peer.endpoint, peer.allowed_ips.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")));
+        rendered.push_str(&format!(
+            "PublicKey = {}\nEndpoint = {}\nAllowedIPs = {}\n",
+            peer.public_key,
+            peer.endpoint,
+            peer.allowed_ips
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         if let Some(keepalive) = peer.persistent_keepalive_secs {
             rendered.push_str(&format!("PersistentKeepalive = {keepalive}\n"));
         }
@@ -304,18 +370,33 @@ fn is_unspecified_or_multicast(ip: IpAddr) -> bool {
 mod tests {
     use super::*;
 
-    fn key() -> String { "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string() }
+    fn key() -> String {
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()
+    }
 
     #[test]
     fn peer_rejects_default_route_when_not_authorized() {
-        let peer = WireGuardPeer::new("node-a".to_string(), key(), "198.51.100.7:51820".parse().unwrap(), vec!["0.0.0.0/0".parse().unwrap()]);
+        let peer = WireGuardPeer::new(
+            "node-a".to_string(),
+            key(),
+            "198.51.100.7:51820".parse().unwrap(),
+            vec!["0.0.0.0/0".parse().unwrap()],
+        );
         let assigned = vec!["10.44.0.0/24".parse().unwrap()];
-        assert!(matches!(peer.validate(&assigned), Err(WireGuardError::RouteOutsideAllocation(_))));
+        assert!(matches!(
+            peer.validate(&assigned),
+            Err(WireGuardError::RouteOutsideAllocation(_))
+        ));
     }
 
     #[test]
     fn peer_accepts_owned_subnet() {
-        let peer = WireGuardPeer::new("node-a".to_string(), key(), "198.51.100.7:51820".parse().unwrap(), vec!["10.44.0.2/32".parse().unwrap()]);
+        let peer = WireGuardPeer::new(
+            "node-a".to_string(),
+            key(),
+            "198.51.100.7:51820".parse().unwrap(),
+            vec!["10.44.0.2/32".parse().unwrap()],
+        );
         assert!(peer.validate(&["10.44.0.0/24".parse().unwrap()]).is_ok());
     }
 }

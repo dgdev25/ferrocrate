@@ -126,7 +126,8 @@ impl VectorMemory {
         {
             let mut db_guard = self.db_cosine.write();
             if db_guard.is_none() {
-                *db_guard = Some(self.init_db(dimensions, ruvector_core::types::DistanceMetric::Cosine));
+                *db_guard =
+                    Some(self.init_db(dimensions, ruvector_core::types::DistanceMetric::Cosine));
             }
         }
 

@@ -28,7 +28,9 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
         let runtime = ContainerRuntime::new(runtime_dir.path())
             .expect("construct production runtime")
             .with_request_origin(origin.clone());
-        let surface = runtime.surface_authorization().expect("surface authorization");
+        let surface = runtime
+            .surface_authorization()
+            .expect("surface authorization");
         let permit = surface.authorize_named(
             &origin,
             Action::RootlessMapping,
@@ -41,7 +43,10 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
                 Ok(_) => panic!("enforce must deny before namespace mutation"),
                 Err(error) => error.to_string(),
             };
-            assert!(error.contains("PolicyDenied"), "stable enforce error: {error}");
+            assert!(
+                error.contains("PolicyDenied"),
+                "stable enforce error: {error}"
+            );
         } else {
             let permit = permit.unwrap_or_else(|error| {
                 panic!("{mode} compatibility mode admits rootless mapping: {error}")
@@ -64,8 +69,10 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
             result.expect("apply production rootless mapping to real child procfs");
         }
         ferro_core::observability::persist_authorization_fixture_evidence(
-            &format!("rootless-{mode}"), before,
+            &format!("rootless-{mode}"),
+            before,
             ferro_core::observability::authorization_metrics_snapshot(),
-        ).expect("persist rootless qualification evidence");
+        )
+        .expect("persist rootless qualification evidence");
     }
 }

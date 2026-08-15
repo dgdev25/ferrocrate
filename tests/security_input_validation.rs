@@ -25,7 +25,6 @@ pub const IMAGE_NAME_TEST_CASES: &[SecurityTestCase] = &[
         input: "image.tar\x00../../../etc/passwd",
         expected_error: "null byte",
     },
-
     // Command Injection
     SecurityTestCase {
         name: "command_injection_semicolon",
@@ -47,7 +46,6 @@ pub const IMAGE_NAME_TEST_CASES: &[SecurityTestCase] = &[
         input: "ubuntu$(id)",
         expected_error: "invalid character",
     },
-
     // Shell Metacharacters
     SecurityTestCase {
         name: "shell_ampersand",
@@ -64,7 +62,6 @@ pub const IMAGE_NAME_TEST_CASES: &[SecurityTestCase] = &[
         input: "ubuntu\nRUN cat /etc/shadow",
         expected_error: "newline",
     },
-
     // Image Name Attacks
     SecurityTestCase {
         name: "image_name_unicode",
@@ -126,10 +123,9 @@ pub fn validate_image_name(input: &str) -> Result<String, String> {
     }
 
     // Validate format
-    if !input.chars().all(|c|
-        c.is_alphanumeric() ||
-        c == '.' || c == '-' || c == '_' || c == '/' || c == ':' || c == '@'
-    ) {
+    if !input.chars().all(|c| {
+        c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == '/' || c == ':' || c == '@'
+    }) {
         return Err("invalid character in image name".to_string());
     }
 
@@ -177,9 +173,9 @@ mod tests {
             );
             let error = result.unwrap_err();
             assert!(
-                error.to_lowercase().contains(case.expected_error) ||
-                error.to_lowercase().contains("dangerous") ||
-                error.to_lowercase().contains("invalid"),
+                error.to_lowercase().contains(case.expected_error)
+                    || error.to_lowercase().contains("dangerous")
+                    || error.to_lowercase().contains("invalid"),
                 "Test '{}' expected error containing '{}', got: {}",
                 case.name,
                 case.expected_error,
@@ -203,8 +199,8 @@ mod tests {
             );
             let error = result.unwrap_err();
             assert!(
-                error.to_lowercase().contains(case.expected_error) ||
-                error.to_lowercase().contains("not allowed"),
+                error.to_lowercase().contains(case.expected_error)
+                    || error.to_lowercase().contains("not allowed"),
                 "Test '{}' expected error containing '{}', got: {}",
                 case.name,
                 case.expected_error,

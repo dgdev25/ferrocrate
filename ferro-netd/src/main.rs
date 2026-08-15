@@ -182,6 +182,7 @@ fn load_grant_verifier(
     Ok(verifier)
 }
 
+#[allow(dead_code)]
 fn receive_prefix_without_descriptors(
     stream: &std::os::unix::net::UnixStream,
     prefix: &mut [u8; 4],
@@ -209,6 +210,7 @@ fn receive_prefix_without_descriptors(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn receive_body_without_descriptors(
     stream: &std::os::unix::net::UnixStream,
     body: &mut [u8],
@@ -238,6 +240,7 @@ fn receive_body_without_descriptors(
     Ok(())
 }
 
+#[allow(dead_code)]
 struct AuthenticatedPeer {
     _pidfd: std::os::fd::OwnedFd,
     pid: i32,
@@ -245,6 +248,7 @@ struct AuthenticatedPeer {
     start_time: String,
 }
 
+#[allow(dead_code)]
 impl AuthenticatedPeer {
     fn still_valid(&self) -> bool {
         read_peer_identity(self.pid)
@@ -252,6 +256,7 @@ impl AuthenticatedPeer {
     }
 }
 
+#[allow(dead_code)]
 fn authenticate_peer_process(
     pid: i32,
     expected: &std::path::Path,
@@ -274,6 +279,7 @@ fn authenticate_peer_process(
     })
 }
 
+#[allow(dead_code)]
 fn read_peer_identity(pid: i32) -> Result<(std::path::PathBuf, String), ()> {
     let actual = fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| ())?;
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
@@ -287,6 +293,7 @@ fn read_peer_identity(pid: i32) -> Result<(std::path::PathBuf, String), ()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{authenticate_peer_process, receive_prefix_without_descriptors};
 

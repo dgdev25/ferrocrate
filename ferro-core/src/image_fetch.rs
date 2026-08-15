@@ -152,6 +152,7 @@ pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, Image
     ImageFetchPlan::from_resolved_manifest(image, &manifest_json)
 }
 
+#[allow(dead_code)]
 fn pull_image(
     runtime_dir: &Path,
     image: &str,
@@ -381,6 +382,7 @@ pub fn pull_image_with_store_authorized(
     }
 }
 
+#[allow(dead_code)]
 fn pull_manifest_only(
     runtime_dir: &Path,
     image: &str,
@@ -390,6 +392,7 @@ fn pull_manifest_only(
     pull_manifest_only_with_store(runtime_dir, image, &store, authority)
 }
 
+#[allow(dead_code)]
 fn pull_manifest_only_with_store(
     runtime_dir: &Path,
     image: &str,
@@ -663,8 +666,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalImageStore::open(temp.path().join("images")).unwrap();
 
-        let error = pull_planned_image_with_store(temp.path(), &plan, &store, &crate::authorization::surface::SurfaceMutationAuthority::for_test())
-            .expect_err("swapped manifest must fail closed");
+        let error = pull_planned_image_with_store(
+            temp.path(),
+            &plan,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect_err("swapped manifest must fail closed");
 
         assert!(matches!(error, ImageFetchError::StaleBinding(_)));
         assert!(store.list_references().unwrap().is_empty());
@@ -675,7 +683,9 @@ mod tests {
     fn planned_pull_publishes_reference_only_after_verified_objects() {
         let server = Server::run();
         let config_digest = format!("sha256:{:x}", Sha256::digest(b"expected"));
-        let manifest = format!(r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":8}},"layers":[]}}"#);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":8}},"layers":[]}}"#
+        );
         let image = format!("{}/library/atomic:latest", server.addr());
         let plan = ImageFetchPlan::from_resolved_manifest(&image, &manifest).unwrap();
         server.expect(
@@ -728,7 +738,12 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let image = format!("{}/library/alpine", server.addr());
-        let result = pull_image(temp.path(), &image, &crate::authorization::surface::SurfaceMutationAuthority::for_test()).expect("pull image");
+        let result = pull_image(
+            temp.path(),
+            &image,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("pull image");
         assert_eq!(result.layer_paths.len(), 1);
         let content = fs::read_to_string(&result.layer_paths[0]).expect("blob content");
         assert_eq!(content, "TEST");
@@ -783,7 +798,12 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let image = format!("{}/library/busybox", server.addr());
-        pull_manifest_only(temp.path(), &image, &crate::authorization::surface::SurfaceMutationAuthority::for_test()).expect("pull manifest only");
+        pull_manifest_only(
+            temp.path(),
+            &image,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("pull manifest only");
         let blob_root = temp.path().join("images").join("blobs");
         let layer_path = blob_root
             .join("sha256_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");

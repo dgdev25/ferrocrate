@@ -83,16 +83,12 @@ pub enum NetdRequest {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayMode {
     WireGuard,
+    #[default]
     BridgeOnly,
-}
-impl Default for OverlayMode {
-    fn default() -> Self {
-        Self::BridgeOnly
-    }
 }
 impl OverlayMode {
     pub const fn as_str(self) -> &'static str {

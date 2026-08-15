@@ -11,6 +11,8 @@ use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
 use rvf_runtime::options::DistanceMetric as RvfDistanceMetric;
 #[cfg(feature = "rvf-persistence")]
 use rvf_runtime::{RvfOptions, RvfStore};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 #[cfg(feature = "rvf-persistence")]
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
@@ -22,8 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 
 /// Model types that can be trained
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -532,7 +532,12 @@ impl TrainingPipeline {
     }
 
     /// Save model to disk
-    fn save_model(&self, path: &Path, model_type: ModelType, model: &TrainedModel) -> Result<(), TrainingError> {
+    fn save_model(
+        &self,
+        path: &Path,
+        model_type: ModelType,
+        model: &TrainedModel,
+    ) -> Result<(), TrainingError> {
         // CQ-01: Handle paths without parent directory
         let parent = path.parent().ok_or_else(|| {
             TrainingError::Io(std::io::Error::new(
@@ -1466,7 +1471,11 @@ mod tests {
                     }),
                     _ => serde_json::json!({"sample": i}),
                 };
-                fs::write(data_dir.join(format!("sample_{}.json", i)), sample.to_string()).unwrap();
+                fs::write(
+                    data_dir.join(format!("sample_{}.json", i)),
+                    sample.to_string(),
+                )
+                .unwrap();
             }
         }
 
@@ -1778,10 +1787,7 @@ pub mod quantize {
     ///
     /// # Errors
     /// Returns `Err` if `vectors` is empty.
-    pub fn train_quantizer(
-        vectors: &[Vec<f32>],
-        _method: Method,
-    ) -> Result<QuantSummary, String> {
+    pub fn train_quantizer(vectors: &[Vec<f32>], _method: Method) -> Result<QuantSummary, String> {
         if vectors.is_empty() {
             return Err("cannot train quantizer: no vectors provided".to_string());
         }

@@ -15,25 +15,20 @@ pub enum AiRuntimeError {
 }
 
 /// Authority level for an AI agent container.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Authority {
     /// Restricted: guest seccomp profile, no network syscalls.
     Guest,
     /// Default seccomp profile, standard container isolation.
+    #[default]
     User,
     /// Unconfined: no additional seccomp restrictions beyond the default.
     Admin,
 }
 
-impl Default for Authority {
-    fn default() -> Self {
-        Self::User
-    }
-}
-
 /// Configuration parsed from the `[ai_runtime]` section of a ferrofile.toml.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRuntimeConfig {
     #[serde(default)]
     pub authority: Authority,
@@ -49,17 +44,6 @@ pub struct AiRuntimeConfig {
     /// - `"vector_store_healthy"`: requires `FERRO_VECTOR_STORE_PATH` env var to be set
     #[serde(default)]
     pub coherence_gates: Vec<String>,
-}
-
-impl Default for AiRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            authority: Authority::default(),
-            token_budget: 0,
-            memory_budget_mb: 0,
-            coherence_gates: Vec::new(),
-        }
-    }
 }
 
 /// Metered token counter for enforcing `token_budget`.
@@ -105,10 +89,7 @@ impl TokenBudgetCounter {
 /// Supported gates:
 /// - `"model_loaded"` — requires `FERRO_MODEL_PATH` in `env`
 /// - `"vector_store_healthy"` — requires `FERRO_VECTOR_STORE_PATH` in `env`
-pub fn check_coherence_gates(
-    gates: &[String],
-    env: &[String],
-) -> Result<(), AiRuntimeError> {
+pub fn check_coherence_gates(gates: &[String], env: &[String]) -> Result<(), AiRuntimeError> {
     for gate in gates {
         match gate.as_str() {
             "model_loaded" => {
@@ -154,7 +135,10 @@ pub fn ai_runtime_env(config: &AiRuntimeConfig) -> Vec<String> {
         out.push(format!("FERRO_TOKEN_BUDGET={}", config.token_budget));
     }
     if config.memory_budget_mb > 0 {
-        out.push(format!("FERRO_MEMORY_BUDGET_MB={}", config.memory_budget_mb));
+        out.push(format!(
+            "FERRO_MEMORY_BUDGET_MB={}",
+            config.memory_budget_mb
+        ));
     }
     out
 }
@@ -211,9 +195,7 @@ mod tests {
     #[test]
     fn coherence_gate_vector_store_passes() {
         let env = vec!["FERRO_VECTOR_STORE_PATH=/data/store".to_string()];
-        assert!(
-            check_coherence_gates(&["vector_store_healthy".to_string()], &env).is_ok()
-        );
+        assert!(check_coherence_gates(&["vector_store_healthy".to_string()], &env).is_ok());
     }
 
     #[test]

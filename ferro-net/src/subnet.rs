@@ -13,7 +13,11 @@ pub fn network_cidr_v4(gateway: &str, prefix: u8) -> Result<String, String> {
         .parse()
         .map_err(|_| format!("invalid ipv4 gateway: {gateway}"))?;
     let bits = u32::from(addr);
-    let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
     let network = Ipv4Addr::from(bits & mask);
     Ok(format!("{network}/{prefix}"))
 }

@@ -219,7 +219,10 @@ impl EbpfNetwork {
         Self::prepare_with(kernel, config)?.attach()
     }
 
-    fn prepare_with<K>(kernel: K, config: EbpfNetworkConfig) -> Result<PreparedEbpfNetwork, EbpfError>
+    fn prepare_with<K>(
+        kernel: K,
+        config: EbpfNetworkConfig,
+    ) -> Result<PreparedEbpfNetwork, EbpfError>
     where
         K: KernelAdapter + 'static,
     {
@@ -460,13 +463,14 @@ fn verified_map_data(
         map: map_name,
         reason: error.to_string(),
     })?;
-    let actual_map_id = data.info().map(|info| info.id()).map_err(|error| {
-        EbpfError::MapOperation {
-            operation: "read verified pinned map identity",
-            map: map_name,
-            reason: error.to_string(),
-        }
-    })?;
+    let actual_map_id =
+        data.info()
+            .map(|info| info.id())
+            .map_err(|error| EbpfError::MapOperation {
+                operation: "read verified pinned map identity",
+                map: map_name,
+                reason: error.to_string(),
+            })?;
     if actual_map_id != expected_map_id {
         return Err(EbpfError::MapOperation {
             operation: "verify pinned ownership",
@@ -485,13 +489,14 @@ fn update_verified_hash<const K: usize, const V: usize>(
     value: [u8; V],
 ) -> Result<(), EbpfError> {
     let map_data = aya::maps::Map::HashMap(verified_map_data(network_id, identity, map_name)?);
-    let mut map = aya::maps::HashMap::<_, [u8; K], [u8; V]>::try_from(map_data).map_err(
-        |error| EbpfError::MapOperation {
-            operation: "reopen verified pinned map",
-            map: map_name,
-            reason: error.to_string(),
-        },
-    )?;
+    let mut map =
+        aya::maps::HashMap::<_, [u8; K], [u8; V]>::try_from(map_data).map_err(|error| {
+            EbpfError::MapOperation {
+                operation: "reopen verified pinned map",
+                map: map_name,
+                reason: error.to_string(),
+            }
+        })?;
     map.insert(key, value, 0)
         .map_err(|error| EbpfError::MapOperation {
             operation: "update verified pinned key",
@@ -501,13 +506,18 @@ fn update_verified_hash<const K: usize, const V: usize>(
 }
 
 fn verify_pinned_tree(identity: &PinnedNetworkIdentity) -> Result<(), EbpfError> {
-    fn visit(root: &Path, path: &Path, observed: &mut Vec<PinnedObjectIdentity>) -> Result<(), EbpfError> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        observed: &mut Vec<PinnedObjectIdentity>,
+    ) -> Result<(), EbpfError> {
         use std::os::unix::fs::MetadataExt as _;
-        let metadata = std::fs::symlink_metadata(path).map_err(|error| EbpfError::MapOperation {
-            operation: "verify pinned ownership",
-            map: "pin tree",
-            reason: error.to_string(),
-        })?;
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|error| EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: error.to_string(),
+            })?;
         if metadata.file_type().is_symlink() {
             return Err(EbpfError::MapOperation {
                 operation: "verify pinned ownership",
@@ -515,11 +525,13 @@ fn verify_pinned_tree(identity: &PinnedNetworkIdentity) -> Result<(), EbpfError>
                 reason: format!("symlink in pin tree: {}", path.display()),
             });
         }
-        let relative = path.strip_prefix(root).map_err(|error| EbpfError::MapOperation {
-            operation: "verify pinned ownership",
-            map: "pin tree",
-            reason: error.to_string(),
-        })?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| EbpfError::MapOperation {
+                operation: "verify pinned ownership",
+                map: "pin tree",
+                reason: error.to_string(),
+            })?;
         let persisted = PinnedObjectIdentity {
             relative_path: relative.display().to_string(),
             device: metadata.dev(),
@@ -585,13 +597,14 @@ fn delete_verified_hash<const K: usize, const V: usize>(
     key: [u8; K],
 ) -> Result<(), EbpfError> {
     let map_data = aya::maps::Map::HashMap(verified_map_data(network_id, identity, map_name)?);
-    let mut map = aya::maps::HashMap::<_, [u8; K], [u8; V]>::try_from(map_data).map_err(|error| {
-        EbpfError::MapOperation {
-            operation: "reopen verified pinned map",
-            map: map_name,
-            reason: error.to_string(),
-        }
-    })?;
+    let mut map =
+        aya::maps::HashMap::<_, [u8; K], [u8; V]>::try_from(map_data).map_err(|error| {
+            EbpfError::MapOperation {
+                operation: "reopen verified pinned map",
+                map: map_name,
+                reason: error.to_string(),
+            }
+        })?;
     match map.remove(&key) {
         Ok(()) | Err(aya::maps::MapError::KeyNotFound) => Ok(()),
         Err(error) => Err(EbpfError::MapOperation {
@@ -631,11 +644,7 @@ impl PreparedEbpfNetwork {
     }
 
     pub fn attach(self) -> Result<EbpfNetwork, EbpfError> {
-        EbpfNetwork::commit_prepared(
-            self.kernel,
-            self.config,
-            self.additional_interfaces,
-        )
+        EbpfNetwork::commit_prepared(self.kernel, self.config, self.additional_interfaces)
     }
 }
 
@@ -647,10 +656,12 @@ fn pinned_map_path(network_id: &str, map_name: &str) -> Result<PathBuf, EbpfErro
         .join(map_name))
 }
 
+#[cfg(test)]
 fn hex_bytes(bytes: &[u8]) -> Vec<String> {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(test)]
 fn build_pinned_map_update_command(
     network_id: &str,
     map_name: &'static str,
@@ -674,6 +685,7 @@ fn build_pinned_map_update_command(
     Ok(command)
 }
 
+#[cfg(test)]
 fn build_pinned_map_delete_command(
     network_id: &str,
     map_name: &'static str,
@@ -945,9 +957,9 @@ mod lifecycle_tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        build_pinned_map_delete_command, build_pinned_map_update_command,
-        embedded_object_sha256, hex_bytes, EbpfError, EbpfNetwork, EbpfNetworkConfig,
-        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
+        build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
+        hex_bytes, EbpfError, EbpfNetwork, EbpfNetworkConfig, EGRESS_CLASSIFIER,
+        INGRESS_CLASSIFIER,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1005,7 +1017,9 @@ mod lifecycle_tests {
         fn preflight(&mut self, request: &KernelPreflight<'_>) -> Result<(), EbpfError> {
             assert_eq!(request.expected_object_sha256, embedded_object_sha256());
             let mut state = self.state.lock().unwrap();
-            state.network_preflights.push(request.network_id.to_string());
+            state
+                .network_preflights
+                .push(request.network_id.to_string());
             state.events.push("preflight".to_string());
             Ok(())
         }
@@ -1019,7 +1033,9 @@ mod lifecycle_tests {
             state
                 .interface_preflights
                 .push((interface.to_string(), expected_ifindex));
-            state.events.push(format!("preflight-interface:{interface}"));
+            state
+                .events
+                .push(format!("preflight-interface:{interface}"));
             Ok(())
         }
 
@@ -1150,14 +1166,14 @@ mod lifecycle_tests {
             protocol: 6,
             host_port: 45_123,
         };
-        let delete = build_pinned_map_delete_command(
-            "shared-bridge",
-            PORTS_MAP_NAME,
-            &port_key.encode(),
-        )
-        .unwrap();
+        let delete =
+            build_pinned_map_delete_command("shared-bridge", PORTS_MAP_NAME, &port_key.encode())
+                .unwrap();
         assert_eq!(delete[2], "delete");
-        assert_eq!(delete[4], "/sys/fs/bpf/ferrocrate/shared-bridge/maps/FERRO_PORTS");
+        assert_eq!(
+            delete[4],
+            "/sys/fs/bpf/ferrocrate/shared-bridge/maps/FERRO_PORTS"
+        );
         assert_eq!(&delete[7..], hex_bytes(&port_key.encode()));
         assert!(build_pinned_map_delete_command("../foreign", PORTS_MAP_NAME, &[0]).is_err());
     }

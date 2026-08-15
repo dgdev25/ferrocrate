@@ -150,6 +150,7 @@ impl LocalVolumeStore {
         })
     }
 
+    #[allow(dead_code)]
     fn create(&self, name: &str) -> Result<VolumeRecord, VolumeStoreError> {
         self.create_with_driver(name, "local", BTreeMap::new())
     }
@@ -344,11 +345,7 @@ impl LocalVolumeStore {
         Ok(())
     }
 
-    fn restore(
-        &self,
-        name: &str,
-        src: impl AsRef<Path>,
-    ) -> Result<(), VolumeStoreError> {
+    fn restore(&self, name: &str, src: impl AsRef<Path>) -> Result<(), VolumeStoreError> {
         let record = self
             .get(name)?
             .ok_or_else(|| VolumeStoreError::NotFound(name.to_string()))?;

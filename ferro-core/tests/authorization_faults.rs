@@ -1,4 +1,7 @@
 use ferro_core::authorization::inventory::MUTATION_INVENTORY;
+use ferro_core::authorization::{
+    gate::AuthorizationGate, policy::PolicyStore, Action, RequestOrigin, ResourceKind,
+};
 use ferro_core::observability::{
     authorization_metrics, authorization_metrics_snapshot, AuthorizationFixtureEvidence,
     AuthorizationMetric, AuthorizationMetrics, AuthorizationMetricsSnapshot, DecisionMetric,
@@ -7,8 +10,72 @@ use ferro_core::observability::{
 use ferro_core::witness::{FaultPoint, FlushBoundary};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const SECRET: &str = "task11-canary-password-7f3b";
+
+/// The authorization SLO deliberately excludes durable witness I/O.  It times
+/// the production runtime surface through normalization, policy pinning, and
+/// gate evaluation while the disabled-mode surface avoids journal persistence.
+#[test]
+fn authorization_decision_p99_is_below_one_millisecond_without_witness_io() {
+    const SAMPLE_COUNT: usize = 1_001;
+    const P99_LIMIT: Duration = Duration::from_millis(1);
+
+    let root = tempfile::tempdir().expect("temporary runtime directory");
+    let policy_path = root.path().join("policy.toml");
+    fs::write(
+        &policy_path,
+        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+    )
+    .expect("write protected policy");
+    fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600)).expect("protect policy");
+    let gate = Arc::new(AuthorizationGate::new(Arc::new(
+        PolicyStore::load(&policy_path).expect("load policy"),
+    )));
+    let runtime =
+        ferro_core::runtime::ContainerRuntime::new_with_authorization(root.path(), gate, None)
+            .expect("construct runtime without witness I/O");
+    let surface = runtime
+        .surface_authorization()
+        .expect("runtime authorization surface");
+    let origin = RequestOrigin::cli_current().expect("authenticated CLI origin");
+
+    // Warm policy and allocation paths before taking the measured sample set.
+    let _ = surface
+        .authorize_named(
+            &origin,
+            Action::VolumeCreate,
+            ResourceKind::Volume,
+            "authorization-latency-warmup",
+            1,
+        )
+        .expect("warm authorization");
+
+    let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+    for generation in 1..=SAMPLE_COUNT as u64 {
+        let started = Instant::now();
+        let permit = surface
+            .authorize_named(
+                &origin,
+                Action::VolumeCreate,
+                ResourceKind::Volume,
+                "authorization-latency-volume",
+                generation,
+            )
+            .expect("authorization must admit disabled-mode fixture");
+        std::hint::black_box(permit);
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    let p99 = samples[(SAMPLE_COUNT * 99).div_ceil(100) - 1];
+    assert!(
+        p99 < P99_LIMIT,
+        "authorization decision p99 exceeded {P99_LIMIT:?}: {p99:?}"
+    );
+}
 
 #[test]
 fn authorization_metrics_have_a_closed_nonsecret_schema() {

@@ -3537,6 +3537,7 @@ fn build_limits(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn handle_build(
     store: &LocalImageStore,
     origin: &RequestOrigin,
@@ -5575,6 +5576,7 @@ fn run_compose_service(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn compose_service_execution_digest(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,

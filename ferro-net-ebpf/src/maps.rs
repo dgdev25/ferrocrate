@@ -6,19 +6,19 @@ use aya_ebpf::{
 
 use crate::{
     abi::{
-        CONNTRACK_KEY_LEN, CONNTRACK_LAST_SEEN_OFFSET, CONNTRACK_MAX_ENTRIES,
+        MetaConfig, CONNTRACK_KEY_LEN, CONNTRACK_LAST_SEEN_OFFSET, CONNTRACK_MAX_ENTRIES,
         CONNTRACK_STATE_OFFSET, CONNTRACK_TRANSLATED_ADDRESS_OFFSET,
         CONNTRACK_TRANSLATED_PORT_OFFSET, CONNTRACK_VALUE_LEN, COUNTER_MAX_ENTRIES,
         ENDPOINT_FLAGS_OFFSET, ENDPOINT_IFINDEX_OFFSET, ENDPOINT_KEY_LEN, ENDPOINT_MAC_OFFSET,
-        ENDPOINT_MAX_ENTRIES, ENDPOINT_VALUE_LEN, META_MAX_ENTRIES, META_VALUE_LEN, MetaConfig,
+        ENDPOINT_MAX_ENTRIES, ENDPOINT_VALUE_LEN, META_MAX_ENTRIES, META_VALUE_LEN,
         POLICY_ACTION_OFFSET, POLICY_KEY_LEN, POLICY_MAX_ENTRIES, POLICY_VALUE_LEN, PORT_KEY_LEN,
         PORT_MAX_ENTRIES, PORT_VALUE_ADDRESS_OFFSET, PORT_VALUE_LEN, PORT_VALUE_NUMBER_OFFSET,
         PROGRAM_ABI_VERSION,
     },
     datapath::{
         ConntrackRecord, ConntrackReservation, Counter, DatapathState, Endpoint, ExternalNetwork,
-        FlowKey, NatTarget, PolicyAction, PolicyKey, PortTarget,
-        CONNTRACK_STATE_ESTABLISHED, POLICY_ACTION_ALLOW,
+        FlowKey, NatTarget, PolicyAction, PolicyKey, PortTarget, CONNTRACK_STATE_ESTABLISHED,
+        POLICY_ACTION_ALLOW,
     },
 };
 
@@ -43,12 +43,10 @@ pub static FERRO_POLICY: HashMap<[u8; POLICY_KEY_LEN], [u8; POLICY_VALUE_LEN]> =
     HashMap::with_max_entries(POLICY_MAX_ENTRIES, 0);
 
 #[map]
-pub static FERRO_COUNTERS: PerCpuArray<u64> =
-    PerCpuArray::with_max_entries(COUNTER_MAX_ENTRIES, 0);
+pub static FERRO_COUNTERS: PerCpuArray<u64> = PerCpuArray::with_max_entries(COUNTER_MAX_ENTRIES, 0);
 
 #[map]
-pub static FERRO_META: Array<[u8; META_VALUE_LEN]> =
-    Array::with_max_entries(META_MAX_ENTRIES, 0);
+pub static FERRO_META: Array<[u8; META_VALUE_LEN]> = Array::with_max_entries(META_MAX_ENTRIES, 0);
 
 pub struct KernelState;
 

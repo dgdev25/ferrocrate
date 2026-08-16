@@ -785,6 +785,8 @@ pub struct RequestFacts {
     readonly_rootfs: bool,
     no_new_privileges: bool,
     mount_sources_approved: Option<bool>,
+    execution_digest: Option<String>,
+    parent_resource_id: Option<String>,
 }
 
 impl RequestFacts {
@@ -822,6 +824,14 @@ impl RequestFacts {
 
     pub fn no_new_privileges(&self) -> bool {
         self.no_new_privileges
+    }
+
+    pub fn execution_digest(&self) -> Option<&str> {
+        self.execution_digest.as_deref()
+    }
+
+    pub fn parent_resource_id(&self) -> Option<&str> {
+        self.parent_resource_id.as_deref()
     }
 }
 

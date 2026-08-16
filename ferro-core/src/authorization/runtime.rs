@@ -63,6 +63,13 @@ pub(crate) struct RunSecurityFacts {
     pub readonly_rootfs: bool,
     pub no_new_privileges: bool,
     pub mount_sources_approved: Option<bool>,
+    /// Digest of the complete normalized execution request, including image,
+    /// command, environment, labels, annotations, mounts, limits, and network.
+    /// Keeping it in the canonical facts makes the proof bind what will run,
+    /// rather than only the container's mutable resource identity.
+    pub execution_digest: Option<String>,
+    /// Optional parent resource identity (for example a CRI pod sandbox).
+    pub parent_resource_id: Option<String>,
 }
 
 pub(crate) struct MutationPermit {
@@ -499,6 +506,8 @@ impl RuntimeAuthorization {
             readonly_rootfs: run.readonly_rootfs,
             no_new_privileges: run.no_new_privileges,
             mount_sources_approved: run.mount_sources_approved,
+            execution_digest: run.execution_digest,
+            parent_resource_id: run.parent_resource_id,
             ..Default::default()
         };
         let resource = Resource::canonical(

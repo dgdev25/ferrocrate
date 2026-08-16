@@ -2249,6 +2249,9 @@ impl ContainerRuntime {
             port_mappings,
             &normalized,
         );
+        let mut normalized = normalized;
+        normalized.facts.execution_digest = Some(hex::encode(execution_digest));
+        normalized.facts.parent_resource_id = labels.get("io.ferrocrate.parent-resource").cloned();
         if self
             .authorization
             .request_origin()
@@ -3867,6 +3870,8 @@ fn normalize_run_request(
             readonly_rootfs,
             no_new_privileges,
             mount_sources_approved,
+            execution_digest: None,
+            parent_resource_id: None,
         },
         capabilities: capabilities.to_vec(),
         network_mode: network_mode.to_owned(),

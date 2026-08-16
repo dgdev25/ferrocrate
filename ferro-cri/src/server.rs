@@ -720,8 +720,21 @@ impl RuntimeService for CriRuntime {
         let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
             .map_err(|error| Status::internal(error.to_string()))?
             .with_request_origin(identity.origin);
-        let labels = std::collections::HashMap::new();
-        let annotations = std::collections::HashMap::new();
+        let sandbox_uid = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?
+            .get(&record.sandbox_id)
+            .map(|sandbox| sandbox.uid.clone())
+            .ok_or_else(|| Status::failed_precondition("pod sandbox is not present"))?;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(
+            "io.ferrocrate.parent-resource".to_string(),
+            record.sandbox_id.clone(),
+        );
+        labels.insert("io.ferrocrate.cri-container-id".to_string(), id.clone());
+        let mut annotations = std::collections::HashMap::new();
+        annotations.insert("io.ferrocrate.cri-sandbox-uid".to_string(), sandbox_uid);
         let started = runtime
             .run(
                 &record.image,

@@ -41,6 +41,33 @@ fn request(action: Action, principal: Option<(&str, Role)>, owner: Option<&str>)
 }
 
 #[test]
+fn execution_and_parent_facts_are_part_of_the_canonical_request_bytes() {
+    let mut first = RequestFacts::default();
+    first.execution_digest = Some("aa".repeat(32));
+    first.parent_resource_id = Some("cri-sandbox-a".into());
+    let mut second = first.clone();
+    second.execution_digest = Some("bb".repeat(32));
+    second.parent_resource_id = Some("cri-sandbox-b".into());
+    let one = serde_json::to_vec(&RequestContext::resolved(
+        "request-1",
+        None,
+        Action::ContainerRun,
+        Resource::canonical(ResourceKind::Container, "container-1", None, 1),
+        first,
+    ))
+    .unwrap();
+    let two = serde_json::to_vec(&RequestContext::resolved(
+        "request-1",
+        None,
+        Action::ContainerRun,
+        Resource::canonical(ResourceKind::Container, "container-1", None, 1),
+        second,
+    ))
+    .unwrap();
+    assert_ne!(one, two);
+}
+
+#[test]
 fn the_five_roles_apply_the_native_domain_rules() {
     let policy = policy(AuthorizationMode::Enforce);
     let cases = [

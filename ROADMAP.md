@@ -47,7 +47,7 @@ compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
 
 - [x] Complete pod-sandbox network reconciliation on restart; reopened state preserves readiness when the netns exists and reports `NotReady` after namespace loss.
 - [x] Qualify Create/Start/Stop/RemoveContainer, ContainerStatus, and ExecSync with a real OCI image/rootfs, including exit code, stdout, and deadline behavior; broader image corpus and cancellation remain open.
-- [ ] Bind pod/container identity, sandbox, image digest, command, and resource state into the common authorization proof and witness lifecycle.
+- [x] Bind pod/container identity, sandbox parent, pinned image, normalized command/environment/resource execution digest, and lifecycle state into the common authorization facts and witness request digest; canonical-byte and CRI socket coverage are passing.
 - [x] Add UDS conformance fixtures for the exposed lifecycle path; malformed requests, deadlines, retries, and full method idempotency remain in the qualification expansion.
 - [x] Publish the supported CRI method/version/error matrix and wire-level malformed/unknown/idempotency fixtures; kubelet/containerd compatibility remains a separate qualification gate.
 - [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary.

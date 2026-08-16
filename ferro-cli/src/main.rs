@@ -6299,6 +6299,29 @@ impl DockerEventStore {
         let event = query.get("event").or_else(|| query.get("action"));
         let kind = query.get("type");
         let resource = query.get("container").or_else(|| query.get("image"));
+        let filters = query
+            .get("filters")
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+        let filter_values = |name: &str| -> Option<Vec<String>> {
+            filters
+                .as_ref()
+                .and_then(|value| value.get(name))
+                .and_then(|value| match value {
+                    serde_json::Value::Array(values) => Some(
+                        values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect(),
+                    ),
+                    serde_json::Value::String(value) => Some(vec![value.clone()]),
+                    _ => None,
+                })
+        };
+        let filter_events = filter_values("event");
+        let filter_types = filter_values("type");
+        let filter_containers = filter_values("container");
+        let filter_images = filter_values("image");
         contents
             .lines()
             .filter_map(|line| serde_json::from_str::<DockerEvent>(line).ok())
@@ -6307,6 +6330,28 @@ impl DockerEventStore {
             .filter(|item| event.is_none_or(|value| item.action == *value))
             .filter(|item| kind.is_none_or(|value| item.event_type == *value))
             .filter(|item| resource.is_none_or(|value| item.resource.as_deref() == Some(value)))
+            .filter(|item| {
+                filter_events
+                    .as_ref()
+                    .is_none_or(|values| values.iter().any(|value| value == &item.action))
+            })
+            .filter(|item| {
+                filter_types
+                    .as_ref()
+                    .is_none_or(|values| values.iter().any(|value| value == &item.event_type))
+            })
+            .filter(|item| {
+                let values = match item.event_type.as_str() {
+                    "container" => filter_containers.as_ref(),
+                    "image" => filter_images.as_ref(),
+                    _ => None,
+                };
+                values.is_none_or(|values| {
+                    item.resource
+                        .as_ref()
+                        .is_some_and(|resource| values.iter().any(|value| value == resource))
+                })
+            })
             .collect::<Vec<_>>()
             .pipe(Ok)
     }
@@ -8865,6 +8910,19 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "start");
         assert_eq!(events[0].status, 204);
+
+        let mut docker_filters = HashMap::new();
+        docker_filters.insert(
+            "filters".to_string(),
+            r#"{"event":["start"],"type":["container"],"container":["c1"]}"#.to_string(),
+        );
+        assert_eq!(reopened.query(&docker_filters).unwrap().len(), 1);
+
+        docker_filters.insert(
+            "filters".to_string(),
+            r#"{"event":["create"],"type":["volume"]}"#.to_string(),
+        );
+        assert_eq!(reopened.query(&docker_filters).unwrap().len(), 0);
     }
 
     #[test]

@@ -82,6 +82,7 @@ Docker Engine, and release claims are still marked partial or rework-needed.
 - Container rename CLI and remote-context routing are verified separately in `docs/evidence/verification/2026-08-16-rename-routing.md`.
 - [x] Run the current Docker API matrix and Compose contract suites against the public Unix socket, including versioned paths and explicit unsupported endpoint errors; retries and streaming expansion remain in the endpoint completion work.
 - Image history is now exposed by the native CLI and selected remote contexts, with manifest-layer Docker history records verified in `docs/evidence/verification/2026-08-16-image-history-routing.md`.
+- Network prune is now exposed by the native CLI and selected remote contexts, retaining built-ins and associated networks and preserving authorization-backed teardown in `docs/evidence/verification/2026-08-16-network-prune-routing.md`.
 - [x] Add a repeatable release-readiness gate for host evidence, Docker/CRI/security contracts, and compatibility evidence; cross-target artifacts, checksums/signatures, upgrade/rollback, and reproducible metadata remain open.
 - [x] Reconcile README and PRD status claims with evidence; remaining release-gated capabilities now point to the evidence-backed roadmap rather than implying full parity.
 

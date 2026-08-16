@@ -728,6 +728,7 @@ pub enum NetworkCommands {
         ipv6_gateway: Option<String>,
     },
     Ls,
+    Prune,
     Inspect {
         name: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -4828,6 +4829,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/networks/{}", percent_encode_path_component(name)),
         )
         .map(|_| ()),
+        Commands::Network {
+            command: NetworkCommands::Prune,
+        } => {
+            request("POST", "/networks/prune".to_string()).and_then(|body| print_json(body, "json"))
+        }
         Commands::Volume {
             command: VolumeCommands::Create { name, driver, opts },
         } => {
@@ -6795,6 +6801,30 @@ fn handle_network_authorized(
                 .map_err(|error| error.to_string())?;
             execute_network_remove(runtime_dir, &stored, &associations, proof)?;
             println!("network rm: {name}");
+        }
+        NetworkCommands::Prune => {
+            let associations = runtime.list().map_err(|err| err.to_string())?;
+            let records = load_networks(runtime_dir)?;
+            let mut deleted = Vec::new();
+            for record in records.into_iter().filter(|record| {
+                !is_builtin_network_mode(&record.name)
+                    && !associations.iter().any(|container| {
+                        container.network_name.as_deref() == Some(record.name.as_str())
+                    })
+            }) {
+                let proof = authorization
+                    .authorize_named(
+                        origin,
+                        AuthorizationAction::NetworkDelete,
+                        ResourceKind::Network,
+                        &record.name,
+                        record.generation,
+                    )
+                    .map_err(|error| error.to_string())?;
+                execute_network_remove(runtime_dir, &record, &associations, proof)?;
+                deleted.push(record.name);
+            }
+            println!("network prune: removed={}", deleted.len());
         }
     }
     Ok(())
@@ -11855,6 +11885,14 @@ volumes:
                 VolumeCommands::Rm { name } => assert_eq!(name, "data"),
                 _ => panic!("unexpected volume command"),
             },
+            _ => panic!("unexpected command"),
+        }
+
+        let prune = Cli::parse_from(["ferrocrate", "network", "prune"]);
+        match prune.command {
+            Commands::Network { command } => {
+                assert!(matches!(command, NetworkCommands::Prune))
+            }
             _ => panic!("unexpected command"),
         }
     }

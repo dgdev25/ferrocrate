@@ -204,11 +204,13 @@ fn seeded_secret_is_absent_from_sled_json_logs_errors_and_metrics() {
     let root = tempfile::tempdir().unwrap();
     let digest = Sha256::digest(SECRET.as_bytes());
 
-    let db = sled::open(root.path().join("witness.sled")).unwrap();
-    db.insert(b"redacted-request-digest", digest.as_slice())
-        .unwrap();
-    db.flush().unwrap();
-    drop(db);
+    let legacy_dir = root.path().join("witness.sled");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(
+        legacy_dir.join("redacted-request-digest"),
+        digest.as_slice(),
+    )
+    .unwrap();
 
     let export = serde_json::json!({"request_digest": hex::encode(digest)});
     fs::write(root.path().join("export.json"), export.to_string()).unwrap();
@@ -238,7 +240,7 @@ fn seeded_secret_is_absent_from_sled_json_logs_errors_and_metrics() {
     ] {
         examined.push(fs::read(entry).unwrap());
     }
-    for entry in fs::read_dir(root.path().join("witness.sled")).unwrap() {
+    for entry in fs::read_dir(legacy_dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_file() {
             examined.push(fs::read(path).unwrap());

@@ -336,6 +336,10 @@ pub enum Commands {
         name: String,
     },
     #[cfg(target_os = "linux")]
+    Start {
+        container: String,
+    },
+    #[cfg(target_os = "linux")]
     Restart {
         container: String,
         #[arg(long, default_value = "10")]
@@ -986,6 +990,7 @@ fn is_runtime_command_name(command: &str) -> bool {
             | "kill"
             | "rm"
             | "rename"
+            | "start"
             | "restart"
             | "exec"
             | "scan"
@@ -2739,6 +2744,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Rm { container } => handle_rm(&runtime, &container),
             #[cfg(target_os = "linux")]
             Commands::Rename { container, name } => handle_rename(&runtime, &container, &name),
+            #[cfg(target_os = "linux")]
+            Commands::Start { container } => {
+                unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
+                handle_start(&runtime, &container)
+            }
             #[cfg(target_os = "linux")]
             Commands::Restart { container, timeout } => {
                 unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
@@ -4786,6 +4796,14 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .map(|_| ()),
+        Commands::Start { container } => request(
+            "POST",
+            format!(
+                "/containers/{}/start",
+                percent_encode_path_component(container)
+            ),
+        )
+        .map(|_| ()),
         Commands::Rm { container } => request(
             "DELETE",
             format!("/containers/{}", percent_encode_path_component(container)),
@@ -6372,6 +6390,17 @@ fn handle_restart(runtime: &ContainerRuntime, container: &str, timeout: u64) -> 
         .restart(&resolved, std::time::Duration::from_secs(timeout))
         .map_err(|err| err.to_string())?;
     println!("restart: {resolved}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_start(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("start: container is required".to_string());
+    }
+    let resolved = resolve_container_id(runtime, container)?;
+    runtime.start(&resolved).map_err(|err| err.to_string())?;
+    println!("start: {resolved}");
     Ok(())
 }
 
@@ -11936,6 +11965,15 @@ volumes:
                 assert_eq!(container, "abc123");
                 assert_eq!(timeout, 10);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_start_command() {
+        let cli = Cli::parse_from(["ferrocrate", "start", "abc123"]);
+        match cli.command {
+            Commands::Start { container } => assert_eq!(container, "abc123"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

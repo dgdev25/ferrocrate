@@ -37,6 +37,7 @@ impl RecoveryTruthStrategy {
             | WitnessAction::ContainerKill => Some(Self::ContainerRunning),
             WitnessAction::ContainerResume => Some(Self::ContainerPaused),
             WitnessAction::ContainerRestart => Some(Self::RestartObserved),
+            WitnessAction::ContainerStart => Some(Self::RestartObserved),
             WitnessAction::ContainerDelete => Some(Self::ContainerPresent),
             _ => None,
         }
@@ -153,6 +154,7 @@ impl RecoveryRecipe {
                     | WitnessAction::ContainerStop
                     | WitnessAction::ContainerKill
                     | WitnessAction::ContainerRestart
+                    | WitnessAction::ContainerStart
                     | WitnessAction::ContainerDelete,
                 WitnessResourceKind::Container,
                 WitnessAction::ContainerDelete

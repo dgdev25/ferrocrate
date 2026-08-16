@@ -3295,7 +3295,16 @@ impl ContainerRuntime {
 
     pub fn restart(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::ContainerRestart, id, |runtime, proof, intent| {
-            runtime.restart_authorized(proof, intent, id, timeout)
+            runtime.restart_authorized(proof, intent, id, timeout, true)
+        })
+    }
+
+    /// Start a previously stopped container without first signalling its old
+    /// process. This is the native equivalent of Docker's start transition;
+    /// it uses the same durable launch/recovery protocol as restart.
+    pub fn start(&self, id: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerStart, id, |runtime, proof, intent| {
+            runtime.restart_authorized(proof, intent, id, Duration::ZERO, false)
         })
     }
 
@@ -3370,6 +3379,7 @@ impl ContainerRuntime {
         _intent: Option<&crate::witness::DurableIntent>,
         id: &str,
         timeout: Duration,
+        stop_existing: bool,
     ) -> Result<(), RuntimeError> {
         let mut record = self
             .store
@@ -3378,16 +3388,25 @@ impl ContainerRuntime {
         if record.command.is_empty() {
             return Err(RuntimeError::MissingCommand);
         }
+        if !stop_existing && record.status == "running" {
+            return Err(RuntimeError::InvalidState(
+                "container is already running".into(),
+            ));
+        }
 
         let records = self.store.list()?;
         self.reconcile_record_network(&record, &records, &mut BTreeSet::new())?;
         self.phase_hook
             .reached("restart", LifecyclePhasePoint::NetworkApplied)?;
 
-        stop_pid(record.pid, timeout)?;
-        cleanup_security_ebpf_monitor(&record.id)?;
-        self.phase_hook
-            .reached("restart", LifecyclePhasePoint::RestartOldStopped)?;
+        if stop_existing {
+            stop_pid(record.pid, timeout)?;
+            cleanup_security_ebpf_monitor(&record.id)?;
+        }
+        self.phase_hook.reached(
+            if stop_existing { "restart" } else { "start" },
+            LifecyclePhasePoint::RestartOldStopped,
+        )?;
 
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
@@ -3419,8 +3438,10 @@ impl ContainerRuntime {
             false,
             seccomp_profile.as_ref(),
         )?;
-        self.phase_hook
-            .reached("restart", LifecyclePhasePoint::SpawnPrepared)?;
+        self.phase_hook.reached(
+            if stop_existing { "restart" } else { "start" },
+            LifecyclePhasePoint::SpawnPrepared,
+        )?;
         if security_ebpf_monitor_enabled() {
             setup_security_ebpf_monitor(&record.id)?;
         }
@@ -3437,13 +3458,15 @@ impl ContainerRuntime {
             let _ = kill_pid(child_id);
             return Err(error.into());
         }
-        self.phase_hook
-            .reached("restart", LifecyclePhasePoint::LaunchIdentityDurable)?;
+        self.phase_hook.reached(
+            if stop_existing { "restart" } else { "start" },
+            LifecyclePhasePoint::LaunchIdentityDurable,
+        )?;
         release_prepared_child(child_id)?;
         let _ = log_event(
             &self.runtime_dir,
             make_event(
-                "restart",
+                if stop_existing { "restart" } else { "start" },
                 Some(id),
                 Some(&record.image),
                 Some("running"),
@@ -4277,6 +4300,7 @@ fn runtime_action_name(action: Action) -> &'static str {
         Action::ContainerStop => "container.stop",
         Action::ContainerKill => "container.kill",
         Action::ContainerRestart => "container.restart",
+        Action::ContainerStart => "container.start",
         Action::ContainerDelete => "container.delete",
         Action::ContainerRename => "container.rename",
         _ => "container.unsupported",
@@ -4292,6 +4316,7 @@ fn runtime_witness_action_name(action: crate::witness::WitnessAction) -> &'stati
         crate::witness::WitnessAction::ContainerStop => "container.stop",
         crate::witness::WitnessAction::ContainerKill => "container.kill",
         crate::witness::WitnessAction::ContainerRestart => "container.restart",
+        crate::witness::WitnessAction::ContainerStart => "container.start",
         crate::witness::WitnessAction::ContainerDelete => "container.delete",
         crate::witness::WitnessAction::ContainerRename => "container.rename",
         _ => "container.unsupported",
@@ -10137,6 +10162,15 @@ mod tests {
         runtime
             .stop(&record.id, std::time::Duration::from_millis(50))
             .expect("stop");
+
+        runtime.start(&record.id).expect("start");
+        assert_eq!(
+            runtime.inspect(&record.id).expect("inspect").status,
+            "running"
+        );
+        runtime
+            .stop(&record.id, std::time::Duration::from_millis(50))
+            .expect("stop after start");
 
         runtime.remove(&record.id).expect("remove");
 

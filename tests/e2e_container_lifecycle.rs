@@ -242,7 +242,7 @@ CMD ["cat", "/hello.txt"]
 
     #[test]
     #[ignore = "Requires container runtime"]
-    fn container_restart_preserves_bind_mount_across_cli_processes() {
+    fn container_start_preserves_bind_mount_across_cli_processes() {
         if !should_run() {
             eprintln!("Skipping: container runtime not available");
             return;
@@ -285,10 +285,10 @@ CMD ["cat", "/hello.txt"]
 
         assert!(stop_output.status.success(), "Container should stop");
 
-        // Restart the stopped container in a separate CLI process.
+        // Start the stopped container in a separate CLI process.
         let start_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["restart", "restart-test"])
+            .args(["start", "restart-test"])
             .output()
             .expect("start");
 

@@ -152,6 +152,7 @@ pub enum WitnessAction {
     KeyRotate = 28,
     RootlessMapping = 29,
     ContainerRename = 30,
+    ContainerStart = 31,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

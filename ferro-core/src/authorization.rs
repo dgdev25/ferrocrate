@@ -560,6 +560,8 @@ pub enum Action {
     ContainerKill,
     #[serde(rename = "container.restart")]
     ContainerRestart,
+    #[serde(rename = "container.start")]
+    ContainerStart,
     #[serde(rename = "container.delete")]
     ContainerDelete,
     #[serde(rename = "container.rename")]

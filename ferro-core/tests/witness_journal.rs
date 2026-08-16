@@ -75,10 +75,7 @@ fn rejects_v1_storage_instead_of_silently_opening_an_unreadable_journal() {
 #[cfg(not(feature = "legacy-sled-importers"))]
 fn rejects_legacy_storage_before_optional_importer_is_enabled() {
     let dir = tempdir().unwrap();
-    let db = sled::open(dir.path().join("witness.sled")).unwrap();
-    db.open_tree("witness-meta-v1").unwrap();
-    db.flush().unwrap();
-    drop(db);
+    std::fs::create_dir_all(dir.path().join("witness.sled")).unwrap();
     assert!(matches!(
         WitnessJournal::open(config(dir.path())),
         Err(JournalError::LegacyMigrationRequired)

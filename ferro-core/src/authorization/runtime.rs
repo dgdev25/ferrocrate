@@ -924,6 +924,7 @@ fn witness_action(action: Action) -> WitnessAction {
         Action::ContainerStop => WitnessAction::ContainerStop,
         Action::ContainerKill => WitnessAction::ContainerKill,
         Action::ContainerRestart => WitnessAction::ContainerRestart,
+        Action::ContainerStart => WitnessAction::ContainerStart,
         Action::ContainerDelete => WitnessAction::ContainerDelete,
         Action::ContainerRename => WitnessAction::ContainerRename,
         _ => unreachable!("runtime authorization only handles container lifecycle"),

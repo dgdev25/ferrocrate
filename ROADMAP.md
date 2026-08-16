@@ -4,7 +4,7 @@
      forward work is sourced from the PRD-backed roadmap, completion plan,
      security audit, RVF plan, platform plan, and compatibility contracts. -->
 
-**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `b618e94`
+**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `3bd24b5`
 
 ## How to use this roadmap
 
@@ -92,7 +92,7 @@ below full parity; secure cache and multi-platform workflows are adoption gaps.
 *Size:* XL. *Sources:* IMG-06, COMPAT-06, Docker competitive-gap sequence.
 
 - [ ] Model builds as a content-addressed dependency graph with parallel independent stages.
-- [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance; local cache entries now persist their key/timestamp, are written atomically, and support deterministic oldest-entry pruning, while import/export, remote cache, and graph-wide provenance remain open.
+- [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance; local cache entries now persist their key/timestamp, are written atomically, support deterministic oldest-entry pruning, and support validated atomic file import/export via `--cache-from`/`--cache-to`, while remote cache and graph-wide provenance remain open.
 - [ ] Add secrets, SSH mounts, cache mounts, named contexts, multi-platform output, and strict secret non-disclosure in logs/witnesses/cache metadata.
 - [ ] Add build cancellation, resource limits, retries, resumability, and authorization-bound source/context/image identities.
 

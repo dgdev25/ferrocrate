@@ -282,6 +282,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
     dockerfile_path: &Path,
     tag: Option<&str>,
@@ -1563,7 +1564,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 let id = id.ok_or_else(|| {
                     DockerfileBuildError::Invalid("secret mount requires id".to_string())
                 })?;
-                let id = validate_secret_id(&id)?;
+                let id = validate_secret_id(id)?;
                 let target = target
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("/run/secrets/{id}"));
@@ -2021,7 +2022,7 @@ fn run_stage_commands(
                     }
                 }
                 for (target, backup, _cache, existed) in mounted.iter().rev() {
-                    let _ = fs::remove_dir_all(&target);
+                    let _ = fs::remove_dir_all(target);
                     if *existed {
                         fs::rename(backup, target)?;
                     }

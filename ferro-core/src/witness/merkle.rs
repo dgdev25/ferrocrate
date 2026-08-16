@@ -105,7 +105,7 @@ pub fn prove(leaves: &[[u8; 32]], index: usize) -> Result<MerkleProof, MerkleErr
     let mut cursor = index;
     let mut siblings = Vec::new();
     while level.len() > 1 {
-        let sibling = if cursor % 2 == 0 {
+        let sibling = if cursor.is_multiple_of(2) {
             level.get(cursor + 1).copied().unwrap_or(level[cursor])
         } else {
             level[cursor - 1]
@@ -138,7 +138,7 @@ pub fn verify(proof: &MerkleProof) -> Result<(), MerkleError> {
     let mut hash = leaf_hash(&proof.leaf);
     let mut cursor = proof.index as usize;
     for sibling in &proof.siblings {
-        hash = if cursor % 2 == 0 {
+        hash = if cursor.is_multiple_of(2) {
             node_hash(&hash, sibling)
         } else {
             node_hash(sibling, &hash)

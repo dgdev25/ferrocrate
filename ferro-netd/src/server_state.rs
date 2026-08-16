@@ -291,12 +291,12 @@ impl NetdServer {
         self.journal_lock = Some(lock);
         #[cfg(any(test, feature = "test-support"))]
         let faults = self.test_faults.clone();
-        let loaded = crate::ownership_journal::load(&path, |phase| {
+        let loaded = crate::ownership_journal::load(&path, |_phase| {
             #[cfg(any(test, feature = "test-support"))]
             if faults.take(crate::test_support::FaultPoint::JournalPersist(
-                phase.into(),
+                _phase.into(),
             )) {
-                return Err(format!("injected journal {phase} failure"));
+                return Err(format!("injected journal {_phase} failure"));
             }
             Ok(())
         })?;
@@ -473,15 +473,15 @@ impl NetdServer {
                 overlay_intents: self.overlay_intents.clone(),
                 revision_floors: self.policy.revision_floors(),
             },
-            |phase| {
+            |_phase| {
                 #[cfg(any(test, feature = "test-support"))]
                 if self
                     .test_faults
                     .take(crate::test_support::FaultPoint::JournalPersist(
-                        phase.into(),
+                        _phase.into(),
                     ))
                 {
-                    return Err(format!("injected journal {phase} failure"));
+                    return Err(format!("injected journal {_phase} failure"));
                 }
                 Ok(())
             },

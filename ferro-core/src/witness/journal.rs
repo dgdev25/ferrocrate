@@ -114,7 +114,7 @@ impl WitnessJournal {
             return Err(JournalError::ProofMismatch);
         }
         let next = expected.checked_add(1).ok_or(JournalError::Corrupt)?;
-        self.meta.insert(EPOCH, &next.to_be_bytes())?;
+        self.meta.insert(EPOCH, next.to_be_bytes())?;
         self.db.flush()?;
         self.epoch.store(next, Ordering::Release);
         Ok(next)
@@ -350,15 +350,15 @@ impl WitnessJournal {
             self.repair_read_mirror();
             return Ok(());
         }
-        self.meta.insert(JOURNAL_ID, &self.journal_id)?;
-        self.meta.insert(HEAD_SEQUENCE, &0_u64.to_be_bytes())?;
-        self.meta.insert(HEAD_HASH, &[0_u8; 32])?;
-        self.meta.insert(EPOCH, &1_u64.to_be_bytes())?;
-        self.meta.insert(RESERVE, &reserve_bytes.to_be_bytes())?;
+        self.meta.insert(JOURNAL_ID, self.journal_id)?;
+        self.meta.insert(HEAD_SEQUENCE, 0_u64.to_be_bytes())?;
+        self.meta.insert(HEAD_HASH, [0_u8; 32])?;
+        self.meta.insert(EPOCH, 1_u64.to_be_bytes())?;
+        self.meta.insert(RESERVE, reserve_bytes.to_be_bytes())?;
         self.meta
-            .insert(RESERVE_TOTAL, &reserve_bytes.to_be_bytes())?;
-        self.meta.insert(MAX_BYTES, &self.max_bytes.to_be_bytes())?;
-        self.meta.insert(CURRENT_SEGMENT, &0_u64.to_be_bytes())?;
+            .insert(RESERVE_TOTAL, reserve_bytes.to_be_bytes())?;
+        self.meta.insert(MAX_BYTES, self.max_bytes.to_be_bytes())?;
+        self.meta.insert(CURRENT_SEGMENT, 0_u64.to_be_bytes())?;
         let mut genesis = [0_u8; 40];
         genesis[..8].copy_from_slice(&1_u64.to_be_bytes());
         self.segments

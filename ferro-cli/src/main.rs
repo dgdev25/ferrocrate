@@ -1838,7 +1838,7 @@ fn validate_merkle_proof_kind(value: &str) -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 fn decode_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("hex value must have an even number of characters".to_string());
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
@@ -2167,7 +2167,7 @@ fn verify_witness_snapshot(snapshot: &Path) -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 fn decode_witness_hex_vec(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("witness snapshot canonical bytes must be hexadecimal".into());
     }
     (0..value.len() / 2)
@@ -3797,9 +3797,9 @@ fn context_endpoint_available(endpoint: &str) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
-        return std::fs::symlink_metadata(path)
+        std::fs::symlink_metadata(path)
             .map(|metadata| metadata.file_type().is_socket())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
@@ -5034,6 +5034,7 @@ fn is_builtin_network_mode(value: &str) -> bool {
     matches!(value, "bridge" | "host" | "none" | "wireguard")
 }
 
+#[allow(dead_code)]
 fn network_store_path(runtime_dir: &Path) -> PathBuf {
     crate::network_lifecycle::network_store_path(runtime_dir)
 }
@@ -5042,6 +5043,7 @@ fn load_networks(runtime_dir: &Path) -> Result<Vec<NetworkRecord>, String> {
     crate::network_lifecycle::load_networks(runtime_dir)
 }
 
+#[allow(dead_code)]
 fn save_networks(runtime_dir: &Path, records: &[NetworkRecord]) -> Result<(), String> {
     crate::network_lifecycle::save_networks(runtime_dir, records)
 }
@@ -7149,7 +7151,7 @@ impl DockerEventStore {
                         let mut parts = selector.splitn(2, '=');
                         let key = parts.next().unwrap_or_default();
                         item.attributes.get(key).is_some_and(|actual| {
-                            parts.next().map_or(true, |expected| actual == expected)
+                            parts.next().is_none_or(|expected| actual == expected)
                         })
                     })
                 })
@@ -8384,7 +8386,7 @@ fn docker_container_matches_filters(
             let matched = record
                 .labels
                 .get(key)
-                .is_some_and(|actual| parts.next().map_or(true, |expected| actual == expected));
+                .is_some_and(|actual| parts.next().is_none_or(|expected| actual == expected));
             if !matched {
                 return false;
             }
@@ -9376,7 +9378,7 @@ volumes:
             root.command,
             Commands::Witness {
                 command: WitnessCommands::MerkleRoot { leaves }
-            } if leaves == PathBuf::from("leaves.txt")
+            } if leaves == *"leaves.txt"
         ));
 
         let verify = Cli::parse_from([
@@ -9392,7 +9394,7 @@ volumes:
             verify.command,
             Commands::Witness {
                 command: WitnessCommands::MerkleVerify { proof, kind }
-            } if proof == PathBuf::from("proof.json") && kind == "consistency"
+            } if proof == *"proof.json" && kind == "consistency"
         ));
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9811,7 +9813,7 @@ volumes:
         let record =
             super::create_network_record("app-net", Some("10.88.0.0/24"), None, None, None)
                 .expect("record");
-        super::save_networks(temp.path(), &[record.clone()]).expect("save");
+        super::save_networks(temp.path(), std::slice::from_ref(&record)).expect("save");
         let binding = bind_run_network(temp.path(), "app-net", None, None).expect("bind");
         assert_eq!(binding.mode, "bridge");
         assert_eq!(binding.association.as_deref(), Some("app-net"));
@@ -11103,7 +11105,7 @@ volumes:
     fn docker_list_query_scalars_fail_closed() {
         assert!(parse_docker_bool_query(Some(&"maybe".to_string()), "all").is_err());
         assert!(parse_docker_limit_query(Some(&"ten".to_string())).is_err());
-        assert_eq!(parse_docker_bool_query(None, "all").unwrap(), false);
+        assert!(!parse_docker_bool_query(None, "all").unwrap());
         assert_eq!(
             parse_docker_limit_query(Some(&"-1".to_string())).unwrap(),
             None

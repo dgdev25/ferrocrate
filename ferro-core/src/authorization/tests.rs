@@ -42,9 +42,11 @@ fn request(action: Action, principal: Option<(&str, Role)>, owner: Option<&str>)
 
 #[test]
 fn execution_and_parent_facts_are_part_of_the_canonical_request_bytes() {
-    let mut first = RequestFacts::default();
-    first.execution_digest = Some("aa".repeat(32));
-    first.parent_resource_id = Some("cri-sandbox-a".into());
+    let first = RequestFacts {
+        execution_digest: Some("aa".repeat(32)),
+        parent_resource_id: Some("cri-sandbox-a".into()),
+        ..Default::default()
+    };
     let mut second = first.clone();
     second.execution_digest = Some("bb".repeat(32));
     second.parent_resource_id = Some("cri-sandbox-b".into());

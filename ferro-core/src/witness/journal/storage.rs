@@ -15,6 +15,8 @@ use std::{
 const LOCK_HANDOFF_RETRIES: usize = 16;
 const LOCK_HANDOFF_DELAY: Duration = Duration::from_millis(1);
 
+type JournalEntries = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// SQLite key/value storage used by the witness-journal cutover.
 ///
 /// The journal deliberately keeps its existing tree names and byte keys. This
@@ -123,7 +125,7 @@ impl SqliteJournalStore {
         Ok(())
     }
 
-    pub(super) fn scan(&self, tree: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, JournalError> {
+    pub(super) fn scan(&self, tree: &str) -> Result<JournalEntries, JournalError> {
         let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
         let mut statement =
             connection.prepare("SELECT key, value FROM kv WHERE tree = ?1 ORDER BY key")?;
@@ -235,7 +237,7 @@ impl JournalTree {
 }
 
 pub(super) struct JournalTreeIter {
-    entries: Option<Result<Vec<(Vec<u8>, Vec<u8>)>, JournalError>>,
+    entries: Option<Result<JournalEntries, JournalError>>,
 }
 
 impl Iterator for JournalTreeIter {

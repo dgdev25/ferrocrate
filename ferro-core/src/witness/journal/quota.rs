@@ -70,7 +70,7 @@ impl WitnessJournal {
         let mut reservation = [0_u8; 24];
         reservation[..16].copy_from_slice(id.as_bytes());
         reservation[16..].copy_from_slice(&bytes.to_be_bytes());
-        self.meta.insert(RESERVE_INFLIGHT, &reservation)?;
+        self.meta.insert(RESERVE_INFLIGHT, reservation)?;
         if self
             .faults
             .take(FaultPoint::BeforeFlush(FlushBoundary::Reserve))
@@ -114,7 +114,7 @@ impl WitnessJournal {
 
     pub(super) fn stop_automation(&self) {
         self.automation_stopped.store(true, Ordering::Release);
-        let _ = self.meta.insert(AUTOMATION_STOPPED, &[1_u8]);
+        let _ = self.meta.insert(AUTOMATION_STOPPED, [1_u8]);
         let _ = self.db.flush();
         let marker = self.root.join("witness.automation-stopped");
         let temporary = self.root.join("witness.automation-stopped.tmp");
@@ -212,7 +212,7 @@ impl WitnessJournal {
 
     pub(super) fn post_ack_rotation(&self) {
         if self.seal_active_segment(false).is_err() {
-            let _ = self.meta.insert(super::ROTATION_DEFERRED, &[1_u8]);
+            let _ = self.meta.insert(super::ROTATION_DEFERRED, [1_u8]);
             let _ = self.db.flush();
         } else {
             let _ = self.meta.remove(super::ROTATION_DEFERRED);

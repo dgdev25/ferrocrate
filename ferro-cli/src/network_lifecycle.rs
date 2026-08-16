@@ -153,6 +153,7 @@ fn validate_bridge_config(config: &ferro_net::BridgeConfig) -> Result<(), Networ
 /// When `bridge_name` is `None`, the logical name is also used as the kernel
 /// bridge name (test convenience). Production callers with distinct logical
 /// and bridge names should use [`NetworkCreateRecord::from_record`].
+#[allow(dead_code)]
 pub(crate) fn create_network_record(
     name: &str,
     cidr: Option<&str>,
@@ -162,6 +163,7 @@ pub(crate) fn create_network_record(
 }
 
 /// Build a validated create record with an explicit kernel bridge name.
+#[allow(dead_code)]
 pub(crate) fn create_network_record_with_bridge(
     logical_name: &str,
     bridge_name: &str,
@@ -302,6 +304,7 @@ pub(crate) fn save_networks(runtime_dir: &Path, records: &[NetworkRecord]) -> Re
 
 /// Errors surfaced by the lifecycle core.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum NetworkLifecycleError {
     InvalidRecord(String),
     /// The journal exists but cannot be decoded; fail closed, never rewrite.
@@ -379,6 +382,7 @@ pub(crate) trait NetworkKernel {
 
 /// Real kernel adapter. Observation is the read-only path exported by
 /// `ferro-net`; mutation goes through the transactional bridge helpers.
+#[allow(dead_code)]
 pub(crate) struct SystemBridgeKernel;
 
 impl NetworkKernel for SystemBridgeKernel {
@@ -814,6 +818,7 @@ fn is_terminal_phase(phase: &NetworkLifecyclePhase) -> bool {
     )
 }
 
+#[allow(clippy::match_like_matches_macro)]
 fn is_legal_transition(
     action: NetworkAction,
     from: &NetworkLifecyclePhase,
@@ -920,6 +925,7 @@ fn fresh_op_id(name: &str, action: NetworkAction, generation: u64, seq: usize) -
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mint_operation(
     ops: &[NetworkOperation],
     name: &str,
@@ -930,7 +936,7 @@ fn mint_operation(
     observed: Option<BridgeIdentity>,
     detail: Option<String>,
 ) -> Result<NetworkOperation, NetworkLifecycleError> {
-    let generation = next_generation(&ops, name);
+    let generation = next_generation(ops, name);
     let op_id = fresh_op_id(name, action, generation, ops.len());
     if ops.iter().any(|op| op.op_id == op_id) {
         return Err(NetworkLifecycleError::JournalCorrupt(
@@ -969,6 +975,7 @@ fn mint_operation(
 /// Mint and durably append the sole first entry for an operation. Generation
 /// and operation id are selected under the writer lock, then retained by every
 /// later checkpoint.
+#[allow(clippy::too_many_arguments)]
 fn append_lifecycle_entry(
     runtime_dir: &Path,
     name: &str,
@@ -1916,6 +1923,7 @@ pub(crate) fn recover_network_lifecycles(
 }
 
 /// Single-network recovery classifier (thin wrapper over the report driver).
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecoveryVerdict {
     NotApplied,
@@ -1923,6 +1931,7 @@ pub(crate) enum RecoveryVerdict {
     Quarantined,
 }
 
+#[allow(dead_code)]
 pub(crate) fn classify_recovery(
     runtime_dir: &Path,
     network: &str,

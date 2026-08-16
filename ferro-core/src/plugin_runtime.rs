@@ -234,7 +234,7 @@ fn plugin_command(
             .arg("--")
             .arg(&manifest.entrypoint)
             .args(args);
-        return Ok(command);
+        Ok(command)
     }
 
     #[cfg(not(unix))]
@@ -765,14 +765,18 @@ mod tests {
     fn kills_timed_out_plugin_and_rejects_excess_output() {
         let temp = tempfile::tempdir().expect("tempdir");
         let key = SigningKey::from_bytes(&[4u8; 32]);
-        let mut limits = PluginLimits::default();
-        limits.timeout_secs = 1;
+        let limits = PluginLimits {
+            timeout_secs: 1,
+            ..Default::default()
+        };
         let manifest = signed_manifest(&script(&temp, "sleep 2"), limits, &key);
         let result = execute_plugin(&manifest, &key.verifying_key(), &[], b"").expect("timeout");
         assert!(result.timed_out);
 
-        let mut limits = PluginLimits::default();
-        limits.max_output_bytes = 4;
+        let limits = PluginLimits {
+            max_output_bytes: 4,
+            ..Default::default()
+        };
         let manifest = signed_manifest(&script(&temp, "printf 12345"), limits, &key);
         assert!(matches!(
             execute_plugin(&manifest, &key.verifying_key(), &[], b""),
@@ -785,8 +789,10 @@ mod tests {
     fn applies_declared_address_space_limit() {
         let temp = tempfile::tempdir().expect("tempdir");
         let key = SigningKey::from_bytes(&[6u8; 32]);
-        let mut limits = PluginLimits::default();
-        limits.memory_bytes = 64 * 1024 * 1024;
+        let limits = PluginLimits {
+            memory_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        };
         let manifest = signed_manifest(&script(&temp, "ulimit -v"), limits, &key);
         let result =
             execute_plugin(&manifest, &key.verifying_key(), &[], b"").expect("limited plugin");

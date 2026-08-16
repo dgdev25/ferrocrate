@@ -344,6 +344,7 @@ fn load_sandboxes(runtime_dir: &Path) -> BTreeMap<String, SandboxRecord> {
     load_cri_state(runtime_dir, "sandboxes", &sandbox_state_path(runtime_dir))
 }
 
+#[allow(clippy::result_large_err)]
 fn persist_sandboxes(
     runtime_dir: &Path,
     sandboxes: &BTreeMap<String, SandboxRecord>,
@@ -389,6 +390,7 @@ fn load_containers(runtime_dir: &Path) -> BTreeMap<String, ContainerSpecRecord> 
     )
 }
 
+#[allow(clippy::result_large_err)]
 fn persist_containers(
     runtime_dir: &Path,
     containers: &BTreeMap<String, ContainerSpecRecord>,

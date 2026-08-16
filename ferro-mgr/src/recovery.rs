@@ -123,7 +123,7 @@ mod tests {
 
         let plan = restore_backup(
             &destination,
-            &temp.path().join("recovered.sqlite"),
+            temp.path().join("recovered.sqlite"),
             "lost host",
             1234,
         )

@@ -193,7 +193,29 @@ pub fn create_bridge(config: &BridgeConfig) -> Result<(), ExecError> {
     )?;
 
     txn.commit();
+
+    let observed = observe_bridge_identity(&config.name)?;
+    if !observation_matches_config(observed.as_ref(), config) {
+        let rollback = destroy_bridge(&config.name);
+        let detail = match rollback {
+            Ok(()) => "bridge was removed after read-back mismatch".to_string(),
+            Err(error) => format!("bridge rollback also failed: {error}"),
+        };
+        return Err(ExecError::CommandFailed {
+            cmd: format!("bridge read-back verification for {}", config.name),
+            stderr: detail,
+        });
+    }
     Ok(())
+}
+
+fn observation_matches_config(observed: Option<&BridgeObservation>, config: &BridgeConfig) -> bool {
+    let Some(observed) = observed else {
+        return false;
+    };
+    let expected_cidr = (!config.cidr.is_empty()).then_some(config.cidr.as_str());
+    let expected_ipv6 = config.ipv6_cidr.as_deref().filter(|cidr| !cidr.is_empty());
+    observed.cidr.as_deref() == expected_cidr && observed.ipv6_cidr.as_deref() == expected_ipv6
 }
 
 /// Destroy a bridge (bring down and delete).
@@ -221,7 +243,7 @@ mod tests {
     use super::{
         build_ip_addr_add_bridge_cmd, build_ip_addr_add_ipv6_bridge_cmd,
         build_ip_link_add_bridge_cmd, build_ip_link_set_master_cmd, build_ip_link_set_up_cmd,
-        BridgeConfig,
+        observation_matches_config, BridgeConfig, BridgeObservation,
     };
 
     #[test]
@@ -279,6 +301,30 @@ mod tests {
             ipv6_cidr: Some("fd00::1/64".to_string()),
         };
         assert_eq!(cfg.ipv6_cidr.as_deref(), Some("fd00::1/64"));
+    }
+
+    #[test]
+    fn readback_requires_exact_requested_addresses() {
+        let config = BridgeConfig {
+            name: "ferro0".into(),
+            cidr: "10.0.0.1/24".into(),
+            ipv6_cidr: Some("fd00::1/64".into()),
+        };
+        let observed = BridgeObservation {
+            name: "ferro0".into(),
+            ifindex: 7,
+            cidr: Some("10.0.0.1/24".into()),
+            ipv6_cidr: Some("fd00::1/64".into()),
+        };
+        assert!(observation_matches_config(Some(&observed), &config));
+        assert!(!observation_matches_config(None, &config));
+        assert!(!observation_matches_config(
+            Some(&BridgeObservation {
+                ipv6_cidr: Some("fd00::2/64".into()),
+                ..observed
+            }),
+            &config
+        ));
     }
 }
 

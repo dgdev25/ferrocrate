@@ -5,6 +5,7 @@
 //! identity, declared capabilities, and signature metadata through an
 //! authorization-bound executor.
 
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -53,6 +54,12 @@ pub enum PluginManifestError {
     EntrypointTraversal,
     #[error("plugin manifest permission is unsupported: {0}")]
     UnsupportedPermission(String),
+    #[error("plugin manifest signature must use ed25519:<128 hex characters>")]
+    SignatureEncoding,
+    #[error("plugin manifest signature verification failed")]
+    SignatureInvalid,
+    #[error("plugin manifest canonicalization failed: {0}")]
+    Canonicalization(String),
 }
 
 pub fn validate_plugin_manifest(
@@ -98,9 +105,32 @@ pub fn parse_plugin_manifest(bytes: &[u8]) -> Result<PluginManifest, PluginManif
     validate_plugin_manifest(manifest)
 }
 
+/// Verify the detached Ed25519 signature over canonical JSON with the
+/// manifest's signature field cleared. Trust-key selection remains the
+/// deployment authority's responsibility.
+pub fn verify_plugin_signature(
+    manifest: &PluginManifest,
+    key: &VerifyingKey,
+) -> Result<(), PluginManifestError> {
+    let encoded = manifest
+        .signature
+        .strip_prefix("ed25519:")
+        .ok_or(PluginManifestError::SignatureEncoding)?;
+    let bytes = hex::decode(encoded).map_err(|_| PluginManifestError::SignatureEncoding)?;
+    let signature =
+        Signature::from_slice(&bytes).map_err(|_| PluginManifestError::SignatureEncoding)?;
+    let mut unsigned = manifest.clone();
+    unsigned.signature.clear();
+    let payload = serde_json::to_vec(&unsigned)
+        .map_err(|error| PluginManifestError::Canonicalization(error.to_string()))?;
+    key.verify(&payload, &signature)
+        .map_err(|_| PluginManifestError::SignatureInvalid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_plugin_manifest, PluginKind, PluginManifestError};
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn valid() -> &'static [u8] {
         br#"{
@@ -134,6 +164,25 @@ mod tests {
         assert_eq!(
             error,
             PluginManifestError::UnsupportedPermission("mount_host".into())
+        );
+    }
+
+    #[test]
+    fn verifies_canonical_manifest_signature() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut unsigned_manifest = parse_plugin_manifest(valid()).unwrap();
+        unsigned_manifest.signature.clear();
+        let unsigned = serde_json::to_vec(&unsigned_manifest).unwrap();
+        let signature = key.sign(&unsigned);
+        unsigned_manifest.signature = format!("ed25519:{}", hex::encode(signature.to_bytes()));
+        let manifest = unsigned_manifest;
+        super::verify_plugin_signature(&manifest, &key.verifying_key()).expect("signature");
+
+        let mut tampered = manifest.clone();
+        tampered.name = "tampered".into();
+        assert_eq!(
+            super::verify_plugin_signature(&tampered, &key.verifying_key()).unwrap_err(),
+            PluginManifestError::SignatureInvalid
         );
     }
 }

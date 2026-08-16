@@ -6436,6 +6436,7 @@ impl DockerEventStore {
             .transpose()?;
         let event = query.get("event").or_else(|| query.get("action"));
         let kind = query.get("type");
+        let scope = query.get("scope");
         let resource = query.get("container").or_else(|| query.get("image"));
         let filters = query
             .get("filters")
@@ -6462,6 +6463,7 @@ impl DockerEventStore {
         let filter_images = filter_values("image");
         let filter_networks = filter_values("network");
         let filter_volumes = filter_values("volume");
+        let filter_scopes = filter_values("scope");
         let parsed_events = contents
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -6476,6 +6478,7 @@ impl DockerEventStore {
             .filter(|item| until.is_none_or(|value| item.time <= value))
             .filter(|item| event.is_none_or(|value| item.action == *value))
             .filter(|item| kind.is_none_or(|value| item.event_type == *value))
+            .filter(|item| scope.is_none_or(|value| item.scope == *value))
             .filter(|item| resource.is_none_or(|value| item.resource.as_deref() == Some(value)))
             .filter(|item| {
                 filter_events
@@ -6500,6 +6503,11 @@ impl DockerEventStore {
                         .as_ref()
                         .is_some_and(|resource| values.iter().any(|value| value == resource))
                 })
+            })
+            .filter(|item| {
+                filter_scopes
+                    .as_ref()
+                    .is_none_or(|values| values.iter().any(|value| value == &item.scope))
             })
             .collect::<Vec<_>>()
             .pipe(Ok)
@@ -9614,6 +9622,15 @@ mod tests {
             r#"{"type":["network"],"network":["n1"]}"#.to_string(),
         );
         assert_eq!(reopened.query(&docker_filters).unwrap().len(), 1);
+
+        docker_filters.insert(
+            "filters".to_string(),
+            r#"{"scope":["local"],"type":["container"]}"#.to_string(),
+        );
+        assert_eq!(reopened.query(&docker_filters).unwrap().len(), 1);
+        let mut scope_query = HashMap::new();
+        scope_query.insert("scope".to_string(), "swarm".to_string());
+        assert!(reopened.query(&scope_query).unwrap().is_empty());
     }
 
     #[test]

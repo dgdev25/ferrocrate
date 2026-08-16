@@ -1,6 +1,7 @@
 use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore, RequestOrigin};
 use ferro_core::container_store::CreationProvenance;
-use ferro_core::container_store::{ContainerRecord, LocalContainerStore};
+use ferro_core::container_store::ContainerRecord;
+use ferro_core::sqlite_container_store::SqliteContainerStore;
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::runtime::{
     ContainerRuntime, LifecyclePhaseHook, LifecyclePhasePoint, RuntimeError,
@@ -118,7 +119,7 @@ fn assert_abort_reopen_matrix(action: &str) {
                 .arg("30")
                 .spawn()
                 .unwrap();
-            let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+            let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
             let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
                 "id":id,"pid":spawned.id(),"image":"example.invalid/app:latest","command":["true"],
                 "created_at_unix":1,"stdout_path":"","stderr_path":"","status": if action == "remove" { "stopped" } else { "running" }
@@ -317,7 +318,7 @@ fn assert_post_effect_unknown_reconciles(action: &str) {
         .arg("30")
         .spawn()
         .unwrap();
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id":id, "pid":child.id(), "image":"example.invalid/app:latest", "command":["true"],
         "created_at_unix":1, "stdout_path":"", "stderr_path":"",
@@ -422,7 +423,7 @@ fn exec_exposes_every_durable_crash_boundary_in_order() {
         ))
         .unwrap(),
     );
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id":"00112233445566778899aabbccddeeff", "pid":std::process::id(),
         "image":"example.invalid/app:latest", "command":["true"],
@@ -502,7 +503,7 @@ fn failed_witnessed_run_leaves_no_phantom_candidate() {
         .unwrap_err();
     assert!(error.to_string().contains("command is required"));
     drop(runtime);
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     assert!(store.list().unwrap().is_empty());
 }
 
@@ -535,7 +536,7 @@ fn denied_exec_is_witnessed_once_and_has_no_side_effect() {
         ))
         .unwrap(),
     );
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id":"00112233445566778899aabbccddeeff", "pid":4294967295u32,
         "image":"example.invalid/app:latest", "command":["true"],
@@ -618,7 +619,7 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
         );
         let id = "00112233445566778899aabbccddeeff";
         if action != "run" {
-            let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+            let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
             let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
                 "id":id, "pid":std::process::id(), "image":"example.invalid/app:latest",
                 "command":["true"], "created_at_unix":1, "stdout_path":"", "stderr_path":"",
@@ -748,7 +749,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
                 .unwrap();
             let pid = spawned.id();
             child = Some(spawned);
-            let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+            let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
             let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
                 "id":id, "pid":pid, "image":"example.invalid/app:latest",
                 "command": if action == "restart" {
@@ -886,7 +887,7 @@ fn disabled_mode_rejects_any_journal_and_uses_explicit_compatibility_path() {
     )
     .unwrap();
     std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id":"00112233445566778899aabbccddeeff", "pid":u32::MAX,
         "image":"example.invalid/app:latest", "command":["true"],

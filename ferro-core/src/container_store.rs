@@ -322,6 +322,10 @@ pub enum ContainerStoreError {
     Decode(#[source] serde_json::Error),
     #[error("container SQLite migration failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("container store filesystem error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("container store lock failed: {0}")]
+    Lock(String),
     #[error("container mutation compare-and-swap failed")]
     MutationConflict,
 }
@@ -1088,7 +1092,7 @@ fn lifecycle_operation(
     }
 }
 
-fn process_start_time(pid: u32) -> Option<u64> {
+pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
     }

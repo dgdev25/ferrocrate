@@ -14,8 +14,7 @@ use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
     now_unix, ContainerRecord, ContainerStoreError, CreationProvenance, EbpfFilterOwnershipRecord,
     EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LifecycleOperation,
-    LifecyclePhase, LocalContainerStore, MutationReservation, NetworkOwnershipRecord,
-    PortMappingRecord, RestartPolicy,
+    LifecyclePhase, MutationReservation, NetworkOwnershipRecord, PortMappingRecord, RestartPolicy,
 };
 use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
@@ -43,6 +42,7 @@ use crate::rootfs::construct_rootfs_with_dedup;
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
 };
+use crate::sqlite_container_store::SqliteContainerStore;
 use dashmap::DashMap;
 use ferro_net::bridge;
 use ferro_net::ebpf::{
@@ -1111,7 +1111,7 @@ impl Drop for CreationRollback {
 
 fn recover_pending_network_cleanups(
     runtime_dir: &Path,
-    store: &LocalContainerStore,
+    store: &SqliteContainerStore,
     cgroup_root: &Path,
     authorization: &RuntimeAuthorization,
     kernel_ops: Arc<dyn KernelResourceOps>,
@@ -1238,7 +1238,7 @@ fn validate_legacy_cleanup_authority(
 
 fn validate_cleanup_authority(
     pending: &PendingNetworkCleanup,
-    store: &LocalContainerStore,
+    store: &SqliteContainerStore,
     authorization: &RuntimeAuthorization,
 ) -> Result<Option<CleanupAuthority>, RuntimeError> {
     let Some(operation_id) = pending.operation_id else {
@@ -1395,7 +1395,7 @@ fn parse_cmd_args(cmd: &[String]) -> Result<(&String, &[String]), RuntimeError> 
 }
 
 pub struct ContainerRuntime {
-    store: LocalContainerStore,
+    store: SqliteContainerStore,
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
     health_cancel: DashMap<String, Arc<AtomicBool>>,
@@ -1639,7 +1639,7 @@ impl ContainerRuntime {
         kernel_ops: Arc<dyn KernelResourceOps>,
     ) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
-        let store = LocalContainerStore::open(runtime_dir.join("containers.db"))?;
+        let store = SqliteContainerStore::open(runtime_dir.join("containers.db"))?;
         let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup"));
@@ -4131,7 +4131,7 @@ fn spawn_process_with_logs(
     stdout_path: &Path,
     stderr_path: &Path,
     append: bool,
-    store: sled::Db,
+    store: SqliteContainerStore,
     container_id: String,
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
@@ -4573,7 +4573,7 @@ fn release_prepared_child(pid: u32) -> Result<(), RuntimeError> {
 fn supervise_child(
     mut child: Child,
     mut _pidfd: OwnedFd,
-    store: sled::Db,
+    store: SqliteContainerStore,
     container_id: String,
     cmd: Vec<String>,
     env: Vec<String>,
@@ -6470,7 +6470,7 @@ fn ensure_bridge_backend_root(
 }
 
 fn validate_port_mapping_conflicts(
-    store: &LocalContainerStore,
+    store: &SqliteContainerStore,
     requested: &[crate::container_store::PortMappingRecord],
 ) -> Result<(), RuntimeError> {
     if requested.is_empty() {
@@ -8592,101 +8592,43 @@ fn adaptive_restart_delay(
 }
 
 fn update_pid_status(
-    db: &sled::Db,
+    db: &SqliteContainerStore,
     id: &str,
     pid: u32,
     status: &str,
 ) -> Result<(), ContainerStoreError> {
-    use sled::transaction::{ConflictableTransactionError, TransactionError};
-    let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
-    tree.transaction(|tree| {
-        let Some(bytes) = tree.get(id.as_bytes())? else {
-            return Ok(());
-        };
-        let mut record = serde_json::from_slice::<ContainerRecord>(&bytes).map_err(|error| {
-            ConflictableTransactionError::Abort(ContainerStoreError::Decode(error))
-        })?;
-        if record.pending_mutation.is_some() {
-            return Err(ConflictableTransactionError::Abort(
-                ContainerStoreError::MutationConflict,
-            ));
-        }
-        record.pid = pid;
-        record.status = status.to_string();
-        let encoded = serde_json::to_vec(&record).map_err(|error| {
-            ConflictableTransactionError::Abort(ContainerStoreError::Encode(error))
-        })?;
-        tree.insert(id.as_bytes(), encoded)?;
-        Ok(())
-    })
-    .map_err(|error| match error {
-        TransactionError::Abort(error) => error,
-        TransactionError::Storage(error) => ContainerStoreError::Open(error),
-    })?;
-    tree.flush()?;
+    let Some(mut record) = db.get(id)? else {
+        return Ok(());
+    };
+    if record.pending_mutation.is_some() {
+        return Err(ContainerStoreError::MutationConflict);
+    }
+    record.pid = pid;
+    record.status = status.to_string();
+    db.put(&record)?;
     Ok(())
 }
 
-fn update_exit(db: &sled::Db, id: &str, exit_code: i32) -> Result<String, ContainerStoreError> {
-    use sled::transaction::{ConflictableTransactionError, TransactionError};
-    let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
-    let status = tree
-        .transaction(|tree| {
-            let Some(bytes) = tree.get(id.as_bytes())? else {
-                return Ok("exited".to_string());
-            };
-            let mut record =
-                serde_json::from_slice::<ContainerRecord>(&bytes).map_err(|error| {
-                    ConflictableTransactionError::Abort(ContainerStoreError::Decode(error))
-                })?;
-            if record.pending_mutation.is_some() {
-                return Err(ConflictableTransactionError::Abort(
-                    ContainerStoreError::MutationConflict,
-                ));
-            }
-            record.last_exit_code = Some(exit_code);
-            if record.status != "stopped" && record.status != "killed" {
-                record.status = "exited".to_string();
-            }
-            let status = record.status.clone();
-            let encoded = serde_json::to_vec(&record).map_err(|error| {
-                ConflictableTransactionError::Abort(ContainerStoreError::Encode(error))
-            })?;
-            tree.insert(id.as_bytes(), encoded)?;
-            Ok(status)
-        })
-        .map_err(|error| match error {
-            TransactionError::Abort(error) => error,
-            TransactionError::Storage(error) => ContainerStoreError::Open(error),
-        })?;
-    tree.flush()?;
-    Ok(status)
+fn update_exit(
+    db: &SqliteContainerStore,
+    id: &str,
+    exit_code: i32,
+) -> Result<String, ContainerStoreError> {
+    db.update_exit(id, exit_code)
 }
 
 fn update_health(
-    db: &sled::Db,
+    db: &SqliteContainerStore,
     id: &str,
     status: &str,
     failures: u32,
     checked_at_unix: u64,
 ) -> Result<bool, ContainerStoreError> {
-    let tree = db.open_tree(crate::container_store::CONTAINER_INDEX_TREE)?;
-    let Some(bytes) = tree.get(id.as_bytes())? else {
-        return Ok(false);
-    };
-    let mut record =
-        serde_json::from_slice::<ContainerRecord>(&bytes).map_err(ContainerStoreError::Decode)?;
-    record.health_status = status.to_string();
-    record.health_failures = failures;
-    record.health_checked_at_unix = Some(checked_at_unix);
-    let encoded = serde_json::to_vec(&record)?;
-    tree.insert(id.as_bytes(), encoded)?;
-    tree.flush()?;
-    Ok(true)
+    db.update_health(id, status, failures, checked_at_unix)
 }
 
 fn run_health_checks(
-    store: sled::Db,
+    store: SqliteContainerStore,
     id: String,
     pid: u32,
     config: HealthConfig,
@@ -8711,11 +8653,7 @@ fn run_health_checks(
         }
 
         // Check if container still exists (handles removal during health check)
-        let tree = match store.open_tree("containers") {
-            Ok(t) => t,
-            Err(_) => return, // Store error, exit
-        };
-        if !tree.contains_key(&id).unwrap_or(false) {
+        if !store.contains(&id).unwrap_or(false) {
             return; // Container removed, exit
         }
 
@@ -8808,7 +8746,7 @@ fn should_start_ai_monitor(memory_limit: u64) -> bool {
 /// - Writes predictions to audit log with DecisionTrace
 /// - Progressive rollout: v0.1 observe only, v0.2 suggestions, v0.3 auto-adjust
 fn run_resource_monitor(
-    store: sled::Db,
+    store: SqliteContainerStore,
     id: String,
     cgroup_root: PathBuf,
     memory_limit: u64,
@@ -8856,11 +8794,7 @@ fn run_resource_monitor(
         }
 
         // Check if container still exists
-        let tree = match store.open_tree("containers") {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        if !tree.contains_key(&id).unwrap_or(false) {
+        if !store.contains(&id).unwrap_or(false) {
             return; // Container removed
         }
 
@@ -10434,9 +10368,10 @@ mod tests {
             serde_json::to_vec(&pending).unwrap(),
         )
         .unwrap();
-        let store =
-            crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
-                .unwrap();
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .unwrap();
 
         let authorization =
             crate::authorization::runtime::RuntimeAuthorization::compatibility_with_id([1; 16]);
@@ -11162,7 +11097,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     #[test]
     fn port_mapping_conflicts_are_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = crate::container_store::LocalContainerStore::open(temp.path()).expect("store");
+        let store =
+            crate::sqlite_container_store::SqliteContainerStore::open(temp.path()).expect("store");
         let existing = ContainerRecord {
             id: "c-existing".to_string(),
             name: None,

@@ -57,6 +57,7 @@ pub mod process_lifecycle;
 pub mod registry;
 pub mod runtime_config;
 pub mod rvf_image;
+pub mod sqlite_container_store;
 pub mod volume_store;
 pub mod witness;
 

@@ -3965,18 +3965,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Ok(endpoint) => endpoint,
         Err(error) => return Some(Err(error)),
     }?;
-    let request = |method: &str, path: String| {
-        remote_docker_request(&endpoint, method, &path, None).and_then(|(status, body)| {
-            if (200..300).contains(&status) {
-                Ok(body)
-            } else {
-                Err(format!(
-                    "remote context request returned HTTP {status}: {}",
-                    String::from_utf8_lossy(&body)
-                ))
-            }
-        })
+    let request_with_body = |method: &str, path: String, payload: Option<Vec<u8>>| {
+        remote_docker_request(&endpoint, method, &path, payload.as_deref()).and_then(
+            |(status, body)| {
+                if (200..300).contains(&status) {
+                    Ok(body)
+                } else {
+                    Err(format!(
+                        "remote context request returned HTTP {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    ))
+                }
+            },
+        )
     };
+    let request = |method: &str, path: String| request_with_body(method, path, None);
     let print_json = |body: Vec<u8>, format: &str| -> Result<(), String> {
         if format == "json" {
             let value: serde_json::Value = serde_json::from_slice(&body)
@@ -4067,12 +4070,90 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         .map(|_| ()),
         Commands::Network {
             command: NetworkCommands::Ls,
-        } => request("GET", "/networks".to_string())
-            .and_then(|body| print_json(body, "json")),
+        } => request("GET", "/networks".to_string()).and_then(|body| print_json(body, "json")),
         Commands::Volume {
             command: VolumeCommands::Ls,
-        } => request("GET", "/volumes".to_string())
-            .and_then(|body| print_json(body, "json")),
+        } => request("GET", "/volumes".to_string()).and_then(|body| print_json(body, "json")),
+        Commands::Network {
+            command:
+                NetworkCommands::Create {
+                    name,
+                    subnet,
+                    gateway,
+                    ipv6_subnet,
+                    ipv6_gateway,
+                },
+        } => {
+            let mut configs = Vec::new();
+            if subnet.is_some() || gateway.is_some() {
+                configs.push(serde_json::json!({
+                    "Subnet": subnet,
+                    "Gateway": gateway,
+                }));
+            }
+            if ipv6_subnet.is_some() || ipv6_gateway.is_some() {
+                configs.push(serde_json::json!({
+                    "Subnet": ipv6_subnet,
+                    "Gateway": ipv6_gateway,
+                }));
+            }
+            let body = serde_json::json!({
+                "Name": name,
+                "Driver": "bridge",
+                "EnableIPv6": ipv6_subnet.is_some(),
+                "IPAM": {"Config": configs},
+            });
+            let body = match serde_json::to_vec(&body) {
+                Ok(body) => body,
+                Err(error) => return Some(Err(error.to_string())),
+            };
+            request_with_body("POST", "/networks/create".to_string(), Some(body))
+                .and_then(|body| print_json(body, "json"))
+        }
+        Commands::Network {
+            command: NetworkCommands::Rm { name },
+        } => request(
+            "DELETE",
+            format!("/networks/{}", percent_encode_path_component(name)),
+        )
+        .map(|_| ()),
+        Commands::Volume {
+            command: VolumeCommands::Create { name, driver, opts },
+        } => {
+            let mut driver_opts = serde_json::Map::new();
+            for option in opts {
+                let (key, value) = match option.split_once('=') {
+                    Some(pair) => pair,
+                    None => {
+                        return Some(Err(format!(
+                            "remote context volume option must use key=value: {option}"
+                        )))
+                    }
+                };
+                driver_opts.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+            let body = serde_json::json!({
+                "Name": name,
+                "Driver": driver,
+                "DriverOpts": driver_opts,
+            });
+            let body = match serde_json::to_vec(&body) {
+                Ok(body) => body,
+                Err(error) => return Some(Err(error.to_string())),
+            };
+            request_with_body("POST", "/volumes/create".to_string(), Some(body))
+                .and_then(|body| print_json(body, "json"))
+        }
+        Commands::Volume {
+            command: VolumeCommands::Rm { name },
+        } => request(
+            "DELETE",
+            format!("/volumes/{}", percent_encode_path_component(name)),
+        )
+        .map(|_| ()),
         _ => {
             Err("selected remote context has no transport mapping for this command yet".to_string())
         }
@@ -12449,6 +12530,7 @@ volumes:
             stream.read_to_end(&mut request).ok();
             let request = String::from_utf8_lossy(&request);
             assert!(request.contains("POST /containers/web%2Fname/stop?t=7"));
+            assert!(request.contains("{\"Name\":\"mesh\"}"));
             stream
                 .write_all(
                     b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -12459,7 +12541,7 @@ volumes:
             &socket.to_string_lossy(),
             "POST",
             "/containers/web%2Fname/stop?t=7",
-            None,
+            Some(br#"{"Name":"mesh"}"#),
         )
         .expect("remote lifecycle request");
         worker.join().expect("remote worker");

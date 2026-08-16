@@ -1,6 +1,9 @@
 //! Immutable authorization bindings for Compose fan-out.
 
+use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FanoutAction {
@@ -115,33 +118,76 @@ pub enum FanoutError {
 }
 
 pub struct FanoutReplayStore {
-    db: sled::Db,
+    db: Mutex<Connection>,
 }
 impl FanoutReplayStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, FanoutError> {
-        sled::open(path.as_ref().join("compose-replay.db"))
-            .map(|db| Self { db })
-            .map_err(|error| FanoutError::Storage(error.to_string()))
+        let root = path.as_ref();
+        std::fs::create_dir_all(root).map_err(|error| FanoutError::Storage(error.to_string()))?;
+        let legacy = root.join("compose-replay.db");
+        let sqlite_path = root.join("compose-replay.sqlite");
+        let db = Connection::open(&sqlite_path)
+            .map_err(|error| FanoutError::Storage(error.to_string()))?;
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS compose_replay (
+                child_id BLOB PRIMARY KEY NOT NULL,
+                value BLOB NOT NULL
+            )",
+        )
+        .map_err(|error| FanoutError::Storage(error.to_string()))?;
+        migrate_legacy_replay(root, &legacy, &db)?;
+        Ok(Self { db: Mutex::new(db) })
     }
     pub fn claim(&self, child: &FanoutChild) -> Result<(), FanoutError> {
         let mut value = Vec::with_capacity(96);
         value.extend_from_slice(&child.idempotency_key);
         value.extend_from_slice(&child.plan_digest);
         value.extend_from_slice(&child.request_digest);
-        match self
+        let db = self
             .db
-            .compare_and_swap(child.child_id, None as Option<&[u8]>, Some(value))
-            .map_err(|error| FanoutError::Storage(error.to_string()))?
-        {
-            Ok(()) => {
-                self.db
-                    .flush()
-                    .map_err(|error| FanoutError::Storage(error.to_string()))?;
-                Ok(())
-            }
-            Err(_) => Err(FanoutError::Replay),
+            .lock()
+            .map_err(|error| FanoutError::Storage(error.to_string()))?;
+        let inserted = db
+            .execute(
+                "INSERT OR IGNORE INTO compose_replay (child_id, value) VALUES (?1, ?2)",
+                params![child.child_id.as_slice(), value],
+            )
+            .map_err(|error| FanoutError::Storage(error.to_string()))?;
+        if inserted == 0 {
+            Err(FanoutError::Replay)
+        } else {
+            db.execute_batch("PRAGMA wal_checkpoint(FULL);")
+                .map_err(|error| FanoutError::Storage(error.to_string()))?;
+            Ok(())
         }
     }
+}
+
+fn migrate_legacy_replay(
+    root: &Path,
+    legacy: &Path,
+    sqlite: &Connection,
+) -> Result<(), FanoutError> {
+    let marker = root.join("compose-replay.sqlite.migrated");
+    if marker.exists() || !legacy.join("conf").exists() {
+        return Ok(());
+    }
+    let legacy_db = sled::open(legacy).map_err(|error| FanoutError::Storage(error.to_string()))?;
+    for item in legacy_db.iter() {
+        let (key, value) = item.map_err(|error| FanoutError::Storage(error.to_string()))?;
+        sqlite
+            .execute(
+                "INSERT OR IGNORE INTO compose_replay (child_id, value) VALUES (?1, ?2)",
+                params![key.as_ref(), value.as_ref()],
+            )
+            .map_err(|error| FanoutError::Storage(error.to_string()))?;
+    }
+    sqlite
+        .execute_batch("PRAGMA wal_checkpoint(FULL);")
+        .map_err(|error| FanoutError::Storage(error.to_string()))?;
+    std::fs::write(marker, b"compose-replay-migration-v1\n")
+        .map_err(|error| FanoutError::Storage(error.to_string()))?;
+    Ok(())
 }
 
 impl FanoutPlan {
@@ -411,4 +457,44 @@ where
         })
         .collect();
     FanoutResult::new(statuses)
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::{FanoutAction, FanoutChild, FanoutReplayStore};
+
+    #[test]
+    fn legacy_compose_replay_claims_migrate_idempotently() {
+        let temp = tempfile::tempdir().expect("compose replay directory");
+        let legacy = sled::open(temp.path().join("compose-replay.db")).expect("legacy store");
+        let child_id = [7_u8; 16];
+        legacy
+            .insert(child_id, vec![1_u8; 96])
+            .expect("legacy claim");
+        legacy.flush().expect("legacy flush");
+        drop(legacy);
+
+        let store = FanoutReplayStore::open(temp.path()).expect("migrate replay store");
+        let child = FanoutChild {
+            parent_request_id: [1; 16],
+            child_id,
+            idempotency_key: [2; 32],
+            service: "api".to_string(),
+            action: FanoutAction::ContainerRun,
+            request_digest: [3; 32],
+            deadline_unix_ms: u64::MAX,
+            policy_generation: 1,
+            policy_digest: [4; 32],
+            attempt: 0,
+            ordinal: 0,
+            plan_digest: [5; 32],
+        };
+        assert!(matches!(
+            store.claim(&child),
+            Err(super::FanoutError::Replay)
+        ));
+        assert!(temp.path().join("compose-replay.sqlite").is_file());
+        assert!(temp.path().join("compose-replay.sqlite.migrated").is_file());
+        assert!(temp.path().join("compose-replay.db").is_dir());
+    }
 }

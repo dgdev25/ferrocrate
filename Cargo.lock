@@ -924,6 +924,7 @@ dependencies = [
 name = "ferro-compose"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_yaml",
  "sha2",

@@ -35,9 +35,47 @@ pub struct PluginManifest {
     pub entrypoint: String,
     #[serde(default)]
     pub permissions: Vec<String>,
+    #[serde(default)]
+    pub limits: PluginLimits,
     /// Signature is opaque to admission; trust-bundle verification belongs to
     /// the deployment authority and must happen before execution.
     pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginLimits {
+    #[serde(default = "default_memory_limit")]
+    pub memory_bytes: u64,
+    #[serde(default = "default_pid_limit")]
+    pub pids: u32,
+    #[serde(default = "default_timeout_limit")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_output_limit")]
+    pub max_output_bytes: u64,
+}
+
+impl Default for PluginLimits {
+    fn default() -> Self {
+        Self {
+            memory_bytes: default_memory_limit(),
+            pids: default_pid_limit(),
+            timeout_secs: default_timeout_limit(),
+            max_output_bytes: default_output_limit(),
+        }
+    }
+}
+
+fn default_memory_limit() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_pid_limit() -> u32 {
+    64
+}
+fn default_timeout_limit() -> u64 {
+    300
+}
+fn default_output_limit() -> u64 {
+    16 * 1024 * 1024
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -54,6 +92,8 @@ pub enum PluginManifestError {
     EntrypointTraversal,
     #[error("plugin manifest permission is unsupported: {0}")]
     UnsupportedPermission(String),
+    #[error("plugin manifest resource limits are invalid: {0}")]
+    InvalidLimits(&'static str),
     #[error("plugin manifest signature must use ed25519:<128 hex characters>")]
     SignatureEncoding,
     #[error("plugin manifest signature verification failed")]
@@ -95,6 +135,20 @@ pub fn validate_plugin_manifest(
                 permission.clone(),
             ));
         }
+    }
+    if manifest.limits.memory_bytes == 0 || manifest.limits.memory_bytes > 1024 * 1024 * 1024 {
+        return Err(PluginManifestError::InvalidLimits("memory_bytes"));
+    }
+    if manifest.limits.pids == 0 || manifest.limits.pids > 65_536 {
+        return Err(PluginManifestError::InvalidLimits("pids"));
+    }
+    if manifest.limits.timeout_secs == 0 || manifest.limits.timeout_secs > 86_400 {
+        return Err(PluginManifestError::InvalidLimits("timeout_secs"));
+    }
+    if manifest.limits.max_output_bytes == 0
+        || manifest.limits.max_output_bytes > 1024 * 1024 * 1024
+    {
+        return Err(PluginManifestError::InvalidLimits("max_output_bytes"));
     }
     Ok(manifest)
 }
@@ -165,6 +219,11 @@ mod tests {
             error,
             PluginManifestError::UnsupportedPermission("mount_host".into())
         );
+
+        value["permissions"] = serde_json::json!([]);
+        value["limits"] = serde_json::json!({"memory_bytes": 0});
+        let error = parse_plugin_manifest(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert_eq!(error, PluginManifestError::InvalidLimits("memory_bytes"));
     }
 
     #[test]

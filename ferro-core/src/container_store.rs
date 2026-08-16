@@ -320,6 +320,8 @@ pub enum ContainerStoreError {
     Encode(#[from] serde_json::Error),
     #[error("failed to decode container record: {0}")]
     Decode(#[source] serde_json::Error),
+    #[error("container SQLite migration failed: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("container mutation compare-and-swap failed")]
     MutationConflict,
 }
@@ -908,6 +910,55 @@ impl LocalContainerStore {
     pub fn clone_db(&self) -> sled::Db {
         self.db.clone()
     }
+
+    /// Export the legacy sled trees into a transactional SQLite snapshot.
+    /// The source remains untouched so operators can roll back while the
+    /// runtime migration is qualified on each host.
+    pub fn export_sqlite_snapshot(
+        &self,
+        sqlite_path: impl AsRef<Path>,
+    ) -> Result<(), ContainerStoreError> {
+        let connection = rusqlite::Connection::open(sqlite_path)?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS containers (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 payload BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS lifecycle_operations (
+                 operation_id BLOB PRIMARY KEY NOT NULL,
+                 payload BLOB NOT NULL
+             );",
+        )?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM containers", [])?;
+        transaction.execute("DELETE FROM lifecycle_operations", [])?;
+        let mut offset = 0;
+        loop {
+            let page = self.list_paginated(Some(offset), Some(1000))?;
+            if page.is_empty() {
+                break;
+            }
+            for record in page {
+                transaction.execute(
+                    "INSERT INTO containers (id, payload) VALUES (?1, ?2)",
+                    rusqlite::params![record.id, serde_json::to_vec(&record)?],
+                )?;
+            }
+            offset += 1000;
+        }
+        for operation in self.lifecycle_operations()? {
+            transaction.execute(
+                "INSERT INTO lifecycle_operations (operation_id, payload) VALUES (?1, ?2)",
+                rusqlite::params![
+                    operation.operation_id.to_vec(),
+                    serde_json::to_vec(&operation)?
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
 }
 
 fn lifecycle_operation(
@@ -1038,6 +1089,25 @@ mod tests {
         let listed = store.list().expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "c1");
+    }
+
+    #[test]
+    fn exports_transactional_sqlite_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalContainerStore::open(temp.path().join("containers.db")).expect("open");
+        let sqlite = temp.path().join("containers.sqlite");
+        store.export_sqlite_snapshot(&sqlite).expect("export");
+        let db = rusqlite::Connection::open(sqlite).expect("sqlite");
+        let containers: i64 = db
+            .query_row("SELECT COUNT(*) FROM containers", [], |row| row.get(0))
+            .expect("containers count");
+        let operations: i64 = db
+            .query_row("SELECT COUNT(*) FROM lifecycle_operations", [], |row| {
+                row.get(0)
+            })
+            .expect("operations count");
+        assert_eq!(containers, 0);
+        assert_eq!(operations, 0);
     }
 
     #[test]

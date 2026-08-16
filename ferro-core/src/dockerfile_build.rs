@@ -693,6 +693,39 @@ fn save_build_cache(
     Ok(())
 }
 
+/// Export validated local cache metadata to a caller-selected file.
+pub fn export_build_cache(
+    runtime_dir: &Path,
+    destination: &Path,
+) -> Result<(), DockerfileBuildError> {
+    let cache = load_build_cache(runtime_dir)?;
+    let bytes =
+        serde_json::to_vec_pretty(&cache).map_err(|error| io::Error::other(error.to_string()))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = destination.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, destination)?;
+    Ok(())
+}
+
+/// Import cache metadata, merging entries into the local cache. Malformed
+/// metadata fails closed and no partial write is published.
+pub fn import_build_cache(
+    runtime_dir: &Path,
+    source: &Path,
+) -> Result<usize, DockerfileBuildError> {
+    let bytes = fs::read(source)?;
+    let imported = serde_json::from_slice::<HashMap<String, BuildCacheEntry>>(&bytes)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut cache = load_build_cache(runtime_dir)?;
+    let count = imported.len();
+    cache.extend(imported);
+    save_build_cache(runtime_dir, &cache)?;
+    Ok(count)
+}
+
 /// Retain the newest `max_entries` local build-cache records. Entries are
 /// ordered by their persisted provenance timestamp and the update is atomic.
 pub fn prune_build_cache(
@@ -1833,9 +1866,9 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_from_dockerfile_with_store_and_compression, dockerignore_matches, load_build_cache,
-        parse_stages, prepare_dockerfile_build, prune_build_cache, save_build_cache,
-        BuildCacheEntry,
+        build_from_dockerfile_with_store_and_compression, dockerignore_matches, export_build_cache,
+        import_build_cache, load_build_cache, parse_stages, prepare_dockerfile_build,
+        prune_build_cache, save_build_cache, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -1954,6 +1987,31 @@ mod tests {
         let retained = load_build_cache(&runtime).unwrap();
         assert!(retained.contains_key("new"));
         assert_eq!(retained.len(), 1);
+    }
+
+    #[test]
+    fn exports_and_imports_build_cache_metadata_atomically() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let mut cache = HashMap::new();
+        cache.insert(
+            "key".to_string(),
+            BuildCacheEntry {
+                cache_key: "key".to_string(),
+                created_at_unix: 1,
+                layer_digest: "sha256:layer".to_string(),
+                layer_size: 1,
+                layer_media_type: "application/octet-stream".to_string(),
+                config_digest: "sha256:config".to_string(),
+                config_json: "{}".to_string(),
+                manifest_json: "{}".to_string(),
+            },
+        );
+        save_build_cache(source.path(), &cache).unwrap();
+        let export = source.path().join("export.json");
+        export_build_cache(source.path(), &export).unwrap();
+        assert_eq!(import_build_cache(target.path(), &export).unwrap(), 1);
+        assert_eq!(load_build_cache(target.path()).unwrap().len(), 1);
     }
 
     #[test]

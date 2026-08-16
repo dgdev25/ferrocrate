@@ -207,6 +207,12 @@ pub enum Commands {
         /// available.
         #[arg(long)]
         platform: Option<String>,
+        /// Import local build-cache metadata before building.
+        #[arg(long = "cache-from")]
+        cache_from: Option<String>,
+        /// Export local build-cache metadata after a successful build.
+        #[arg(long = "cache-to")]
+        cache_to: Option<String>,
     },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2224,6 +2230,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 image_format,
                 embed_model,
                 platform,
+                cache_from,
+                cache_to,
             } => handle_build(
                 &image_store,
                 &runtime
@@ -2237,6 +2245,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 image_format.as_str(),
                 embed_model.as_deref(),
                 platform.as_deref(),
+                cache_from.as_deref(),
+                cache_to.as_deref(),
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
@@ -3723,10 +3733,16 @@ fn handle_build(
     image_format: &str,
     embed_model: Option<&str>,
     platform: Option<&str>,
+    cache_from: Option<&str>,
+    cache_to: Option<&str>,
 ) -> Result<(), String> {
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
+    if let Some(source) = cache_from {
+        ferro_core::dockerfile_build::import_build_cache(&runtime_dir, Path::new(source))
+            .map_err(|error| format!("build: cache-from failed: {error}"))?;
+    }
 
     let (result, source_desc) = if let Some(ferrofile_path) = ferrofile {
         let plan = ferro_core::ferrofile_build::prepare_ferrofile_build(
@@ -3811,6 +3827,11 @@ fn handle_build(
 
         let rvf = ferro_core::rvf_image::build_rvf_image(&params).map_err(|e| e.to_string())?;
 
+        if let Some(destination) = cache_to {
+            ferro_core::dockerfile_build::export_build_cache(&runtime_dir, Path::new(destination))
+                .map_err(|error| format!("build: cache-to failed: {error}"))?;
+        }
+
         println!(
             "build: {} tag={} format=rvf output={} digest={} size={} segments={}",
             source_desc,
@@ -3821,6 +3842,11 @@ fn handle_build(
             rvf.segment_count,
         );
         return Ok(());
+    }
+
+    if let Some(destination) = cache_to {
+        ferro_core::dockerfile_build::export_build_cache(&runtime_dir, Path::new(destination))
+            .map_err(|error| format!("build: cache-to failed: {error}"))?;
     }
 
     println!(
@@ -7874,6 +7900,8 @@ mod tests {
                 image_format,
                 embed_model,
                 platform,
+                cache_from,
+                cache_to,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
@@ -7882,6 +7910,8 @@ mod tests {
                 assert_eq!(image_format, "oci");
                 assert!(embed_model.is_none());
                 assert!(platform.is_none());
+                assert!(cache_from.is_none());
+                assert!(cache_to.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -9221,6 +9251,8 @@ mod tests {
             "oci",
             None,
             None,
+            None,
+            None,
         )
         .expect_err("dockerfile should be read");
         assert!(
@@ -9245,6 +9277,8 @@ mod tests {
             Some(""),
             "gzip",
             "oci",
+            None,
+            None,
             None,
             None,
         )

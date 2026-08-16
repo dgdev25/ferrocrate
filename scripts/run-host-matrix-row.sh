@@ -23,6 +23,14 @@ if ! uname -r | grep -Fq -- "$kernel"; then
   exit 77
 fi
 
+# Check privilege before touching repository evidence. Existing qualified
+# evidence may be owned by the operator that ran the privileged row, and an
+# unprivileged probe must report blocked rather than fail on that directory.
+if [[ "$(id -u)" != 0 ]]; then
+  echo "matrix row $row_id requires root" >&2
+  exit 77
+fi
+
 evidence_dir="$repo_root/docs/evidence/host-matrix/$row_id"
 mkdir -p "$evidence_dir"
 printf 'row_id=%s\ndistribution=%s\nkernel=%s\narchitecture=%s\nmanifest_status=%s\n' \
@@ -31,8 +39,6 @@ printf 'row_id=%s\ndistribution=%s\nkernel=%s\narchitecture=%s\nmanifest_status=
 
 bash "$repo_root/scripts/host-matrix-preflight.sh" "$evidence_dir/preflight.txt"
 bash "$repo_root/scripts/host-matrix-supporting-checks.sh" "$evidence_dir/supporting-checks.txt"
-
-[[ "$(id -u)" == 0 ]] || { echo "privileged matrix row requires root" >&2; exit 77; }
 
 bash "$repo_root/scripts/test-privileged-network-lifecycle.sh" \
   >"$evidence_dir/bridge-ipv6-lifecycle.log" 2>&1

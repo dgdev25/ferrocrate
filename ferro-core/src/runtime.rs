@@ -7879,6 +7879,9 @@ fn start_slirp4netns(pid: u32) -> Result<(u32, u64), RuntimeError> {
     let config = RootlessNetConfig {
         tap_name,
         cidr: "10.0.2.0/24".to_string(),
+        enable_ipv6: std::env::var("FERROCRATE_ROOTLESS_IPV6")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
     };
     let cmd = match build_slirp4netns_cmd(pid, &config) {
         Ok(c) => c,

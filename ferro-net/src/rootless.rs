@@ -4,6 +4,7 @@ use crate::validate::{validate_cidr, validate_interface_name};
 pub struct RootlessNetConfig {
     pub tap_name: String,
     pub cidr: String,
+    pub enable_ipv6: bool,
 }
 
 impl RootlessNetConfig {
@@ -27,11 +28,19 @@ pub fn build_slirp4netns_cmd(pid: u32, config: &RootlessNetConfig) -> Result<Vec
         "slirp4netns".to_string(),
         "--configure".to_string(),
         "--mtu=65520".to_string(),
+        if config.enable_ipv6 {
+            "--enable-ipv6".to_string()
+        } else {
+            String::new()
+        },
         "--cidr".to_string(),
         config.cidr.clone(),
         pid.to_string(),
         config.tap_name.clone(),
-    ])
+    ]
+    .into_iter()
+    .filter(|argument| !argument.is_empty())
+    .collect())
 }
 
 #[cfg(test)]
@@ -43,6 +52,7 @@ mod tests {
         let config = RootlessNetConfig {
             tap_name: "tap0".to_string(),
             cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: false,
         };
         let cmd = build_slirp4netns_cmd(1234, &config).unwrap();
         assert_eq!(
@@ -64,6 +74,7 @@ mod tests {
         let config = RootlessNetConfig {
             tap_name: "tap-long-name1".to_string(),
             cidr: "192.168.0.0/16".to_string(),
+            enable_ipv6: false,
         };
         let cmd = build_slirp4netns_cmd(9999, &config).unwrap();
         assert_eq!(
@@ -85,6 +96,7 @@ mod tests {
         let config = RootlessNetConfig {
             tap_name: "tap@0".to_string(), // Invalid character
             cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: false,
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
     }
@@ -94,7 +106,19 @@ mod tests {
         let config = RootlessNetConfig {
             tap_name: "tap0".to_string(),
             cidr: "invalid-cidr".to_string(), // Invalid CIDR
+            enable_ipv6: false,
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
+    }
+
+    #[test]
+    fn enables_ipv6_only_when_explicitly_requested() {
+        let config = RootlessNetConfig {
+            tap_name: "tap0".to_string(),
+            cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: true,
+        };
+        let command = build_slirp4netns_cmd(1234, &config).unwrap();
+        assert!(command.iter().any(|argument| argument == "--enable-ipv6"));
     }
 }

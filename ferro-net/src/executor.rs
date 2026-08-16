@@ -4,7 +4,8 @@
 //! built by the other modules, with support for atomic transactions with
 //! rollback on failure.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use thiserror::Error;
 use tracing::warn;
 
@@ -155,6 +156,72 @@ pub fn exec_cmd_capture(args: &[String]) -> Result<String, ExecError> {
     }
 }
 
+/// Execute a command vector with stdin and capture stdout.
+pub fn exec_cmd_with_stdin(args: &[String], input: &str) -> Result<String, ExecError> {
+    if args.is_empty() {
+        return Err(ExecError::CommandFailed {
+            cmd: String::new(),
+            stderr: "empty command".to_string(),
+        });
+    }
+    let (program, cmd_args) = args.split_first().expect("checked non-empty");
+    let cmd_str = args.join(" ");
+    let mut child = Command::new(program)
+        .args(cmd_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| ExecError::Io {
+            cmd: cmd_str.clone(),
+            source,
+        })?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| ExecError::CommandFailed {
+            cmd: cmd_str.clone(),
+            stderr: "failed to open command stdin".to_string(),
+        })?
+        .write_all(input.as_bytes())
+        .map_err(|source| ExecError::Io {
+            cmd: cmd_str.clone(),
+            source,
+        })?;
+    let output = child.wait_with_output().map_err(|source| ExecError::Io {
+        cmd: cmd_str.clone(),
+        source,
+    })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(ExecError::CommandFailed {
+            cmd: cmd_str,
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+/// Execute a command vector and return whether it exited successfully.
+pub fn exec_cmd_status(args: &[String]) -> Result<bool, ExecError> {
+    if args.is_empty() {
+        return Err(ExecError::CommandFailed {
+            cmd: String::new(),
+            stderr: "empty command".to_string(),
+        });
+    }
+    let (program, cmd_args) = args.split_first().expect("checked non-empty");
+    let cmd_str = args.join(" ");
+    let status = Command::new(program)
+        .args(cmd_args)
+        .status()
+        .map_err(|source| ExecError::Io {
+            cmd: cmd_str,
+            source,
+        })?;
+    Ok(status.success())
+}
+
 /// Execute a command while treating absence of an already-owned resource as success.
 pub fn exec_cmd_allow_missing(args: &[String]) -> Result<(), ExecError> {
     match exec_cmd(args) {
@@ -295,6 +362,15 @@ mod tests {
         let result = exec_cmd(&["false".to_string()]);
         assert!(result.is_err());
         assert!(matches!(result, Err(ExecError::CommandFailed { .. })));
+    }
+
+    #[test]
+    fn exec_stdin_capture_and_status_share_typed_boundary() {
+        let output = exec_cmd_with_stdin(&["cat".to_string()], "wireguard-config")
+            .expect("stdin command should succeed");
+        assert_eq!(output, "wireguard-config");
+        assert!(exec_cmd_status(&["true".to_string()]).expect("status command"));
+        assert!(!exec_cmd_status(&["false".to_string()]).expect("status command"));
     }
 
     #[test]

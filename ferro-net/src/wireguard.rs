@@ -3,11 +3,11 @@ use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use ipnet::IpNet;
 use thiserror::Error;
 
+use crate::executor::{exec_cmd_capture, exec_cmd_status, exec_cmd_with_stdin, ExecError};
 use crate::validate::validate_interface_name;
 
 const MAX_PEERS: usize = 512;
@@ -260,55 +260,42 @@ impl WireGuardManager {
     }
 
     fn run(&self, args: &[&str]) -> Result<String, WireGuardError> {
-        let output = self.command(args).output()?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(WireGuardError::Command(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ))
-        }
+        let command = self.command_args(args);
+        exec_cmd_capture(&command)
+            .map(|output| output.trim().to_string())
+            .map_err(map_exec_error)
     }
 
     fn run_with_stdin(&self, args: &[&str], input: &str) -> Result<String, WireGuardError> {
-        let mut child = self
-            .command(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| WireGuardError::Command("failed to open command stdin".into()))?
-            .write_all(input.as_bytes())?;
-        let output = child.wait_with_output()?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(WireGuardError::Command(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ))
-        }
+        let command = self.command_args(args);
+        exec_cmd_with_stdin(&command, input)
+            .map(|output| output.trim().to_string())
+            .map_err(map_exec_error)
     }
 
     fn run_status(&self, args: &[&str]) -> Result<bool, WireGuardError> {
-        Ok(self.command(args).status()?.success())
+        let command = self.command_args(args);
+        exec_cmd_status(&command).map_err(map_exec_error)
     }
 
-    fn command(&self, args: &[&str]) -> Command {
-        let command = if let Some(namespace) = &self.namespace {
-            let mut command = Command::new("ip");
-            command.args(["netns", "exec", namespace]);
-            command.args(args);
+    fn command_args(&self, args: &[&str]) -> Vec<String> {
+        if let Some(namespace) = &self.namespace {
+            let mut command = vec![
+                "ip".to_string(),
+                "netns".to_string(),
+                "exec".to_string(),
+                namespace.clone(),
+            ];
+            command.extend(args.iter().map(|arg| (*arg).to_string()));
             command
         } else {
-            let mut command = Command::new(args[0]);
-            command.args(&args[1..]);
-            command
-        };
-        command
+            args.iter().map(|arg| (*arg).to_string()).collect()
+        }
     }
+}
+
+fn map_exec_error(error: ExecError) -> WireGuardError {
+    WireGuardError::Command(error.to_string())
 }
 
 fn validate_config(

@@ -583,7 +583,12 @@ impl RuntimeService for CriRuntime {
         let record = sandboxes
             .get(&id)
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
-        let state = if record.state == "ready" {
+        let state = if record.state == "ready"
+            && record
+                .netns_name
+                .as_deref()
+                .is_none_or(|name| ferro_net::netns_path(name).exists())
+        {
             PodSandboxState::Ready
         } else {
             PodSandboxState::Notready
@@ -624,6 +629,21 @@ impl RuntimeService for CriRuntime {
             .ok_or_else(|| Status::invalid_argument("container config is required"))?;
         if req.pod_sandbox_id.trim().is_empty() {
             return Err(Status::invalid_argument("pod sandbox ID is required"));
+        }
+        let sandbox = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?
+            .get(&req.pod_sandbox_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
+        if sandbox.state != "ready"
+            || sandbox
+                .netns_name
+                .as_deref()
+                .is_some_and(|name| !ferro_net::netns_path(name).exists())
+        {
+            return Err(Status::failed_precondition("pod sandbox is not ready"));
         }
         if config.image.trim().is_empty() {
             return Err(Status::invalid_argument("container image is required"));
@@ -1571,9 +1591,35 @@ mod tests {
         let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
         let runtime =
             CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        runtime
+            .run_pod_sandbox(authenticated(RunPodSandboxRequest {
+                config: Some(PodSandboxConfig {
+                    metadata: Some(crate::runtime::PodSandboxMetadata {
+                        name: "missing-image-pod".into(),
+                        uid: "missing-image-uid".into(),
+                        namespace: "default".into(),
+                        attempt: 1,
+                    }),
+                    hostname: "missing-image-pod".into(),
+                    log_directory: String::new(),
+                    dns_config: String::new(),
+                    network_namespace: "none".into(),
+                }),
+                runtime_handler: String::new(),
+            }))
+            .await
+            .expect("sandbox create");
+        let sandbox_id = runtime
+            .sandboxes
+            .lock()
+            .expect("sandbox lock")
+            .keys()
+            .next()
+            .cloned()
+            .expect("sandbox id");
         let container = runtime
             .create_container(authenticated(CreateContainerRequest {
-                pod_sandbox_id: "sandbox-1".into(),
+                pod_sandbox_id: sandbox_id,
                 config: Some(ContainerConfig {
                     metadata_name: "missing-image".into(),
                     image: "missing:latest".into(),

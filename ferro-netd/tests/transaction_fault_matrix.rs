@@ -16,6 +16,7 @@ use ferro_netd::{
     test_support::{normalized_request_parameters, FaultHandle, FaultPoint},
 };
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
@@ -149,6 +150,126 @@ fn wireguard(address: &str, route: &str) -> NetdRequest {
         routes: vec![route.into()],
         addresses: vec![address.into()],
     }
+}
+
+/// Production-kernel authorization witness: the same signed envelope and
+/// helper grant used by the deterministic matrix must reach a real netd
+/// WireGuard mutation before the interface is created. This is opt-in because
+/// it requires root and leaves no state when the remove operation succeeds.
+#[test]
+#[ignore]
+fn real_kernel_wireguard_grant_path() {
+    assert_eq!(nix::unistd::geteuid().as_raw(), 0, "root is required");
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = dir.path().join("wireguard.key");
+    let key = base64::engine::general_purpose::STANDARD.encode([31_u8; 32]);
+    std::fs::write(&key_path, format!("{key}\n")).unwrap();
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let keys = Keys {
+        manager: SigningKey::from_bytes(&[17; 32]),
+        helper: SigningKey::from_bytes(&[18; 32]),
+    };
+    let policy = Policy::new(
+        "cluster".into(),
+        "node".into(),
+        &base64::engine::general_purpose::STANDARD.encode(keys.manager.verifying_key().to_bytes()),
+    )
+    .unwrap();
+    let verifier = GrantVerifier::new(
+        keys.helper.verifying_key(),
+        "runtime",
+        "key-1",
+        "boot-a",
+        GrantLedger::open(dir.path().join("grants.json")).unwrap(),
+    );
+    let mut server =
+        NetdServer::with_wireguard(nix::unistd::geteuid().as_raw(), policy, key_path, 51991)
+            .with_grants(verifier)
+            .load_journal(dir.path().join("ownership.json"))
+            .unwrap();
+    let interfaces = ferro_core::managed_overlay::managed_interface_identities("matrix-overlay");
+    struct LinkCleanup(Vec<String>);
+    impl Drop for LinkCleanup {
+        fn drop(&mut self) {
+            for name in &self.0 {
+                let exists = std::process::Command::new("ip")
+                    .args(["link", "show", "dev", name])
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                if exists {
+                    let _ = std::process::Command::new("ip")
+                        .args(["link", "delete", name])
+                        .status();
+                }
+            }
+        }
+    }
+    let _cleanup = LinkCleanup(vec![
+        "fw-direct".into(),
+        interfaces.bridge_ifname.clone(),
+        interfaces.wireguard_ifname.clone(),
+    ]);
+    let direct = ferro_net::WireGuardManager::new(None);
+    let direct_name = "fw-direct";
+    let direct_result = direct.apply(
+        &ferro_net::WireGuardInterfaceConfig {
+            name: direct_name.into(),
+            private_key_path: dir.path().join("wireguard.key"),
+            listen_port: 51990,
+            addresses: vec!["10.78.0.1/24".parse().unwrap()],
+        },
+        &[],
+    );
+    assert!(
+        direct_result.is_ok(),
+        "direct real WireGuard apply: {direct_result:?}"
+    );
+    direct
+        .remove(&ferro_net::WireGuardInterfaceConfig {
+            name: direct_name.into(),
+            private_key_path: dir.path().join("wireguard.key"),
+            listen_port: 51990,
+            addresses: vec![],
+        })
+        .unwrap();
+    let wireguard_name = interfaces.wireguard_ifname;
+    let apply = wireguard("10.77.0.1/24", "10.77.0.0/24");
+    let response = server.handle_peer(
+        nix::unistd::geteuid().as_raw(),
+        &frame(&keys, apply, 1, None),
+        100,
+    );
+    assert_eq!(
+        response,
+        NetdResponse::Applied,
+        "real apply response: {response:?}"
+    );
+    let show = std::process::Command::new("ip")
+        .args(["link", "show", "dev", &wireguard_name])
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "real WireGuard interface was not created"
+    );
+    let removed = server.handle_peer(
+        nix::unistd::geteuid().as_raw(),
+        &frame(
+            &keys,
+            NetdRequest::RemoveOverlay {
+                overlay_id: "matrix-overlay".into(),
+            },
+            2,
+            Some("req-1"),
+        ),
+        100,
+    );
+    assert_eq!(
+        removed,
+        NetdResponse::Removed,
+        "real remove response: {removed:?}"
+    );
 }
 
 #[derive(Clone, Copy)]

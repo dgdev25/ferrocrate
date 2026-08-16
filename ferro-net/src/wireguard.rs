@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use ipnet::IpNet;
 use thiserror::Error;
@@ -120,9 +120,8 @@ impl WireGuardManager {
                 self.run(&["ip", "link", "add", &config.name, "type", "wireguard"])?;
             }
             let syncconf = render_syncconf(config, peers)?;
-            let path = self.write_syncconf(&config.name, &syncconf)?;
-            let apply = self.run(&["wg", "syncconf", &config.name, &path.to_string_lossy()]);
-            let _ = fs::remove_file(&path);
+            let apply =
+                self.run_with_stdin(&["wg", "syncconf", &config.name, "/dev/stdin"], &syncconf);
             apply?;
             for address in &config.addresses {
                 self.run(&[
@@ -133,16 +132,13 @@ impl WireGuardManager {
                     "dev",
                     &config.name,
                 ])?;
-                self.run(&[
-                    "ip",
-                    "route",
-                    "replace",
-                    &address.to_string(),
-                    "dev",
-                    &config.name,
-                ])?;
             }
-            self.run(&["ip", "link", "set", &config.name, "up"])
+            self.run(&["ip", "link", "set", &config.name, "up"])?;
+            for address in &config.addresses {
+                let route = format!("{}/{}", address.network(), address.prefix_len());
+                self.run(&["ip", "route", "replace", &route, "dev", &config.name])?;
+            }
+            Ok(())
         })();
         if let Err(primary) = result {
             let rollback = self.restore(config, &snapshot, created);
@@ -205,16 +201,9 @@ impl WireGuardManager {
             return self.remove(config);
         }
         if let Some(syncconf) = &snapshot.syncconf {
-            let path = self.write_syncconf(&config.name, syncconf)?;
-            let restore = self.run(&["wg", "syncconf", &config.name, &path.to_string_lossy()]);
-            let _ = fs::remove_file(&path);
-            restore?;
+            self.run_with_stdin(&["wg", "syncconf", &config.name, "/dev/stdin"], syncconf)?;
         }
         Ok(())
-    }
-
-    fn write_syncconf(&self, interface: &str, contents: &str) -> Result<PathBuf, WireGuardError> {
-        self.write_private_file(interface, "conf", contents)
     }
 
     fn write_private_file(
@@ -240,6 +229,28 @@ impl WireGuardManager {
 
     fn run(&self, args: &[&str]) -> Result<String, WireGuardError> {
         let output = self.command(args).output()?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(WireGuardError::Command(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    fn run_with_stdin(&self, args: &[&str], input: &str) -> Result<String, WireGuardError> {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| WireGuardError::Command("failed to open command stdin".into()))?
+            .write_all(input.as_bytes())?;
+        let output = child.wait_with_output()?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {

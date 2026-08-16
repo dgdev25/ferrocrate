@@ -34,6 +34,11 @@ fi
 # encrypted packet flow and handshakes in both directions.
 bash scripts/test-managed-overlay-kernel.sh
 
+if [[ "${FERROCRATE_RUN_REAL_NETD_TESTS:-0}" == "1" ]]; then
+  cargo test -p ferro-netd --test transaction_fault_matrix \
+    real_kernel_wireguard_grant_path --features test-support -- --ignored --nocapture
+fi
+
 : "${FERRO_EBPF_TEST_INTERFACE:?FERRO_EBPF_TEST_INTERFACE is required}"
 : "${FERRO_EBPF_TEST_IFINDEX:?FERRO_EBPF_TEST_IFINDEX is required}"
 

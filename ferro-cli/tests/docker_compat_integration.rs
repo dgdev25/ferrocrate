@@ -222,6 +222,34 @@ fn docker_compat_network_create_list_delete_routes_work() {
     assert_eq!(delete_status, 204, "delete body={delete_resp}");
 }
 
+#[test]
+fn docker_compat_dual_stack_network_preserves_ipv6_ipam_on_list_and_inspect() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{
+        "Name":"dual-stack-compat",
+        "Driver":"bridge",
+        "EnableIPv6":true,
+        "IPAM":{"Config":[
+            {"Subnet":"10.99.0.0/24","Gateway":"10.99.0.1"},
+            {"Subnet":"fd42:99::/64","Gateway":"fd42:99::1"}
+        ]}
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/networks/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, body) = harness.request_raw(&create_request);
+    assert_eq!(status, 201, "create body={body}");
+
+    for path in ["/v1.45/networks", "/v1.45/networks/dual-stack-compat"] {
+        let (status, body) = harness.request("GET", path);
+        assert_eq!(status, 200, "path={path} body={body}");
+        assert!(body.contains("fd42:99::/64"), "path={path} body={body}");
+        assert!(body.contains("fd42:99::1"), "path={path} body={body}");
+    }
+}
+
 /// Docker create/delete must drive the shared lifecycle kernel adapter and leave
 /// durable exact-identity effects in the emulated state file.
 #[test]

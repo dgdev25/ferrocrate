@@ -663,6 +663,11 @@ pub enum VolumeCommands {
         path: String,
     },
     Ls,
+    Inspect {
+        name: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Rm {
         name: String,
     },
@@ -682,6 +687,11 @@ pub enum NetworkCommands {
         ipv6_gateway: Option<String>,
     },
     Ls,
+    Inspect {
+        name: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Rm {
         name: String,
     },
@@ -4071,9 +4081,23 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Commands::Network {
             command: NetworkCommands::Ls,
         } => request("GET", "/networks".to_string()).and_then(|body| print_json(body, "json")),
+        Commands::Network {
+            command: NetworkCommands::Inspect { name, format },
+        } => request(
+            "GET",
+            format!("/networks/{}", percent_encode_path_component(name)),
+        )
+        .and_then(|body| print_json(body, format)),
         Commands::Volume {
             command: VolumeCommands::Ls,
         } => request("GET", "/volumes".to_string()).and_then(|body| print_json(body, "json")),
+        Commands::Volume {
+            command: VolumeCommands::Inspect { name, format },
+        } => request(
+            "GET",
+            format!("/volumes/{}", percent_encode_path_component(name)),
+        )
+        .and_then(|body| print_json(body, format)),
         Commands::Network {
             command:
                 NetworkCommands::Create {
@@ -5395,6 +5419,30 @@ fn handle_volume_authorized(
                 }
             }
         }
+        VolumeCommands::Inspect { name, format } => {
+            let record = store
+                .get(&name)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("volume: not found {name}"))?;
+            let payload = serde_json::json!({
+                "Name": record.name,
+                "Driver": record.driver,
+                "Mountpoint": record.path,
+                "CreatedAt": record.created_at_unix.to_string(),
+                "Status": serde_json::Value::Null,
+                "UsageData": serde_json::Value::Null,
+            });
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?
+                );
+            } else {
+                println!("Name: {}", payload["Name"]);
+                println!("Driver: {}", payload["Driver"]);
+                println!("Mountpoint: {}", payload["Mountpoint"]);
+            }
+        }
         VolumeCommands::Rm { name } => {
             let proof = authorization
                 .authorize_named(
@@ -5758,6 +5806,42 @@ fn handle_network_authorized(
                     "{}\t{}\t{}\t{}",
                     record.name, record.driver, record.subnet, record.gateway
                 );
+            }
+        }
+        NetworkCommands::Inspect { name, format } => {
+            let payload = if name == "bridge" {
+                serde_json::json!({
+                    "Name": "bridge", "Id": "bridge", "Driver": "bridge",
+                    "Scope": "local", "IPAM": {"Config": []}, "Containers": {}
+                })
+            } else {
+                let record = load_networks(runtime_dir)?
+                    .into_iter()
+                    .find(|record| record.name == name)
+                    .ok_or_else(|| format!("network: not found {name}"))?;
+                let ipv6_config = docker_network_ipv6_config(&record);
+                let mut ipam_config = vec![serde_json::json!({
+                    "Subnet": record.subnet,
+                    "Gateway": record.gateway
+                })];
+                if let Some(config) = ipv6_config {
+                    ipam_config.push(config);
+                }
+                serde_json::json!({
+                    "Name": record.name, "Id": record.name, "Driver": record.driver,
+                    "Scope": "local", "EnableIPv6": record.ipv6_cidr.is_some(),
+                    "IPAM": {"Config": ipam_config}, "Containers": {}
+                })
+            };
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?
+                );
+            } else {
+                println!("Name: {}", payload["Name"]);
+                println!("Driver: {}", payload["Driver"]);
+                println!("Scope: {}", payload["Scope"]);
             }
         }
         NetworkCommands::Rm { name } => {
@@ -10710,6 +10794,25 @@ volumes:
             _ => panic!("unexpected command"),
         }
 
+        let inspect = Cli::parse_from([
+            "ferrocrate",
+            "volume",
+            "inspect",
+            "data",
+            "--format",
+            "json",
+        ]);
+        match inspect.command {
+            Commands::Volume { command } => match command {
+                VolumeCommands::Inspect { name, format } => {
+                    assert_eq!(name, "data");
+                    assert_eq!(format, "json");
+                }
+                _ => panic!("unexpected volume command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
         let rm = Cli::parse_from(["ferrocrate", "volume", "rm", "data"]);
         match rm.command {
             Commands::Volume { command } => match command {
@@ -10785,6 +10888,18 @@ volumes:
         let ls = Cli::parse_from(["ferrocrate", "network", "ls"]);
         match ls.command {
             Commands::Network { command } => assert!(matches!(command, NetworkCommands::Ls)),
+            _ => panic!("unexpected command"),
+        }
+
+        let inspect = Cli::parse_from(["ferrocrate", "network", "inspect", "mesh"]);
+        match inspect.command {
+            Commands::Network { command } => match command {
+                NetworkCommands::Inspect { name, format } => {
+                    assert_eq!(name, "mesh");
+                    assert_eq!(format, "text");
+                }
+                _ => panic!("unexpected network command"),
+            },
             _ => panic!("unexpected command"),
         }
 
@@ -10918,6 +11033,15 @@ volumes:
         handle_volume(&runtime_dir, VolumeCommands::Ls, &authorization).expect("ls volumes");
         handle_volume(
             &runtime_dir,
+            VolumeCommands::Inspect {
+                name: "data".to_string(),
+                format: "json".to_string(),
+            },
+            &authorization,
+        )
+        .expect("inspect volume");
+        handle_volume(
+            &runtime_dir,
             VolumeCommands::Rm {
                 name: "data".to_string(),
             },
@@ -10948,6 +11072,16 @@ volumes:
         .expect("create network");
         handle_network(temp.path(), &runtime, NetworkCommands::Ls, &authorization)
             .expect("ls networks");
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Inspect {
+                name: "test-net".to_string(),
+                format: "json".to_string(),
+            },
+            &authorization,
+        )
+        .expect("inspect network");
         handle_network(
             temp.path(),
             &runtime,

@@ -7378,6 +7378,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
+    let mut attach_hijack: Option<String> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -7560,7 +7561,20 @@ fn handle_docker_compat_connection(
                 }
                 let logs = runtime.logs(id).map_err(|err| err.to_string())?;
                 let output = docker_raw_stream(&logs, "");
-                http_response(200, &output, "application/vnd.docker.raw-stream")
+                let upgraded = request.headers.get("connection").is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+                }) && request
+                    .headers
+                    .get("upgrade")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
+                if upgraded {
+                    attach_hijack = Some(id.to_string());
+                    docker_hijack_headers()
+                } else {
+                    http_response(200, &output, "application/vnd.docker.raw-stream")
+                }
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/top") => {
                 let id = path
@@ -8213,6 +8227,12 @@ fn handle_docker_compat_connection(
         stream_docker_stats(&mut stream, &follow_runtime, &id)?;
         return Ok(());
     }
+    if let Some(id) = attach_hijack {
+        let follow_runtime =
+            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        stream_docker_attach(&mut stream, &follow_runtime, &id)?;
+        return Ok(());
+    }
     if let Some((method, path)) = event_request {
         let status = response
             .get(..)
@@ -8715,6 +8735,7 @@ struct HttpRequest {
     method: String,
     path: String,
     body: Vec<u8>,
+    headers: HashMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -8774,6 +8795,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     }
 
     let mut content_length = 0usize;
+    let mut headers = HashMap::new();
     for line in lines {
         if line.contains('\0') {
             return Err("docker: invalid request header".to_string());
@@ -8782,8 +8804,11 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
             continue;
         }
         if let Some((key, value)) = line.split_once(':') {
-            if key.eq_ignore_ascii_case("content-length") {
-                content_length = value
+            let normalized_key = key.trim().to_ascii_lowercase();
+            let normalized_value = value.trim().to_string();
+            headers.insert(normalized_key.clone(), normalized_value.clone());
+            if normalized_key == "content-length" {
+                content_length = normalized_value
                     .trim()
                     .parse::<usize>()
                     .map_err(|_| "docker: invalid content-length".to_string())?;
@@ -8807,7 +8832,12 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
         }
     }
     body.truncate(content_length);
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        body,
+        headers,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -8842,6 +8872,11 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
         "HTTP/1.1 {status_line}\r\nTransfer-Encoding: chunked\r\nContent-Type: {content_type}\r\nConnection: keep-alive\r\n\r\n"
     )
     .into_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hijack_headers() -> Vec<u8> {
+    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n".to_vec()
 }
 
 #[cfg(target_os = "linux")]
@@ -8974,6 +9009,31 @@ fn stream_docker_stats(
 }
 
 #[cfg(target_os = "linux")]
+fn stream_docker_attach(
+    stream: &mut UnixStream,
+    runtime: &ContainerRuntime,
+    id: &str,
+) -> Result<(), String> {
+    let mut emitted = 0usize;
+    loop {
+        let raw = runtime.logs(id).map_err(|error| error.to_string())?;
+        if raw.len() < emitted {
+            emitted = 0;
+        }
+        if raw.len() > emitted {
+            let delta = &raw[emitted..];
+            let frame = docker_raw_stream(delta, "");
+            stream
+                .write_all(&frame)
+                .map_err(|error| error.to_string())?;
+            stream.flush().map_err(|error| error.to_string())?;
+            emitted = raw.len();
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn write_chunk(stream: &mut UnixStream, body: &[u8]) -> Result<(), String> {
     stream
         .write_all(format!("{:x}\r\n", body.len()).as_bytes())
@@ -9067,20 +9127,21 @@ mod tests {
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
         context_endpoint_available, desktop_forward_enabled, discover_rootless_socket, dispatch,
         docker_chunked_headers, docker_container_apply_time_bounds,
-        docker_container_matches_filters, docker_event_payload, docker_image_apply_time_bounds,
-        docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_network_matches_filters, docker_raw_stream, docker_tail_logs, docker_top_payload,
-        docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
-        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
-        parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
-        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, read_merkle_leaves,
-        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_exec_command, validate_docker_image_prune_filters,
+        docker_container_matches_filters, docker_event_payload, docker_hijack_headers,
+        docker_image_apply_time_bounds, docker_image_matches_filters,
+        docker_image_prune_matches_filters, docker_network_matches_filters, docker_raw_stream,
+        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
+        handle_build, handle_containers, handle_context, handle_exec, handle_image_prune,
+        handle_images, handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report,
+        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
+        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
+        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
+        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_filters,
+        parse_docker_limit_query, parse_driver_opts, parse_env_entries, parse_key_values,
+        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, read_merkle_leaves, should_desktop_forward, split_path_query,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_docker_exec_command, validate_docker_image_prune_filters,
         validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerEvent, DockerEventStore, DockerExecCreateRequest, MigrateCommands,
@@ -9650,6 +9711,25 @@ volumes:
         drop(writer);
         let err = read_http_request(&mut reader).expect_err("invalid content-length");
         assert!(err.contains("invalid content-length"));
+    }
+
+    #[test]
+    fn read_http_request_preserves_case_insensitive_upgrade_headers() {
+        let (mut writer, mut reader) = StdUnixStream::pair().expect("pair");
+        writer
+            .write_all(
+                b"POST /containers/c1/attach HTTP/1.1\r\nConnection: keep-alive, Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n",
+            )
+            .expect("write");
+        let request = read_http_request(&mut reader).expect("request");
+        assert_eq!(
+            request.headers.get("connection").map(String::as_str),
+            Some("keep-alive, Upgrade")
+        );
+        assert_eq!(
+            request.headers.get("upgrade").map(String::as_str),
+            Some("tcp")
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -11299,6 +11379,15 @@ volumes:
         assert!(headers.contains("Transfer-Encoding: chunked"));
         assert!(headers.contains("Connection: keep-alive"));
         assert!(headers.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn docker_attach_hijack_uses_upgrade_headers() {
+        let headers = String::from_utf8(docker_hijack_headers()).expect("headers are utf8");
+        assert!(headers.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(headers.contains("Connection: Upgrade\r\n"));
+        assert!(headers.contains("Upgrade: tcp\r\n"));
+        assert!(headers.contains("application/vnd.docker.raw-stream"));
     }
 
     #[test]

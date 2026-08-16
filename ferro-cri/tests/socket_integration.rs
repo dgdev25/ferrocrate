@@ -20,10 +20,15 @@ use ferro_cri::server::{
 use httptest::matchers::request;
 use httptest::responders::status_code;
 use httptest::{Expectation, Server};
+use sha2::{Digest, Sha256};
+use std::io::Cursor;
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tar::{Builder, Header};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
@@ -537,6 +542,189 @@ async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
         .await
         .expect("remove sandbox rpc");
 
+    server.abort();
+    let _ = server.await;
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+    }
+}
+
+fn seed_runnable_fixture_image(runtime_dir: &Path) {
+    let store = ferro_core::image_store::LocalImageStore::open(runtime_dir.join("images"))
+        .expect("open image store");
+    let layer_path = runtime_dir.join("fixture-layer.tar");
+    let busybox = std::fs::read("/usr/bin/busybox").expect("busybox is required for fixture");
+    let file = std::fs::File::create(&layer_path).expect("create fixture layer");
+    let mut tar = Builder::new(file);
+    let mut header = Header::new_gnu();
+    header.set_path("bin/busybox").expect("layer path");
+    header.set_size(busybox.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    tar.append(&header, Cursor::new(busybox))
+        .expect("append busybox");
+    tar.finish().expect("finish fixture layer");
+    let layer = std::fs::read(&layer_path).expect("read fixture layer");
+    let layer_digest = format!("sha256:{:x}", Sha256::digest(&layer));
+
+    let config = serde_json::json!({
+        "architecture": "amd64",
+        "os": "linux",
+        "config": { "Cmd": ["/bin/busybox", "sleep", "30"] },
+        "rootfs": { "type": "layers", "diff_ids": [layer_digest] }
+    });
+    let config_bytes = serde_json::to_vec(&config).expect("encode fixture config");
+    let config_digest = format!("sha256:{:x}", Sha256::digest(&config_bytes));
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": config_digest,
+            "size": config_bytes.len()
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "digest": layer_digest,
+            "size": layer.len()
+        }]
+    });
+    let manifest_json = serde_json::to_string(&manifest).expect("encode fixture manifest");
+    let runtime = ContainerRuntime::new(runtime_dir).expect("runtime authorization");
+    let authority = runtime.surface_authorization().expect("surface authority");
+    let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+    let plan = store
+        .prepare_reference_write(
+            "fixture:latest",
+            manifest["config"]["digest"]
+                .as_str()
+                .expect("config digest"),
+            "application/vnd.oci.image.manifest.v1+json",
+            &manifest_json,
+        )
+        .expect("prepare fixture reference");
+    let permit = authority
+        .authorize_image_reference_write_plan(&origin, &plan)
+        .expect("authorize fixture reference");
+    store
+        .put_reference_authorized(plan, permit)
+        .expect("store fixture reference");
+    let config_path = runtime_dir
+        .join("images/configs")
+        .join(config_digest.replace(':', "_"));
+    std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
+    std::fs::write(config_path, config_bytes).expect("write fixture config");
+    let blob_path = runtime_dir
+        .join("images/blobs")
+        .join(layer_digest.replace(':', "_"));
+    std::fs::create_dir_all(blob_path.parent().expect("blob parent")).expect("blob dir");
+    std::fs::copy(layer_path, blob_path).expect("write fixture layer");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
+        .unwrap_or(true)
+    {
+        eprintln!("skipping real CRI rootfs fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    seed_runnable_fixture_image(runtime.path());
+    let socket = runtime.path().join("cri-runnable.sock");
+    unsafe {
+        std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+    }
+    let socket_for_server = socket.clone();
+    let server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_server).await;
+    });
+    wait_for_socket(&socket).await;
+
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "rootfs-pod".into(),
+                    uid: "rootfs-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "rootfs-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox.clone(),
+            config: Some(ContainerConfig {
+                metadata_name: "rootfs-container".into(),
+                image: "fixture:latest".into(),
+                command: vec!["/bin/busybox".into(), "sleep".into(), "30".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("container")
+        .into_inner()
+        .container_id;
+    client
+        .start_container(StartContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect("start container");
+    let exec = client
+        .exec_sync(ferro_cri::runtime::ExecSyncRequest {
+            container_id: container.clone(),
+            cmd: vec!["/bin/busybox".into(), "echo".into(), "cri-ok".into()],
+            timeout: 5,
+        })
+        .await
+        .expect("exec sync")
+        .into_inner();
+    assert_eq!(exec.exit_code, 0);
+    assert_eq!(String::from_utf8_lossy(&exec.stdout).trim(), "cri-ok");
+    client
+        .stop_container(ferro_cri::runtime::StopContainerRequest {
+            container_id: container.clone(),
+            timeout: 5,
+        })
+        .await
+        .expect("stop");
+    client
+        .remove_container(RemoveContainerRequest {
+            container_id: container,
+        })
+        .await
+        .expect("remove");
+    client
+        .stop_pod_sandbox(StopPodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("stop sandbox");
+    client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox,
+        })
+        .await
+        .expect("remove sandbox");
     server.abort();
     let _ = server.await;
     unsafe {

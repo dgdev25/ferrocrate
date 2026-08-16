@@ -341,6 +341,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
                 &stage.env,
                 stage.workdir.as_deref(),
                 stage.user.as_deref(),
+                &runtime_dir.join("build").join("cache"),
             )?;
             let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
             layer_bytes = rebuilt;
@@ -1298,6 +1299,13 @@ struct HealthcheckSpec {
 struct RunSpec {
     args: Vec<String>,
     _shell: bool,
+    cache_mounts: Vec<CacheMount>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheMount {
+    target: String,
+    id: String,
 }
 
 fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBuildError> {
@@ -1355,18 +1363,70 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
 
 fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildError> {
     let trimmed = raw.trim();
-    for mount_type in ["secret", "ssh", "cache"] {
-        if trimmed.contains(&format!("--mount=type={mount_type}")) {
-            return Err(DockerfileBuildError::Unsupported(format!(
-                "RUN --mount=type={mount_type} is not supported"
-            )));
+    let mut tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    let mut cache_mounts = Vec::new();
+    while tokens
+        .first()
+        .is_some_and(|token| token.starts_with("--mount="))
+    {
+        let mount = tokens.remove(0).trim_start_matches("--mount=");
+        let mut kind = None;
+        let mut target = None;
+        let mut id = None;
+        for option in mount.split(',') {
+            let (key, value) = option.split_once('=').unwrap_or((option, ""));
+            match key {
+                "type" => kind = Some(value),
+                "target" | "dst" | "destination" => target = Some(value),
+                "id" => id = Some(value),
+                "ro" | "readonly" | "sharing" => {}
+                _ => {
+                    return Err(DockerfileBuildError::Unsupported(format!(
+                        "RUN --mount option is not supported: {key}"
+                    )))
+                }
+            }
+        }
+        match kind {
+            Some("cache") => {
+                let target = target.ok_or_else(|| {
+                    DockerfileBuildError::Invalid("cache mount requires target".to_string())
+                })?;
+                let target = validate_cache_target(target)?;
+                let id = id.unwrap_or(target.trim_start_matches('/'));
+                let id = validate_cache_id(id)?;
+                cache_mounts.push(CacheMount { target, id });
+            }
+            Some("secret") | Some("ssh") => {
+                return Err(DockerfileBuildError::Unsupported(format!(
+                    "RUN --mount=type={} is not supported",
+                    kind.unwrap()
+                )))
+            }
+            Some(other) => {
+                return Err(DockerfileBuildError::Unsupported(format!(
+                    "RUN --mount=type={other} is not supported"
+                )))
+            }
+            None => {
+                return Err(DockerfileBuildError::Invalid(
+                    "RUN mount requires type".to_string(),
+                ))
+            }
         }
     }
-    if trimmed.starts_with('[') {
-        let args = parse_json_array(trimmed)?;
+    let command = tokens.join(" ");
+    if command.starts_with('[') {
+        if !cache_mounts.is_empty() {
+            return Err(DockerfileBuildError::Unsupported(
+                "cache mounts require shell-form RUN".to_string(),
+            ));
+        }
+        let args = parse_json_array(&command)?;
         return Ok(RunSpec {
             args,
             _shell: false,
+            cache_mounts,
         });
     }
     if shell.is_empty() {
@@ -1375,8 +1435,36 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         ));
     }
     let mut args = shell.to_vec();
-    args.push(trimmed.to_string());
-    Ok(RunSpec { args, _shell: true })
+    args.push(command);
+    Ok(RunSpec {
+        args,
+        _shell: true,
+        cache_mounts,
+    })
+}
+
+fn validate_cache_target(target: &str) -> Result<String, DockerfileBuildError> {
+    let path = Path::new(target);
+    if !path.is_absolute() || target == "/" || target.contains("..") {
+        return Err(DockerfileBuildError::Invalid(
+            "cache mount target must be an absolute non-parent path".to_string(),
+        ));
+    }
+    Ok(target.trim_end_matches('/').to_string())
+}
+
+fn validate_cache_id(id: &str) -> Result<String, DockerfileBuildError> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "cache mount id contains invalid characters".to_string(),
+        ));
+    }
+    Ok(id.to_string())
 }
 
 fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
@@ -1467,9 +1555,11 @@ fn run_stage_commands(
     env: &[String],
     workdir: Option<&str>,
     user: Option<&str>,
+    cache_root: &Path,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
     let running_as_root = nix::unistd::Uid::effective().is_root();
+    fs::create_dir_all(cache_root)?;
     for run in runs {
         if run.args.is_empty() {
             return Err(DockerfileBuildError::Invalid(
@@ -1491,6 +1581,7 @@ fn run_stage_commands(
         }
 
         let rootfs = rootfs.to_path_buf();
+        let command_rootfs = rootfs.clone();
         let workdir = workdir.map(|v| v.to_string());
         let run_user = user.map(|v| v.to_string());
         let seccomp = seccomp_profile.clone();
@@ -1519,7 +1610,7 @@ fn run_stage_commands(
                         )
                     })?;
                 }
-                enter_build_rootfs(&rootfs, workdir.as_deref()).map_err(|err| {
+                enter_build_rootfs(&command_rootfs, workdir.as_deref()).map_err(|err| {
                     io::Error::new(err.kind(), format!("build pre_exec enter rootfs: {err}"))
                 })?;
                 apply_build_identity(run_user.as_deref()).map_err(|err| {
@@ -1560,11 +1651,60 @@ fn run_stage_commands(
             });
         }
 
-        let status = cmd.status()?;
+        let mut mounted = Vec::new();
+        for (index, mount) in run.cache_mounts.iter().enumerate() {
+            let target = rootfs.join(mount.target.trim_start_matches('/'));
+            let backup = rootfs.join(format!(".ferrocrate-cache-backup-{index}"));
+            let existed = target.exists();
+            if existed {
+                fs::rename(&target, &backup)?;
+            }
+            let cache = cache_root.join(&mount.id);
+            fs::create_dir_all(&cache)?;
+            fs::create_dir_all(&target)?;
+            reject_cache_symlinks(&cache)?;
+            copy_path_recursive(&cache, &target)?;
+            mounted.push((target, backup, cache, existed));
+        }
+        let status_result = cmd.status();
+        let mut cleanup_error = None;
+        for (target, backup, cache, existed) in mounted.into_iter().rev() {
+            if target.exists() {
+                if let Err(err) = reject_cache_symlinks(&target) {
+                    cleanup_error.get_or_insert(err);
+                } else if let Err(err) = copy_path_recursive(&target, &cache) {
+                    cleanup_error.get_or_insert(err);
+                }
+                let _ = fs::remove_dir_all(&target);
+            }
+            if existed {
+                fs::rename(backup, target)?;
+            }
+        }
+        if let Some(err) = cleanup_error {
+            return Err(err);
+        }
+        let status = status_result?;
         if !status.success() {
             return Err(DockerfileBuildError::Invalid(format!(
                 "RUN failed with status {status}"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_cache_symlinks(path: &Path) -> Result<(), DockerfileBuildError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "cache mount contains a symlink: {}",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            reject_cache_symlinks(&entry?.path())?;
         }
     }
     Ok(())
@@ -2114,13 +2254,33 @@ mod tests {
 
     #[test]
     fn run_mount_features_fail_closed_until_secret_handling_exists() {
-        for mount_type in ["secret", "ssh", "cache"] {
+        for mount_type in ["secret", "ssh"] {
             let error = parse_run(
                 &format!("--mount=type={mount_type} echo value"),
                 &["/bin/sh".into(), "-c".into()],
             )
             .expect_err("unsupported mount must not be executed");
             assert!(error.to_string().contains("not supported"));
+        }
+    }
+
+    #[test]
+    fn cache_mounts_parse_with_safe_identity_and_target() {
+        let run = parse_run(
+            "--mount=type=cache,target=/root/.cache,id=compiler echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("cache mount parses");
+        assert_eq!(run.cache_mounts.len(), 1);
+        assert_eq!(run.cache_mounts[0].target, "/root/.cache");
+        assert_eq!(run.cache_mounts[0].id, "compiler");
+
+        for invalid in [
+            "--mount=type=cache,target=relative echo value",
+            "--mount=type=cache,target=/tmp/../escape echo value",
+            "--mount=type=cache,target=/tmp,id=bad/slash echo value",
+        ] {
+            assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }
     }
 

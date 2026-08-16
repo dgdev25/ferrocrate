@@ -76,7 +76,7 @@ Docker Engine, and release claims are still marked partial or rework-needed.
 `docs/PROJECT_COMPLETION_PLAN.md`.
 
 - [ ] Establish full OCI Image, Runtime, and Distribution conformance suites beyond the current basic validation scripts; the repeatable repository fixture gate now runs all three smoke paths via `scripts/oci-conformance.sh`, but upstream corpus coverage remains open.
-- [ ] Close Dockerfile parity gaps: `COPY --chmod`, deterministic unsupported-flag/directive errors, and explicit host-bound `build --platform` validation are now covered; directive/flag breadth, secrets/SSH/cache mounts, named contexts, cross-platform output, and full parity remain open.
+- [ ] Close Dockerfile parity gaps: `COPY --chmod`, deterministic unsupported-flag/directive errors, and explicit host-bound `build --platform` validation are now covered; shell-form `RUN --mount=type=cache` now has validated targets/IDs, isolated persistent cache storage, and symlink rejection, while secrets/SSH mounts, named contexts, cross-platform output, and full parity remain open.
 - [x] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
 - [ ] Complete high-value Docker container, image, network, volume, streaming, wait, and event endpoints while preserving authorization and witness receipts; image history, container list `all`/`limit` filters, authorized image tagging, network/volume inspect/list/prune, `/containers/{id}/wait` timeout, pause/unpause, logs `tail`/chunked `follow=1`, and chunked stats streaming are wired, while broader streaming and endpoint parity remain open.
 - [x] Run the current Docker API matrix and Compose contract suites against the public Unix socket, including versioned paths and explicit unsupported endpoint errors; retries and streaming expansion remain in the endpoint completion work.
@@ -93,7 +93,7 @@ below full parity; secure cache and multi-platform workflows are adoption gaps.
 
 - [ ] Model builds as a content-addressed dependency graph with parallel independent stages.
 - [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance; local cache entries now persist their key/timestamp plus context/Dockerfile/base-image provenance, are written atomically, support deterministic oldest-entry pruning, and support validated atomic file import/export via `--cache-from`/`--cache-to`, while remote cache and graph-wide provenance remain open.
-- [ ] Add secrets, SSH mounts, cache mounts, named contexts, multi-platform output, and strict secret non-disclosure in logs/witnesses/cache metadata.
+- [ ] Add secrets, SSH mounts, named contexts, multi-platform output, and strict secret non-disclosure in logs/witnesses/cache metadata; shell-form cache mounts now persist through an isolated per-build cache directory with validated target/ID parsing and fail-closed symlink handling.
 - [ ] Add build cancellation, resource limits, retries, resumability, and authorization-bound source/context/image identities.
 
 ### 6. Rootless productization and operational lifecycle

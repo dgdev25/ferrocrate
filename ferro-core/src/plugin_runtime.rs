@@ -215,19 +215,6 @@ fn plugin_command(
         // shell interpretation or interpolation. RLIMIT_NPROC is per-user on
         // Linux (not per-plugin), so it cannot safely represent the manifest's
         // process budget; deployment cgroups enforce that budget instead.
-        let probe = Command::new("prlimit").arg("--version").output();
-        match probe {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                return Err(PluginExecutionError::ResourceLimits(format!(
-                    "prlimit exited with {}",
-                    output.status
-                )));
-            }
-            Err(error) => {
-                return Err(PluginExecutionError::ResourceLimits(error.to_string()));
-            }
-        }
         let mut command = Command::new("prlimit");
         command
             .arg(format!("--as={}", manifest.limits.memory_bytes))

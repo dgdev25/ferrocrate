@@ -6524,6 +6524,11 @@ struct DockerEvent {
     scope: String,
     resource: Option<String>,
     status: u16,
+    /// Stable actor attributes are persisted with the event rather than
+    /// reconstructed at response time. This keeps filtered/replayed events
+    /// deterministic after a daemon restart.
+    #[serde(default)]
+    attributes: BTreeMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -6568,6 +6573,11 @@ impl DockerEventStore {
         let timestamp = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
+        let mut attributes = BTreeMap::new();
+        attributes.insert("method".to_string(), method.to_string());
+        attributes.insert("path".to_string(), path.to_string());
+        attributes.insert("httpStatus".to_string(), status.to_string());
+        attributes.insert("scope".to_string(), "local".to_string());
         let event = DockerEvent {
             id: self.next_id,
             time: timestamp.as_secs(),
@@ -6577,6 +6587,7 @@ impl DockerEventStore {
             scope: "local".to_string(),
             resource,
             status,
+            attributes,
         };
         self.next_id = self.next_id.saturating_add(1);
         let bytes = serde_json::to_vec(&event).map_err(|error| error.to_string())?;
@@ -6644,6 +6655,7 @@ impl DockerEventStore {
         let filter_networks = filter_values("network");
         let filter_volumes = filter_values("volume");
         let filter_scopes = filter_values("scope");
+        let filter_labels = filter_values("label");
         let parsed_events = contents
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -6689,6 +6701,17 @@ impl DockerEventStore {
                     .as_ref()
                     .is_none_or(|values| values.iter().any(|value| value == &item.scope))
             })
+            .filter(|item| {
+                filter_labels.as_ref().is_none_or(|selectors| {
+                    selectors.iter().all(|selector| {
+                        let mut parts = selector.splitn(2, '=');
+                        let key = parts.next().unwrap_or_default();
+                        item.attributes.get(key).is_some_and(|actual| {
+                            parts.next().map_or(true, |expected| actual == expected)
+                        })
+                    })
+                })
+            })
             .collect::<Vec<_>>()
             .pipe(Ok)
     }
@@ -6728,13 +6751,13 @@ fn docker_event_resource(path: &str) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
     let actor = event.resource.as_ref().map(|resource| {
+        let mut attributes = event.attributes.clone();
+        attributes.insert("status".to_string(), event.action.clone());
+        attributes.insert("httpStatus".to_string(), event.status.to_string());
+        attributes.insert("scope".to_string(), event.scope.clone());
         serde_json::json!({
             "ID": resource,
-            "Attributes": {
-                "status": event.action,
-                "httpStatus": event.status.to_string(),
-                "scope": event.scope,
-            }
+            "Attributes": attributes,
         })
     });
     let time_nano = if event.time_nano == 0 {
@@ -8485,7 +8508,7 @@ mod network_lifecycle;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::io::Read;
     use std::sync::Mutex;
 
@@ -10263,6 +10286,10 @@ volumes:
             scope: "local".to_string(),
             resource: Some("abc123".to_string()),
             status: 204,
+            attributes: BTreeMap::from([
+                ("method".to_string(), "POST".to_string()),
+                ("path".to_string(), "/containers/abc123/start".to_string()),
+            ]),
         };
         let payload = docker_event_payload(&event);
         assert_eq!(payload["Type"], "container");
@@ -10270,6 +10297,10 @@ volumes:
         assert_eq!(payload["Actor"]["ID"], "abc123");
         assert_eq!(payload["Actor"]["Attributes"]["status"], "start");
         assert_eq!(payload["Actor"]["Attributes"]["httpStatus"], "204");
+        assert_eq!(
+            payload["Actor"]["Attributes"]["path"],
+            "/containers/abc123/start"
+        );
         assert_eq!(payload["time"], 12);
         assert_eq!(payload["timeNano"], 12_345_678_901u64);
     }
@@ -10554,6 +10585,26 @@ volumes:
             .query(&query)
             .expect_err("malformed event filters must fail");
         assert!(error.contains("must be an array"), "error={error}");
+    }
+
+    #[test]
+    fn docker_event_query_filters_persisted_actor_attributes() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store.append("POST", "/containers/c1/start", 204).unwrap();
+
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_string(),
+            r#"{"label":["method=POST","path=/containers/c1/start"]}"#.to_string(),
+        );
+        assert_eq!(store.query(&query).unwrap().len(), 1);
+
+        query.insert(
+            "filters".to_string(),
+            r#"{"label":["path=/containers/c1/stop"]}"#.to_string(),
+        );
+        assert!(store.query(&query).unwrap().is_empty());
     }
 
     #[test]

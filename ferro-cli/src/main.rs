@@ -7476,10 +7476,12 @@ fn handle_docker_compat_connection(
                 http_response(204, &[], "text/plain")
             }
             ("GET", "/volumes") => {
+                let filters = parse_docker_filters(&query)?;
                 let volumes = volume_store
                     .list()
                     .map_err(|error| error.to_string())?
                     .into_iter()
+                    .filter(|record| docker_volume_matches_filters(record, &filters))
                     .map(|record| {
                         serde_json::json!({
                             "Name": record.name,
@@ -7766,6 +7768,23 @@ fn docker_image_matches_filters(
                     .strip_suffix('*')
                     .is_some_and(|prefix| record.reference.starts_with(prefix))
         })
+}
+
+fn docker_volume_matches_filters(
+    record: &ferro_core::volume_store::VolumeRecord,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    if let Some(names) = filters.get("name") {
+        if !names.is_empty() && !names.iter().any(|candidate| candidate == &record.name) {
+            return false;
+        }
+    }
+    if let Some(drivers) = filters.get("driver") {
+        if !drivers.is_empty() && !drivers.iter().any(|candidate| candidate == &record.driver) {
+            return false;
+        }
+    }
+    true
 }
 
 fn docker_image_apply_time_bounds(
@@ -8253,16 +8272,16 @@ mod tests {
         desktop_forward_enabled, discover_rootless_socket, dispatch, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
         docker_image_apply_time_bounds, docker_image_matches_filters, docker_tail_logs,
-        docker_top_payload, effective_readonly, handle_build, handle_containers, handle_context,
-        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_bool_query,
-        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, should_desktop_forward,
-        split_path_query, structured_desktop_error, top_level_command_name,
+        docker_top_payload, docker_volume_matches_filters, effective_readonly, handle_build,
+        handle_containers, handle_context, handle_exec, handle_image_prune, handle_images,
+        handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report, handle_network,
+        handle_pause, handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run,
+        handle_stats, handle_stop, handle_unpause, handle_volume, host_build_arch,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_capabilities,
+        parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
+        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
+        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
+        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_network_backend, validate_network_mode, AiCommands, Cli,
         Commands, ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
         MigrateCommands, NetworkCommands, VolumeCommands,
@@ -10186,6 +10205,27 @@ volumes:
                 .collect::<Vec<_>>(),
             vec!["sha256:b"]
         );
+    }
+
+    #[test]
+    fn docker_volume_filters_match_name_and_driver() {
+        let record = ferro_core::volume_store::VolumeRecord {
+            name: "database".to_string(),
+            path: "/var/lib/ferrocrate/volumes/database".to_string(),
+            driver: "local".to_string(),
+            driver_opts: Default::default(),
+            created_at_unix: 1,
+        };
+        let filters = serde_json::from_value(serde_json::json!({
+            "name": ["database"],
+            "driver": ["local"]
+        }))
+        .expect("filters");
+        assert!(docker_volume_matches_filters(&record, &filters));
+
+        let mismatched =
+            serde_json::from_value(serde_json::json!({"name": ["cache"]})).expect("filters");
+        assert!(!docker_volume_matches_filters(&record, &mismatched));
     }
 
     #[test]

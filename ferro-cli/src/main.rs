@@ -814,13 +814,13 @@ pub enum AiCommunityCommands {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum ConfigCommands {
     Set { key: String, value: String },
     Get { key: String },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum ContextCommands {
     Create {
         name: String,
@@ -2429,6 +2429,26 @@ fn dispatch(command: Commands) -> Result<(), String> {
     {
         let runtime_dir = runtime_dir();
 
+        // Context administration must not require opening the local runtime,
+        // and selecting a remote endpoint must never be silently ignored by
+        // commands that still execute against local state.
+        if let Commands::Context { command: context } = &command {
+            return handle_context(context.clone());
+        }
+        if let Commands::Config { command: config } = &command {
+            return handle_config(config.clone());
+        }
+        if let Commands::Doctor {
+            fix,
+            bootstrap,
+            dry_run,
+            confirm,
+            json,
+        } = &command
+        {
+            return handle_doctor(*fix, *bootstrap, *dry_run, *confirm, *json);
+        }
+
         match &command {
             Commands::Policy {
                 command: command @ PolicyCommands::Check { .. },
@@ -2462,6 +2482,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
             return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
         }
+
+        ensure_context_routing_available()?;
 
         let runtime = ContainerRuntime::new(&runtime_dir)
             .map_err(|err| err.to_string())?
@@ -3837,6 +3859,37 @@ fn context_endpoint_available(endpoint: &str) -> bool {
         let _ = path;
         false
     }
+}
+
+fn context_endpoint_is_local(endpoint: &str) -> bool {
+    let Some(path) = endpoint.strip_prefix("unix://") else {
+        return false;
+    };
+    let path = Path::new(path);
+    path == runtime_dir().join("ferrocrate.sock") || path == Path::new("/var/run/ferrocrate.sock")
+}
+
+/// Context records are already persisted and inspected, but the CLI command
+/// handlers are local-runtime handlers. Refuse to silently execute against
+/// local state when an operator selected a different daemon endpoint until a
+/// transport client is wired for that context.
+fn ensure_context_routing_available() -> Result<(), String> {
+    let config = load_cli_config()?;
+    let Some(name) = config.current_context else {
+        return Ok(());
+    };
+    let Some(context) = config.contexts.get(&name) else {
+        return Err(format!(
+            "selected context '{name}' is missing from the context store"
+        ));
+    };
+    if context_endpoint_is_local(&context.endpoint) {
+        return Ok(());
+    }
+    Err(format!(
+        "selected context '{name}' targets {}; remote daemon routing is not implemented; use a local context or `context use` with a local socket",
+        context.endpoint
+    ))
 }
 
 fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
@@ -9440,18 +9493,18 @@ mod tests {
         docker_image_apply_time_bounds, docker_image_matches_filters,
         docker_image_prune_matches_filters, docker_network_matches_filters,
         docker_pending_matches_filters, docker_raw_stream, docker_tail_logs, docker_top_payload,
-        docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
-        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
-        parse_docker_bool_query, parse_docker_create_spec, parse_docker_filters,
-        parse_docker_limit_query, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, read_merkle_leaves, should_desktop_forward, split_path_query,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_docker_container_name, validate_docker_exec_command,
+        docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
+        handle_build, handle_containers, handle_context, handle_exec, handle_image_prune,
+        handle_images, handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report,
+        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
+        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
+        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
+        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, read_merkle_leaves,
+        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
         AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
@@ -11827,6 +11880,9 @@ volumes:
             config.contexts["rootless"].endpoint,
             "unix:///run/user/1000/ferrocrate.sock"
         );
+        let error = ensure_context_routing_available()
+            .expect_err("remote context must not be silently ignored");
+        assert!(error.contains("remote daemon routing is not implemented"));
         assert!(handle_context(ContextCommands::Create {
             name: "bad/name".to_string(),
             endpoint: "unix:///tmp/socket".to_string(),

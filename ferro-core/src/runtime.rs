@@ -46,9 +46,10 @@ use crate::sqlite_container_store::SqliteContainerStore;
 use dashmap::DashMap;
 use ferro_net::bridge;
 use ferro_net::ebpf::{
-    embedded_object_abi, embedded_object_sha256, install_security_monitor, EbpfNetwork,
-    EbpfNetworkConfig, PinnedNetworkIdentity, PinnedObjectIdentity, PreparedEbpfNetwork,
-    SecurityMonitorConfig, VerifiedPinnedNetwork, FERRO_NETWORK_ROOT,
+    cleanup_security_monitor, embedded_object_abi, embedded_object_sha256,
+    install_security_monitor, EbpfNetwork, EbpfNetworkConfig, PinnedNetworkIdentity,
+    PinnedObjectIdentity, PreparedEbpfNetwork, SecurityMonitorConfig, VerifiedPinnedNetwork,
+    FERRO_NETWORK_ROOT,
 };
 use ferro_net::ebpf_abi::{EndpointKey, EndpointValue, PortKey, PortValue};
 use ferro_net::netns;
@@ -3068,6 +3069,7 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         stop_pid(record.pid, timeout)?;
+        cleanup_security_ebpf_monitor(&record.id)?;
         self.persist_effect_status(proof, intent, id, "running", "stopped")?;
         let _ = log_event(
             &self.runtime_dir,
@@ -3104,6 +3106,7 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         kill_pid(record.pid)?;
+        cleanup_security_ebpf_monitor(&record.id)?;
         self.persist_effect_status(proof, intent, id, "running", "killed")?;
         let _ = log_event(
             &self.runtime_dir,
@@ -3269,6 +3272,7 @@ impl ContainerRuntime {
             .reached("restart", LifecyclePhasePoint::NetworkApplied)?;
 
         stop_pid(record.pid, timeout)?;
+        cleanup_security_ebpf_monitor(&record.id)?;
         self.phase_hook
             .reached("restart", LifecyclePhasePoint::RestartOldStopped)?;
 
@@ -3421,6 +3425,7 @@ impl ContainerRuntime {
                 "container {id} is still running"
             )));
         }
+        cleanup_security_ebpf_monitor(&record.id)?;
         let records = self.store.list()?;
         cleanup_network(Some((_proof, intent)), &record, &records)?;
         let container_dir = self.runtime_dir.join("containers").join(id);
@@ -8573,22 +8578,16 @@ fn security_ebpf_events() -> Vec<String> {
 }
 
 fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
-    let events = security_ebpf_events();
-    let object_path = std::env::var("FERROCRATE_EBPF_SECURITY_OBJECT")
-        .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-security.o".to_string());
-    let pin_root = std::env::var("FERROCRATE_EBPF_SECURITY_PIN_ROOT")
-        .unwrap_or_else(|_| format!("/sys/fs/bpf/ferrocrate-security-{container_id}"));
+    let config = security_monitor_config(container_id);
+    let events = config.events.clone();
+    let object_path = config.object_path.clone();
+    let pin_root = config.pin_root.clone();
     validate_security_ebpf_config(&object_path, &pin_root, &events)?;
     if !command_available("bpftool") {
         return Err(RuntimeError::Network(
             "security ebpf monitor unavailable: requires bpftool; fallback=disabled (turn the monitor off explicitly)".to_string(),
         ));
     }
-    let config = SecurityMonitorConfig {
-        object_path,
-        pin_root,
-        events,
-    };
     let installed =
         install_security_monitor(&config).map_err(|err| RuntimeError::Network(err.to_string()))?;
     log::info!(
@@ -8597,6 +8596,25 @@ fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
         installed
     );
     Ok(())
+}
+
+fn security_monitor_config(container_id: &str) -> SecurityMonitorConfig {
+    SecurityMonitorConfig {
+        object_path: std::env::var("FERROCRATE_EBPF_SECURITY_OBJECT")
+            .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-security.o".to_string()),
+        pin_root: std::env::var("FERROCRATE_EBPF_SECURITY_PIN_ROOT")
+            .unwrap_or_else(|_| format!("/sys/fs/bpf/ferrocrate-security-{container_id}")),
+        events: security_ebpf_events(),
+    }
+}
+
+fn cleanup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
+    let config = security_monitor_config(container_id);
+    if !Path::new(&config.pin_root).exists() {
+        return Ok(());
+    }
+    cleanup_security_monitor(&config)
+        .map_err(|error| RuntimeError::Network(format!("security ebpf cleanup failed: {error}")))
 }
 
 fn validate_security_ebpf_config(

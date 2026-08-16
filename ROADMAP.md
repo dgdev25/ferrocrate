@@ -4,7 +4,7 @@
      forward work is sourced from the PRD-backed roadmap, completion plan,
      security audit, RVF plan, platform plan, and compatibility contracts. -->
 
-**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `87d03c5`
+**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `9858e5f`
 
 ## How to use this roadmap
 
@@ -131,7 +131,7 @@ competitive-gap sequence; existing observability and authorization surfaces.
 reliability acceptance thresholds are not yet demonstrated. *Size:* L–XL. *Sources:*
 PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
 
-- [ ] Establish baselines and enforce thresholds for startup, warm start, pull, build, idle RSS, per-container overhead, binary size, and AI latency; the repeatable collector and strict verifier now cover these metrics plus Docker/OCI/rootless evidence, and the 2026-08-16 local run is archived in `docs/evidence/performance/2026-08-16-local.md`, while non-skipped cross-host baselines remain open.
+- [ ] Establish baselines and enforce thresholds for startup, warm start, pull, build, idle RSS, per-container overhead, binary size, and AI latency; the repeatable collector and strict verifier now cover these metrics plus Docker/OCI/rootless evidence, the 2026-08-16 local run is archived in `docs/evidence/performance/2026-08-16-local.md`, and a rootful ten-feature Docker comparison is archived in `docs/evidence/performance/2026-08-16-docker-comparison.md`; non-skipped cross-host baselines remain open.
 - [ ] Optimize image extraction, network setup, memory overhead, and parallel operations against those baselines.
 - [ ] Add sustained-load tests (100+ containers), resource exhaustion, daemon crash, OOM, interrupted network, disk-full, and kernel-effect fault matrices; `scripts/reliability-matrix.sh` now passes authorization, witness disk/checkpoint, network, CRI, helper-grant, and dedicated 100-process lifecycle fixtures with dated evidence, while container-scale sustained load, real resource exhaustion, and host-kernel chaos remain open.
 - [ ] Verify AI-disabled graceful degradation and ensure AI monitoring overhead stays within the published budget.
@@ -243,3 +243,4 @@ corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
 
 - 2026-08-16 `7f36ac6` — consolidated all remaining work from the active roadmap, PRD-backed partials, security audit, RVF plan, platform plan, monetization plan, and compatibility contracts into this single Now/Next/Later backlog.
 - 2026-08-16 — added a six-row host qualification manifest with candidate/qualified/blocked status semantics and a CI-validating manifest gate; only the existing Ubuntu row remains qualified.
+- 2026-08-16 `9858e5f` — added a reproducible ten-feature Docker/Ferrocrate benchmark harness and archived rootful Ubuntu median timings.

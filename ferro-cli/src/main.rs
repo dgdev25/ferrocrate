@@ -279,6 +279,16 @@ pub enum Commands {
         format: String,
     },
     #[cfg(target_os = "linux")]
+    Wait {
+        container: String,
+        #[arg(long, default_value = "not-running")]
+        condition: String,
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    #[cfg(target_os = "linux")]
     Inspect {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2676,6 +2686,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Top { container, format } => handle_top(&runtime, &container, &format),
             #[cfg(target_os = "linux")]
+            Commands::Wait {
+                container,
+                condition,
+                timeout,
+                format,
+            } => handle_wait(&runtime, &container, &condition, timeout, &format),
+            #[cfg(target_os = "linux")]
             Commands::Pause { container } => handle_pause(&runtime, &container),
             #[cfg(target_os = "linux")]
             Commands::Unpause { container } => handle_unpause(&runtime, &container),
@@ -4638,6 +4655,34 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .and_then(|body| print_json(body, format)),
+        Commands::Wait {
+            container,
+            condition,
+            timeout,
+            format,
+        } => (|| -> Result<(), String> {
+            validate_wait_condition(condition)?;
+            let mut path = format!(
+                "/containers/{}/wait?condition={}",
+                percent_encode_path_component(container),
+                percent_encode_path_component(condition)
+            );
+            if let Some(timeout) = timeout {
+                path.push_str(&format!("&timeout={timeout}"));
+            }
+            let body = request("POST", path)?;
+            if format == "json" {
+                return print_json(body, format);
+            }
+            let response: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|error| format!("remote wait returned invalid JSON: {error}"))?;
+            let status = response
+                .get("StatusCode")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default();
+            println!("wait: container={} status_code={status}", container);
+            Ok(())
+        })(),
         Commands::Pause { container } => request(
             "POST",
             format!(
@@ -6011,6 +6056,56 @@ fn handle_top(runtime: &ContainerRuntime, container: &str, format: &str) -> Resu
                 println!("{row}");
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_wait_condition(condition: &str) -> Result<(), String> {
+    if matches!(condition, "not-running" | "next-exit") {
+        Ok(())
+    } else {
+        Err(format!(
+            "wait: condition must be not-running or next-exit, got {condition}"
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_wait(
+    runtime: &ContainerRuntime,
+    container: &str,
+    condition: &str,
+    timeout: Option<u64>,
+    format: &str,
+) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("wait: container is required".to_string());
+    }
+    validate_wait_condition(condition)?;
+    let resolved = resolve_container_id(runtime, container)?;
+    wait_for_container_exit_with_timeout(
+        runtime,
+        &resolved,
+        timeout
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs),
+    )?;
+    let record = runtime
+        .inspect(&resolved)
+        .map_err(|error| error.to_string())?;
+    let status_code = record.last_exit_code.unwrap_or(0);
+    if format == "json" {
+        let output = serde_json::json!({
+            "StatusCode": status_code,
+            "Error": serde_json::Value::Null,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("wait: container={} status_code={status_code}", resolved);
     }
     Ok(())
 }
@@ -10796,7 +10891,7 @@ mod tests {
         handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
         handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
         handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_top, handle_unpause, handle_volume, host_build_arch,
+        handle_stop, handle_top, handle_unpause, handle_volume, handle_wait, host_build_arch,
         import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
         parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
@@ -10808,8 +10903,8 @@ mod tests {
         validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
-        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
-        DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
+        validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
         DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands, VolumeCommands,
         WitnessCommands,
     };
@@ -13553,6 +13648,37 @@ volumes:
     }
 
     #[test]
+    fn parses_wait_command_and_rejects_unknown_condition() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "wait",
+            "c1",
+            "--condition",
+            "next-exit",
+            "--timeout",
+            "3",
+            "--format",
+            "json",
+        ])
+        .expect("parse wait");
+        match cli.command {
+            Commands::Wait {
+                container,
+                condition,
+                timeout,
+                format,
+            } => {
+                assert_eq!(container, "c1");
+                assert_eq!(condition, "next-exit");
+                assert_eq!(timeout, Some(3));
+                assert_eq!(format, "json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(validate_wait_condition("bogus").is_err());
+    }
+
+    #[test]
     fn remote_run_rejects_local_only_options_before_connecting() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
         let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
@@ -13727,6 +13853,18 @@ volumes:
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let err = handle_top(&runtime, "", "text").expect_err("container required");
         assert!(err.contains("top: container is required"));
+    }
+
+    #[test]
+    fn wait_handler_validates_container_and_condition() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let missing =
+            handle_wait(&runtime, "", "not-running", None, "text").expect_err("container required");
+        assert!(missing.contains("wait: container is required"));
+        let invalid =
+            handle_wait(&runtime, "c1", "bogus", None, "text").expect_err("condition validation");
+        assert!(invalid.contains("condition must be"));
     }
 
     #[test]

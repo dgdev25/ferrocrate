@@ -2070,7 +2070,7 @@ impl ContainerRuntime {
                         record
                             .network_ownership
                             .as_ref()
-                            .and_then(|ownership| Some(ownership.host_interface.as_str())),
+                            .map(|ownership| ownership.host_interface.as_str()),
                         record
                             .network_ownership
                             .as_ref()
@@ -2919,7 +2919,7 @@ impl ContainerRuntime {
             match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
                     rollback.slirp_process = Some((helper_pid, helper_start_time));
-                    if let Err(error) = configure_slirp_host_forwards(&api_socket, &port_mappings) {
+                    if let Err(error) = configure_slirp_host_forwards(&api_socket, port_mappings) {
                         let _ = kill_pid(child_id);
                         rollback.rollback();
                         return Err(error);

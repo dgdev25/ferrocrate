@@ -68,6 +68,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "{}",
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/create?name=matrix-container",
+        coverage: Coverage::Partial,
+        expected_status: 201,
+        body: r#"{"Image":"busybox","Cmd":["true"]}"#,
+    },
+    ApiCase {
         method: "GET",
         path: "/networks",
         coverage: Coverage::Implemented,

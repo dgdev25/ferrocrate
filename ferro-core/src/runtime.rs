@@ -4710,6 +4710,7 @@ fn supervise_child(
                 recent_failures: restart_count,
                 uptime_secs,
             };
+            let confidence = adaptive_policy.estimate_success_probability(&adaptive_signal);
             let decision = adaptive_policy.decide(&adaptive_signal);
             if let Some(logger) = ai_decision_logger() {
                 let ts = std::time::SystemTime::now()
@@ -4725,7 +4726,8 @@ fn supervise_child(
                 .with_evidence("container_id", container_id.clone())
                 .with_evidence("exit_code", exit_code.to_string())
                 .with_evidence("recent_failures", restart_count.to_string())
-                .with_evidence("uptime_secs", uptime_secs.to_string());
+                .with_evidence("uptime_secs", uptime_secs.to_string())
+                .with_evidence("confidence", format!("{confidence:.6}"));
                 let _ = logger.log("ai_restart_decision", &trace);
             }
             Some(decision)
@@ -8964,6 +8966,13 @@ fn run_resource_monitor(
                         .with_evidence("container_id", id.clone())
                         .with_evidence("score", format!("{:.6}", score.score))
                         .with_evidence("threshold", format!("{:.6}", score.threshold))
+                        .with_evidence(
+                            "confidence",
+                            format!(
+                                "{:.6}",
+                                (score.score / score.threshold.max(f32::EPSILON)).clamp(0.0, 1.0)
+                            ),
+                        )
                         .with_evidence("cpu_norm", format!("{:.6}", cpu_norm))
                         .with_evidence("memory_norm", format!("{:.6}", mem_norm))
                         .with_evidence("pids_norm", format!("{:.6}", pids_norm));

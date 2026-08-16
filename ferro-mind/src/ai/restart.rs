@@ -359,6 +359,13 @@ impl AdaptiveRestartPolicy {
         1.0 / (1.0 + (-z).exp())
     }
 
+    /// Estimate the probability that a restart will succeed for a signal.
+    /// This is exposed for explainability only; `decide` remains the authority
+    /// that applies retry and safety thresholds.
+    pub fn estimate_success_probability(&self, signal: &RestartSignal) -> f32 {
+        self.predict_success_probability(self.build_decision_features(signal))
+    }
+
     fn update_decision_model(&mut self, features: [f32; 5], outcome: RestartOutcome) {
         let target = match outcome {
             RestartOutcome::Success => 1.0,
@@ -536,6 +543,17 @@ mod tests {
             uptime_secs: 100,
         };
         assert_eq!(policy.decide(&signal), RestartDecision::Restart);
+    }
+
+    #[test]
+    fn adaptive_policy_exposes_bounded_success_confidence_for_explainability() {
+        let policy = AdaptiveRestartPolicy::new("test");
+        let confidence = policy.estimate_success_probability(&RestartSignal {
+            exit_code: 1,
+            recent_failures: 1,
+            uptime_secs: 100,
+        });
+        assert!((0.0..=1.0).contains(&confidence));
     }
 
     #[test]

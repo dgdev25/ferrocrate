@@ -8658,6 +8658,9 @@ fn normalize_docker_api_path(path: &str) -> String {
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
     let request: DockerCreateRequest =
         serde_json::from_slice(body).map_err(|err| err.to_string())?;
+    let name = name
+        .map(|name| validate_docker_container_name(&name).map(|_| name))
+        .transpose()?;
     let mut cmd = request.cmd.unwrap_or_default();
     if let Some(entry) = request.entrypoint {
         let mut merged = entry;
@@ -8695,6 +8698,20 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         name,
         network_mode,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_container_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 128 {
+        return Err("docker: container name must contain 1-128 characters".to_string());
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        return Err("docker: container name contains unsupported characters".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -9166,16 +9183,17 @@ mod tests {
         handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
         handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
         host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_filters,
-        parse_docker_limit_query, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, read_merkle_leaves, should_desktop_forward, split_path_query,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_docker_exec_command, validate_docker_image_prune_filters,
-        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, DockerExecCreateRequest, MigrateCommands,
-        NetworkCommands, RvfCommands, VolumeCommands, WitnessCommands,
+        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, read_merkle_leaves,
+        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
+        validate_docker_image_prune_filters, validate_docker_network_filters,
+        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
+        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands, DockerEvent,
+        DockerEventStore, DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands,
+        VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -11018,6 +11036,25 @@ volumes:
         let mut scope_query = HashMap::new();
         scope_query.insert("scope".to_string(), "swarm".to_string());
         assert!(reopened.query(&scope_query).unwrap().is_empty());
+    }
+
+    #[test]
+    fn docker_create_name_is_bounded_and_path_safe() {
+        assert!(validate_docker_container_name("web_1.test-2").is_ok());
+        assert!(validate_docker_container_name("").is_err());
+        assert!(validate_docker_container_name("../escape").is_err());
+        assert!(validate_docker_container_name("name/with/slash").is_err());
+        assert!(validate_docker_container_name(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn docker_create_spec_rejects_unsafe_query_name_before_pending_state() {
+        let error = parse_docker_create_spec(
+            br#"{"Image":"busybox","Cmd":["true"]}"#,
+            Some("../escape".to_string()),
+        )
+        .expect_err("unsafe Docker names must fail closed");
+        assert!(error.contains("unsupported characters"));
     }
 
     #[test]

@@ -14,10 +14,10 @@ use aya_ebpf::{
     macros::classifier,
     programs::TcContext,
 };
-use core::{panic::PanicInfo, slice};
+use core::panic::PanicInfo;
 
 use datapath::{
-    action_for_parse_failure, actual_disposition, apply_decision, decide_egress, decide_ingress,
+    action_for_parse_failure, actual_disposition, decide_egress, decide_ingress,
     decision_error_counter, Action, Counter, DatapathState, Decision, Direction, Packet,
     ParseFailure, IP_PROTOCOL_TCP, IP_PROTOCOL_UDP,
 };
@@ -44,18 +44,9 @@ fn classify(ctx: TcContext, direction: Direction) -> i32 {
     }
 
     let parsed = PacketView::parse(&ctx);
-    // SAFETY: this classifier owns the context, pull_data made the skb linear,
-    // and exactly one mutable slice is created from the checked data bounds.
-    let bytes = match unsafe { packet_bytes(&ctx) } {
-        Ok(bytes) => bytes,
-        Err(_) => return finish_without_decision(Action::Drop),
-    };
     let state = KernelState;
-    let packet = match parsed {
-        Ok(view) => match packet_from_view(bytes, view) {
-            Ok(packet) => packet,
-            Err(_) => return finish_without_decision(Action::Drop),
-        },
+    let view = match parsed {
+        Ok(view) => view,
         Err(error) => {
             let failure = match error {
                 PacketError::UnsupportedNetwork | PacketError::UnsupportedTransport => {
@@ -66,9 +57,13 @@ fn classify(ctx: TcContext, direction: Direction) -> i32 {
                 | PacketError::InvalidTransportHeader
                 | PacketError::Fragmented => ParseFailure::Invalid,
             };
-            let owned = invalid_packet_is_owned(bytes, direction, &state);
+            let owned = invalid_packet_is_owned_context(&ctx, direction, &state);
             return finish_without_decision(action_for_parse_failure(failure, owned));
         }
+    };
+    let packet = match packet_from_context(&ctx, view) {
+        Ok(packet) => packet,
+        Err(_) => return finish_without_decision(Action::Drop),
     };
 
     let decision = match direction {
@@ -91,7 +86,7 @@ fn classify(ctx: TcContext, direction: Direction) -> i32 {
             return finish_without_decision(Action::Drop);
         }
     }
-    if apply_decision(bytes, &packet, &decision).is_err() {
+    if packet::apply_decision_context(&ctx, view, &packet, &decision).is_err() {
         return finish_without_decision(Action::Drop);
     }
 
@@ -128,20 +123,23 @@ fn disposition(decision: &Decision) -> (Action, i32) {
     }
 }
 
-unsafe fn packet_bytes<'a>(ctx: &'a TcContext) -> Result<&'a mut [u8], PacketError> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = end.checked_sub(start).ok_or(PacketError::Truncated)?;
-    // SAFETY: data/data_end are verifier-provided ordered skb bounds. The caller
-    // owns the context and creates no alias or skb-reallocating helper while live.
-    Ok(unsafe { slice::from_raw_parts_mut(start as *mut u8, len) })
-}
-
-fn packet_from_view(bytes: &[u8], view: PacketView) -> Result<Packet, PacketError> {
-    let source = read_address(bytes, view.ipv4_offset + 12)?;
-    let destination = read_address(bytes, view.ipv4_offset + 16)?;
-    let source_port = read_u16(bytes, view.transport_offset)?;
-    let destination_port = read_u16(bytes, view.transport_offset + 2)?;
+fn packet_from_context(ctx: &TcContext, view: PacketView) -> Result<Packet, PacketError> {
+    let source = load_address(ctx, 26)?;
+    let destination = load_address(ctx, 30)?;
+    let (source_port, destination_port) = match view.transport_offset {
+        34 => (load_u16(ctx, 34)?, load_u16(ctx, 36)?),
+        38 => (load_u16(ctx, 38)?, load_u16(ctx, 40)?),
+        42 => (load_u16(ctx, 42)?, load_u16(ctx, 44)?),
+        46 => (load_u16(ctx, 46)?, load_u16(ctx, 48)?),
+        50 => (load_u16(ctx, 50)?, load_u16(ctx, 52)?),
+        54 => (load_u16(ctx, 54)?, load_u16(ctx, 56)?),
+        58 => (load_u16(ctx, 58)?, load_u16(ctx, 60)?),
+        62 => (load_u16(ctx, 62)?, load_u16(ctx, 64)?),
+        66 => (load_u16(ctx, 66)?, load_u16(ctx, 68)?),
+        70 => (load_u16(ctx, 70)?, load_u16(ctx, 72)?),
+        74 => (load_u16(ctx, 74)?, load_u16(ctx, 76)?),
+        _ => return Err(PacketError::Truncated),
+    };
     let protocol = match view.transport {
         TransportProtocol::Tcp => IP_PROTOCOL_TCP,
         TransportProtocol::Udp => IP_PROTOCOL_UDP,
@@ -159,31 +157,38 @@ fn packet_from_view(bytes: &[u8], view: PacketView) -> Result<Packet, PacketErro
     })
 }
 
-fn read_address(bytes: &[u8], offset: usize) -> Result<[u8; 4], PacketError> {
-    let end = offset.checked_add(4).ok_or(PacketError::Truncated)?;
-    let address = bytes.get(offset..end).ok_or(PacketError::Truncated)?;
-    Ok([address[0], address[1], address[2], address[3]])
+fn load_address(ctx: &TcContext, offset: usize) -> Result<[u8; 4], PacketError> {
+    Ok([
+        load_byte(ctx, offset)?,
+        load_byte(ctx, offset + 1)?,
+        load_byte(ctx, offset + 2)?,
+        load_byte(ctx, offset + 3)?,
+    ])
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, PacketError> {
-    let end = offset.checked_add(2).ok_or(PacketError::Truncated)?;
-    let value = bytes.get(offset..end).ok_or(PacketError::Truncated)?;
-    Ok(u16::from_be_bytes([value[0], value[1]]))
+fn load_byte(ctx: &TcContext, offset: usize) -> Result<u8, PacketError> {
+    ctx.load::<u8>(offset).map_err(|_| PacketError::Truncated)
 }
 
-fn invalid_packet_is_owned<S: DatapathState>(
-    bytes: &[u8],
+fn load_u16(ctx: &TcContext, offset: usize) -> Result<u16, PacketError> {
+    let high = load_byte(ctx, offset)?;
+    let low = load_byte(ctx, offset + 1)?;
+    Ok(u16::from_be_bytes([high, low]))
+}
+
+fn invalid_packet_is_owned_context<S: DatapathState>(
+    ctx: &TcContext,
     direction: Direction,
     state: &S,
 ) -> bool {
-    if read_u16(bytes, 12) != Ok(0x0800) {
+    if load_u16(ctx, 12) != Ok(0x0800) {
         return false;
     }
     let address_offset = match direction {
-        Direction::Ingress => 14 + 16,
-        Direction::Egress => 14 + 12,
+        Direction::Ingress => 30,
+        Direction::Egress => 26,
     };
-    if let Ok(address) = read_address(bytes, address_offset) {
+    if let Ok(address) = load_address(ctx, address_offset) {
         if state.endpoint(address).is_some() {
             return true;
         }
@@ -191,20 +196,32 @@ fn invalid_packet_is_owned<S: DatapathState>(
     if direction != Direction::Ingress {
         return false;
     }
-    let version_ihl = match bytes.get(14) {
-        Some(value) if value >> 4 == 4 => *value,
+    let version_ihl = match load_byte(ctx, 14) {
+        Ok(value) if value >> 4 == 4 => value,
         _ => return false,
     };
-    let transport_offset = 14 + usize::from(version_ihl & 0x0f) * 4;
-    let protocol = match bytes.get(14 + 9) {
-        Some(value) if *value == IP_PROTOCOL_TCP || *value == IP_PROTOCOL_UDP => *value,
+    let protocol = match load_byte(ctx, 23) {
+        Ok(value) if value == IP_PROTOCOL_TCP || value == IP_PROTOCOL_UDP => value,
         _ => return false,
     };
-    let destination_port = match read_u16(bytes, transport_offset + 2) {
-        Ok(port) => port,
-        Err(_) => return false,
+    let destination_port = match version_ihl & 0x0f {
+        5 => load_u16(ctx, 36),
+        6 => load_u16(ctx, 40),
+        7 => load_u16(ctx, 44),
+        8 => load_u16(ctx, 48),
+        9 => load_u16(ctx, 52),
+        10 => load_u16(ctx, 56),
+        11 => load_u16(ctx, 60),
+        12 => load_u16(ctx, 64),
+        13 => load_u16(ctx, 68),
+        14 => load_u16(ctx, 72),
+        15 => load_u16(ctx, 76),
+        _ => return false,
     };
-    state.published_port(protocol, destination_port).is_some()
+    match destination_port {
+        Ok(port) => state.published_port(protocol, port).is_some(),
+        Err(_) => false,
+    }
 }
 
 fn finish_without_decision(action: Action) -> i32 {

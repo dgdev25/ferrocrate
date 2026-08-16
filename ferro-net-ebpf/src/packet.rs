@@ -268,8 +268,9 @@ pub fn rewrite_transport_port(
 #[cfg(target_arch = "bpf")]
 mod tc {
     use super::{parse_with, PacketError, PacketView};
+    use crate::datapath::{Decision, Packet, Translation};
     use aya_ebpf::programs::TcContext;
-    use core::{mem, ptr};
+    use core::mem;
     use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
     unsafe fn header_at<T>(ctx: &TcContext, offset: usize) -> Result<*mut T, PacketError> {
@@ -286,12 +287,7 @@ mod tc {
     }
 
     fn byte_at(ctx: &TcContext, offset: usize) -> Result<u8, PacketError> {
-        // SAFETY: header_at proves `data + offset + size_of::<u8>() <= data_end`
-        // with checked arithmetic before producing the packet pointer.
-        let byte = unsafe { header_at::<u8>(ctx, offset)? };
-        // SAFETY: the typed u8 bounds proof above covers the complete read and u8
-        // has alignment one; read_unaligned also avoids stronger alignment assumptions.
-        Ok(unsafe { ptr::read_unaligned(byte) })
+        ctx.load::<u8>(offset).map_err(|_| PacketError::Truncated)
     }
 
     impl PacketView {
@@ -323,4 +319,168 @@ mod tc {
             Ok(view)
         }
     }
+
+    pub fn apply_decision_context(
+        ctx: &TcContext,
+        view: PacketView,
+        packet: &Packet,
+        decision: &Decision,
+    ) -> Result<(), PacketError> {
+        match decision.translation {
+            Translation::None => {}
+            Translation::Source => {
+                if packet.source.address != decision.source.address {
+                    rewrite_ipv4_address_context(
+                        ctx,
+                        26,
+                        packet.source.address,
+                        decision.source.address,
+                        view,
+                    )?;
+                }
+                if packet.source.port != decision.source.port {
+                    rewrite_transport_port_context(
+                        ctx,
+                        view,
+                        packet.source.port,
+                        decision.source.port,
+                        false,
+                    )?;
+                }
+            }
+            Translation::Destination => {
+                if packet.destination.address != decision.destination.address {
+                    rewrite_ipv4_address_context(
+                        ctx,
+                        30,
+                        packet.destination.address,
+                        decision.destination.address,
+                        view,
+                    )?;
+                }
+                if packet.destination.port != decision.destination.port {
+                    rewrite_transport_port_context(
+                        ctx,
+                        view,
+                        packet.destination.port,
+                        decision.destination.port,
+                        true,
+                    )?;
+                }
+            }
+        }
+        if let Some(mac) = decision.destination_mac {
+            for (offset, value) in [
+                (0, mac[0]),
+                (1, mac[1]),
+                (2, mac[2]),
+                (3, mac[3]),
+                (4, mac[4]),
+                (5, mac[5]),
+            ] {
+                ctx.store(offset, &value, 0)
+                    .map_err(|_| PacketError::Truncated)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn load_byte(ctx: &TcContext, offset: usize) -> Result<u8, PacketError> {
+        ctx.load::<u8>(offset).map_err(|_| PacketError::Truncated)
+    }
+
+    fn load_u16(ctx: &TcContext, offset: usize) -> Result<u16, PacketError> {
+        Ok(u16::from_be_bytes([
+            load_byte(ctx, offset)?,
+            load_byte(ctx, offset + 1)?,
+        ]))
+    }
+
+    fn store_byte(ctx: &TcContext, offset: usize, value: u8) -> Result<(), PacketError> {
+        ctx.store(offset, &value, 0)
+            .map_err(|_| PacketError::Truncated)
+    }
+
+    fn store_u16(ctx: &TcContext, offset: usize, value: u16) -> Result<(), PacketError> {
+        let bytes = value.to_be_bytes();
+        store_byte(ctx, offset, bytes[0])?;
+        store_byte(ctx, offset + 1, bytes[1])
+    }
+
+    fn transport_offsets(view: PacketView, destination: bool) -> Option<(usize, usize)> {
+        let port_delta = if destination { 2 } else { 0 };
+        let checksum_delta = match view.transport {
+            super::TransportProtocol::Tcp => 16,
+            super::TransportProtocol::Udp => 6,
+        };
+        match view.transport_offset {
+            34 => Some((34 + port_delta, 34 + checksum_delta)),
+            38 => Some((38 + port_delta, 38 + checksum_delta)),
+            42 => Some((42 + port_delta, 42 + checksum_delta)),
+            46 => Some((46 + port_delta, 46 + checksum_delta)),
+            50 => Some((50 + port_delta, 50 + checksum_delta)),
+            54 => Some((54 + port_delta, 54 + checksum_delta)),
+            58 => Some((58 + port_delta, 58 + checksum_delta)),
+            62 => Some((62 + port_delta, 62 + checksum_delta)),
+            66 => Some((66 + port_delta, 66 + checksum_delta)),
+            70 => Some((70 + port_delta, 70 + checksum_delta)),
+            74 => Some((74 + port_delta, 74 + checksum_delta)),
+            _ => None,
+        }
+    }
+
+    fn rewrite_ipv4_address_context(
+        ctx: &TcContext,
+        address_offset: usize,
+        old_address: [u8; 4],
+        new_address: [u8; 4],
+        view: PacketView,
+    ) -> Result<(), PacketError> {
+        let old_checksum = load_u16(ctx, 24)?;
+        let new_checksum = super::update_ipv4_checksum(old_checksum, old_address, new_address);
+        let (_, transport_checksum_offset) =
+            transport_offsets(view, false).ok_or(PacketError::Truncated)?;
+        let old_transport_checksum = load_u16(ctx, transport_checksum_offset)?;
+        let new_transport_checksum = if view.transport == super::TransportProtocol::Udp
+            && old_transport_checksum == 0
+        {
+            0
+        } else {
+            super::normalize_udp_checksum(
+                view.transport,
+                super::update_transport_checksum(old_transport_checksum, old_address, new_address),
+            )
+        };
+        store_byte(ctx, address_offset, new_address[0])?;
+        store_byte(ctx, address_offset + 1, new_address[1])?;
+        store_byte(ctx, address_offset + 2, new_address[2])?;
+        store_byte(ctx, address_offset + 3, new_address[3])?;
+        store_u16(ctx, 24, new_checksum)?;
+        store_u16(ctx, transport_checksum_offset, new_transport_checksum)
+    }
+
+    fn rewrite_transport_port_context(
+        ctx: &TcContext,
+        view: PacketView,
+        old_port: u16,
+        new_port: u16,
+        destination: bool,
+    ) -> Result<(), PacketError> {
+        let (port_offset, checksum_offset) =
+            transport_offsets(view, destination).ok_or(PacketError::Truncated)?;
+        let old_checksum = load_u16(ctx, checksum_offset)?;
+        let new_checksum = if view.transport == super::TransportProtocol::Udp && old_checksum == 0 {
+            0
+        } else {
+            super::normalize_udp_checksum(
+                view.transport,
+                super::update_checksum_word(old_checksum, old_port, new_port),
+            )
+        };
+        store_u16(ctx, port_offset, new_port)?;
+        store_u16(ctx, checksum_offset, new_checksum)
+    }
 }
+
+#[cfg(target_arch = "bpf")]
+pub use tc::apply_decision_context;

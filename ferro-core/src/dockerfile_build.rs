@@ -693,6 +693,29 @@ fn save_build_cache(
     Ok(())
 }
 
+/// Retain the newest `max_entries` local build-cache records. Entries are
+/// ordered by their persisted provenance timestamp and the update is atomic.
+pub fn prune_build_cache(
+    runtime_dir: &Path,
+    max_entries: usize,
+) -> Result<usize, DockerfileBuildError> {
+    let mut cache = load_build_cache(runtime_dir)?;
+    if cache.len() <= max_entries {
+        return Ok(0);
+    }
+    let mut entries = cache
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.created_at_unix))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, created_at)| *created_at);
+    let remove_count = entries.len() - max_entries;
+    for (key, _) in entries.into_iter().take(remove_count) {
+        cache.remove(&key);
+    }
+    save_build_cache(runtime_dir, &cache)?;
+    Ok(remove_count)
+}
+
 fn build_cache_key(
     dockerfile: &str,
     compression: CompressionFormat,
@@ -1811,8 +1834,10 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         build_from_dockerfile_with_store_and_compression, dockerignore_matches, load_build_cache,
-        parse_stages, prepare_dockerfile_build,
+        parse_stages, prepare_dockerfile_build, prune_build_cache, save_build_cache,
+        BuildCacheEntry,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn build_preparation_is_side_effect_free_and_binds_context() {
@@ -1902,6 +1927,33 @@ mod tests {
         assert!(!entry.cache_key.is_empty());
         assert!(entry.created_at_unix > 0);
         assert!(!runtime_dir.join("images/build-cache.json.tmp").exists());
+    }
+
+    #[test]
+    fn prunes_oldest_build_cache_entries_deterministically() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().to_path_buf();
+        let mut cache = HashMap::new();
+        for (key, timestamp) in [("old", 1), ("middle", 2), ("new", 3)] {
+            cache.insert(
+                key.to_string(),
+                BuildCacheEntry {
+                    cache_key: key.to_string(),
+                    created_at_unix: timestamp,
+                    layer_digest: format!("sha256:{key}"),
+                    layer_size: 1,
+                    layer_media_type: "application/octet-stream".to_string(),
+                    config_digest: format!("sha256:config-{key}"),
+                    config_json: "{}".to_string(),
+                    manifest_json: "{}".to_string(),
+                },
+            );
+        }
+        save_build_cache(&runtime, &cache).unwrap();
+        assert_eq!(prune_build_cache(&runtime, 1).unwrap(), 2);
+        let retained = load_build_cache(&runtime).unwrap();
+        assert!(retained.contains_key("new"));
+        assert_eq!(retained.len(), 1);
     }
 
     #[test]

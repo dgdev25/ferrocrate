@@ -107,3 +107,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — added a CI/manual host-matrix evidence gate that rejects qualified rows with missing or mismatched evidence artifacts.
 - 2026-08-16 — audited seccomp wiring: resolved profiles are applied in the container launch `pre_exec` path; roadmap status corrected from stale unchecked state.
 - 2026-08-16 — published the Docker API compatibility declaration for advertised versions, endpoint groups, and authorization behavior.
+- 2026-08-16 — published the CRI method matrix; it records the implemented runtime/image RPCs and explicitly identifies absent pod/container lifecycle RPCs.

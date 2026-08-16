@@ -45,7 +45,11 @@ if [[ -z "$binary" || ! -x "$binary" ]]; then
   echo "rootless-install: executable ferrocrate not found; pass --binary PATH" >&2
   exit 1
 fi
-if [[ "$socket" != /* ]]; then
+if [[ "$binary" != /* || "$binary" == *[$'\t\n\r"%']* ]]; then
+  echo "rootless-install: binary must be an absolute path without unit-file metacharacters" >&2
+  exit 1
+fi
+if [[ "$socket" != /* || "$socket" == *[$'\t\n\r"%']* ]]; then
   echo "rootless-install: socket must be an absolute path" >&2
   exit 1
 fi
@@ -72,6 +76,7 @@ done
 
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit_path="$unit_dir/ferrocrate.service"
+installed_binary="$HOME/.local/bin/ferrocrate"
 unit_content="[Unit]
 Description=FerroCrate rootless Docker-compatible daemon
 After=default.target
@@ -85,6 +90,16 @@ Environment=FERROCRATE_RUNTIME_DIR=%h/.local/share/ferrocrate
 [Install]
 WantedBy=default.target
 "
+
+if ((upgrade)); then
+  if (( !dry_run )) && [[ ! -e "$installed_binary" || ! -e "$unit_path" ]]; then
+    echo "rootless-install: --upgrade requires an existing binary and user unit" >&2
+    exit 1
+  fi
+elif (( !dry_run )) && [[ -e "$installed_binary" || -e "$unit_path" ]]; then
+  echo "rootless-install: installation already exists; use --upgrade" >&2
+  exit 1
+fi
 
 if ((dry_run)); then
   echo "rootless.install.dry_run=pass"
@@ -100,11 +115,12 @@ cleanup() {
 }
 trap cleanup EXIT
 install -m 0755 "$binary" "$binary_tmp"
-install -m 0644 <(printf '%s' "$unit_content") "$unit_tmp"
-mv -f -- "$binary_tmp" "$HOME/.local/bin/ferrocrate"
+printf '%s' "$unit_content" >"$unit_tmp"
+chmod 0644 "$unit_tmp"
+mv -f -- "$binary_tmp" "$installed_binary"
 mv -f -- "$unit_tmp" "$unit_path"
 trap - EXIT
-echo "rootless.install.binary_path=$HOME/.local/bin/ferrocrate"
+echo "rootless.install.binary_path=$installed_binary"
 echo "rootless.install.unit_path=$unit_path"
 
 if ((enable)); then

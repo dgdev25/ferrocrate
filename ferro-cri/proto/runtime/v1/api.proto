@@ -9,6 +9,12 @@ service RuntimeService {
   rpc StopPodSandbox(StopPodSandboxRequest) returns (StopPodSandboxResponse);
   rpc RemovePodSandbox(RemovePodSandboxRequest) returns (RemovePodSandboxResponse);
   rpc PodSandboxStatus(PodSandboxStatusRequest) returns (PodSandboxStatusResponse);
+  rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
+  rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+  rpc RemoveContainer(RemoveContainerRequest) returns (RemoveContainerResponse);
+  rpc ContainerStatus(ContainerStatusRequest) returns (ContainerStatusResponse);
+  rpc ExecSync(ExecSyncRequest) returns (ExecSyncResponse);
 }
 
 service ImageService {
@@ -92,6 +98,50 @@ message PodSandboxMetadata {
   string uid = 2;
   string namespace = 3;
   uint32 attempt = 4;
+}
+
+message CreateContainerRequest {
+  string pod_sandbox_id = 1;
+  ContainerConfig config = 2;
+  PodSandboxConfig sandbox_config = 3;
+}
+message CreateContainerResponse { string container_id = 1; }
+message StartContainerRequest { string container_id = 1; }
+message StartContainerResponse {}
+message StopContainerRequest { string container_id = 1; uint64 timeout = 2; }
+message StopContainerResponse {}
+message RemoveContainerRequest { string container_id = 1; }
+message RemoveContainerResponse {}
+message ContainerStatusRequest { string container_id = 1; bool verbose = 2; }
+message ContainerStatusResponse { ContainerStatus status = 1; map<string, string> info = 2; }
+message ExecSyncRequest { string container_id = 1; repeated string cmd = 2; uint64 timeout = 3; }
+message ExecSyncResponse { bytes stdout = 1; bytes stderr = 2; int32 exit_code = 3; }
+
+message ContainerConfig {
+  string metadata_name = 1;
+  string image = 2;
+  repeated string command = 3;
+  repeated string args = 4;
+  map<string, string> env = 5;
+}
+
+message ContainerStatus {
+  string id = 1;
+  ContainerState state = 2;
+  string created_at = 3;
+  string started_at = 4;
+  string finished_at = 5;
+  int32 exit_code = 6;
+  string reason = 7;
+  string message = 8;
+  string image_ref = 9;
+}
+
+enum ContainerState {
+  CONTAINER_STATE_UNKNOWN = 0;
+  CONTAINER_STATE_CREATED = 1;
+  CONTAINER_STATE_RUNNING = 2;
+  CONTAINER_STATE_EXITED = 3;
 }
 
 message RuntimeStatus {

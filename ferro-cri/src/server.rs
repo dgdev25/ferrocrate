@@ -1,12 +1,16 @@
 use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
+    ContainerState, ContainerStatus, ContainerStatusRequest, ContainerStatusResponse,
+    CreateContainerRequest, CreateContainerResponse, ExecSyncRequest, ExecSyncResponse,
     FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
     ImageStatusResponse, ListImagesRequest, ListImagesResponse, PodSandboxState, PodSandboxStatus,
     PodSandboxStatusRequest, PodSandboxStatusResponse, PullImageRequest, PullImageResponse,
-    RemoveImageRequest, RemoveImageResponse, RemovePodSandboxRequest, RemovePodSandboxResponse,
-    RunPodSandboxRequest, RunPodSandboxResponse, RuntimeCondition, RuntimeStatus, StatusRequest,
-    StatusResponse, StopPodSandboxRequest, StopPodSandboxResponse, VersionRequest, VersionResponse,
+    RemoveContainerRequest, RemoveContainerResponse, RemoveImageRequest, RemoveImageResponse,
+    RemovePodSandboxRequest, RemovePodSandboxResponse, RunPodSandboxRequest, RunPodSandboxResponse,
+    RuntimeCondition, RuntimeStatus, StartContainerRequest, StartContainerResponse, StatusRequest,
+    StatusResponse, StopContainerRequest, StopContainerResponse, StopPodSandboxRequest,
+    StopPodSandboxResponse, VersionRequest, VersionResponse,
 };
 pub use ferro_core::authorization::cri_delegation::{
     CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,
@@ -263,6 +267,7 @@ pub struct CriRuntime {
     identity_policy: CriIdentityPolicy,
     authorization: Arc<SurfaceAuthorization>,
     sandboxes: Arc<Mutex<BTreeMap<String, SandboxRecord>>>,
+    containers: Arc<Mutex<BTreeMap<String, ContainerSpecRecord>>>,
 }
 
 fn sandbox_state_path(runtime_dir: &Path) -> std::path::PathBuf {
@@ -303,6 +308,45 @@ struct SandboxRecord {
     network_mode: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ContainerSpecRecord {
+    id: String,
+    sandbox_id: String,
+    name: String,
+    image: String,
+    command: Vec<String>,
+    env: Vec<String>,
+    runtime_id: Option<String>,
+    created_at_unix: u64,
+}
+
+fn container_state_path(runtime_dir: &Path) -> std::path::PathBuf {
+    runtime_dir.join("cri-containers.json")
+}
+
+fn load_containers(runtime_dir: &Path) -> BTreeMap<String, ContainerSpecRecord> {
+    fs::read(container_state_path(runtime_dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn persist_containers(
+    runtime_dir: &Path,
+    containers: &BTreeMap<String, ContainerSpecRecord>,
+) -> Result<(), Status> {
+    fs::create_dir_all(runtime_dir)
+        .map_err(|error| Status::internal(format!("create CRI state directory: {error}")))?;
+    let path = container_state_path(runtime_dir);
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(containers)
+        .map_err(|error| Status::internal(format!("encode CRI container state: {error}")))?;
+    fs::write(&temporary, bytes)
+        .map_err(|error| Status::internal(format!("write CRI container state: {error}")))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| Status::internal(format!("publish CRI container state: {error}")))
+}
+
 impl std::fmt::Debug for CriRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CriRuntime").finish_non_exhaustive()
@@ -315,12 +359,14 @@ impl CriRuntime {
             .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
         let runtime_dir = std::path::PathBuf::from(runtime_dir);
         let sandboxes = load_sandboxes(&runtime_dir);
+        let containers = load_containers(&runtime_dir);
         Self {
             store,
             runtime_dir,
             identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
             authorization,
             sandboxes: Arc::new(Mutex::new(sandboxes)),
+            containers: Arc::new(Mutex::new(containers)),
         }
     }
 
@@ -331,12 +377,14 @@ impl CriRuntime {
     ) -> Self {
         let runtime_dir = runtime_dir.into();
         let sandboxes = load_sandboxes(&runtime_dir);
+        let containers = load_containers(&runtime_dir);
         Self {
             store,
             runtime_dir,
             identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
             authorization,
             sandboxes: Arc::new(Mutex::new(sandboxes)),
+            containers: Arc::new(Mutex::new(containers)),
         }
     }
 
@@ -543,6 +591,283 @@ impl RuntimeService for CriRuntime {
             } else {
                 Default::default()
             },
+        }))
+    }
+
+    async fn create_container(
+        &self,
+        request: Request<CreateContainerRequest>,
+    ) -> Result<Response<CreateContainerResponse>, Status> {
+        resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerRun,
+            request.get_ref().pod_sandbox_id.as_str(),
+        )?;
+        let req = request.into_inner();
+        let config = req
+            .config
+            .ok_or_else(|| Status::invalid_argument("container config is required"))?;
+        if req.pod_sandbox_id.trim().is_empty() {
+            return Err(Status::invalid_argument("pod sandbox ID is required"));
+        }
+        if config.image.trim().is_empty() {
+            return Err(Status::invalid_argument("container image is required"));
+        }
+        let name = if config.metadata_name.trim().is_empty() {
+            format!(
+                "cri-container-{}",
+                self.containers
+                    .lock()
+                    .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+                    .len()
+            )
+        } else {
+            config.metadata_name
+        };
+        let id = format!(
+            "cri-container-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let env = config
+            .env
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let record = ContainerSpecRecord {
+            id: id.clone(),
+            sandbox_id: req.pod_sandbox_id,
+            name,
+            image: config.image,
+            command: config.command.into_iter().chain(config.args).collect(),
+            env,
+            runtime_id: None,
+            created_at_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let mut containers = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
+        containers.insert(id.clone(), record);
+        persist_containers(&self.runtime_dir, &containers)?;
+        Ok(Response::new(CreateContainerResponse { container_id: id }))
+    }
+
+    async fn start_container(
+        &self,
+        request: Request<StartContainerRequest>,
+    ) -> Result<Response<StartContainerResponse>, Status> {
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerRun,
+            request.get_ref().container_id.as_str(),
+        )?;
+        let id = request.into_inner().container_id;
+        let record = {
+            let containers = self
+                .containers
+                .lock()
+                .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
+            containers
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| Status::not_found("container not found"))?
+        };
+        if record.runtime_id.is_some() {
+            return Ok(Response::new(StartContainerResponse {}));
+        }
+        let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+            .map_err(|error| Status::internal(error.to_string()))?
+            .with_request_origin(identity.origin);
+        let labels = std::collections::HashMap::new();
+        let annotations = std::collections::HashMap::new();
+        let started = runtime
+            .run(
+                &record.image,
+                &record.command,
+                &record.env,
+                &labels,
+                &annotations,
+                None,
+                Default::default(),
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                true,
+                None,
+                None,
+                Some(&record.name),
+                &[],
+                "none",
+                ferro_net::NetworkBackend::Iptables,
+                None,
+            )
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let mut containers = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
+        let stored = containers
+            .get_mut(&id)
+            .ok_or_else(|| Status::not_found("container not found"))?;
+        stored.runtime_id = Some(started.id);
+        persist_containers(&self.runtime_dir, &containers)?;
+        Ok(Response::new(StartContainerResponse {}))
+    }
+
+    async fn stop_container(
+        &self,
+        request: Request<StopContainerRequest>,
+    ) -> Result<Response<StopContainerResponse>, Status> {
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerStop,
+            request.get_ref().container_id.as_str(),
+        )?;
+        let req = request.into_inner();
+        let runtime_id = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .get(&req.container_id)
+            .and_then(|record| record.runtime_id.clone())
+            .ok_or_else(|| Status::failed_precondition("container has not been started"))?;
+        let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+            .map_err(|error| Status::internal(error.to_string()))?
+            .with_request_origin(identity.origin);
+        runtime
+            .stop(&runtime_id, std::time::Duration::from_secs(req.timeout))
+            .map_err(|error| Status::internal(error.to_string()))?;
+        Ok(Response::new(StopContainerResponse {}))
+    }
+
+    async fn remove_container(
+        &self,
+        request: Request<RemoveContainerRequest>,
+    ) -> Result<Response<RemoveContainerResponse>, Status> {
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerDelete,
+            request.get_ref().container_id.as_str(),
+        )?;
+        let id = request.into_inner().container_id;
+        let runtime_id = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .get(&id)
+            .and_then(|record| record.runtime_id.clone());
+        if let Some(runtime_id) = runtime_id {
+            let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+                .map_err(|error| Status::internal(error.to_string()))?
+                .with_request_origin(identity.origin);
+            runtime
+                .remove(&runtime_id)
+                .map_err(|error| Status::internal(error.to_string()))?;
+        }
+        let mut containers = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
+        if containers.remove(&id).is_none() {
+            return Err(Status::not_found("container not found"));
+        }
+        persist_containers(&self.runtime_dir, &containers)?;
+        Ok(Response::new(RemoveContainerResponse {}))
+    }
+
+    async fn container_status(
+        &self,
+        request: Request<ContainerStatusRequest>,
+    ) -> Result<Response<ContainerStatusResponse>, Status> {
+        let req = request.into_inner();
+        let record = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .get(&req.container_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("container not found"))?;
+        let runtime_record = if let Some(runtime_id) = record.runtime_id.as_deref() {
+            ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+                .map_err(|error| Status::internal(error.to_string()))?
+                .inspect(runtime_id)
+                .ok()
+        } else {
+            None
+        };
+        let state = match runtime_record.as_ref().map(|value| value.status.as_str()) {
+            Some("running") => ContainerState::Running,
+            Some("exited") | Some("stopped") => ContainerState::Exited,
+            _ => ContainerState::Created,
+        };
+        Ok(Response::new(ContainerStatusResponse {
+            status: Some(ContainerStatus {
+                id: record.id,
+                state: state as i32,
+                created_at: record.created_at_unix.to_string(),
+                started_at: runtime_record
+                    .as_ref()
+                    .map(|value| value.created_at_unix.to_string())
+                    .unwrap_or_default(),
+                finished_at: String::new(),
+                exit_code: 0,
+                reason: String::new(),
+                message: String::new(),
+                image_ref: record.image,
+            }),
+            info: if req.verbose {
+                [("sandboxID".to_string(), record.sandbox_id)]
+                    .into_iter()
+                    .collect()
+            } else {
+                Default::default()
+            },
+        }))
+    }
+
+    async fn exec_sync(
+        &self,
+        request: Request<ExecSyncRequest>,
+    ) -> Result<Response<ExecSyncResponse>, Status> {
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerExec,
+            request.get_ref().container_id.as_str(),
+        )?;
+        let req = request.into_inner();
+        if req.cmd.is_empty() {
+            return Err(Status::invalid_argument("exec command is required"));
+        }
+        let runtime_id = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .get(&req.container_id)
+            .and_then(|record| record.runtime_id.clone())
+            .ok_or_else(|| Status::failed_precondition("container has not been started"))?;
+        let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+            .map_err(|error| Status::internal(error.to_string()))?
+            .with_request_origin(identity.origin);
+        let result = runtime
+            .exec(&runtime_id, &req.cmd)
+            .map_err(|error| Status::internal(error.to_string()))?;
+        Ok(Response::new(ExecSyncResponse {
+            stdout: result.stdout.into_bytes(),
+            stderr: result.stderr.into_bytes(),
+            exit_code: result.exit_code,
         }))
     }
 }
@@ -955,8 +1280,9 @@ async fn serve_configured(
 mod tests {
     use super::*;
     use crate::runtime::{
-        ImageFsInfoRequest, ImageSpec, ImageStatusRequest, ListImagesRequest, PodSandboxConfig,
-        PullImageRequest, RemoveImageRequest,
+        ContainerConfig, CreateContainerRequest, ImageFsInfoRequest, ImageSpec, ImageStatusRequest,
+        ListImagesRequest, PodSandboxConfig, PullImageRequest, RemoveContainerRequest,
+        RemoveImageRequest,
     };
     use tonic::Request;
 
@@ -1100,6 +1426,39 @@ mod tests {
             status.status.expect("status").state,
             PodSandboxState::Ready as i32
         );
+        let container = runtime
+            .create_container(authenticated(CreateContainerRequest {
+                pod_sandbox_id: run.pod_sandbox_id.clone(),
+                config: Some(ContainerConfig {
+                    metadata_name: "web".into(),
+                    image: "alpine:latest".into(),
+                    command: vec!["true".into()],
+                    args: Vec::new(),
+                    env: Default::default(),
+                }),
+                sandbox_config: None,
+            }))
+            .await
+            .expect("container create")
+            .into_inner();
+        let container_status = runtime
+            .container_status(authenticated(ContainerStatusRequest {
+                container_id: container.container_id.clone(),
+                verbose: true,
+            }))
+            .await
+            .expect("container status")
+            .into_inner();
+        assert_eq!(
+            container_status.status.expect("container status").state,
+            ContainerState::Created as i32
+        );
+        runtime
+            .remove_container(authenticated(RemoveContainerRequest {
+                container_id: container.container_id,
+            }))
+            .await
+            .expect("container remove");
         runtime
             .stop_pod_sandbox(authenticated(StopPodSandboxRequest {
                 pod_sandbox_id: run.pod_sandbox_id.clone(),

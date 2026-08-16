@@ -11,6 +11,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ferro-core = { path = "../ferro-core" }
+ferro-net = { path = "../ferro-net" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.11", features = ["transport"] }

@@ -7142,6 +7142,13 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/wait");
+                if let Some(condition) = query.get("condition") {
+                    if !matches!(condition.as_str(), "not-running" | "next-exit") {
+                        return Err(format!(
+                            "docker: wait condition is unsupported: {condition}"
+                        ));
+                    }
+                }
                 let timeout = query
                     .get("timeout")
                     .map(|value| {
@@ -7442,7 +7449,14 @@ fn handle_docker_compat_connection(
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/volumes/prune") => {
-                let records = volume_store.list().map_err(|error| error.to_string())?;
+                let filters = parse_docker_filters(&query)?;
+                validate_docker_volume_filters(&filters)?;
+                let records = volume_store
+                    .list()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|record| docker_volume_matches_filters(record, &filters))
+                    .collect::<Vec<_>>();
                 let mut deleted = Vec::new();
                 for record in records {
                     let proof = surface_authorization
@@ -7477,6 +7491,7 @@ fn handle_docker_compat_connection(
             }
             ("GET", "/volumes") => {
                 let filters = parse_docker_filters(&query)?;
+                validate_docker_volume_filters(&filters)?;
                 let volumes = volume_store
                     .list()
                     .map_err(|error| error.to_string())?
@@ -7785,6 +7800,17 @@ fn docker_volume_matches_filters(
         }
     }
     true
+}
+
+fn validate_docker_volume_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    for key in filters.keys() {
+        if !matches!(key.as_str(), "name" | "driver") {
+            return Err(format!(
+                "docker: volume filter `{key}` is unsupported; supported filters: name, driver"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn docker_image_apply_time_bounds(
@@ -8282,9 +8308,10 @@ mod tests {
         parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
         parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
         should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_network_backend, validate_network_mode, AiCommands, Cli,
-        Commands, ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
-        MigrateCommands, NetworkCommands, VolumeCommands,
+        validate_build_platform, validate_docker_volume_filters, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
+        VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -10226,6 +10253,14 @@ volumes:
         let mismatched =
             serde_json::from_value(serde_json::json!({"name": ["cache"]})).expect("filters");
         assert!(!docker_volume_matches_filters(&record, &mismatched));
+    }
+
+    #[test]
+    fn docker_volume_filters_reject_unsupported_selectors() {
+        let filters =
+            serde_json::from_value(serde_json::json!({"dangling": ["true"]})).expect("filters");
+        let error = validate_docker_volume_filters(&filters).expect_err("unsupported filter");
+        assert!(error.contains("unsupported"));
     }
 
     #[test]

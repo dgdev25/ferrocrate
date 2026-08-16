@@ -59,7 +59,7 @@ deployment may require independent machines and a transport-aware test harness.
 Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 `docs/ROADMAP.md` SEC-02, COMPAT-09, and Docker compatibility checklist.
 
-- [ ] Apply parsed seccomp profiles in the container launch path and verify denial behavior.
+- [x] Apply parsed seccomp profiles in the container launch path; the runtime applies the resolved profile in `pre_exec` and retains ignored root-only denial coverage.
 - [ ] Complete CRI pod-sandbox/container lifecycle methods and conformance fixtures.
 - [ ] Publish supported Docker Engine API versions and complete high-value endpoint coverage.
 - [ ] Add SDK/Compose contract tests while preserving authorization and witness mediation.
@@ -105,3 +105,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — bridge-mode veth creation accepts a validated `FERROCRATE_VETH_MTU` and fails closed when kernel read-back does not report the requested MTU.
 - 2026-08-16 — idempotent network cleanup now routes through `ferro-net`’s executor, centralizing subprocess errors and safe missing-resource handling.
 - 2026-08-16 — added a CI/manual host-matrix evidence gate that rejects qualified rows with missing or mismatched evidence artifacts.
+- 2026-08-16 — audited seccomp wiring: resolved profiles are applied in the container launch `pre_exec` path; roadmap status corrected from stale unchecked state.

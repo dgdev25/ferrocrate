@@ -507,3 +507,19 @@ mod storage_tests {
         assert!(temp.path().join("compose-replay.db").is_dir());
     }
 }
+
+#[cfg(all(test, not(feature = "legacy-sled")))]
+mod storage_boundary_tests {
+    use super::FanoutReplayStore;
+
+    #[test]
+    fn legacy_compose_replay_requires_explicit_migration_feature() {
+        let temp = tempfile::tempdir().expect("compose replay directory");
+        std::fs::create_dir_all(temp.path().join("compose-replay.db/conf")).expect("legacy marker");
+        let error = match FanoutReplayStore::open(temp.path()) {
+            Ok(_) => panic!("legacy must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy-sled"));
+    }
+}

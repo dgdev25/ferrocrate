@@ -6702,7 +6702,10 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/logs");
-                let logs = runtime.logs(id).map_err(|err| err.to_string())?;
+                let logs = docker_tail_logs(
+                    &runtime.logs(id).map_err(|err| err.to_string())?,
+                    query.get("tail").map(String::as_str),
+                )?;
                 http_response(200, logs.as_bytes(), "text/plain")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
@@ -7087,6 +7090,31 @@ fn docker_status_for_error(err: &str) -> u16 {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_tail_logs(logs: &str, tail: Option<&str>) -> Result<String, String> {
+    let Some(tail) = tail else {
+        return Ok(logs.to_string());
+    };
+    if tail.eq_ignore_ascii_case("all") {
+        return Ok(logs.to_string());
+    }
+    let count = tail
+        .parse::<usize>()
+        .map_err(|_| "docker: logs tail must be a non-negative integer or all".to_string())?;
+    let mut lines: Vec<&str> = logs.lines().collect();
+    if count == 0 {
+        return Ok(String::new());
+    }
+    if lines.len() > count {
+        lines.drain(..lines.len() - count);
+    }
+    let mut result = lines.join("\n");
+    if logs.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
 fn normalize_docker_api_path(path: &str) -> String {
     if !path.starts_with("/v") {
         return path.to_string();
@@ -7367,17 +7395,18 @@ mod tests {
 
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
-        docker_event_payload, effective_readonly, handle_build, handle_containers, handle_context,
-        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
-        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
-        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_capabilities,
-        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, should_desktop_forward, structured_desktop_error,
-        top_level_command_name, validate_build_platform, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
+        docker_event_payload, docker_tail_logs, effective_readonly, handle_build,
+        handle_containers, handle_context, handle_exec, handle_image_prune, handle_images,
+        handle_inspect, handle_kill, handle_logs, handle_network, handle_pause, handle_pull,
+        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, should_desktop_forward,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
+        ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
+        NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8977,6 +9006,17 @@ mod tests {
         assert_eq!(payload["Actor"]["ID"], "abc123");
         assert_eq!(payload["time"], 12);
         assert_eq!(payload["timeNano"], 12_000_000_000u64);
+    }
+
+    #[test]
+    fn docker_logs_tail_matches_engine_query_semantics() {
+        assert_eq!(
+            docker_tail_logs("one\ntwo\nthree\n", Some("2")).unwrap(),
+            "two\nthree\n"
+        );
+        assert_eq!(docker_tail_logs("one\ntwo\n", Some("0")).unwrap(), "");
+        assert_eq!(docker_tail_logs("one\n", Some("all")).unwrap(), "one\n");
+        assert!(docker_tail_logs("one\n", Some("nope")).is_err());
     }
 
     #[test]

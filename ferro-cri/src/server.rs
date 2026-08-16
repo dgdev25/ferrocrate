@@ -859,6 +859,16 @@ impl RuntimeService for CriRuntime {
             Some("exited") | Some("stopped") => ContainerState::Exited,
             _ => ContainerState::Created,
         };
+        let exit_code = runtime_record
+            .as_ref()
+            .and_then(|value| value.last_exit_code)
+            .unwrap_or(0);
+        let reason = match state {
+            ContainerState::Exited => "exited",
+            ContainerState::Running => "running",
+            ContainerState::Created => "created",
+            _ => "unknown",
+        };
         Ok(Response::new(ContainerStatusResponse {
             status: Some(ContainerStatus {
                 id: record.id,
@@ -869,8 +879,8 @@ impl RuntimeService for CriRuntime {
                     .map(|value| value.created_at_unix.to_string())
                     .unwrap_or_default(),
                 finished_at: String::new(),
-                exit_code: 0,
-                reason: String::new(),
+                exit_code,
+                reason: reason.to_string(),
                 message: String::new(),
                 image_ref: record.image,
             }),

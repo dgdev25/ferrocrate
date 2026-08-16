@@ -92,7 +92,7 @@ below full parity; secure cache and multi-platform workflows are adoption gaps.
 *Size:* XL. *Sources:* IMG-06, COMPAT-06, Docker competitive-gap sequence.
 
 - [ ] Model builds as a content-addressed dependency graph with parallel independent stages.
-- [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance.
+- [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance; local cache entries now persist their key and creation timestamp and are written atomically, while import/export, remote cache, pruning, and graph-wide provenance remain open.
 - [ ] Add secrets, SSH mounts, cache mounts, named contexts, multi-platform output, and strict secret non-disclosure in logs/witnesses/cache metadata.
 - [ ] Add build cancellation, resource limits, retries, resumability, and authorization-bound source/context/image identities.
 

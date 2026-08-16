@@ -159,6 +159,10 @@ struct BaseImageInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BuildCacheEntry {
+    #[serde(default)]
+    cache_key: String,
+    #[serde(default)]
+    created_at_unix: u64,
     layer_digest: String,
     layer_size: i64,
     layer_media_type: String,
@@ -230,6 +234,11 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
     let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
     let mut cache = load_build_cache(runtime_dir)?;
     if let Some(entry) = cache.get(&cache_key).cloned() {
+        if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
+            return Err(DockerfileBuildError::Invalid(
+                "build cache provenance key mismatch".to_string(),
+            ));
+        }
         let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
         let config_path = config_path(runtime_dir, &entry.config_digest);
         if layer_path.exists() && config_path.exists() {
@@ -387,6 +396,11 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
             cache.insert(
                 cache_key.clone(),
                 BuildCacheEntry {
+                    cache_key: cache_key.clone(),
+                    created_at_unix: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
                     layer_digest: layer_digest.clone(),
                     layer_size,
                     layer_media_type,
@@ -673,7 +687,9 @@ fn save_build_cache(
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec(cache).map_err(|err| io::Error::other(err.to_string()))?;
-    fs::write(&path, bytes)?;
+    let temporary = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)?;
     Ok(())
 }
 
@@ -1882,6 +1898,10 @@ mod tests {
 
         let cache = load_build_cache(&runtime_dir).expect("load cache");
         assert_eq!(cache.len(), 1);
+        let entry = cache.values().next().expect("cache entry");
+        assert!(!entry.cache_key.is_empty());
+        assert!(entry.created_at_unix > 0);
+        assert!(!runtime_dir.join("images/build-cache.json.tmp").exists());
     }
 
     #[test]

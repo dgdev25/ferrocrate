@@ -112,8 +112,14 @@ pub fn resolve_auth_for_registry(registry: &str) -> Result<Option<RegistryAuth>,
         return Ok(None);
     }
 
-    let content =
-        fs::read_to_string(&config_path).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let content = match fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        // Docker config files can disappear between the existence check and
+        // the read (for example during an atomic config rotation). Treat that
+        // race like an absent config, while preserving all other I/O errors.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(DockerAuthError::Read(error.to_string())),
+    };
     let config: DockerConfig =
         serde_json::from_str(&content).map_err(|err| DockerAuthError::Parse(err.to_string()))?;
 
@@ -393,8 +399,11 @@ fn load_ferrocrate_auths() -> Result<Option<HashMap<String, RegistryAuth>>, Dock
         }
     }
 
-    let content =
-        fs::read_to_string(&path).map_err(|err| DockerAuthError::Read(err.to_string()))?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(DockerAuthError::Read(error.to_string())),
+    };
     let file: FerrocrateAuthFile =
         serde_json::from_str(&content).map_err(|err| DockerAuthError::Parse(err.to_string()))?;
     let mut out = HashMap::new();

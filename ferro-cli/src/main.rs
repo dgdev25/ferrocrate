@@ -6375,6 +6375,10 @@ impl DockerEventStore {
     }
 
     fn query(&self, query: &HashMap<String, String>) -> Result<Vec<DockerEvent>, String> {
+        // Event filters use the same Docker JSON contract as the container
+        // listing endpoint. Validate them before evaluating any predicates so
+        // malformed input cannot silently degrade into an unfiltered stream.
+        parse_docker_filters(query)?;
         let contents = std::fs::read_to_string(&self.path).unwrap_or_default();
         let since = query
             .get("since")
@@ -9563,6 +9567,18 @@ mod tests {
         let mut query = HashMap::new();
         query.insert("filters".to_string(), "[]".to_string());
         assert!(parse_docker_filters(&query).is_err());
+    }
+
+    #[test]
+    fn docker_event_query_rejects_malformed_filters() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        let mut query = HashMap::new();
+        query.insert("filters".to_string(), r#"{"event":"start"}"#.to_string());
+        let error = store
+            .query(&query)
+            .expect_err("malformed event filters must fail");
+        assert!(error.contains("must be an array"), "error={error}");
     }
 
     #[test]

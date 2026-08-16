@@ -280,7 +280,10 @@ fn cri_state_db(runtime_dir: &Path) -> Result<rusqlite::Connection, String> {
         .map_err(|error| error.to_string())?;
     connection
         .execute_batch(
-            "CREATE TABLE IF NOT EXISTS cri_state (
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             PRAGMA foreign_keys=ON;
+             CREATE TABLE IF NOT EXISTS cri_state (
                 kind TEXT PRIMARY KEY NOT NULL,
                 payload BLOB NOT NULL
             )",

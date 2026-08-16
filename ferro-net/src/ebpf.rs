@@ -23,6 +23,7 @@ pub struct EbpfNetworkConfig {
     pub network_id: String,
     pub interface: String,
     pub external_ipv4: [u8; 4],
+    pub bridge_gateway: [u8; 4],
     pub external_ifindex: u32,
     pub loopback_ifindex: u32,
     pub next_hop_mac: [u8; 6],
@@ -207,6 +208,19 @@ impl EbpfNetwork {
         Self::prepare(config)?.attach()
     }
 
+    /// Attach the loaded classifiers to a per-container veth. The veth is
+    /// lifecycle-owned and disappears with the container, so it is not added
+    /// to the shared network's persisted filter inventory.
+    pub fn attach_interface(
+        &mut self,
+        interface: &str,
+        expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
+        validate_network_id(interface)?;
+        self.active_kernel()?
+            .attach_ingress_interface(interface, expected_ifindex)
+    }
+
     pub fn prepare(config: EbpfNetworkConfig) -> Result<PreparedEbpfNetwork, EbpfError> {
         Self::prepare_with(AyaKernel::new(), config)
     }
@@ -315,6 +329,7 @@ impl EbpfNetwork {
         let metadata = MetaConfig {
             abi_version: PROGRAM_ABI_VERSION,
             external_ipv4: config.external_ipv4,
+            bridge_gateway: config.bridge_gateway,
             external_ifindex: config.external_ifindex,
             loopback_ifindex: config.loopback_ifindex,
             next_hop_mac: config.next_hop_mac,
@@ -641,6 +656,31 @@ impl PreparedEbpfNetwork {
         self.additional_interfaces
             .push((interface.to_string(), expected_ifindex));
         Ok(())
+    }
+
+    /// Attach the already-loaded classifiers to a newly created per-container
+    /// interface. The interface is owned by the container lifecycle and is
+    /// removed with its veth, so it is intentionally not part of the shared
+    /// network's persisted filter set.
+    pub fn attach_interface(
+        &mut self,
+        interface: &str,
+        expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
+        validate_network_id(interface)?;
+        if interface == self.config.interface {
+            return Err(EbpfError::InvalidAdapterState {
+                reason: format!("classifier interface {interface} is duplicated"),
+            });
+        }
+        self.kernel
+            .preflight_interface(interface, expected_ifindex)?;
+        self.kernel
+            .attach_interface(interface, expected_ifindex)
+            .map_err(|error| EbpfError::Attach {
+                classifier: "ferro_ingress/ferro_egress".to_string(),
+                reason: error.to_string(),
+            })
     }
 
     pub fn attach(self) -> Result<EbpfNetwork, EbpfError> {
@@ -1196,6 +1236,7 @@ mod lifecycle_tests {
             network_id: "test-network".to_string(),
             interface: "eth-test0".to_string(),
             external_ipv4: [203, 0, 113, 8],
+            bridge_gateway: [10, 0, 0, 1],
             external_ifindex: 17,
             loopback_ifindex: 1,
             next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],

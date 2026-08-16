@@ -2066,6 +2066,20 @@ impl ContainerRuntime {
                     .attach()
                     .map_err(|error| RuntimeError::Network(error.to_string()))?;
                 for record in records {
+                    if let (Some(interface), Some(ifindex)) = (
+                        record
+                            .network_ownership
+                            .as_ref()
+                            .and_then(|ownership| Some(ownership.host_interface.as_str())),
+                        record
+                            .network_ownership
+                            .as_ref()
+                            .and_then(|ownership| ownership.host_ifindex),
+                    ) {
+                        network
+                            .attach_interface(interface, ifindex)
+                            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+                    }
                     install_record_on_attached_network(&mut network, record)?;
                 }
                 let mut filters = shared_tc_filter_snapshot(&interface)?;
@@ -5522,6 +5536,16 @@ fn setup_network(
         &netns_name,
         &["ip", "link", "set", "eth0", "up"],
     ))?;
+    // Published-port requests originating on the host loopback retain their
+    // 127/8 source while eBPF redirects them onto the container veth. Linux's
+    // default loose reverse-path filter rejects that valid hairpin packet
+    // because the namespace routes 127/8 through `lo`, not `eth0`. Disable
+    // reverse-path filtering inside this disposable namespace so the packet
+    // reaches the workload; the namespace teardown restores the host state.
+    for interface in ["all", "default", "eth0"] {
+        let setting = format!("net.ipv4.conf.{interface}.rp_filter=0");
+        run_cmd(&ip_netns_exec(&netns_name, &["sysctl", "-w", &setting]))?;
+    }
     run_cmd(&ip_netns_exec(
         &netns_name,
         &[
@@ -6015,12 +6039,18 @@ fn prepare_shared_ebpf_network(
     existing_records: &[ContainerRecord],
 ) -> Result<SharedEbpfPreparation, RuntimeError> {
     let route = ebpf_external_route()?;
+    let bridge_gateway = bridge_config()?
+        .gateway
+        .parse::<Ipv4Addr>()
+        .map_err(|_| RuntimeError::Network("invalid bridge gateway".to_string()))?
+        .octets();
     let loopback_ifindex = interface_ifindex("lo")?;
     let (snat_port_start, snat_port_end) = ebpf_snat_range()?;
     let config = EbpfNetworkConfig {
         network_id: network_id.to_string(),
         interface: route.interface.clone(),
         external_ipv4: route.address,
+        bridge_gateway,
         external_ifindex: route.ifindex,
         loopback_ifindex,
         next_hop_mac: route.next_hop_mac,
@@ -6297,8 +6327,11 @@ fn setup_ebpf_backend(
     };
 
     if let Some(prepared) = preparation.prepared.take() {
-        let network = prepared
+        let mut network = prepared
             .attach()
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        network
+            .attach_interface(host_veth, host_ifindex)
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
         let mut filters = shared_tc_filter_snapshot(&preparation.route.interface)?;
         filters.retain(|filter| !preparation.filters_before.contains(filter));
@@ -6985,6 +7018,11 @@ fn ebpf_config_from_ownership(
         network_id,
         interface,
         external_ipv4,
+        bridge_gateway: bridge_config()?
+            .gateway
+            .parse::<Ipv4Addr>()
+            .map_err(|_| RuntimeError::Network("invalid bridge gateway".to_string()))?
+            .octets(),
         external_ifindex,
         loopback_ifindex,
         next_hop_mac,

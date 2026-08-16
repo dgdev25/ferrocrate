@@ -420,6 +420,44 @@ mod tc {
                     )?;
                 }
             }
+            Translation::SourceAndDestination => {
+                if packet.source.address != decision.source.address {
+                    rewrite_ipv4_address_context(
+                        ctx,
+                        view.ipv4_offset + 12,
+                        packet.source.address,
+                        decision.source.address,
+                        view,
+                    )?;
+                }
+                if packet.source.port != decision.source.port {
+                    rewrite_transport_port_context(
+                        ctx,
+                        view,
+                        packet.source.port,
+                        decision.source.port,
+                        false,
+                    )?;
+                }
+                if packet.destination.address != decision.destination.address {
+                    rewrite_ipv4_address_context(
+                        ctx,
+                        view.ipv4_offset + 16,
+                        packet.destination.address,
+                        decision.destination.address,
+                        view,
+                    )?;
+                }
+                if packet.destination.port != decision.destination.port {
+                    rewrite_transport_port_context(
+                        ctx,
+                        view,
+                        packet.destination.port,
+                        decision.destination.port,
+                        true,
+                    )?;
+                }
+            }
         }
         if view.ipv4_offset == 14 {
             if let Some(mac) = decision.destination_mac {
@@ -518,11 +556,10 @@ mod tc {
         new_address: [u8; 4],
         view: PacketView,
     ) -> Result<(), PacketError> {
-        let ipv4_checksum_offset = view.ipv4_offset + 10;
-        let old_checksum = load_u16(ctx, ipv4_checksum_offset)?;
-        let new_checksum = super::update_ipv4_checksum(old_checksum, old_address, new_address);
         let (_, transport_checksum_offset) =
             transport_offsets(view, false).ok_or(PacketError::Truncated)?;
+        let old_checksum = load_u16(ctx, view.ipv4_offset + 10)?;
+        let new_checksum = super::update_ipv4_checksum(old_checksum, old_address, new_address);
         let old_transport_checksum = load_u16(ctx, transport_checksum_offset)?;
         let new_transport_checksum = if view.transport == super::TransportProtocol::Udp
             && old_transport_checksum == 0
@@ -538,7 +575,7 @@ mod tc {
         store_byte(ctx, address_offset + 1, new_address[1])?;
         store_byte(ctx, address_offset + 2, new_address[2])?;
         store_byte(ctx, address_offset + 3, new_address[3])?;
-        store_u16(ctx, ipv4_checksum_offset, new_checksum)?;
+        store_u16(ctx, view.ipv4_offset + 10, new_checksum)?;
         store_u16(ctx, transport_checksum_offset, new_transport_checksum)
     }
 

@@ -178,6 +178,7 @@ pub struct Endpoint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExternalNetwork {
     pub address: [u8; 4],
+    pub bridge_gateway: [u8; 4],
     pub ifindex: u32,
     pub loopback_ifindex: u32,
     pub next_hop_mac: [u8; 6],
@@ -210,6 +211,7 @@ pub enum Translation {
     None,
     Source,
     Destination,
+    SourceAndDestination,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -440,11 +442,36 @@ pub fn decide_ingress<S: DatapathState>(
         {
             return Ok(decision);
         }
-        decision.destination = Socket {
-            address: target.address,
-            port: target.port,
-        };
-        decision.translation = Translation::Destination;
+        if state.endpoint(packet.source.address).is_some() {
+            decision.source = Socket {
+                address: target.address,
+                port: target.port,
+            };
+            if packet.destination.address
+                == state
+                    .external_network()
+                    .map(|external| external.bridge_gateway)
+                    .unwrap_or([0; 4])
+                && target.address[0] == 127
+            {
+                // Hairpin responses arrive on the veth ingress path. Rewrite
+                // both tuples before redirecting them to host loopback.
+                decision.destination.address = target.address;
+                decision.translation = Translation::SourceAndDestination;
+            } else {
+                // An endpoint response to an external client retains its
+                // destination while its source becomes the published address.
+                decision.translation = Translation::Source;
+            }
+        } else {
+            // Generic SNAT replies are translated on the destination side,
+            // preserving the pre-NAT internal source tuple.
+            decision.destination = Socket {
+                address: target.address,
+                port: target.port,
+            };
+            decision.translation = Translation::Destination;
+        }
         reverse_conntrack = true;
     } else if state.endpoint(packet.source.address).is_some()
         && state.external_network().is_some_and(|external| {
@@ -468,12 +495,32 @@ pub fn decide_ingress<S: DatapathState>(
             address: target.address,
             port: target.port,
         };
-        decision.translation = Translation::Destination;
+        let host_loopback = packet.source.address[0] == 127 && packet.destination.address[0] == 127;
+        if host_loopback {
+            // A host-loopback request redirected into a network namespace
+            // cannot retain a 127/8 source: the namespace would route the
+            // reply back to its own loopback device. Hairpin it through the
+            // bridge gateway and remember that tuple for the reverse rewrite.
+            decision.source.address = state
+                .external_network()
+                .ok_or(DecisionError::EndpointMissing)?
+                .bridge_gateway;
+            decision.translation = Translation::SourceAndDestination;
+        } else {
+            decision.translation = Translation::Destination;
+        }
         decision.reverse_conntrack = Some(ConntrackRecord {
             key: FlowKey {
                 protocol: packet.protocol,
                 source: target.address,
-                destination: packet.source.address,
+                destination: if host_loopback {
+                    state
+                        .external_network()
+                        .ok_or(DecisionError::EndpointMissing)?
+                        .bridge_gateway
+                } else {
+                    packet.source.address
+                },
                 source_port: target.port,
                 destination_port: packet.source.port,
             },
@@ -504,10 +551,7 @@ pub fn decide_ingress<S: DatapathState>(
                 decision.ifindex = Some(external.loopback_ifindex);
                 decision.destination_mac = None;
                 Ok(decision)
-            } else if decision.destination.address == external.address
-                && external.ifindex != 0
-                && external.next_hop_mac != [0; 6]
-            {
+            } else if external.ifindex != 0 && external.next_hop_mac != [0; 6] {
                 decision.action = Action::Redirect;
                 decision.ifindex = Some(external.ifindex);
                 decision.destination_mac = Some(external.next_hop_mac);
@@ -539,6 +583,16 @@ pub fn decide_egress<S: DatapathState>(
         };
         decision.translation = Translation::Source;
         conntrack_target = Some(target);
+        if packet.destination.address
+            == state
+                .external_network()
+                .map(|external| external.bridge_gateway)
+                .unwrap_or([0; 4])
+            && target.address[0] == 127
+        {
+            decision.destination.address = target.address;
+            decision.translation = Translation::SourceAndDestination;
+        }
     }
 
     if let Some(endpoint) = state.endpoint(decision.destination.address) {
@@ -606,6 +660,20 @@ pub fn apply_decision(
             }
         }
         Translation::Destination => {
+            if packet.destination.address != decision.destination.address {
+                rewrite_ipv4_destination(bytes, decision.destination.address)?;
+            }
+            if packet.destination.port != decision.destination.port {
+                rewrite_transport_port(bytes, PortField::Destination, decision.destination.port)?;
+            }
+        }
+        Translation::SourceAndDestination => {
+            if packet.source.address != decision.source.address {
+                rewrite_ipv4_source(bytes, decision.source.address)?;
+            }
+            if packet.source.port != decision.source.port {
+                rewrite_transport_port(bytes, PortField::Source, decision.source.port)?;
+            }
             if packet.destination.address != decision.destination.address {
                 rewrite_ipv4_destination(bytes, decision.destination.address)?;
             }

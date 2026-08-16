@@ -49,6 +49,7 @@ impl FixtureState {
             )],
             external: Some(ExternalNetwork {
                 address: [203, 0, 113, 8],
+                bridge_gateway: [10, 44, 1, 1],
                 ifindex: 9,
                 loopback_ifindex: 1,
                 next_hop_mac: [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
@@ -273,6 +274,12 @@ fn independently_translate(frame: &[u8], decision: &datapath::Decision) -> Vec<u
             expected[30..34].copy_from_slice(&decision.destination.address);
             expected[36..38].copy_from_slice(&decision.destination.port.to_be_bytes());
         }
+        Translation::SourceAndDestination => {
+            expected[26..30].copy_from_slice(&decision.source.address);
+            expected[34..36].copy_from_slice(&decision.source.port.to_be_bytes());
+            expected[30..34].copy_from_slice(&decision.destination.address);
+            expected[36..38].copy_from_slice(&decision.destination.port.to_be_bytes());
+        }
     }
     write_checksums(&mut expected, udp_zero);
     expected
@@ -323,21 +330,22 @@ fn mirrored_metadata_abi_uses_one_coherent_fixed_width_config() {
     assert_eq!(host_abi::META_MAX_ENTRIES, 1);
     assert_eq!(host_abi::META_MAX_ENTRIES, abi::META_MAX_ENTRIES);
     assert_eq!(host_abi::META_VALUE_LEN, abi::META_VALUE_LEN);
-    assert_eq!(host_abi::META_VALUE_LEN, 28);
+    assert_eq!(host_abi::META_VALUE_LEN, 32);
 
     let config = host_abi::MetaConfig {
         abi_version: host_abi::PROGRAM_ABI_VERSION,
         external_ipv4: [203, 0, 113, 8],
         external_ifindex: 0x0102_0304,
         loopback_ifindex: 1,
+        bridge_gateway: [10, 0, 0, 1],
         next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         snat_port_start: 55_000,
         snat_port_end: 55_031,
         flags: host_abi::META_FLAG_SNAT_RANGE_RESERVED,
     };
     let expected = [
-        0, 0, 0, 2, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xd6, 0xd8, 0xd6,
-        0xf7, 0, 1, 0, 0, 0, 1,
+        0, 0, 0, 3, 203, 0, 113, 8, 1, 2, 3, 4, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xd6, 0xd8, 0xd6,
+        0xf7, 0, 1, 0, 0, 0, 1, 10, 0, 0, 1,
     ];
     assert_eq!(config.encode(), expected);
     assert_eq!(host_abi::MetaConfig::decode(expected), config);
@@ -745,6 +753,7 @@ fn localhost_published_port_response_returns_through_loopback() {
     let mut state = FixtureState {
         external: Some(ExternalNetwork {
             address: [203, 0, 113, 8],
+            bridge_gateway: [10, 44, 1, 1],
             ifindex: 9,
             loopback_ifindex: 1,
             next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
@@ -772,11 +781,13 @@ fn localhost_published_port_response_returns_through_loopback() {
 
     let ingress = decide_ingress(&request, &state).unwrap();
     let reverse = ingress.reverse_conntrack.expect("reverse DNAT record");
+    assert_eq!(ingress.source.address, [10, 44, 1, 1]);
+    assert_eq!(ingress.translation, Translation::SourceAndDestination);
     state
         .conntrack
         .borrow_mut()
         .push((reverse.key, reverse.target));
-    let response = tcp_packet(endpoint_address, 80, localhost, 51_000);
+    let response = tcp_packet(endpoint_address, 80, [10, 44, 1, 1], 51_000);
     let egress = decide_egress(&response, &state).unwrap();
 
     assert_eq!(
@@ -792,6 +803,7 @@ fn localhost_published_port_response_returns_through_loopback() {
         "localhost response must use loopback"
     );
     assert_eq!(egress.destination_mac, None);
+    assert_eq!(egress.destination.address, localhost);
 }
 
 #[test]
@@ -802,6 +814,7 @@ fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
     let mut state = FixtureState {
         external: Some(ExternalNetwork {
             address: [203, 0, 113, 8],
+            bridge_gateway: [10, 44, 1, 1],
             ifindex: 9,
             loopback_ifindex: 1,
             next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
@@ -831,16 +844,16 @@ fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
     let reverse = ingress.reverse_conntrack.expect("reverse DNAT record");
     state.insert_existing(reverse.key, reverse.target);
 
-    let response = tcp_packet(endpoint_address, 80, localhost, 51_000);
+    let response = tcp_packet(endpoint_address, 80, [10, 44, 1, 1], 51_000);
     let redirected = decide_ingress(&response, &state).unwrap();
     assert_eq!(
         redirected.destination,
         Socket {
             address: localhost,
-            port: 8080,
+            port: 51_000,
         }
     );
-    assert_eq!(redirected.translation, Translation::Destination);
+    assert_eq!(redirected.translation, Translation::SourceAndDestination);
     assert_eq!(redirected.action, Action::Redirect);
     assert_eq!(redirected.ifindex, Some(1));
     assert_eq!(redirected.destination_mac, None);

@@ -149,6 +149,7 @@ impl DatapathState for KernelState {
         }
         Some(ExternalNetwork {
             address: config.external_ipv4,
+            bridge_gateway: config.bridge_gateway,
             ifindex: config.external_ifindex,
             loopback_ifindex: config.loopback_ifindex,
             next_hop_mac: config.next_hop_mac,

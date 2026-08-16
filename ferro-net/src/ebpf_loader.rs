@@ -126,6 +126,13 @@ pub(crate) trait KernelAdapter {
     ) -> Result<(), EbpfError> {
         Ok(())
     }
+    fn attach_ingress_interface(
+        &mut self,
+        _interface: &str,
+        _expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
+        Ok(())
+    }
     fn rollback(&mut self) -> Result<(), EbpfError>;
     fn detach(&mut self) -> Result<(), EbpfError>;
     fn persist(&mut self) -> Result<(), EbpfError> {
@@ -500,6 +507,28 @@ impl KernelAdapter for AyaKernel {
         };
         self.additional_links.push(ingress);
         self.additional_links.push(egress);
+        Ok(())
+    }
+
+    fn attach_ingress_interface(
+        &mut self,
+        interface: &str,
+        expected_ifindex: u32,
+    ) -> Result<(), EbpfError> {
+        self.require_state(AdapterState::Committed, "additional ingress attach")?;
+        validate_attach_interface(interface, expected_ifindex)?;
+        match tc::qdisc_add_clsact(interface) {
+            Ok(()) => {}
+            Err(error) if qdisc_already_exists(&error) => {}
+            Err(error) => return Err(loader_error("add additional clsact qdisc", error)),
+        }
+        let ingress = attach_classifier(
+            self.bpf_mut()?,
+            INGRESS_PROGRAM,
+            interface,
+            TcAttachType::Ingress,
+        )?;
+        self.additional_links.push(ingress);
         Ok(())
     }
 

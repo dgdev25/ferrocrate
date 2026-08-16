@@ -7167,11 +7167,31 @@ impl DockerEventStore {
         Ok(Self { path, next_id })
     }
 
+    #[allow(dead_code)]
     fn append(&mut self, method: &str, path: &str, status: u16) -> Result<(), String> {
+        self.append_with_context(method, path, status, &[], &[])
+    }
+
+    fn append_with_context(
+        &mut self,
+        method: &str,
+        path: &str,
+        status: u16,
+        request_body: &[u8],
+        response_bytes: &[u8],
+    ) -> Result<(), String> {
         let Some((event_type, action)) = docker_event_kind(method, path) else {
             return Ok(());
         };
-        let resource = docker_event_resource(path);
+        let resource = docker_event_resource(path).or_else(|| {
+            response_body_json(response_bytes)
+                .and_then(|body| {
+                    body.get("Id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|id| !id.is_empty() && id.len() <= 256)
+        });
         let timestamp = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -7180,6 +7200,7 @@ impl DockerEventStore {
         attributes.insert("path".to_string(), path.to_string());
         attributes.insert("httpStatus".to_string(), status.to_string());
         attributes.insert("scope".to_string(), "local".to_string());
+        attributes.extend(docker_event_request_attributes(request_body));
         let event = DockerEvent {
             id: self.next_id,
             time: timestamp.as_secs(),
@@ -7337,6 +7358,51 @@ impl DockerEventStore {
             .collect::<Vec<_>>()
             .pipe(Ok)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn response_body_json(response: &[u8]) -> Option<serde_json::Value> {
+    let body = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .and_then(|position| response.get(position + 4..))
+        .unwrap_or(response);
+    serde_json::from_slice(body).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_event_request_attributes(body: &[u8]) -> BTreeMap<String, String> {
+    const MAX_ATTRIBUTES: usize = 64;
+    const MAX_TEXT: usize = 256;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return BTreeMap::new();
+    };
+    let Some(object) = value.as_object() else {
+        return BTreeMap::new();
+    };
+    let mut attributes = BTreeMap::new();
+    for key in ["name", "Name", "Image", "Driver", "NetworkID", "Container"] {
+        if let Some(text) = object.get(key).and_then(serde_json::Value::as_str) {
+            if !text.is_empty() && text.len() <= MAX_TEXT {
+                attributes.insert(key.to_string(), text.to_string());
+            }
+        }
+    }
+    if let Some(labels) = object.get("Labels").and_then(serde_json::Value::as_object) {
+        for (key, value) in labels.iter().take(MAX_ATTRIBUTES) {
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            if key.is_empty() || key.len() > MAX_TEXT || value.len() > MAX_TEXT {
+                continue;
+            }
+            attributes.insert(key.clone(), value.to_string());
+            if attributes.len() >= MAX_ATTRIBUTES {
+                break;
+            }
+        }
+    }
+    attributes
 }
 
 #[cfg(target_os = "linux")]
@@ -7559,7 +7625,7 @@ fn handle_docker_compat_connection(
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
-    let mut event_request: Option<(String, String)> = None;
+    let mut event_request: Option<(String, String, Vec<u8>)> = None;
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
@@ -7582,7 +7648,7 @@ fn handle_docker_compat_connection(
 
         let (path, query) = split_path_query(&request.path)?;
         let path = normalize_docker_api_path(&path);
-        event_request = Some((request.method.clone(), path.clone()));
+        event_request = Some((request.method.clone(), path.clone(), request.body.clone()));
         let response = match (request.method.as_str(), path.as_str()) {
             ("GET", "/events") => {
                 let events = state
@@ -8477,7 +8543,7 @@ fn handle_docker_compat_connection(
         stream_docker_attach(&mut stream, &follow_runtime, &id)?;
         return Ok(());
     }
-    if let Some((method, path)) = event_request {
+    if let Some((method, path, request_body)) = event_request {
         let status = response
             .get(..)
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
@@ -8486,7 +8552,7 @@ fn handle_docker_compat_connection(
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(500);
         if let Ok(mut events) = state.events.lock() {
-            let _ = events.append(&method, &path, status);
+            let _ = events.append_with_context(&method, &path, status, &request_body, &response);
         }
     }
     let fixture = ferro_core::observability::qualification_fixture("docker");
@@ -11465,6 +11531,38 @@ volumes:
             docker_event_resource("/volumes/volume-a"),
             Some("volume-a".to_string())
         );
+    }
+
+    #[test]
+    fn docker_event_create_captures_response_identity_and_safe_request_attributes() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/containers/create",
+                201,
+                br#"{"Image":"busybox","Labels":{"tier":"frontend"},"Env":["TOKEN=secret"]}"#,
+                br#"{"Id":"container-1","Warnings":[]}"#,
+            )
+            .unwrap();
+        let events = store.query(&HashMap::new()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].resource.as_deref(), Some("container-1"));
+        assert_eq!(
+            events[0].attributes.get("Image"),
+            Some(&"busybox".to_string())
+        );
+        assert_eq!(
+            events[0].attributes.get("tier"),
+            Some(&"frontend".to_string())
+        );
+        assert!(!events[0]
+            .attributes
+            .values()
+            .any(|value| value.contains("secret")));
+        let payload = docker_event_payload(&events[0]);
+        assert_eq!(payload["Actor"]["ID"], "container-1");
     }
 
     #[test]

@@ -3919,6 +3919,7 @@ fn handle_build(
     let compression = parse_compression(compression)?;
     let named_contexts = parse_build_contexts(build_context)?;
     let secrets = parse_build_secrets(secrets)?;
+    let retry_limit = build_retry_limit()?;
     if ferrofile.is_some() && !secrets.is_empty() {
         return Err("build: --secret is only supported with Dockerfiles".to_string());
     }
@@ -3927,56 +3928,69 @@ fn handle_build(
             .map_err(|error| format!("build: cache-from failed: {error}"))?;
     }
 
-    let (result, source_desc) = if let Some(ferrofile_path) = ferrofile {
-        if !named_contexts.is_empty() {
-            return Err("build: --build-context is only supported with Dockerfiles".to_string());
-        }
-        let plan = ferro_core::ferrofile_build::prepare_ferrofile_build(
-            Path::new(ferrofile_path),
-            &runtime_dir,
-            compression,
-            store,
-        )
-        .map_err(|err| err.to_string())?;
-        let permit = authorization
-            .authorize_image_build_plan(origin, &plan)
-            .map_err(|error| error.to_string())?;
-        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized_with_secrets(
-            plan, store, permit, &secrets,
-        )
-        .map_err(|error| error.to_string())?;
-        let desc = format!("ferrofile={}", ferrofile_path);
-        (r, desc)
-    } else {
-        let dockerfile = dockerfile.unwrap_or("Dockerfile");
-        let tag = tag.unwrap_or("local/build:latest");
-        parse_image_reference(tag).map_err(|err| err.to_string())?;
-        // Resolve relative dockerfile paths against current working directory
-        let dockerfile_path = if Path::new(dockerfile).is_absolute() {
-            PathBuf::from(dockerfile)
+    let mut attempt = 0u32;
+    let (result, source_desc) = loop {
+        let outcome = if let Some(ferrofile_path) = ferrofile {
+            if !named_contexts.is_empty() {
+                return Err("build: --build-context is only supported with Dockerfiles".to_string());
+            }
+            let plan = ferro_core::ferrofile_build::prepare_ferrofile_build(
+                Path::new(ferrofile_path),
+                &runtime_dir,
+                compression,
+                store,
+            )
+            .map_err(|err| err.to_string())?;
+            let permit = authorization
+                .authorize_image_build_plan(origin, &plan)
+                .map_err(|error| error.to_string())?;
+            ferro_core::dockerfile_build::execute_dockerfile_build_authorized_with_secrets(
+                plan, store, permit, &secrets,
+            )
+            .map(|result| (result, format!("ferrofile={ferrofile_path}")))
+            .map_err(|error| error.to_string())
         } else {
-            std::env::current_dir()
-                .map_err(|err| format!("failed to get current directory: {err}"))?
-                .join(dockerfile)
+            let dockerfile = dockerfile.unwrap_or("Dockerfile");
+            let tag = tag.unwrap_or("local/build:latest");
+            parse_image_reference(tag).map_err(|err| err.to_string())?;
+            // Resolve relative dockerfile paths against current working directory.
+            let dockerfile_path = if Path::new(dockerfile).is_absolute() {
+                PathBuf::from(dockerfile)
+            } else {
+                std::env::current_dir()
+                    .map_err(|err| format!("failed to get current directory: {err}"))?
+                    .join(dockerfile)
+            };
+            let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts(
+                &dockerfile_path,
+                Some(tag),
+                &runtime_dir,
+                compression,
+                store,
+                &named_contexts,
+            )
+            .map_err(|err| err.to_string())?;
+            let permit = authorization
+                .authorize_image_build_plan(origin, &plan)
+                .map_err(|error| error.to_string())?;
+            ferro_core::dockerfile_build::execute_dockerfile_build_authorized_with_secrets(
+                plan, store, permit, &secrets,
+            )
+            .map(|result| (result, format!("dockerfile={}", dockerfile_path.display())))
+            .map_err(|error| error.to_string())
         };
-        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts(
-            &dockerfile_path,
-            Some(tag),
-            &runtime_dir,
-            compression,
-            store,
-            &named_contexts,
-        )
-        .map_err(|err| err.to_string())?;
-        let permit = authorization
-            .authorize_image_build_plan(origin, &plan)
-            .map_err(|error| error.to_string())?;
-        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized_with_secrets(
-            plan, store, permit, &secrets,
-        )
-        .map_err(|error| error.to_string())?;
-        let desc = format!("dockerfile={}", dockerfile_path.display());
-        (r, desc)
+        match outcome {
+            Ok(value) => break value,
+            Err(error) if attempt < retry_limit && build_error_is_retryable(&error) => {
+                attempt += 1;
+                let backoff = 50u64.saturating_mul(1u64 << attempt.min(5));
+                eprintln!(
+                    "build: transient attempt failure; retry {attempt}/{retry_limit} in {backoff}ms: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(backoff));
+            }
+            Err(error) => return Err(error),
+        }
     };
 
     if image_format == "rvf" {
@@ -4043,6 +4057,35 @@ fn handle_build(
         source_desc, result.reference, result.layer_digest, result.config_digest
     );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn build_retry_limit() -> Result<u32, String> {
+    let raw = std::env::var("FERROCRATE_BUILD_RETRIES").unwrap_or_else(|_| "0".to_string());
+    let retries = raw
+        .parse::<u32>()
+        .map_err(|_| "build: FERROCRATE_BUILD_RETRIES must be an integer".to_string())?;
+    if retries > 5 {
+        return Err("build: FERROCRATE_BUILD_RETRIES must be between 0 and 5".to_string());
+    }
+    Ok(retries)
+}
+
+#[cfg(target_os = "linux")]
+fn build_error_is_retryable(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    ![
+        "authorization",
+        "invalid dockerfile",
+        "unsupported",
+        "cancelled",
+        "timed out",
+        "secret",
+        "traversal",
+        "symlink",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
 }
 
 fn validate_image_format(value: &str) -> Result<String, String> {
@@ -8530,22 +8573,23 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     use super::{
-        bind_run_network, build_health_config, build_limits, context_endpoint_available,
-        desktop_forward_enabled, discover_rootless_socket, dispatch, docker_chunked_headers,
-        docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
-        docker_image_apply_time_bounds, docker_image_matches_filters,
-        docker_image_prune_matches_filters, docker_network_matches_filters, docker_tail_logs,
-        docker_top_payload, docker_volume_matches_filters, effective_readonly, handle_build,
-        handle_containers, handle_context, handle_exec, handle_image_prune, handle_images,
-        handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report, handle_network,
-        handle_pause, handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run,
-        handle_stats, handle_stop, handle_unpause, handle_volume, host_build_arch,
-        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
-        parse_capabilities, parse_docker_bool_query, parse_docker_filters,
-        parse_docker_limit_query, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, should_desktop_forward, split_path_query, structured_desktop_error,
-        top_level_command_name, validate_build_platform, validate_docker_image_prune_filters,
+        bind_run_network, build_error_is_retryable, build_health_config, build_limits,
+        context_endpoint_available, desktop_forward_enabled, discover_rootless_socket, dispatch,
+        docker_chunked_headers, docker_container_apply_time_bounds,
+        docker_container_matches_filters, docker_event_payload, docker_image_apply_time_bounds,
+        docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_network_matches_filters, docker_tail_logs, docker_top_payload,
+        docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
+        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
+        parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
+        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
+        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
+        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_image_prune_filters,
         validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
@@ -8827,6 +8871,18 @@ volumes:
             "id=token,src=missing".to_string()
         ])
         .is_err());
+    }
+
+    #[test]
+    fn build_retry_classifier_excludes_authorization_and_policy_errors() {
+        assert!(build_error_is_retryable("registry connection reset"));
+        assert!(!build_error_is_retryable(
+            "image build authorization failed"
+        ));
+        assert!(!build_error_is_retryable("RUN cancelled by build control"));
+        assert!(!build_error_is_retryable(
+            "unsupported Dockerfile directive"
+        ));
     }
 
     #[test]

@@ -4711,7 +4711,7 @@ fn supervise_child(
                 uptime_secs,
             };
             let decision = adaptive_policy.decide(&adaptive_signal);
-            if let Some(logger) = ferro_mind::ai::audit::AuditLogger::from_env() {
+            if let Some(logger) = ai_decision_logger() {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -8818,6 +8818,26 @@ fn is_ai_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Return the durable AI decision logger used by every runtime lifecycle path.
+/// An explicit path remains supported for operators; otherwise decisions are
+/// written beneath the configured runtime directory so enabling AI never
+/// silently drops adaptive-restart evidence.
+fn ai_decision_logger() -> Option<ferro_mind::ai::audit::AuditLogger> {
+    if !is_ai_enabled() {
+        return None;
+    }
+    let path = std::env::var_os("FERROCRATE_AI_AUDIT_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("FERROCRATE_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/var/lib/ferrocrate"))
+                .join("ai")
+                .join("decisions.jsonl")
+        });
+    Some(ferro_mind::ai::audit::AuditLogger::new(path))
+}
+
 fn ai_lifecycle_enabled(config: Option<&AiRuntimeConfig>) -> bool {
     if config.is_none() {
         return false;
@@ -8869,20 +8889,7 @@ fn run_resource_monitor(
     // Persist AI decisions by default when the monitor is enabled. Operators
     // may override the location, but enabling AI must not silently discard
     // per-container evidence when no optional audit variable is configured.
-    let ai_logger = if is_ai_enabled() {
-        let audit_path = std::env::var_os("FERROCRATE_AI_AUDIT_LOG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("FERROCRATE_RUNTIME_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/var/lib/ferrocrate"))
-                    .join("ai")
-                    .join("decisions.jsonl")
-            });
-        Some(ferro_mind::ai::audit::AuditLogger::new(audit_path))
-    } else {
-        None
-    };
+    let ai_logger = ai_decision_logger();
 
     let mut anomaly_detector = ferro_mind::ai::anomaly::NeuralAnomalyDetector::new(3, 0.5);
     let mut anomaly_training_samples: Vec<Vec<f32>> = Vec::new();

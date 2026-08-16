@@ -3496,10 +3496,23 @@ impl Drop for ScopedEnv {
 
 #[cfg(target_os = "linux")]
 fn wait_for_container_exit(runtime: &ContainerRuntime, id: &str) -> Result<(), String> {
+    wait_for_container_exit_with_timeout(runtime, id, None)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_container_exit_with_timeout(
+    runtime: &ContainerRuntime,
+    id: &str,
+    timeout: Option<Duration>,
+) -> Result<(), String> {
+    let started = Instant::now();
     loop {
         let record = runtime.inspect(id).map_err(|err| err.to_string())?;
         match record.status.as_str() {
             "running" | "paused" => {
+                if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                    return Err(format!("wait: timed out waiting for container {id}"));
+                }
                 std::thread::sleep(Duration::from_millis(200));
             }
             _ => return Ok(()),
@@ -6808,7 +6821,19 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/wait");
-                wait_for_container_exit(&runtime, id)?;
+                let timeout = query
+                    .get("timeout")
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .map(|seconds| (seconds > 0).then_some(Duration::from_secs(seconds)))
+                            .map_err(|_| {
+                                "docker: wait timeout must be a non-negative integer".to_string()
+                            })
+                    })
+                    .transpose()?
+                    .flatten();
+                wait_for_container_exit_with_timeout(&runtime, id, timeout)?;
                 let record = runtime.inspect(id).map_err(|err| err.to_string())?;
                 let body = serde_json::json!({
                     "StatusCode": record.last_exit_code.unwrap_or(0),

@@ -1487,6 +1487,46 @@ fn handle_doctor(
             remediated: false,
             action: None,
         });
+
+        #[cfg(target_os = "linux")]
+        {
+            let rootless = ferro_core::rootless::RootlessConfig::from_system();
+            let runtime_socket = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .map(|path| path.join("docker.sock"))
+                .filter(|path| path.exists())
+                .or_else(|| {
+                    let path = runtime_dir().join("docker.sock");
+                    path.exists().then_some(path)
+                });
+            let socket_message = runtime_socket.as_ref().map_or_else(
+                || "rootless Docker socket not discovered (set XDG_RUNTIME_DIR or use the configured daemon socket)".to_string(),
+                |path| format!("rootless Docker socket discovered at {}", path.display()),
+            );
+            checks.push(DoctorCheck {
+                id: "rootless_context".to_string(),
+                ok: rootless.is_ok(),
+                message: match rootless {
+                    Ok(config) => format!(
+                        "rootless context available for {} (uid map {}:{} size {}; gid map {}:{} size {}); {}",
+                        config.username,
+                        config.uid_mapping.container_id,
+                        config.uid_mapping.host_id,
+                        config.uid_mapping.size,
+                        config.gid_mapping.container_id,
+                        config.gid_mapping.host_id,
+                        config.gid_mapping.size,
+                        socket_message,
+                    ),
+                    Err(error) => format!("rootless context unavailable: {error}; {socket_message}"),
+                },
+                hint: Some(
+                    "rootless contexts currently support the local runtime; CRI, Compose, and advanced network features remain explicitly qualification-gated".to_string(),
+                ),
+                remediated: false,
+                action: None,
+            });
+        }
     }
 
     let healthy = checks.iter().all(|check| check.ok);

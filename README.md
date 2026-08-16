@@ -12,10 +12,12 @@
 - **🧠 AI-Native**: Built-in predictive resource allocation, anomaly detection, and intelligent restart policies
 - **🔒 Secure by Default**: Rootless containers, seccomp profiles, capability dropping, image signature verification
 - **⚡ Fast**: <100ms cold start, <50ms warm start, file-level deduplication with Blake3
-- **🐋 Docker Compatible**: Drop-in replacement for Docker CLI and docker-compose.yml files
+- **🐋 Docker Compatible**: Docker CLI and Compose compatibility for the documented endpoint and feature matrix
 - **🎯 Lightweight**: <15MB single binary, perfect for edge devices and resource-constrained environments
 
 ## Features
+
+> **Qualification scope:** Feature checkmarks describe implemented behavior covered by repository tests. Host-kernel, distribution, rootless, MAC, eBPF, cross-target release, and broader Docker/CRI compatibility claims remain release-gated until the evidence listed in [`ROADMAP.md`](ROADMAP.md) is archived. Unsupported endpoints and planned capabilities are intentionally documented rather than presented as drop-in parity.
 
 ### Container Lifecycle Management
 - ✅ **Run OCI-compliant images** — Docker Hub, GHCR, ECR, GCR, Harbor, Quay.io

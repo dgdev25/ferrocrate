@@ -39,8 +39,9 @@ pub use observability::{format_backend_metrics, BackendMetrics};
 
 // Re-export eBPF execution functions
 pub use ebpf::{
-    embedded_object_abi, embedded_object_sha256, install_security_monitor, EbpfError, EbpfMetrics,
-    EbpfNetwork, EbpfNetworkConfig, SecurityMonitorConfig,
+    cleanup_security_monitor, embedded_object_abi, embedded_object_sha256,
+    install_security_monitor, EbpfError, EbpfMetrics, EbpfNetwork, EbpfNetworkConfig,
+    SecurityMonitorConfig,
 };
 
 // Re-export veth execution functions

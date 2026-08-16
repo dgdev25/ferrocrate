@@ -11,7 +11,7 @@ use crate::ebpf_abi::{
 use crate::ebpf_loader::{
     sha256, validate_embedded_object, AyaKernel, KernelAdapter, KernelLoadPlan, KernelPreflight,
 };
-use crate::executor::{exec_cmd, exec_cmd_capture, ExecError};
+use crate::executor::{exec_cmd, exec_cmd_allow_missing, exec_cmd_capture, ExecError};
 
 pub const BPFFS_ROOT: &str = "/sys/fs/bpf";
 pub const FERRO_NETWORK_ROOT: &str = "/sys/fs/bpf/ferrocrate";
@@ -906,23 +906,69 @@ pub fn install_security_monitor(config: &SecurityMonitorConfig) -> Result<Vec<St
             object_path: config.object_path.clone(),
             section: "tracepoint".to_string(),
         };
-        exec_cmd(&build_bpftool_load_cmd(&program, &pin_path))?;
+        if let Err(error) = exec_cmd(&build_bpftool_load_cmd(&program, &pin_path)) {
+            cleanup_security_monitor_paths(&config.pin_root, &installed)?;
+            return Err(error);
+        }
+        installed.push(normalized.clone());
         let tracepoint = format!("sys_enter_{normalized}");
-        exec_cmd(&build_tracepoint_attach_cmd(
+        if let Err(error) = exec_cmd(&build_tracepoint_attach_cmd(
             &pin_path,
             "syscalls",
             &tracepoint,
-        ))?;
-        let _ = exec_cmd_capture(&[
+        )) {
+            cleanup_security_monitor_paths(&config.pin_root, &installed)?;
+            return Err(error);
+        }
+        if let Err(error) = exec_cmd_capture(&[
             "bpftool".to_string(),
             "prog".to_string(),
             "show".to_string(),
             "pinned".to_string(),
             pin_path,
-        ])?;
-        installed.push(normalized);
+        ]) {
+            cleanup_security_monitor_paths(&config.pin_root, &installed)?;
+            return Err(error);
+        }
     }
     Ok(installed)
+}
+
+/// Detach and remove all pinned security-monitor programs for the selected
+/// events. Cleanup is idempotent and uses only typed argv execution; callers
+/// use it during rollback and normal container teardown.
+pub fn cleanup_security_monitor(config: &SecurityMonitorConfig) -> Result<(), ExecError> {
+    let events = normalize_security_events(&config.events)?;
+    cleanup_security_monitor_paths(&config.pin_root, &events)
+}
+
+fn cleanup_security_monitor_paths(pin_root: &str, events: &[String]) -> Result<(), ExecError> {
+    let mut first_error = None;
+    for event in events {
+        let pin_path = format!("{pin_root}/{event}");
+        let tracepoint = format!("sys_enter_{event}");
+        if let Err(error) = exec_cmd_allow_missing(&[
+            "bpftool".to_string(),
+            "prog".to_string(),
+            "detach".to_string(),
+            "pinned".to_string(),
+            pin_path.clone(),
+            "tracepoint".to_string(),
+            "syscalls".to_string(),
+            tracepoint,
+        ]) {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) = std::fs::remove_file(&pin_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                first_error.get_or_insert(ExecError::Io {
+                    cmd: format!("remove pinned security monitor {pin_path}"),
+                    source: error,
+                });
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn normalize_security_events(events: &[String]) -> Result<Vec<String>, ExecError> {

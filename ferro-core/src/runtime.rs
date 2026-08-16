@@ -1749,6 +1749,14 @@ impl ContainerRuntime {
                 internal_cleanup_observation(&record.id, true),
                 true,
             )?;
+            if is_ai_enabled() {
+                log_ai_reconciliation(
+                    &record.id,
+                    record.last_exit_code.unwrap_or(-1),
+                    "stale-pid",
+                    "exited",
+                );
+            }
             let _ = log_event(
                 &self.runtime_dir,
                 make_event(
@@ -8989,6 +8997,27 @@ fn log_ai_restart_lifecycle(
         trace = trace.with_evidence("pid", pid.to_string());
     }
     let _ = logger.log(action, &trace);
+}
+
+fn log_ai_reconciliation(container_id: &str, exit_code: i32, reason: &str, status: &str) {
+    let Some(logger) = ai_decision_logger() else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let trace = ferro_mind::ai::explain::DecisionTrace::new(
+        format!("ai-reconcile-{container_id}-{ts}"),
+        format!("Runtime reconciliation action for container {container_id}"),
+    )
+    .with_model("runtime-reconciliation", "runtime-v1")
+    .with_decision("reconcile-exited")
+    .with_evidence("container_id", container_id.to_string())
+    .with_evidence("status", status.to_string())
+    .with_evidence("exit_code", exit_code.to_string())
+    .with_evidence("reason", reason.to_string());
+    let _ = logger.log("ai_reconciliation_applied", &trace);
 }
 
 fn ai_lifecycle_enabled(config: Option<&AiRuntimeConfig>) -> bool {

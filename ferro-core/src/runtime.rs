@@ -4834,6 +4834,24 @@ fn supervise_child(
         container_start_time = std::time::Instant::now();
         if ai_enabled {
             adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
+            if let Some(logger) = ai_decision_logger() {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let trace = ferro_mind::ai::explain::DecisionTrace::new(
+                    format!("ai-restart-applied-{container_id}-{ts}"),
+                    format!("Adaptive restart applied to container {container_id}"),
+                )
+                .with_model("adaptive-restart-policy", "runtime-v1")
+                .with_decision("restart-applied")
+                .with_evidence("container_id", container_id.clone())
+                .with_evidence("previous_exit_code", exit_code.to_string())
+                .with_evidence("restart_count", restart_count.to_string())
+                .with_evidence("delay_secs", delay_secs.to_string())
+                .with_evidence("new_pid", pid.to_string());
+                let _ = logger.log("ai_restart_applied", &trace);
+            }
         }
         restart_count += 1;
     }

@@ -3991,13 +3991,17 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Ok(())
     };
     let result = match command {
-        Commands::Images { format } => request("GET", "/images/json".to_string())
-            .and_then(|body| print_json(body, format)),
+        Commands::Images { format } => {
+            request("GET", "/images/json".to_string()).and_then(|body| print_json(body, format))
+        }
         Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
             .and_then(|body| print_json(body, format)),
         Commands::Inspect { container, format } => request(
             "GET",
-            format!("/containers/{}/json", percent_encode_path_component(container)),
+            format!(
+                "/containers/{}/json",
+                percent_encode_path_component(container)
+            ),
         )
         .and_then(|body| print_json(body, format)),
         Commands::Logs { container, format } => request(
@@ -4016,10 +4020,54 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .and_then(|body| print_json(body, format)),
-        _ => Err(
-            "selected remote context is available only for images, containers, logs, stats, and inspect; this command has no remote transport yet"
-                .to_string(),
-        ),
+        Commands::Pause { container } => request(
+            "POST",
+            format!(
+                "/containers/{}/pause",
+                percent_encode_path_component(container)
+            ),
+        )
+        .map(|_| ()),
+        Commands::Unpause { container } => request(
+            "POST",
+            format!(
+                "/containers/{}/unpause",
+                percent_encode_path_component(container)
+            ),
+        )
+        .map(|_| ()),
+        Commands::Stop { container, timeout } => request(
+            "POST",
+            format!(
+                "/containers/{}/stop?t={timeout}",
+                percent_encode_path_component(container)
+            ),
+        )
+        .map(|_| ()),
+        Commands::Kill { container } => request(
+            "POST",
+            format!(
+                "/containers/{}/kill",
+                percent_encode_path_component(container)
+            ),
+        )
+        .map(|_| ()),
+        Commands::Restart { container, timeout } => request(
+            "POST",
+            format!(
+                "/containers/{}/restart?t={timeout}",
+                percent_encode_path_component(container)
+            ),
+        )
+        .map(|_| ()),
+        Commands::Rm { container } => request(
+            "DELETE",
+            format!("/containers/{}", percent_encode_path_component(container)),
+        )
+        .map(|_| ()),
+        _ => {
+            Err("selected remote context has no transport mapping for this command yet".to_string())
+        }
     };
     Some(result)
 }
@@ -12379,6 +12427,36 @@ volumes:
         assert_eq!(status, 200);
         assert_eq!(body, b"[]");
         assert_eq!(percent_encode_path_component("web/name"), "web%2Fname");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_context_transport_supports_authorized_lifecycle_methods() {
+        let temp = tempfile::tempdir().expect("remote socket fixture");
+        let socket = temp.path().join("remote.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept remote request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).ok();
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains("POST /containers/web%2Fname/stop?t=7"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write response");
+        });
+        let (status, body) = remote_docker_request(
+            &socket.to_string_lossy(),
+            "POST",
+            "/containers/web%2Fname/stop?t=7",
+            None,
+        )
+        .expect("remote lifecycle request");
+        worker.join().expect("remote worker");
+        assert_eq!(status, 204);
+        assert!(body.is_empty());
     }
 
     #[test]

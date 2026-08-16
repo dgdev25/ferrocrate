@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Magic bytes at the start of every `.rvf` file.
@@ -53,6 +54,13 @@ pub const SEG_CRYPTO: u8 = 0x10;
 pub struct RvfSegment {
     pub seg_type: u8,
     pub payload: Vec<u8>,
+}
+
+/// A validated RVF image containing its manifest and segments.
+#[derive(Debug, Clone)]
+pub struct RvfImage {
+    pub manifest: FerroImageManifest,
+    pub segments: Vec<RvfSegment>,
 }
 
 /// Manifest embedded in every `.rvf` image as `SEG_MANIFEST`.
@@ -111,6 +119,12 @@ pub enum RvfError {
     UnsupportedVersion(u8),
     #[error("manifest segment missing")]
     ManifestMissing,
+    #[error("layer segment missing")]
+    LayerMissing,
+    #[error("RVF layer size mismatch: manifest={expected}, actual={actual}")]
+    LayerSizeMismatch { expected: u64, actual: u64 },
+    #[error("RVF layer digest mismatch: expected={expected}, actual={actual}")]
+    LayerDigestMismatch { expected: String, actual: String },
     #[error("duplicate segment type: 0x{0:02x}")]
     DuplicateSegment(u8),
     #[error("segment payload too large: {0} bytes")]
@@ -198,6 +212,87 @@ pub fn parse_manifest(segments: &[RvfSegment]) -> Result<FerroImageManifest, Rvf
         .find(|s| s.seg_type == SEG_MANIFEST)
         .ok_or(RvfError::ManifestMissing)
         .and_then(|s| serde_json::from_slice(&s.payload).map_err(RvfError::Serialization))
+}
+
+/// Read and validate an RVF image from disk.
+///
+/// Validation includes the required manifest and layer segments, the manifest
+/// layer size, and the OCI-compatible `sha256:` layer digest. This gives
+/// callers a single fail-closed boundary before exposing an RVF layer to an
+/// OCI/rootfs reader.
+pub fn read_rvf_image(path: &Path) -> Result<RvfImage, RvfError> {
+    let mut file = std::fs::File::open(path)?;
+    let segments = read_rvf(&mut file)?;
+    for required_type in [SEG_MANIFEST, SEG_LAYER] {
+        if segments
+            .iter()
+            .filter(|segment| segment.seg_type == required_type)
+            .count()
+            > 1
+        {
+            return Err(RvfError::DuplicateSegment(required_type));
+        }
+    }
+    let manifest = parse_manifest(&segments)?;
+    let layer = segments
+        .iter()
+        .find(|segment| segment.seg_type == SEG_LAYER)
+        .ok_or(RvfError::LayerMissing)?;
+
+    let actual_size = layer.payload.len() as u64;
+    if manifest.layer_size != actual_size {
+        return Err(RvfError::LayerSizeMismatch {
+            expected: manifest.layer_size,
+            actual: actual_size,
+        });
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(&layer.payload);
+    let actual_digest = format!("sha256:{:x}", hasher.finalize());
+    if manifest.layer_digest != actual_digest {
+        return Err(RvfError::LayerDigestMismatch {
+            expected: manifest.layer_digest,
+            actual: actual_digest,
+        });
+    }
+
+    Ok(RvfImage { manifest, segments })
+}
+
+/// Extract the validated OCI layer blob from an RVF image atomically.
+///
+/// The output is the exact compressed layer bytes referenced by the manifest,
+/// suitable for importing into an OCI image store. The destination is synced
+/// before rename and its parent directory is synced afterwards.
+pub fn extract_layer(path: &Path, output_path: &Path) -> Result<u64, RvfError> {
+    let image = read_rvf_image(path)?;
+    let layer = image
+        .segments
+        .iter()
+        .find(|segment| segment.seg_type == SEG_LAYER)
+        .ok_or(RvfError::LayerMissing)?;
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = output_path.with_extension("rvf-layer.tmp");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(&layer.payload)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, output_path)?;
+    if let Some(parent) = output_path.parent() {
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
+    Ok(layer.payload.len() as u64)
 }
 
 /// Return `true` if `path` starts with the RVF magic bytes.
@@ -542,5 +637,84 @@ mod tests {
         let segments = read_rvf(&mut Cursor::new(&bytes)).unwrap();
         let vec_seg = segments.iter().find(|s| s.seg_type == SEG_VEC).unwrap();
         assert_eq!(vec_seg.payload, vec![0xffu8; 64]);
+    }
+
+    #[test]
+    fn read_rvf_image_validates_layer_size_and_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layer = b"validated-layer";
+        let mut hasher = Sha256::new();
+        hasher.update(layer);
+        let digest = format!("sha256:{:x}", hasher.finalize());
+        let manifest = FerroImageManifest {
+            name: "app".into(),
+            tag: "latest".into(),
+            entrypoint: vec![],
+            cmd: vec![],
+            env: vec![],
+            arch: "x86_64".into(),
+            os: "linux".into(),
+            created_at: "0".into(),
+            format_version: RVF_FORMAT_VERSION,
+            layer_digest: digest,
+            layer_size: layer.len() as u64,
+            overlay_model_type: None,
+        };
+        let image_path = tmp.path().join("image.rvf");
+        let mut bytes = Vec::new();
+        write_rvf(
+            &mut bytes,
+            &[
+                RvfSegment {
+                    seg_type: SEG_MANIFEST,
+                    payload: serde_json::to_vec(&manifest).unwrap(),
+                },
+                RvfSegment {
+                    seg_type: SEG_LAYER,
+                    payload: layer.to_vec(),
+                },
+            ],
+        )
+        .unwrap();
+        std::fs::write(&image_path, bytes).unwrap();
+
+        let image = read_rvf_image(&image_path).unwrap();
+        assert_eq!(image.manifest.name, "app");
+        assert_eq!(image.segments.len(), 2);
+
+        let output = tmp.path().join("oci-layer.tar");
+        assert_eq!(
+            extract_layer(&image_path, &output).unwrap(),
+            layer.len() as u64
+        );
+        assert_eq!(std::fs::read(output).unwrap(), layer);
+    }
+
+    #[test]
+    fn read_rvf_image_rejects_tampered_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = sample_manifest();
+        let image_path = tmp.path().join("tampered.rvf");
+        let mut bytes = Vec::new();
+        write_rvf(
+            &mut bytes,
+            &[
+                RvfSegment {
+                    seg_type: SEG_MANIFEST,
+                    payload: serde_json::to_vec(&manifest).unwrap(),
+                },
+                RvfSegment {
+                    seg_type: SEG_LAYER,
+                    payload: b"different".to_vec(),
+                },
+            ],
+        )
+        .unwrap();
+        std::fs::write(&image_path, bytes).unwrap();
+
+        assert!(matches!(
+            read_rvf_image(&image_path),
+            Err(RvfError::LayerSizeMismatch { .. }) | Err(RvfError::LayerDigestMismatch { .. })
+        ));
     }
 }

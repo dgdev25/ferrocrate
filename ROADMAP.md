@@ -155,7 +155,7 @@ container/runtime release. *Size:* XXL. *Source:* `docs/RVF_INTEGRATION_PLAN.md`
 - [ ] Upgrade and consolidate RVF dependencies and remove thin wrappers only after compatibility review.
 - [ ] Decide whether replacing core CAS/signing primitives is worth the migration risk; if yes, implement versioned migration and rollback.
 - [ ] Add quantization and compression with measured size/accuracy gates; the RVF scalar quantizer now reports measured original/encoded bytes, compression ratio, and maximum reconstruction error with dimension validation and regression gates, RVF publication rejects duplicate/oversized segments and atomically publishes output, and the persistent RVF vector store now exposes compression-aware creation with reopen/query coverage, while broader store-format and accuracy policy integration remains open.
-- [ ] Define and implement an opt-in `.rvf` image manifest, build format, launcher, and OCI interoperability.
+- [ ] Define and implement an opt-in `.rvf` image manifest, build format, launcher, and OCI interoperability. The versioned manifest/build format is implemented, and `ferro-core::rvf_image::read_rvf_image` plus atomic `extract_layer` now provide a digest- and size-validated OCI layer handoff; native launcher/QEMU execution and CLI import/run wiring remain open.
 - [ ] Add optional cognitive-container policy: authority-to-seccomp mapping, token budgets, metered model proxy, and coherence pre-run gates.
 
 ### 11. Multi-host orchestration

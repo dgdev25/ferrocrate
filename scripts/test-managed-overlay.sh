@@ -39,6 +39,10 @@ if [[ "${FERROCRATE_RUN_REAL_NETD_TESTS:-0}" == "1" ]]; then
     real_kernel_wireguard_grant_path --features test-support -- --ignored --nocapture
 fi
 
+if [[ "${FERROCRATE_RUN_REAL_TWO_HOST_TESTS:-0}" == "1" ]]; then
+  bash scripts/test-two-host-authenticated.sh
+fi
+
 : "${FERRO_EBPF_TEST_INTERFACE:?FERRO_EBPF_TEST_INTERFACE is required}"
 : "${FERRO_EBPF_TEST_IFINDEX:?FERRO_EBPF_TEST_IFINDEX is required}"
 

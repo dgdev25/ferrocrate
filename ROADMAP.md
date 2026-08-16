@@ -89,3 +89,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 `d283473` — created the follow-on qualification, execution-layer, multi-host, and parity roadmap; started host-matrix preflight.
 - 2026-08-16 — qualified the first Ubuntu 26.04/kernel 7.0 matrix row and fixed IPv6 DAD portability with `nodad`.
 - 2026-08-16 — added `HostCapabilities` admission to the shared executor and wired bridge mutations to fail closed before effects when Linux/root/CAP_NET_ADMIN/iproute2 are unavailable.
+- 2026-08-16 — corrected tool capability detection to resolve binaries through `PATH`, avoiding false negatives from nonstandard `ip --version` exit codes.

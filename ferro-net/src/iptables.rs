@@ -71,6 +71,7 @@ pub fn build_iptables_delete_cmd(rule: &IptablesRule) -> Result<Vec<String>, Str
 }
 
 pub fn apply_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
+    crate::executor::HostCapabilities::probe().require_network_mutation()?;
     let cmd = build_iptables_cmd(rule).map_err(|err| ExecError::CommandFailed {
         cmd: "iptables build".to_string(),
         stderr: err,
@@ -79,6 +80,7 @@ pub fn apply_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
 }
 
 pub fn delete_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
+    crate::executor::HostCapabilities::probe().require_network_mutation()?;
     let cmd = build_iptables_delete_cmd(rule).map_err(|err| ExecError::CommandFailed {
         cmd: "iptables delete build".to_string(),
         stderr: err,

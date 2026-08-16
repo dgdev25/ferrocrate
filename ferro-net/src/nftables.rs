@@ -124,6 +124,7 @@ fn normalize_nft_expr(value: &str) -> String {
 }
 
 pub fn apply_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
+    crate::executor::HostCapabilities::probe().require_network_mutation()?;
     let cmd = build_nft_add_rule_cmd(rule).map_err(|err| ExecError::CommandFailed {
         cmd: "nft add build".to_string(),
         stderr: err,
@@ -132,6 +133,7 @@ pub fn apply_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
 }
 
 pub fn delete_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
+    crate::executor::HostCapabilities::probe().require_network_mutation()?;
     let list_cmd =
         build_nft_list_chain_with_handles_cmd(rule).map_err(|err| ExecError::CommandFailed {
             cmd: "nft list build".to_string(),

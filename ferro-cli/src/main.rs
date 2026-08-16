@@ -6919,7 +6919,11 @@ fn handle_docker_compat_connection(
                     records.retain(|record| matches!(record.status.as_str(), "running" | "paused"));
                 }
                 records.retain(|record| docker_container_matches_filters(record, &filters));
-                records = docker_container_apply_time_bounds(records, &filters)?;
+                records = docker_container_apply_time_bounds(
+                    records,
+                    query.get("since").map(String::as_str),
+                    query.get("before").map(String::as_str),
+                )?;
                 records.sort_by(|left, right| {
                     right
                         .created_at_unix
@@ -7672,7 +7676,8 @@ fn docker_container_matches_filters(
 /// excludes the anchor and `before` excludes containers created at/after it.
 fn docker_container_apply_time_bounds(
     records: Vec<ferro_core::container_store::ContainerRecord>,
-    filters: &HashMap<String, Vec<String>>,
+    since_selector: Option<&str>,
+    before_selector: Option<&str>,
 ) -> Result<Vec<ferro_core::container_store::ContainerRecord>, String> {
     let resolve = |selector: &str| {
         selector.parse::<u64>().ok().or_else(|| {
@@ -7682,19 +7687,15 @@ fn docker_container_apply_time_bounds(
             })
         })
     };
-    let bound = |key: &str| -> Result<Option<u64>, String> {
-        let values = filters.get(key).cloned().unwrap_or_default();
-        if values.len() > 1 {
-            return Err(format!("docker: {key} accepts at most one selector"));
-        }
-        values.first().map_or(Ok(None), |selector| {
+    let bound = |key: &str, selector: Option<&str>| -> Result<Option<u64>, String> {
+        selector.map_or(Ok(None), |selector| {
             resolve(selector).map(Some).ok_or_else(|| {
                 format!("docker: {key} selector not found or not a Unix timestamp: {selector}")
             })
         })
     };
-    let since = bound("since")?;
-    let before = bound("before")?;
+    let since = bound("since", since_selector)?;
+    let before = bound("before", before_selector)?;
     Ok(records
         .into_iter()
         .filter(|record| since.is_none_or(|value| record.created_at_unix > value))
@@ -9941,18 +9942,15 @@ volumes:
             make("c", "third", 30),
         ];
 
-        let mut filters = HashMap::new();
-        filters.insert("since".to_string(), vec!["first".to_string()]);
-        filters.insert("before".to_string(), vec!["c".to_string()]);
-        let bounded = docker_container_apply_time_bounds(records.clone(), &filters).unwrap();
+        let bounded =
+            docker_container_apply_time_bounds(records.clone(), Some("first"), Some("c")).unwrap();
         assert_eq!(
             bounded.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             vec!["b"]
         );
 
-        filters.insert("since".to_string(), vec!["20".to_string()]);
-        filters.remove("before");
-        let timestamp_bounded = docker_container_apply_time_bounds(records, &filters).unwrap();
+        let timestamp_bounded =
+            docker_container_apply_time_bounds(records, Some("20"), None).unwrap();
         assert_eq!(
             timestamp_bounded
                 .iter()
@@ -9976,11 +9974,11 @@ volumes:
                 "status": "running"
             }))
             .expect("record");
-        let mut filters = HashMap::new();
-        filters.insert("since".to_string(), vec!["missing".to_string()]);
-        assert!(docker_container_apply_time_bounds(vec![record.clone()], &filters).is_err());
-        filters.insert("before".to_string(), vec!["1".to_string(), "2".to_string()]);
-        assert!(docker_container_apply_time_bounds(vec![record], &filters).is_err());
+        assert!(
+            docker_container_apply_time_bounds(vec![record.clone()], Some("missing"), None)
+                .is_err()
+        );
+        assert!(docker_container_apply_time_bounds(vec![record], None, Some("missing")).is_err());
     }
 
     #[test]

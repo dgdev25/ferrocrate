@@ -7339,6 +7339,13 @@ fn handle_docker_compat_connection(
                     .trim_end_matches("/json");
                 let record = runtime.inspect(id).map_err(|err| err.to_string())?;
                 let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+                let health = record.health.as_ref().map(|_| {
+                    serde_json::json!({
+                        "Status": record.health_status.clone(),
+                        "FailingStreak": record.health_failures,
+                        "Log": [],
+                    })
+                });
                 let body = serde_json::json!({
                     "Id": record.id,
                     "Name": format!("/{name}"),
@@ -7355,6 +7362,7 @@ fn handle_docker_compat_connection(
                         "Pid": record.pid,
                         "ExitCode": record.last_exit_code,
                         "StartedAt": record.created_at_unix,
+                        "Health": health,
                     }
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")

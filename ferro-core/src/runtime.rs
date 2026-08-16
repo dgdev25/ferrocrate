@@ -2036,8 +2036,17 @@ impl ContainerRuntime {
                 ));
             }
         }
+        let network_id = ownership
+            .network_id
+            .as_deref()
+            .expect("validated network id");
         match plan_network_recovery(observe_owned_ebpf_state(ownership)?)? {
-            NetworkRecoveryAction::VerifyAndReuse => Ok(()),
+            NetworkRecoveryAction::VerifyAndReuse => {
+                if is_ai_enabled() {
+                    log_ai_kernel_reconciliation(network_id, "verify-reuse", records.len());
+                }
+                Ok(())
+            }
             NetworkRecoveryAction::ReloadShared => {
                 let interface = config.interface.clone();
                 let before = shared_tc_filter_snapshot(&interface)?;
@@ -2049,10 +2058,6 @@ impl ContainerRuntime {
                 }
                 let mut filters = shared_tc_filter_snapshot(&interface)?;
                 filters.retain(|filter| !before.contains(filter));
-                let network_id = ownership
-                    .network_id
-                    .as_deref()
-                    .expect("validated network id");
                 let pins = capture_ebpf_pins(&Path::new(FERRO_NETWORK_ROOT).join(network_id))?;
                 if filters.len() != 4 || pins.is_empty() {
                     return Err(RuntimeError::Network(
@@ -2068,6 +2073,9 @@ impl ContainerRuntime {
                     updated_ownership.ebpf_filters = filters.clone();
                     updated_ownership.ebpf_pins = pins.clone();
                     self.store.put(&updated)?;
+                }
+                if is_ai_enabled() {
+                    log_ai_kernel_reconciliation(network_id, "reload-shared", records.len());
                 }
                 Ok(())
             }
@@ -9018,6 +9026,25 @@ fn log_ai_reconciliation(container_id: &str, exit_code: i32, reason: &str, statu
     .with_evidence("exit_code", exit_code.to_string())
     .with_evidence("reason", reason.to_string());
     let _ = logger.log("ai_reconciliation_applied", &trace);
+}
+
+fn log_ai_kernel_reconciliation(network_id: &str, action: &str, container_count: usize) {
+    let Some(logger) = ai_decision_logger() else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let trace = ferro_mind::ai::explain::DecisionTrace::new(
+        format!("ai-kernel-reconcile-{network_id}-{ts}"),
+        format!("Kernel network reconciliation for shared network {network_id}"),
+    )
+    .with_model("runtime-network-reconciliation", "runtime-v1")
+    .with_decision(action)
+    .with_evidence("network_id", network_id.to_string())
+    .with_evidence("container_count", container_count.to_string());
+    let _ = logger.log("ai_kernel_reconciliation", &trace);
 }
 
 fn ai_lifecycle_enabled(config: Option<&AiRuntimeConfig>) -> bool {

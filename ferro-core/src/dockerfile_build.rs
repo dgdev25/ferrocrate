@@ -849,6 +849,7 @@ struct CopyFromSpec {
 struct CopySpec {
     srcs: Vec<String>,
     dest: String,
+    chmod: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1065,11 +1066,26 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         return Ok(None);
     }
     let mut args = Vec::new();
-    for token in tokens {
-        if token.starts_with("--") {
-            continue;
+    let mut chmod = None;
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if let Some(raw_mode) = token.strip_prefix("--chmod=") {
+            chmod = Some(parse_copy_mode(raw_mode)?);
+        } else if token == "--chmod" {
+            let raw_mode = tokens.get(index + 1).ok_or_else(|| {
+                DockerfileBuildError::Invalid("COPY --chmod requires a mode".to_string())
+            })?;
+            chmod = Some(parse_copy_mode(raw_mode)?);
+            index += 1;
+        } else if token.starts_with("--") {
+            return Err(DockerfileBuildError::Unsupported(format!(
+                "COPY flag {token} is not supported"
+            )));
+        } else {
+            args.push(token);
         }
-        args.push(token);
+        index += 1;
     }
     if args.len() < 2 {
         return Err(DockerfileBuildError::Invalid(
@@ -1085,7 +1101,17 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         .iter()
         .map(|s| s.to_string())
         .collect();
-    Ok(Some(CopySpec { srcs, dest }))
+    Ok(Some(CopySpec { srcs, dest, chmod }))
+}
+
+fn parse_copy_mode(raw: &str) -> Result<u32, DockerfileBuildError> {
+    if raw.is_empty() || raw.len() > 4 || !raw.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "invalid COPY --chmod mode: {raw}"
+        )));
+    }
+    u32::from_str_radix(raw, 8)
+        .map_err(|_| DockerfileBuildError::Invalid(format!("invalid COPY --chmod mode: {raw}")))
 }
 
 fn parse_arg(value: &str) -> Result<(String, String), DockerfileBuildError> {
@@ -1706,13 +1732,21 @@ fn copy_from_context(
             } else {
                 dest_root.clone()
             };
-            copy_path_recursive(&source, &dest)?;
+            copy_path_recursive_mode(&source, &dest, spec.chmod)?;
         }
     }
     Ok(())
 }
 
 fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
+    copy_path_recursive_mode(src, dst, None)
+}
+
+fn copy_path_recursive_mode(
+    src: &Path,
+    dst: &Path,
+    chmod: Option<u32>,
+) -> Result<(), DockerfileBuildError> {
     let metadata = fs::metadata(src)?;
     if metadata.is_dir() {
         fs::create_dir_all(dst)?;
@@ -1720,7 +1754,7 @@ fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), DockerfileBuildErro
             let entry = entry?;
             let path = entry.path();
             let name = entry.file_name();
-            copy_path_recursive(&path, &dst.join(name))?;
+            copy_path_recursive_mode(&path, &dst.join(name), chmod)?;
         }
     } else {
         if let Some(parent) = dst.parent() {
@@ -1728,7 +1762,24 @@ fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), DockerfileBuildErro
         }
         fs::copy(src, dst)?;
     }
+    if let Some(mode) = chmod {
+        apply_copy_mode(dst, mode)?;
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn apply_copy_mode(path: &Path, mode: u32) -> Result<(), DockerfileBuildError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_copy_mode(_path: &Path, _mode: u32) -> Result<(), DockerfileBuildError> {
+    Err(DockerfileBuildError::Unsupported(
+        "COPY --chmod requires a Unix filesystem".to_string(),
+    ))
 }
 
 pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
@@ -1851,6 +1902,48 @@ mod tests {
         assert_eq!(
             stage.entrypoint.clone().expect("entrypoint"),
             vec!["/bin/bash", "-lc", "echo bye"]
+        );
+    }
+
+    #[test]
+    fn copy_chmod_is_parsed_and_unsupported_flags_fail_deterministically() {
+        let stages = parse_stages("FROM scratch\nCOPY --chmod=755 app /app\n").unwrap();
+        assert_eq!(stages[0].copy_paths[0].chmod, Some(0o755));
+
+        let error = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
+            .expect_err("unsupported copy flags must not be silently ignored");
+        assert!(error.to_string().contains("COPY flag --chown=1000:1000"));
+
+        let error = parse_stages("FROM scratch\nCOPY --chmod=999 app /app\n")
+            .expect_err("invalid modes must be rejected");
+        assert!(error.to_string().contains("invalid COPY --chmod mode"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_chmod_applies_mode_to_materialized_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::write(&source, "secret").unwrap();
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["source".into()],
+                dest: "/materialized".into(),
+                chmod: Some(0o640),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(destination.join("materialized"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
         );
     }
 

@@ -1482,6 +1482,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn container_start_failure_keeps_durable_created_state() {
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        let container = runtime
+            .create_container(authenticated(CreateContainerRequest {
+                pod_sandbox_id: "sandbox-1".into(),
+                config: Some(ContainerConfig {
+                    metadata_name: "missing-image".into(),
+                    image: "missing:latest".into(),
+                    command: vec!["true".into()],
+                    args: Vec::new(),
+                    env: Default::default(),
+                }),
+                sandbox_config: None,
+            }))
+            .await
+            .expect("container create")
+            .into_inner();
+
+        let start = runtime
+            .start_container(authenticated(StartContainerRequest {
+                container_id: container.container_id.clone(),
+            }))
+            .await
+            .expect_err("missing image must reject start");
+        assert_eq!(start.code(), tonic::Code::Internal);
+
+        let status = runtime
+            .container_status(authenticated(ContainerStatusRequest {
+                container_id: container.container_id.clone(),
+                verbose: false,
+            }))
+            .await
+            .expect("container status")
+            .into_inner();
+        assert_eq!(
+            status.status.expect("status").state,
+            ContainerState::Created as i32
+        );
+
+        let exec = runtime
+            .exec_sync(authenticated(ExecSyncRequest {
+                container_id: container.container_id,
+                cmd: vec!["true".into()],
+                timeout: 1,
+            }))
+            .await
+            .expect_err("exec before start must reject");
+        assert_eq!(exec.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
     async fn status_returns_runtime_ready_condition_with_verbose() {
         let runtime = create_test_runtime().await;
         let request = Request::new(StatusRequest { verbose: true });

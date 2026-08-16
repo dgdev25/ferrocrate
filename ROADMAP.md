@@ -60,7 +60,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 `docs/ROADMAP.md` SEC-02, COMPAT-09, and Docker compatibility checklist.
 
 - [x] Apply parsed seccomp profiles in the container launch path; the runtime applies the resolved profile in `pre_exec` and retains ignored root-only denial coverage.
-- [ ] Complete CRI pod-sandbox/container lifecycle methods and conformance fixtures.
+- [x] Complete CRI pod-sandbox/container lifecycle methods and conformance fixtures; authorized durable state and lifecycle error-path fixtures are covered, while kernel sandbox networking and full kubelet qualification remain explicit follow-on work.
 - [x] Publish supported Docker Engine API versions and document the implemented high-value endpoint groups; endpoint gaps remain explicit unsupported errors.
 - [x] Add Docker-wire/Compose contract tests while preserving authorization and witness mediation; raw Unix-socket matrix tests cover SDK-compatible HTTP semantics, and Compose integration tests cover lifecycle authorization.
 
@@ -107,7 +107,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — added a CI/manual host-matrix evidence gate that rejects qualified rows with missing or mismatched evidence artifacts.
 - 2026-08-16 — audited seccomp wiring: resolved profiles are applied in the container launch `pre_exec` path; roadmap status corrected from stale unchecked state.
 - 2026-08-16 — published the Docker API compatibility declaration for advertised versions, endpoint groups, and authorization behavior.
-- 2026-08-16 — published the CRI method matrix; it records the implemented runtime/image RPCs and explicitly identifies absent pod/container lifecycle RPCs.
+- 2026-08-16 — published the CRI method matrix and conformance fixture; authorized durable pod/container lifecycle RPCs are now exposed, with kernel sandbox networking and full kubelet qualification explicitly left as follow-on work.
 - 2026-08-16 — wired repeatable startup/OCI/rootless performance baselines into a manual artifact-upload workflow.
 - 2026-08-16 — ADR-0013 records that physical multi-host FCNET-105 is conditional and not a current release gate; isolated-host evidence remains authoritative.
 - 2026-08-16 — audited public network runtime paths: network mutation/capture/cleanup calls now use executor-backed helpers; direct subprocesses remain only for workload/process supervision.

@@ -340,7 +340,12 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             }
             let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
             let config_path = config_path(runtime_dir, &entry.config_digest);
-            if layer_path.exists() && config_path.exists() {
+            let layer_valid = entry.layer_size >= 0
+                && fs::metadata(&layer_path)
+                    .is_ok_and(|metadata| metadata.len() == entry.layer_size as u64)
+                && file_matches_digest(&layer_path, &entry.layer_digest);
+            let config_valid = file_matches_digest(&config_path, &entry.config_digest);
+            if layer_valid && config_valid {
                 let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
                 store.put_reference(
                     authority,
@@ -1167,6 +1172,12 @@ fn sha256_digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn file_matches_digest(path: &Path, expected: &str) -> bool {
+    fs::read(path)
+        .map(|bytes| sha256_digest_bytes(&bytes) == expected)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -2680,9 +2691,10 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         build_cache_path, build_from_dockerfile_with_store_and_compression, dockerignore_matches,
-        export_build_cache, import_build_cache, load_build_cache, parse_limit_value, parse_run,
-        parse_stages, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
-        prune_build_cache, save_build_cache, validate_mount_target, BuildCacheEntry,
+        export_build_cache, file_matches_digest, import_build_cache, load_build_cache,
+        parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, save_build_cache,
+        validate_mount_target, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -2719,6 +2731,18 @@ mod tests {
         assert_eq!(first.canonical_tag(), "registry-1.docker.io/local/app:test");
         assert!(store.list_references().unwrap().is_empty());
         assert!(!runtime.join("build-cache.json").exists());
+    }
+
+    #[test]
+    fn cache_artifact_digest_check_rejects_replaced_files() {
+        let temp = tempfile::tempdir().expect("cache artifact directory");
+        let path = temp.path().join("layer");
+        std::fs::write(&path, b"trusted").expect("write artifact");
+        let digest = super::sha256_digest_bytes(b"trusted");
+        assert!(file_matches_digest(&path, &digest));
+        std::fs::write(&path, b"replaced").expect("replace artifact");
+        assert!(!file_matches_digest(&path, &digest));
+        assert!(!file_matches_digest(&temp.path().join("missing"), &digest));
     }
 
     #[test]

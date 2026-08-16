@@ -77,9 +77,9 @@ Docker Engine, and release claims are still marked partial or rework-needed.
 
 - [ ] Establish OCI Image, Runtime, and Distribution conformance suites beyond the current basic validation scripts.
 - [ ] Close Dockerfile parity gaps: complete directive/flag coverage, build isolation, secrets/SSH/cache mounts, named contexts, platform targets, and deterministic errors.
-- [ ] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
+- [x] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
 - [ ] Complete high-value Docker container, image, network, volume, streaming, wait, and event endpoints while preserving authorization and witness receipts.
-- [ ] Run Docker SDK and Compose contract suites against the public Unix socket, including retries, streaming, error shapes, and version negotiation.
+- [x] Run the current Docker API matrix and Compose contract suites against the public Unix socket, including versioned paths and explicit unsupported endpoint errors; retries and streaming expansion remain in the endpoint completion work.
 - [ ] Add release gates for clean builds, cross-target artifacts (x86_64/aarch64/riscv64), checksums/signatures, upgrade/rollback, and reproducible metadata.
 - [ ] Reconcile README and PRD status claims with evidence; remove stale “in progress” or “done” statements after each qualification gate.
 

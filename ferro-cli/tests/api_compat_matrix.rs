@@ -74,6 +74,62 @@ const API_MATRIX: &[ApiCase] = &[
         expected_status: 200,
         body: "",
     },
+    ApiCase {
+        method: "GET",
+        path: "/containers/missing/json",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        path: "/containers/missing/logs",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        path: "/containers/missing/stats",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/missing/start",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/missing/stop",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/missing/wait",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        path: "/events",
+        coverage: Coverage::Unsupported,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/plugins/pull",
+        coverage: Coverage::Unsupported,
+        expected_status: 404,
+        body: "{}",
+    },
 ];
 
 struct DaemonHarness {

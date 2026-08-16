@@ -293,6 +293,34 @@ impl DaemonHarness {
 
         (code, body)
     }
+
+    fn restart(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .env("FERROCRATE_RUNTIME_DIR", self._runtime_dir.path())
+            .args([
+                "daemon",
+                "--docker-compat",
+                "--socket",
+                self.socket_path.to_str().expect("socket path utf8"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("restart daemon");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if self.socket_path.exists() && UnixStream::connect(&self.socket_path).is_ok() {
+                self.child = child;
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("daemon socket did not become ready after restart");
+    }
 }
 
 #[test]
@@ -325,7 +353,7 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
 
 #[test]
 fn docker_create_identity_is_inspectable_before_start() {
-    let harness = DaemonHarness::spawn();
+    let mut harness = DaemonHarness::spawn();
     let (status, body) = harness.request(
         "POST",
         "/containers/create?name=created-before-start",
@@ -352,4 +380,11 @@ fn docker_create_identity_is_inspectable_before_start() {
     assert!(listed
         .as_array()
         .is_some_and(|items| items.iter().any(|item| item["Id"] == id)));
+
+    harness.restart();
+    let (status, body) = harness.request("GET", &format!("/containers/{id}/json"), "");
+    assert_eq!(status, 200, "post-restart inspect response: {body}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("post-restart JSON");
+    assert_eq!(inspect["Id"], id);
+    assert_eq!(inspect["State"]["Status"], "created");
 }

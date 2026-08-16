@@ -7200,25 +7200,45 @@ fn handle_docker_compat_connection(
                 http_response(200, json.as_bytes(), "application/json")
             }
             ("GET", "/networks") => {
+                let filters = parse_docker_filters(&query)?;
+                validate_docker_network_filters(&filters)?;
                 let networks = load_networks(runtime_dir.as_ref())?;
-                let mut entries = vec![serde_json::json!({
-                    "Name": "bridge",
-                    "Id": "bridge",
-                    "Driver": "bridge",
-                    "Scope": "local",
-                })];
-                entries.extend(networks.into_iter().map(|record| {
-                    serde_json::json!({
-                        "Name": record.name,
-                        "Id": record.name,
-                        "Driver": record.driver,
+                let mut entries = Vec::new();
+                if docker_network_matches_filters(
+                    &DockerNetworkView {
+                        name: "bridge",
+                        driver: "bridge",
+                    },
+                    &filters,
+                ) {
+                    entries.push(serde_json::json!({
+                        "Name": "bridge",
+                        "Id": "bridge",
+                        "Driver": "bridge",
                         "Scope": "local",
-                        "IPAM": {
-                            "Config": [{
-                                "Subnet": record.subnet,
-                                "Gateway": record.gateway
-                            }]
-                        }
+                    }));
+                }
+                entries.extend(networks.into_iter().filter_map(|record| {
+                    docker_network_matches_filters(
+                        &DockerNetworkView {
+                            name: &record.name,
+                            driver: &record.driver,
+                        },
+                        &filters,
+                    )
+                    .then(|| {
+                        serde_json::json!({
+                            "Name": record.name,
+                            "Id": record.name,
+                            "Driver": record.driver,
+                            "Scope": "local",
+                            "IPAM": {
+                                "Config": [{
+                                    "Subnet": record.subnet,
+                                    "Gateway": record.gateway
+                                }]
+                            }
+                        })
                     })
                 }));
                 let body = serde_json::to_string(&entries).map_err(|err| err.to_string())?;
@@ -7278,8 +7298,21 @@ fn handle_docker_compat_connection(
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/networks/prune") => {
+                let filters = parse_docker_filters(&query)?;
+                validate_docker_network_filters(&filters)?;
                 let associations = runtime.list().map_err(|error| error.to_string())?;
-                let records = load_networks(runtime_dir.as_ref())?;
+                let records = load_networks(runtime_dir.as_ref())?
+                    .into_iter()
+                    .filter(|record| {
+                        docker_network_matches_filters(
+                            &DockerNetworkView {
+                                name: &record.name,
+                                driver: &record.driver,
+                            },
+                            &filters,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 let mut deleted = Vec::new();
                 for record in records {
                     let proof = surface_authorization
@@ -7813,6 +7846,45 @@ fn validate_docker_volume_filters(filters: &HashMap<String, Vec<String>>) -> Res
     Ok(())
 }
 
+struct DockerNetworkView<'a> {
+    name: &'a str,
+    driver: &'a str,
+}
+
+fn docker_network_matches_filters(
+    record: &DockerNetworkView<'_>,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    let name_matches = filters
+        .get("name")
+        .is_none_or(|values| values.is_empty() || values.iter().any(|value| value == record.name));
+    let driver_matches = filters.get("driver").is_none_or(|values| {
+        values.is_empty() || values.iter().any(|value| value == record.driver)
+    });
+    let scope_matches = filters
+        .get("scope")
+        .is_none_or(|values| values.is_empty() || values.iter().any(|value| value == "local"));
+    let type_matches = filters.get("type").is_none_or(|values| {
+        values.is_empty()
+            || values.iter().any(|value| {
+                (value == "builtin" && record.name == "bridge")
+                    || (value == "custom" && record.name != "bridge")
+            })
+    });
+    name_matches && driver_matches && scope_matches && type_matches
+}
+
+fn validate_docker_network_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    for key in filters.keys() {
+        if !matches!(key.as_str(), "name" | "driver" | "scope" | "type") {
+            return Err(format!(
+                "docker: network filter `{key}` is unsupported; supported filters: name, driver, scope, type"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn docker_image_apply_time_bounds(
     images: Vec<ferro_core::image_store::ImageRecord>,
     filters: &HashMap<String, Vec<String>>,
@@ -8297,21 +8369,22 @@ mod tests {
         bind_run_network, build_health_config, build_limits, context_endpoint_available,
         desktop_forward_enabled, discover_rootless_socket, dispatch, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
-        docker_image_apply_time_bounds, docker_image_matches_filters, docker_tail_logs,
-        docker_top_payload, docker_volume_matches_filters, effective_readonly, handle_build,
-        handle_containers, handle_context, handle_exec, handle_image_prune, handle_images,
-        handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report, handle_network,
-        handle_pause, handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run,
-        handle_stats, handle_stop, handle_unpause, handle_volume, host_build_arch,
-        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_capabilities,
-        parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
-        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
-        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_volume_filters, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
-        VolumeCommands,
+        docker_image_apply_time_bounds, docker_image_matches_filters,
+        docker_network_matches_filters, docker_tail_logs, docker_top_payload,
+        docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
+        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_bool_query,
+        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, should_desktop_forward,
+        split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_network_filters, validate_docker_volume_filters,
+        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
+        ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
+        MigrateCommands, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -10261,6 +10334,31 @@ volumes:
             serde_json::from_value(serde_json::json!({"dangling": ["true"]})).expect("filters");
         let error = validate_docker_volume_filters(&filters).expect_err("unsupported filter");
         assert!(error.contains("unsupported"));
+    }
+
+    #[test]
+    fn docker_network_filters_match_name_driver_and_type() {
+        let custom = super::DockerNetworkView {
+            name: "app-net",
+            driver: "bridge",
+        };
+        let filters = serde_json::from_value(serde_json::json!({
+            "name": ["app-net"],
+            "driver": ["bridge"],
+            "scope": ["local"],
+            "type": ["custom"]
+        }))
+        .expect("filters");
+        assert!(docker_network_matches_filters(&custom, &filters));
+
+        let builtin = super::DockerNetworkView {
+            name: "bridge",
+            driver: "bridge",
+        };
+        assert!(!docker_network_matches_filters(&builtin, &filters));
+        let unsupported =
+            serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
+        assert!(validate_docker_network_filters(&unsupported).is_err());
     }
 
     #[test]

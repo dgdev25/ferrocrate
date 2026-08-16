@@ -60,7 +60,7 @@ policy coverage, runtime monitoring, dependency advisories, and complete shell-o
 reduction remain open. *Size:* L–XL. *Sources:* SEC-03/08/09,
 `docs/SECAUDIT_TASKLIST.md`, `docs/REMEDIATION-PLAN.md`.
 
-- [ ] Implement and qualify AppArmor and SELinux profile selection, loading, denial reporting, rootless behavior, and policy rollback.
+- [ ] Complete AppArmor and SELinux distribution qualification: profile selection/loading diagnostics are implemented and strict prerequisites are gated; denial reporting, rootless behavior, and policy rollback still require MAC-enabled host evidence.
 - [ ] Finish eBPF syscall/security monitoring with a production execution path, capability admission, event schema, bounded buffering, and fallback diagnostics.
 - [ ] Complete the remaining runtime shell-out audit; route network and other privileged mutations through typed executor boundaries or document each justified exception.
 - [ ] Resolve or formally time-box `RUSTSEC-2025-0141` (`bincode` via `ruvector-core`) with isolation, upgrade, or replacement evidence.

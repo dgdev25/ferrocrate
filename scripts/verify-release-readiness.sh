@@ -15,6 +15,7 @@ cargo test -p ferro-cri --test socket_integration --offline -- --test-threads=1
 
 echo "[release] validating security enforcement tests"
 cargo test -p ferro-core --test security_tests --offline -- --nocapture
+bash scripts/verify-mac-policy.sh target/release-readiness/mac-policy.txt
 
 echo "[release] collecting compatibility evidence"
 bash scripts/compat-evidence.sh

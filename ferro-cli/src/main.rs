@@ -545,6 +545,11 @@ pub enum WitnessCommands {
         #[arg(long, default_value_t = 100_000)]
         max_records: usize,
     },
+    /// Verify an exported witness snapshot without opening the live journal.
+    VerifyExport {
+        #[arg(long)]
+        snapshot: PathBuf,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -2037,6 +2042,7 @@ fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(),
             output,
             max_records,
         } => export_witness_snapshot(journal, journal_id, output, *max_records),
+        WitnessCommands::VerifyExport { snapshot } => verify_witness_snapshot(snapshot),
     }?;
     println!("{output}");
     Ok(())
@@ -2100,6 +2106,76 @@ fn decode_witness_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {
             .map_err(|_| "witness export journal-id is not hexadecimal".to_string())?;
     }
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WitnessSnapshot {
+    schema: u8,
+    journal_id: String,
+    record_count: usize,
+    records: Vec<WitnessSnapshotRecord>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WitnessSnapshotRecord {
+    epoch: u64,
+    sequence: u64,
+    record_hash: String,
+    canonical_record_hex: String,
+}
+
+#[cfg(target_os = "linux")]
+fn verify_witness_snapshot(snapshot: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(snapshot).map_err(|error| format!("witness snapshot: {error}"))?;
+    let document: WitnessSnapshot = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("witness snapshot is invalid JSON: {error}"))?;
+    if document.schema != 1 {
+        return Err("witness snapshot schema must be 1".into());
+    }
+    let _journal_id = decode_witness_hex::<16>(&document.journal_id)?;
+    if document.record_count != document.records.len() {
+        return Err("witness snapshot record_count does not match records".into());
+    }
+    let mut previous = None;
+    for record in &document.records {
+        if previous.is_some_and(|sequence| record.sequence <= sequence) {
+            return Err("witness snapshot sequences are not strictly increasing".into());
+        }
+        let canonical = decode_witness_hex_vec(&record.canonical_record_hex)?;
+        let decoded = decode_record(&canonical).map_err(|error| error.to_string())?;
+        if decoded.epoch() != record.epoch || decoded.sequence() != record.sequence {
+            return Err("witness snapshot record identity does not match canonical bytes".into());
+        }
+        let expected = encode_hex(&decoded.record_hash());
+        if expected != record.record_hash {
+            return Err(format!(
+                "witness snapshot record hash mismatch at sequence {}",
+                record.sequence
+            ));
+        }
+        previous = Some(record.sequence);
+    }
+    Ok(format!(
+        "witness snapshot verification=passed records={}",
+        document.records.len()
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn decode_witness_hex_vec(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() % 2 != 0 {
+        return Err("witness snapshot canonical bytes must be hexadecimal".into());
+    }
+    (0..value.len() / 2)
+        .map(|index| {
+            u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+                .map_err(|_| "witness snapshot canonical bytes are not hexadecimal".to_string())
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]

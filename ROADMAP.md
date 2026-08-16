@@ -36,7 +36,7 @@ NET-04–10; SEC-08/09; `docs/compatibility`; host-matrix evidence.
 - [ ] Complete encrypted managed-overlay packet-flow qualification across the supported host matrix; preserve stale-revision, rollback, recovery, and key-rotation evidence.
 - [ ] Decide and, only if operationally required, run FCNET-105 across physically separate machines with clock, MTU, route, endpoint, topology, and key-ID evidence (ADR-0013 currently defers this).
 - [ ] Keep every network mutation, attach/detach, firewall change, and cleanup under the executor plus authorization/grant/witness protocol.
-- [ ] Publish a release troubleshooting and recovery runbook for capability denial, partial effects, quarantine, and operator repair.
+- [x] Publish a release troubleshooting and recovery runbook for capability denial, partial effects, quarantine, and operator repair (`docs/security/network-recovery.md`).
 
 ### 2. CRI production qualification
 

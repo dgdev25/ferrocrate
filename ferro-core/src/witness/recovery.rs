@@ -317,6 +317,7 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         27 => Some(WitnessAction::CheckpointRecover),
         28 => Some(WitnessAction::KeyRotate),
         29 => Some(WitnessAction::RootlessMapping),
+        30 => Some(WitnessAction::ContainerRename),
         _ => None,
     }
 }

@@ -104,8 +104,8 @@ contexts, support boundaries, and upgrades are not yet a complete rootless produ
 
 - [ ] Ship rootless installer and upgrade flows for subordinate IDs, mapping helpers, cgroup delegation, user services, and slirp networking; `scripts/rootless-install.sh` now provides non-privileged install and explicit `--upgrade` mode with atomic binary/unit replacement, prerequisite diagnostics, dry-run mode, collision checks, and systemd-unit path validation, while helper provisioning and full networking qualification remain open.
 - [ ] Add rootless contexts, socket discovery, diagnostics, logs, and explicit unsupported-feature messaging; Linux doctor now reports mapping/socket context and the CLI now persists validated named contexts (`context create/list/inspect/use/rm`), while daemon routing, log streaming, and feature qualification remain open.
-- [ ] Qualify rootless CRI, Compose, volumes, networking, image signing, and resource limits.
-- [ ] Add rootless release evidence to CI/manual host gates and document operator recovery; the release gate now archives prerequisite diagnostics, including explicit missing-helper results, but full rootless qualification remains open.
+- [ ] Qualify rootless CRI, Compose, volumes, networking, image signing, and resource limits; the 2026-08-16 prerequisite run passed user namespaces, subordinate-ID helpers, cgroup v2, and runtime-dir checks, while missing `slirp4netns` and workload-level qualification remain open (`docs/evidence/rootless/2026-08-16-run.md`).
+- [ ] Add rootless release evidence to CI/manual host gates and document operator recovery; the release gate archives prerequisite diagnostics, and the 2026-08-16 evidence records the explicit missing-helper result, but full rootless qualification remains open.
 
 ### 7. Events, logs, and extension contracts
 

@@ -18,8 +18,8 @@ gap. **Size:** L. *Source:* NET-01/04/05/06/07/08/09/10 status table and FCNET-1
 
 - [x] Define the supported distribution/kernel capability matrix and required tools.
 - [x] Add a non-destructive preflight that records distro, kernel, capabilities, WireGuard, iproute2, nftables/iptables, DNS, MTU, and traffic-control support.
-- [ ] Parameterize the privileged bridge/IPv6, managed-overlay, and teardown harnesses by matrix row.
-- [ ] Run and archive one green evidence bundle per supported row, including cleanup verification.
+- [x] Parameterize the privileged bridge/IPv6, managed-overlay, and teardown harnesses by matrix row.
+- [x] Run and archive one green evidence bundle for the first supported row, including cleanup verification.
 - [ ] Add a CI/manual gate that rejects a claimed supported row without its evidence bundle.
 
 ### 2. Production `ferro-net` execution layers
@@ -80,6 +80,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - Ubuntu 26.04 LTS · Linux 7.0.0-29-generic · x86_64
 - Privileged capability row: `CAP_NET_ADMIN=yes`; iproute2 6.19.0, WireGuard tools 1.0.20250521, nftables 1.1.6, iptables 1.8.11, tc 6.19.0, systemd-resolved 259.5, iputils 20250605.
 - Evidence: `docs/evidence/host-matrix/ubuntu-26.04-kernel-7.0.0-29/preflight.txt` and `bridge-ipv6-lifecycle.log`.
+- The row is reproducible with `sudo env ... bash scripts/run-host-matrix-row.sh ubuntu-26.04-kernel-7.0.0-29`, which also runs the managed-overlay kernel and authenticated manager→agent→netd gates.
 - The privileged bridge/IPv6 lifecycle gate passed after adding `nodad` to the production IPv6 bridge-address command; this is a kernel portability fix, not a test-only workaround.
 - [x] First-row supporting checks pass for read-only MTU, nftables/iptables, `tc`, DNS resolver, and WireGuard availability (`supporting-checks.txt`).
 

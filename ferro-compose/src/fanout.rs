@@ -2,6 +2,7 @@
 
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "legacy-sled")]
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -135,7 +136,14 @@ impl FanoutReplayStore {
             )",
         )
         .map_err(|error| FanoutError::Storage(error.to_string()))?;
-        migrate_legacy_replay(root, &legacy, &db)?;
+        if legacy.join("conf").exists() {
+            #[cfg(feature = "legacy-sled")]
+            migrate_legacy_replay(root, &legacy, &db)?;
+            #[cfg(not(feature = "legacy-sled"))]
+            return Err(FanoutError::Storage(
+                "legacy Compose replay requires the `legacy-sled` migration feature".into(),
+            ));
+        }
         Ok(Self { db: Mutex::new(db) })
     }
     pub fn claim(&self, child: &FanoutChild) -> Result<(), FanoutError> {
@@ -163,6 +171,7 @@ impl FanoutReplayStore {
     }
 }
 
+#[cfg(feature = "legacy-sled")]
 fn migrate_legacy_replay(
     root: &Path,
     legacy: &Path,
@@ -459,7 +468,7 @@ where
     FanoutResult::new(statuses)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-sled"))]
 mod storage_tests {
     use super::{FanoutAction, FanoutChild, FanoutReplayStore};
 

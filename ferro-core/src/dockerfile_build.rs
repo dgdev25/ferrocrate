@@ -219,6 +219,14 @@ struct BuiltStage {
     layer_size: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StageCheckpoint {
+    build_key: String,
+    layer_digest: String,
+    layer_media_type: String,
+    layer_size: i64,
+}
+
 #[derive(Debug, Clone)]
 struct BaseImageInfo {
     layers: Vec<PathBuf>,
@@ -319,6 +327,105 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
         named_contexts,
         &HashMap::new(),
     )
+}
+
+fn stage_checkpoint_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("build").join("stage-checkpoints.json")
+}
+
+fn load_stage_checkpoints(
+    runtime_dir: &Path,
+) -> Result<HashMap<usize, StageCheckpoint>, DockerfileBuildError> {
+    let path = stage_checkpoint_path(runtime_dir);
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() || metadata.len() > 4 * 1024 * 1024 {
+        return Err(DockerfileBuildError::Invalid(
+            "stage checkpoint must be a bounded regular file".to_string(),
+        ));
+    }
+    serde_json::from_slice(&fs::read(path)?).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("stage checkpoint is malformed: {error}"))
+    })
+}
+
+fn save_stage_checkpoints(
+    runtime_dir: &Path,
+    checkpoints: &HashMap<usize, StageCheckpoint>,
+) -> Result<(), DockerfileBuildError> {
+    let path = stage_checkpoint_path(runtime_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes =
+        serde_json::to_vec(checkpoints).map_err(|error| io::Error::other(error.to_string()))?;
+    let temporary = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn stage_checkpoint_key(cache_key: &str, index: usize) -> String {
+    sha256_digest_bytes(format!("ferrocrate-stage-checkpoint\0{cache_key}\0{index}").as_bytes())
+}
+
+fn restore_stage_from_checkpoint(
+    runtime_dir: &Path,
+    idx: usize,
+    base_info: &BaseImageInfo,
+    checkpoint: &StageCheckpoint,
+) -> Result<Option<BuiltStage>, DockerfileBuildError> {
+    if checkpoint.layer_size < 0 {
+        return Ok(None);
+    }
+    let layer_path = layer_blob_path(runtime_dir, &checkpoint.layer_digest);
+    let metadata = match fs::metadata(&layer_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    if !metadata.is_file()
+        || metadata.len() != checkpoint.layer_size as u64
+        || !file_matches_digest(&layer_path, &checkpoint.layer_digest)
+    {
+        return Ok(None);
+    }
+    let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
+    if stage_root.exists() {
+        fs::remove_dir_all(&stage_root)?;
+    }
+    let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+    if !base_info.layers.is_empty() {
+        construct_rootfs_with_dedup(&stage_root, &base_info.layers, &cas_root)
+            .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
+    } else {
+        fs::create_dir_all(&stage_root)?;
+    }
+    apply_layer_tar(&stage_root, &layer_path)
+        .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
+    Ok(Some(BuiltStage {
+        root: stage_root,
+        name: None,
+        layer_digest: checkpoint.layer_digest.clone(),
+        layer_media_type: checkpoint.layer_media_type.clone(),
+        layer_size: checkpoint.layer_size,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,6 +599,12 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     let mut stage_roots = vec![None; stages.len()];
     let mut stage_names: HashMap<String, PathBuf> = HashMap::new();
     let ignore_patterns = load_dockerignore_patterns(context_dir)?;
+    let checkpointing = !has_sensitive_mounts(&stages);
+    let mut checkpoints = if checkpointing {
+        load_stage_checkpoints(runtime_dir)?
+    } else {
+        HashMap::new()
+    };
 
     let batches =
         build_stage_execution_batches(&build_stage_dependency_graph(&stages, &named_contexts)?)?;
@@ -516,21 +629,46 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                     .map(|idx| {
                         let stage = &stages[*idx];
                         let base_info = &base_infos[*idx];
-                        scope.spawn(|| {
-                            build_one_stage(
-                                *idx,
-                                stage,
-                                base_info,
-                                runtime_dir,
-                                context_dir,
-                                dockerfile_path,
-                                compression,
-                                &ignore_patterns,
-                                &named_contexts,
-                                secrets,
-                                &roots_snapshot,
-                                &names_snapshot,
-                            )
+                        let checkpoint = checkpoints
+                            .get(idx)
+                            .filter(|checkpoint| {
+                                checkpoint.build_key == stage_checkpoint_key(&cache_key, *idx)
+                            })
+                            .cloned();
+                        let worker_ignore_patterns = ignore_patterns.clone();
+                        let worker_named_contexts = named_contexts.clone();
+                        let worker_roots_snapshot = roots_snapshot.clone();
+                        let worker_names_snapshot = names_snapshot.clone();
+                        scope.spawn(move || {
+                            let restored = checkpoint.as_ref().map(|checkpoint| {
+                                restore_stage_from_checkpoint(
+                                    runtime_dir,
+                                    *idx,
+                                    base_info,
+                                    checkpoint,
+                                )
+                            });
+                            match restored {
+                                Some(Ok(Some(mut output))) => {
+                                    output.name = stage.name.clone();
+                                    Ok(output)
+                                }
+                                Some(Ok(None)) | None => build_one_stage(
+                                    *idx,
+                                    stage,
+                                    base_info,
+                                    runtime_dir,
+                                    context_dir,
+                                    dockerfile_path,
+                                    compression,
+                                    &worker_ignore_patterns,
+                                    &worker_named_contexts,
+                                    secrets,
+                                    &worker_roots_snapshot,
+                                    &worker_names_snapshot,
+                                ),
+                                Some(Err(error)) => Err(error),
+                            }
                         })
                     })
                     .collect::<Vec<_>>();
@@ -549,6 +687,20 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             batch
                 .iter()
                 .map(|idx| {
+                    let checkpoint = checkpoints.get(idx).filter(|checkpoint| {
+                        checkpoint.build_key == stage_checkpoint_key(&cache_key, *idx)
+                    });
+                    if let Some(checkpoint) = checkpoint {
+                        if let Some(mut output) = restore_stage_from_checkpoint(
+                            runtime_dir,
+                            *idx,
+                            &base_infos[*idx],
+                            checkpoint,
+                        )? {
+                            output.name = stages[*idx].name.clone();
+                            return Ok(output);
+                        }
+                    }
                     build_one_stage(
                         *idx,
                         &stages[*idx],
@@ -567,11 +719,25 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 .collect::<Result<Vec<_>, _>>()?
         };
         for (idx, output) in batch.into_iter().zip(outputs) {
+            if checkpointing {
+                checkpoints.insert(
+                    idx,
+                    StageCheckpoint {
+                        build_key: stage_checkpoint_key(&cache_key, idx),
+                        layer_digest: output.layer_digest.clone(),
+                        layer_media_type: output.layer_media_type.clone(),
+                        layer_size: output.layer_size,
+                    },
+                );
+            }
             stage_roots[idx] = Some(output.root.clone());
             if let Some(name) = output.name.as_ref() {
                 stage_names.insert(name.clone(), output.root.clone());
             }
             built[idx] = Some(output);
+        }
+        if checkpointing {
+            save_stage_checkpoints(runtime_dir, &checkpoints)?;
         }
     }
 
@@ -3240,10 +3406,11 @@ mod tests {
         build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
-        load_build_cache, parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, save_build_cache, validate_mount_target, BuildCacheEntry,
-        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
+        load_build_cache, load_stage_checkpoints, parse_limit_value, parse_run, parse_stages,
+        prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
+        registry_cache_descriptor, registry_cache_reference, save_build_cache,
+        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -3398,6 +3565,44 @@ mod tests {
         assert!(!entry.dockerfile_digest.is_empty());
         assert_eq!(entry.base_digests, vec!["scratch"]);
         assert!(!runtime_dir.join("images/build-cache.json.tmp").exists());
+    }
+
+    #[test]
+    fn interrupted_build_resumes_from_digest_bound_stage_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").unwrap();
+        fs::write(temp.path().join("hello.txt"), "resume me").unwrap();
+        let runtime_holder = tempfile::tempdir().unwrap();
+        let runtime = runtime_holder.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/resume:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .unwrap();
+        assert!(stage_checkpoint_path(&runtime).is_file());
+        let checkpoint = load_stage_checkpoints(&runtime).unwrap();
+        assert_eq!(checkpoint.len(), 1);
+        assert_eq!(checkpoint.get(&0).unwrap().layer_digest, first.layer_digest);
+        fs::remove_file(build_cache_path(&runtime)).unwrap();
+        fs::remove_dir_all(runtime.join("build/stage-0")).unwrap();
+        let second = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/resume:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(first.layer_digest, second.layer_digest);
+        assert!(runtime.join("build/stage-0").is_dir());
     }
 
     #[test]

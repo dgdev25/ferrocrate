@@ -8457,19 +8457,21 @@ fn security_ebpf_events() -> Vec<String> {
 }
 
 fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
-    if !command_available("bpftool") {
-        return Err(RuntimeError::Network(
-            "security ebpf monitor requires bpftool".to_string(),
-        ));
-    }
+    let events = security_ebpf_events();
     let object_path = std::env::var("FERROCRATE_EBPF_SECURITY_OBJECT")
         .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-security.o".to_string());
     let pin_root = std::env::var("FERROCRATE_EBPF_SECURITY_PIN_ROOT")
         .unwrap_or_else(|_| format!("/sys/fs/bpf/ferrocrate-security-{container_id}"));
+    validate_security_ebpf_config(&object_path, &pin_root, &events)?;
+    if !command_available("bpftool") {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor unavailable: requires bpftool; fallback=disabled (turn the monitor off explicitly)".to_string(),
+        ));
+    }
     let config = SecurityMonitorConfig {
         object_path,
         pin_root,
-        events: security_ebpf_events(),
+        events,
     };
     let installed =
         install_security_monitor(&config).map_err(|err| RuntimeError::Network(err.to_string()))?;
@@ -8478,6 +8480,39 @@ fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
         container_id,
         installed
     );
+    Ok(())
+}
+
+fn validate_security_ebpf_config(
+    object_path: &str,
+    pin_root: &str,
+    events: &[String],
+) -> Result<(), RuntimeError> {
+    if object_path.trim().is_empty() || !Path::new(object_path).is_absolute() {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor object path must be absolute".to_string(),
+        ));
+    }
+    if pin_root.trim().is_empty() || !Path::new(pin_root).is_absolute() {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor pin root must be absolute".to_string(),
+        ));
+    }
+    if events.is_empty() || events.len() > 32 {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor event set must contain 1..32 events".to_string(),
+        ));
+    }
+    if events.iter().any(|event| {
+        event.is_empty()
+            || !event
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    }) {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor event names must be ASCII components".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -11227,6 +11262,37 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         unsafe {
             std::env::remove_var("FERROCRATE_EBPF_SECURITY_EVENTS");
         }
+    }
+
+    #[test]
+    fn security_ebpf_admission_bounds_events_and_paths() {
+        super::validate_security_ebpf_config(
+            "/usr/lib/ferrocrate/ferro-security.o",
+            "/sys/fs/bpf/ferrocrate-security-c1",
+            &["execve".into(), "connect".into()],
+        )
+        .expect("valid security monitor configuration");
+        let too_many = (0..33)
+            .map(|index| format!("event{index}"))
+            .collect::<Vec<_>>();
+        assert!(super::validate_security_ebpf_config(
+            "/usr/lib/ferrocrate/ferro-security.o",
+            "/sys/fs/bpf/ferrocrate-security-c1",
+            &too_many,
+        )
+        .is_err());
+        assert!(super::validate_security_ebpf_config(
+            "relative.o",
+            "/sys/fs/bpf/ferrocrate-security-c1",
+            &["execve".into()],
+        )
+        .is_err());
+        assert!(super::validate_security_ebpf_config(
+            "/usr/lib/ferrocrate/ferro-security.o",
+            "/sys/fs/bpf/ferrocrate-security-c1",
+            &["execve/open".into()],
+        )
+        .is_err());
     }
 
     #[test]

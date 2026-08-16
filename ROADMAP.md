@@ -61,7 +61,7 @@ reduction remain open. *Size:* L–XL. *Sources:* SEC-03/08/09,
 `docs/SECAUDIT_TASKLIST.md`, `docs/REMEDIATION-PLAN.md`.
 
 - [ ] Complete AppArmor and SELinux distribution qualification: profile selection/loading diagnostics are implemented and strict prerequisites are gated; denial reporting, rootless behavior, and policy rollback still require MAC-enabled host evidence.
-- [ ] Finish eBPF syscall/security monitoring with a production execution path, capability admission, event schema, bounded buffering, and fallback diagnostics.
+- [ ] Finish eBPF syscall/security monitoring with a production execution path, capability admission, event schema, bounded buffering, and fallback diagnostics; bounded configuration admission, explicit bpftool checks, tracepoint verification, and fail-loud fallback diagnostics are now documented in `docs/security/ebpf-monitoring.md`, while kernel event delivery qualification remains open.
 - [ ] Complete the remaining runtime shell-out audit; the current production inventory and justified exceptions are documented in `docs/security/shell-out-audit.md`, while WireGuard/eBPF executor convergence remains open.
 - [x] Formally time-box `RUSTSEC-2025-0141` (`bincode` via `ruvector-core`) in the risk-acceptance register, with dependency-path evidence and a 2026-09-30 revalidation deadline; replacement remains future work.
 - [ ] Replace the `sled` backend to remove `RUSTSEC-2025-0057` (`fxhash`) and `RUSTSEC-2024-0384` (`instant`), including migration and backward-compatibility tests.

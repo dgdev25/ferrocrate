@@ -51,6 +51,9 @@ impl AuditLogger {
             hostname: std::env::var("HOSTNAME").ok(),
             trace_id: trace.id.clone(),
             summary: trace.summary.clone(),
+            model: trace.model.clone(),
+            model_version: trace.model_version.clone(),
+            decision: trace.decision.clone(),
             evidence_keys: trace.evidence.keys().cloned().collect(),
             evidence_count: trace.evidence.len(),
             evidence: trace.evidence.clone(),
@@ -79,6 +82,9 @@ struct DecisionAuditEntry {
     hostname: Option<String>,
     trace_id: String,
     summary: String,
+    model: Option<String>,
+    model_version: Option<String>,
+    decision: Option<String>,
     evidence_keys: Vec<String>,
     evidence_count: usize,
     evidence: BTreeMap<String, String>,
@@ -120,6 +126,8 @@ mod tests {
         let logger = AuditLogger::new(&path);
 
         let trace = DecisionTrace::new("trace-1", "test summary")
+            .with_model("test-model", "v1")
+            .with_decision("observe")
             .with_evidence("confidence", "0.87")
             .with_evidence("container_id", "abc123");
         logger.log("test_action", &trace).expect("log");
@@ -132,5 +140,8 @@ mod tests {
         assert!(entry.get("process_id").is_some());
         assert_eq!(entry["evidence_count"], 2);
         assert_eq!(entry["confidence"], 0.87);
+        assert_eq!(entry["model"], "test-model");
+        assert_eq!(entry["model_version"], "v1");
+        assert_eq!(entry["decision"], "observe");
     }
 }

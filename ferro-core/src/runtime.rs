@@ -8857,6 +8857,8 @@ fn run_resource_monitor(
                             format!("ai-anomaly-{id}-{ts}"),
                             format!("Container {id} exceeded the learned resource baseline"),
                         )
+                        .with_model("neural-anomaly-detector", "runtime-v1")
+                        .with_decision("record-anomaly")
                         .with_evidence("container_id", id.clone())
                         .with_evidence("score", format!("{:.6}", score.score))
                         .with_evidence("threshold", format!("{:.6}", score.threshold))
@@ -8917,6 +8919,8 @@ fn run_resource_monitor(
                             prediction.time_to_oom.as_secs()
                         ),
                     )
+                    .with_model("resource-oom-predictor", "runtime-v1")
+                    .with_decision("record-oom-prediction")
                     .with_evidence("container_id", id.clone())
                     .with_evidence(
                         "current_memory_bytes",

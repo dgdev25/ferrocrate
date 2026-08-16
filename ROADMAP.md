@@ -38,7 +38,7 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 - [x] Add exact post-effect read-back to direct iptables/nftables rule application and deletion.
 - [x] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
 - [x] Implement `tc` bandwidth limits with capability admission and exact rate read-back; privileged recovery coverage remains in the host matrix.
-- [ ] Migrate public runtime paths from direct shelling-out to the execution boundary.
+- [x] Migrate public network runtime paths from direct shelling-out to the execution boundary; mutation, capture, and idempotent cleanup route through `ferro-net` executor APIs.
 
 ## Next
 
@@ -110,3 +110,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — published the CRI method matrix; it records the implemented runtime/image RPCs and explicitly identifies absent pod/container lifecycle RPCs.
 - 2026-08-16 — wired repeatable startup/OCI/rootless performance baselines into a manual artifact-upload workflow.
 - 2026-08-16 — ADR-0013 records that physical multi-host FCNET-105 is conditional and not a current release gate; isolated-host evidence remains authoritative.
+- 2026-08-16 — audited public network runtime paths: network mutation/capture/cleanup calls now use executor-backed helpers; direct subprocesses remain only for workload/process supervision.

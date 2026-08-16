@@ -1586,6 +1586,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pod_sandbox_restart_reconciles_missing_kernel_netns() {
+        let uid = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .expect("id")
+            .stdout;
+        if String::from_utf8_lossy(&uid).trim() != "0" {
+            eprintln!("skipping sandbox restart fixture: root is required");
+            return;
+        }
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime = CriRuntime::with_runtime_dir(
+            Arc::clone(&store),
+            root.path(),
+            test_surface_authorization(),
+        );
+        let sandbox_id = runtime
+            .run_pod_sandbox(authenticated(RunPodSandboxRequest {
+                config: Some(PodSandboxConfig {
+                    metadata: Some(crate::runtime::PodSandboxMetadata {
+                        name: "restart-pod".into(),
+                        uid: "restart-uid".into(),
+                        namespace: "default".into(),
+                        attempt: 1,
+                    }),
+                    hostname: "restart-pod".into(),
+                    log_directory: String::new(),
+                    dns_config: String::new(),
+                    network_namespace: "bridge".into(),
+                }),
+                runtime_handler: String::new(),
+            }))
+            .await
+            .expect("sandbox create")
+            .into_inner()
+            .pod_sandbox_id;
+        let netns_name = runtime
+            .sandboxes
+            .lock()
+            .expect("sandbox lock")
+            .get(&sandbox_id)
+            .and_then(|record| record.netns_name.clone())
+            .expect("netns name");
+        let reopened = CriRuntime::with_runtime_dir(
+            Arc::clone(&store),
+            root.path(),
+            test_surface_authorization(),
+        );
+        let ready = reopened
+            .pod_sandbox_status(authenticated(PodSandboxStatusRequest {
+                pod_sandbox_id: sandbox_id.clone(),
+                verbose: false,
+            }))
+            .await
+            .expect("reopened status")
+            .into_inner();
+        assert_eq!(
+            ready.status.expect("status").state,
+            PodSandboxState::Ready as i32
+        );
+        ferro_net::destroy_netns(&netns_name).expect("simulate namespace loss");
+        let reconciled =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        let notready = reconciled
+            .pod_sandbox_status(authenticated(PodSandboxStatusRequest {
+                pod_sandbox_id: sandbox_id,
+                verbose: false,
+            }))
+            .await
+            .expect("reconciled status")
+            .into_inner();
+        assert_eq!(
+            notready.status.expect("status").state,
+            PodSandboxState::Notready as i32
+        );
+    }
+
+    #[tokio::test]
     async fn container_start_failure_keeps_durable_created_state() {
         let root = tempfile::tempdir().expect("runtime dir");
         let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());

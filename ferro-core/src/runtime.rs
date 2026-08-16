@@ -2643,7 +2643,7 @@ impl ContainerRuntime {
             Some(rootfs_dir.clone()),
             no_new_privs,
             restart_policy.clone(),
-            ai_config.is_some(),
+            ai_lifecycle_enabled(ai_config),
             capabilities.to_vec(),
             resolved_workdir.as_deref(),
             resolved_user.as_deref(),
@@ -3225,7 +3225,7 @@ impl ContainerRuntime {
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
             record.restart_policy.clone(),
-            record.ai_runtime.is_some(),
+            ai_lifecycle_enabled(record.ai_runtime.as_ref()),
             parse_capabilities(&record.capabilities),
             record.workdir.as_deref(),
             record.user.as_deref(),
@@ -8776,6 +8776,16 @@ fn is_ai_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn ai_lifecycle_enabled(config: Option<&AiRuntimeConfig>) -> bool {
+    if config.is_none() {
+        return false;
+    }
+    match std::env::var("FERROCRATE_AI") {
+        Ok(value) => value == "1" || value.eq_ignore_ascii_case("true"),
+        Err(_) => true,
+    }
+}
+
 fn should_start_ai_monitor(memory_limit: u64) -> bool {
     is_ai_enabled() && memory_limit > 0
 }
@@ -11430,6 +11440,26 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(super::is_ai_enabled());
         assert!(super::should_start_ai_monitor(1024));
         assert!(!super::should_start_ai_monitor(0));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+    }
+
+    #[test]
+    fn ai_disabled_environment_overrides_explicit_runtime_config() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous = std::env::var("FERROCRATE_AI").ok();
+        let config = crate::ai_runtime::AiRuntimeConfig::default();
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "0");
+        }
+        assert!(!super::ai_lifecycle_enabled(Some(&config)));
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+        }
+        assert!(super::ai_lifecycle_enabled(Some(&config)));
+        assert!(!super::ai_lifecycle_enabled(None));
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_AI") },

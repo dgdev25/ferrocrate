@@ -6979,6 +6979,32 @@ fn handle_docker_compat_connection(
                 handle_pull_authorized(&store, &reference, false, &origin, &surface_authorization)?;
                 http_response(200, b"{}", "application/json")
             }
+            ("POST", "/images/prune") => {
+                let records = store.list_references().map_err(|error| error.to_string())?;
+                let permits = records
+                    .iter()
+                    .map(|record| {
+                        surface_authorization
+                            .authorize_named(
+                                &origin,
+                                AuthorizationAction::ImageDelete,
+                                ResourceKind::Image,
+                                &record.reference,
+                                1,
+                            )
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let removed = store
+                    .prune_references_authorized(permits)
+                    .map_err(|error| error.to_string())?;
+                let body = serde_json::json!({
+                    "ImagesDeleted": [],
+                    "SpaceReclaimed": 0,
+                    "ferrocrateRemoved": removed,
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("DELETE", path) if path.starts_with("/images/") => {
                 let reference = path.trim_start_matches("/images/");
                 handle_rmi_authorized(&store, reference, &origin, &surface_authorization)?;

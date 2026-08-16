@@ -125,6 +125,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/images/prune",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/plugins/pull",
         coverage: Coverage::Unsupported,
         expected_status: 404,

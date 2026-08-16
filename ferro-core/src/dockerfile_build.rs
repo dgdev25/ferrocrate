@@ -67,6 +67,7 @@ pub struct ImageBuildPlan {
     context_digest: String,
     dockerfile_digest: [u8; 32],
     base_digests: Vec<(String, Option<String>)>,
+    named_contexts: HashMap<String, PathBuf>,
     plan_digest: [u8; 32],
 }
 
@@ -89,6 +90,24 @@ pub fn prepare_dockerfile_build(
     compression: CompressionFormat,
     store: &LocalImageStore,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
+    prepare_dockerfile_build_with_contexts(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        &HashMap::new(),
+    )
+}
+
+pub fn prepare_dockerfile_build_with_contexts(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    named_contexts: &HashMap<String, PathBuf>,
+) -> Result<ImageBuildPlan, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
@@ -99,7 +118,10 @@ pub fn prepare_dockerfile_build(
     let context_dir = dockerfile_path
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
-    let context_digest = hash_context_dir(context_dir, dockerfile_path)?;
+    let context_digest = build_context_binding_digest(
+        &hash_context_dir(context_dir, dockerfile_path)?,
+        named_contexts,
+    )?;
     let canonical_tag = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
     let mut base_digests = Vec::with_capacity(stages.len());
     for stage in stages {
@@ -141,6 +163,7 @@ pub fn prepare_dockerfile_build(
         context_digest,
         dockerfile_digest,
         base_digests,
+        named_contexts: canonicalize_named_contexts(named_contexts)?,
         plan_digest: hash.finalize().into(),
     })
 }
@@ -221,6 +244,26 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
     store: &LocalImageStore,
     authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<BuildResult, DockerfileBuildError> {
+    build_from_dockerfile_with_store_and_compression_with_contexts(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        authority,
+        &HashMap::new(),
+    )
+}
+
+pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    named_contexts: &HashMap<String, PathBuf>,
+) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
@@ -232,7 +275,11 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
     let context_dir = dockerfile_path
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
-    let context_hash = hash_context_dir(context_dir, dockerfile_path)?;
+    let context_hash = build_context_binding_digest(
+        &hash_context_dir(context_dir, dockerfile_path)?,
+        named_contexts,
+    )?;
+    let named_contexts = canonicalize_named_contexts(named_contexts)?;
     let dockerfile_digest = hex::encode(Sha256::digest(dockerfile.as_bytes()));
     let mut base_infos = Vec::new();
     for stage in stages.iter() {
@@ -312,15 +359,16 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
         }
 
         for copy in &stage.copy_from {
-            let source_root = resolve_stage_root(&stage_roots, &stage_names, &copy.from)
-                .ok_or_else(|| {
-                    DockerfileBuildError::Invalid(format!(
-                        "unknown COPY --from stage: {}",
-                        copy.from
-                    ))
-                })?;
-            let source = source_root.join(copy.src.trim_start_matches('/'));
-            let dest = context_root.join(copy.dest.trim_start_matches('/'));
+            let source_root =
+                resolve_stage_root(&stage_roots, &stage_names, &named_contexts, &copy.from)
+                    .ok_or_else(|| {
+                        DockerfileBuildError::Invalid(format!(
+                            "unknown COPY --from stage: {}",
+                            copy.from
+                        ))
+                    })?;
+            let source = safe_context_source(&source_root, &copy.src)?;
+            let dest = safe_context_destination(&context_root, &copy.dest)?;
             copy_path_recursive(&source, &dest)?;
         }
 
@@ -467,12 +515,13 @@ pub fn execute_dockerfile_build_authorized(
             "image build plan does not match authorization proof".to_string(),
         ));
     }
-    let observed = prepare_dockerfile_build(
+    let observed = prepare_dockerfile_build_with_contexts(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
         plan.compression,
         store,
+        &plan.named_contexts,
     )?;
     if observed.plan_digest != plan.plan_digest
         || observed.context_digest != plan.context_digest
@@ -487,13 +536,14 @@ pub fn execute_dockerfile_build_authorized(
         ));
     }
     let authority = permit.mutation_authority();
-    match build_from_dockerfile_with_store_and_compression(
+    match build_from_dockerfile_with_store_and_compression_with_contexts(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
         plan.compression,
         store,
         &authority,
+        &plan.named_contexts,
     ) {
         Ok(result) => {
             permit
@@ -813,6 +863,57 @@ fn hash_context_dir(
         buf.extend_from_slice(&bytes);
     }
     Ok(hex::encode(rvf_crypto::shake256_256(&buf)))
+}
+
+fn canonicalize_named_contexts(
+    contexts: &HashMap<String, PathBuf>,
+) -> Result<HashMap<String, PathBuf>, DockerfileBuildError> {
+    let mut canonical = HashMap::new();
+    for (name, path) in contexts {
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "invalid named build context: {name}"
+            )));
+        }
+        let resolved = fs::canonicalize(path).map_err(|error| {
+            DockerfileBuildError::Invalid(format!(
+                "named build context {name} is unavailable: {error}"
+            ))
+        })?;
+        if !resolved.is_dir() {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "named build context {name} must be a directory"
+            )));
+        }
+        canonical.insert(name.clone(), resolved);
+    }
+    Ok(canonical)
+}
+
+fn build_context_binding_digest(
+    primary_digest: &str,
+    contexts: &HashMap<String, PathBuf>,
+) -> Result<String, DockerfileBuildError> {
+    let canonical = canonicalize_named_contexts(contexts)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ferrocrate/build-contexts/v1");
+    hasher.update(primary_digest.as_bytes());
+    let mut names = canonical.keys().collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let path = canonical
+            .get(name)
+            .expect("name came from canonical context map");
+        let digest = hash_context_dir(path, &path.join(".ferrocrate-no-dockerfile"))?;
+        hasher.update(name.as_bytes());
+        hasher.update(digest.as_bytes());
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn collect_context_files(
@@ -2000,12 +2101,56 @@ fn resolve_base_image(
 fn resolve_stage_root(
     roots: &[PathBuf],
     names: &HashMap<String, PathBuf>,
+    contexts: &HashMap<String, PathBuf>,
     from: &str,
 ) -> Option<PathBuf> {
     if let Ok(idx) = from.parse::<usize>() {
         return roots.get(idx).cloned();
     }
-    names.get(from).cloned()
+    names
+        .get(from)
+        .cloned()
+        .or_else(|| contexts.get(from).cloned())
+}
+
+fn safe_context_source(root: &Path, source: &str) -> Result<PathBuf, DockerfileBuildError> {
+    let relative = Path::new(source.trim_start_matches('/'));
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY --from source escapes its context".to_string(),
+        ));
+    }
+    let candidate = root.join(relative);
+    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("COPY --from source is unavailable: {error}"))
+    })?;
+    if !canonical.starts_with(root) {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY --from source escapes its context".to_string(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn safe_context_destination(
+    root: &Path,
+    destination: &str,
+) -> Result<PathBuf, DockerfileBuildError> {
+    let relative = Path::new(destination.trim_start_matches('/'));
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY destination escapes the build context".to_string(),
+        ));
+    }
+    Ok(root.join(relative))
 }
 
 fn create_build_dir(_runtime_dir: &Path, name: &str) -> Result<PathBuf, DockerfileBuildError> {
@@ -2149,7 +2294,8 @@ mod tests {
     use super::{
         build_from_dockerfile_with_store_and_compression, dockerignore_matches, export_build_cache,
         import_build_cache, load_build_cache, parse_limit_value, parse_run, parse_stages,
-        prepare_dockerfile_build, prune_build_cache, save_build_cache, BuildCacheEntry,
+        prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
+        save_build_cache, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -2186,6 +2332,53 @@ mod tests {
         assert_eq!(first.canonical_tag(), "registry-1.docker.io/local/app:test");
         assert!(store.list_references().unwrap().is_empty());
         assert!(!runtime.join("build-cache.json").exists());
+    }
+
+    #[test]
+    fn named_contexts_are_bound_to_the_plan_and_reject_unsafe_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let context = temp.path().join("context");
+        let assets = temp.path().join("assets");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::create_dir_all(&assets).unwrap();
+        let dockerfile = context.join("Dockerfile");
+        std::fs::write(&dockerfile, "FROM scratch\nCOPY --from=assets app /app\n").unwrap();
+        std::fs::write(assets.join("app"), "one").unwrap();
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let mut contexts = HashMap::new();
+        contexts.insert("assets".to_string(), assets.clone());
+        let plan = prepare_dockerfile_build_with_contexts(
+            &dockerfile,
+            Some("local/app:test"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &contexts,
+        )
+        .unwrap();
+        std::fs::write(assets.join("app"), "two").unwrap();
+        let changed = prepare_dockerfile_build_with_contexts(
+            &dockerfile,
+            Some("local/app:test"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &contexts,
+        )
+        .unwrap();
+        assert_ne!(plan.plan_digest(), changed.plan_digest());
+
+        contexts.insert("bad/name".to_string(), assets.clone());
+        assert!(prepare_dockerfile_build_with_contexts(
+            &dockerfile,
+            Some("local/app:test"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &contexts,
+        )
+        .is_err());
     }
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;

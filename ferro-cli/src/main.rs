@@ -213,6 +213,9 @@ pub enum Commands {
         /// Export local build-cache metadata after a successful build.
         #[arg(long = "cache-to")]
         cache_to: Option<String>,
+        /// Bind a named Dockerfile build context (`name=path`); repeatable.
+        #[arg(long = "build-context")]
+        build_context: Vec<String>,
     },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2239,6 +2242,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 platform,
                 cache_from,
                 cache_to,
+                build_context,
             } => handle_build(
                 &image_store,
                 &runtime
@@ -2254,6 +2258,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 platform.as_deref(),
                 cache_from.as_deref(),
                 cache_to.as_deref(),
+                &build_context,
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
@@ -3780,16 +3785,21 @@ fn handle_build(
     platform: Option<&str>,
     cache_from: Option<&str>,
     cache_to: Option<&str>,
+    build_context: &[String],
 ) -> Result<(), String> {
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
+    let named_contexts = parse_build_contexts(build_context)?;
     if let Some(source) = cache_from {
         ferro_core::dockerfile_build::import_build_cache(&runtime_dir, Path::new(source))
             .map_err(|error| format!("build: cache-from failed: {error}"))?;
     }
 
     let (result, source_desc) = if let Some(ferrofile_path) = ferrofile {
+        if !named_contexts.is_empty() {
+            return Err("build: --build-context is only supported with Dockerfiles".to_string());
+        }
         let plan = ferro_core::ferrofile_build::prepare_ferrofile_build(
             Path::new(ferrofile_path),
             &runtime_dir,
@@ -3817,12 +3827,13 @@ fn handle_build(
                 .map_err(|err| format!("failed to get current directory: {err}"))?
                 .join(dockerfile)
         };
-        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build(
+        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts(
             &dockerfile_path,
             Some(tag),
             &runtime_dir,
             compression,
             store,
+            &named_contexts,
         )
         .map_err(|err| err.to_string())?;
         let permit = authorization
@@ -3939,6 +3950,30 @@ fn validate_build_platform(platform: Option<&str>) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_build_contexts(values: &[String]) -> Result<HashMap<String, PathBuf>, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let mut contexts = HashMap::new();
+    for value in values {
+        let (name, path) = value
+            .split_once('=')
+            .ok_or_else(|| "build-context must use name=path".to_string())?;
+        if name.is_empty() || path.is_empty() {
+            return Err("build-context name and path must not be empty".to_string());
+        }
+        let path = Path::new(path);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        if contexts.insert(name.to_string(), path).is_some() {
+            return Err(format!("duplicate build context: {name}"));
+        }
+    }
+    Ok(contexts)
 }
 
 #[cfg(target_os = "linux")]
@@ -7905,13 +7940,14 @@ mod tests {
         handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
         handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
         handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
-        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_capabilities,
-        parse_docker_filters, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, should_desktop_forward, structured_desktop_error,
-        top_level_command_name, validate_build_platform, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
+        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
+        parse_capabilities, parse_docker_filters, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, should_desktop_forward,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
+        ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
+        NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8065,6 +8101,7 @@ mod tests {
                 platform,
                 cache_from,
                 cache_to,
+                build_context,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
@@ -8075,9 +8112,26 @@ mod tests {
                 assert!(platform.is_none());
                 assert!(cache_from.is_none());
                 assert!(cache_to.is_none());
+                assert!(build_context.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_and_validates_named_build_contexts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("assets");
+        std::fs::create_dir_all(&path).unwrap();
+        let value = format!("assets={}", path.display());
+        let contexts = parse_build_contexts(&[value]).unwrap();
+        assert_eq!(contexts.get("assets"), Some(&path));
+        assert!(parse_build_contexts(&["assets".to_string()]).is_err());
+        assert!(parse_build_contexts(&[
+            format!("assets={}", path.display()),
+            format!("assets={}", path.display()),
+        ])
+        .is_err());
     }
 
     #[test]
@@ -9442,6 +9496,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         )
         .expect_err("dockerfile should be read");
         assert!(
@@ -9470,6 +9525,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         )
         .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));

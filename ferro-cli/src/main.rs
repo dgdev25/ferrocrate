@@ -7149,7 +7149,16 @@ fn handle_docker_compat_connection(
                 http_response(204, &[], "text/plain")
             }
             ("GET", "/images/json") => {
-                let images = store.list_references().map_err(|err| err.to_string())?;
+                let filters = parse_docker_filters(&query)?;
+                let mut images = store.list_references().map_err(|err| err.to_string())?;
+                images.retain(|record| docker_image_matches_filters(record, &filters));
+                images = docker_image_apply_time_bounds(images, &filters)?;
+                images.sort_by(|left, right| {
+                    right
+                        .created_at_unix
+                        .cmp(&left.created_at_unix)
+                        .then_with(|| right.reference.cmp(&left.reference))
+                });
                 let entries: Vec<serde_json::Value> = images
                     .into_iter()
                     .map(|record| {
@@ -7723,6 +7732,57 @@ fn docker_container_apply_time_bounds(
         .collect())
 }
 
+fn docker_image_matches_filters(
+    record: &ferro_core::image_store::ImageRecord,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    let Some(references) = filters.get("reference") else {
+        return true;
+    };
+    references.is_empty()
+        || references.iter().any(|candidate| {
+            candidate == &record.reference
+                || candidate == &record.digest
+                || candidate
+                    .strip_suffix('*')
+                    .is_some_and(|prefix| record.reference.starts_with(prefix))
+        })
+}
+
+fn docker_image_apply_time_bounds(
+    images: Vec<ferro_core::image_store::ImageRecord>,
+    filters: &HashMap<String, Vec<String>>,
+) -> Result<Vec<ferro_core::image_store::ImageRecord>, String> {
+    let resolve = |selector: &str| {
+        selector.parse::<u64>().ok().or_else(|| {
+            images.iter().find_map(|record| {
+                (record.reference == selector || record.digest == selector)
+                    .then_some(record.created_at_unix)
+            })
+        })
+    };
+    let bound = |key: &str| -> Result<Option<u64>, String> {
+        let values = filters.get(key).cloned().unwrap_or_default();
+        if values.len() > 1 {
+            return Err(format!(
+                "docker: image filter {key} accepts at most one selector"
+            ));
+        }
+        values.first().map_or(Ok(None), |selector| {
+            resolve(selector)
+                .map(Some)
+                .ok_or_else(|| format!("docker: image filter {key} selector not found: {selector}"))
+        })
+    };
+    let since = bound("since")?;
+    let before = bound("before")?;
+    Ok(images
+        .into_iter()
+        .filter(|record| since.is_none_or(|value| record.created_at_unix > value))
+        .filter(|record| before.is_none_or(|value| record.created_at_unix < value))
+        .collect())
+}
+
 #[cfg(target_os = "linux")]
 fn normalize_docker_api_path(path: &str) -> String {
     if !path.starts_with("/v") {
@@ -8173,11 +8233,12 @@ mod tests {
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled,
         discover_rootless_socket, dispatch, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
-        docker_tail_logs, docker_top_payload, effective_readonly, handle_build, handle_containers,
-        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        docker_image_apply_time_bounds, docker_image_matches_filters, docker_tail_logs,
+        docker_top_payload, effective_readonly, handle_build, handle_containers, handle_context,
+        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
         parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_bool_query,
         parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
         parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
@@ -10075,6 +10136,51 @@ volumes:
             parse_docker_limit_query(Some(&"2".to_string())).unwrap(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn docker_image_filters_match_reference_and_time_bounds() {
+        let make =
+            |reference: &str, digest: &str, created_at_unix| ferro_core::image_store::ImageRecord {
+                reference: reference.to_string(),
+                digest: digest.to_string(),
+                manifest_media_type: "application/json".to_string(),
+                manifest_json: "{}".to_string(),
+                created_at_unix,
+            };
+        let images = vec![
+            make("alpine:latest", "sha256:a", 10),
+            make("alpine:3.20", "sha256:b", 20),
+            make("busybox:latest", "sha256:c", 30),
+        ];
+        let mut filters = HashMap::new();
+        filters.insert("reference".to_string(), vec!["alpine:*".to_string()]);
+        assert!(docker_image_matches_filters(&images[0], &filters));
+        assert!(!docker_image_matches_filters(&images[2], &filters));
+        filters.insert("since".to_string(), vec!["alpine:latest".to_string()]);
+        filters.insert("before".to_string(), vec!["30".to_string()]);
+        let bounded = docker_image_apply_time_bounds(images, &filters).unwrap();
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|image| image.digest.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sha256:b"]
+        );
+    }
+
+    #[test]
+    fn docker_image_time_filters_reject_unknown_selectors() {
+        let image = ferro_core::image_store::ImageRecord {
+            reference: "alpine:latest".to_string(),
+            digest: "sha256:a".to_string(),
+            manifest_media_type: "application/json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 10,
+        };
+        let mut filters = HashMap::new();
+        filters.insert("since".to_string(), vec!["missing:tag".to_string()]);
+        assert!(docker_image_apply_time_bounds(vec![image], &filters).is_err());
     }
 
     #[test]

@@ -259,6 +259,21 @@ pub fn execute_plugin(
     execute_plugin_inner(manifest, trust_root, args, stdin, None)
 }
 
+/// Execute a plugin with a bounded retry budget for transient execution I/O.
+///
+/// Admission, signature, timeout, output-limit, and resource-policy errors are
+/// never retried. The explicit cap prevents callers from turning a plugin
+/// mutation into an unbounded loop.
+pub fn execute_plugin_with_retries(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    args: &[String],
+    stdin: &[u8],
+    max_retries: u8,
+) -> Result<PluginExecutionResult, PluginExecutionError> {
+    execute_plugin_with_retries_inner(manifest, trust_root, args, stdin, None, max_retries)
+}
+
 /// Verify and execute a plugin inside a dedicated cgroup-v2 subtree.
 ///
 /// `cgroup_root` must be a pre-provisioned writable cgroup-v2 directory. The
@@ -274,6 +289,26 @@ pub fn execute_plugin_with_cgroup(
     cgroup_root: &Path,
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
     execute_plugin_inner(manifest, trust_root, args, stdin, Some(cgroup_root))
+}
+
+/// Cgroup-isolated plugin execution with the same bounded transient-I/O retry
+/// policy as [`execute_plugin_with_retries`].
+pub fn execute_plugin_with_cgroup_retries(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    args: &[String],
+    stdin: &[u8],
+    cgroup_root: &Path,
+    max_retries: u8,
+) -> Result<PluginExecutionResult, PluginExecutionError> {
+    execute_plugin_with_retries_inner(
+        manifest,
+        trust_root,
+        args,
+        stdin,
+        Some(cgroup_root),
+        max_retries,
+    )
 }
 
 /// Execute a plugin as a signed child of a parent authorization decision and
@@ -306,6 +341,82 @@ pub fn execute_plugin_delegated(
     journal.append(&intent)?;
 
     let result = execute_plugin_inner(manifest, trust_root, args, stdin, None);
+    let (result_digest, succeeded, error) = match &result {
+        Ok(value) => (
+            Some(digest_bytes(&[&value.stdout, &value.stderr])?),
+            Some(true),
+            None,
+        ),
+        Err(error) => (None, Some(false), Some(error.to_string())),
+    };
+    let effect = PluginLifecycleRecord {
+        schema: 1,
+        stage: PluginLifecycleStage::Effect,
+        timestamp_unix: now_unix(),
+        parent_operation_id: delegation.parent_operation_id,
+        child_operation_id: delegation.child_operation_id,
+        parent_action: &delegation.parent_action,
+        parent_resource: &delegation.parent_resource,
+        plugin: &manifest.name,
+        manifest_digest: manifest_digest.clone(),
+        result_digest,
+        succeeded,
+        error,
+    };
+    let effect_error = journal.append(&effect).err();
+    let cleanup = PluginLifecycleRecord {
+        schema: 1,
+        stage: PluginLifecycleStage::Cleanup,
+        timestamp_unix: now_unix(),
+        parent_operation_id: delegation.parent_operation_id,
+        child_operation_id: delegation.child_operation_id,
+        parent_action: &delegation.parent_action,
+        parent_resource: &delegation.parent_resource,
+        plugin: &manifest.name,
+        manifest_digest,
+        result_digest: None,
+        succeeded: Some(true),
+        error: None,
+    };
+    let cleanup_error = journal.append(&cleanup).err();
+    if let Some(error) = effect_error.or(cleanup_error) {
+        return Err(error);
+    }
+    result
+}
+
+/// Delegated plugin execution with bounded transient-I/O retries. Lifecycle
+/// intent/effect/cleanup records are written once for the logical operation;
+/// individual retry attempts never create duplicate authorization receipts.
+pub fn execute_plugin_delegated_with_retries(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    delegation: &PluginDelegation,
+    journal: &PluginLifecycleJournal,
+    args: &[String],
+    stdin: &[u8],
+    max_retries: u8,
+) -> Result<PluginExecutionResult, PluginExecutionError> {
+    delegation.verify(trust_root)?;
+    let manifest_digest = digest_json(manifest)?;
+    let intent = PluginLifecycleRecord {
+        schema: 1,
+        stage: PluginLifecycleStage::Intent,
+        timestamp_unix: now_unix(),
+        parent_operation_id: delegation.parent_operation_id,
+        child_operation_id: delegation.child_operation_id,
+        parent_action: &delegation.parent_action,
+        parent_resource: &delegation.parent_resource,
+        plugin: &manifest.name,
+        manifest_digest: manifest_digest.clone(),
+        result_digest: None,
+        succeeded: None,
+        error: None,
+    };
+    journal.append(&intent)?;
+
+    let result =
+        execute_plugin_with_retries_inner(manifest, trust_root, args, stdin, None, max_retries);
     let (result_digest, succeeded, error) = match &result {
         Ok(value) => (
             Some(digest_bytes(&[&value.stdout, &value.stderr])?),
@@ -517,6 +628,32 @@ fn execute_plugin_inner(
     })
 }
 
+fn execute_plugin_with_retries_inner(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    args: &[String],
+    stdin: &[u8],
+    cgroup_root: Option<&Path>,
+    max_retries: u8,
+) -> Result<PluginExecutionResult, PluginExecutionError> {
+    if max_retries > 3 {
+        return Err(PluginExecutionError::ResourceLimits(
+            "plugin retry limit must be between 0 and 3".into(),
+        ));
+    }
+    let mut retries = 0u8;
+    loop {
+        match execute_plugin_inner(manifest, trust_root, args, stdin, cgroup_root) {
+            Err(PluginExecutionError::Io(error)) if retries < max_retries => {
+                retries += 1;
+                thread::sleep(Duration::from_millis(10 * u64::from(retries)));
+                let _ = error;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn prepare_plugin_cgroup(
     root: &Path,
     manifest: &PluginManifest,
@@ -608,6 +745,20 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, b"ok");
         assert!(!result.timed_out);
+    }
+
+    #[test]
+    fn retry_budget_is_capped_and_success_is_not_replayed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[12u8; 32]);
+        let manifest = signed_manifest(&script(&temp, "printf ok"), PluginLimits::default(), &key);
+        let result = execute_plugin_with_retries(&manifest, &key.verifying_key(), &[], b"", 3)
+            .expect("plugin");
+        assert_eq!(result.stdout, b"ok");
+
+        let error = execute_plugin_with_retries(&manifest, &key.verifying_key(), &[], b"", 4)
+            .expect_err("retry cap");
+        assert!(matches!(error, PluginExecutionError::ResourceLimits(_)));
     }
 
     #[test]

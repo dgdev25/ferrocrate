@@ -2354,7 +2354,7 @@ impl ContainerRuntime {
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
         candidate.name = name.map(str::to_owned);
         candidate.capabilities = normalized.facts.capabilities.clone();
-        candidate.network_name = associated_network_name(associated_network, network_mode);
+        candidate.network_name = persisted_network_name(associated_network, network_mode);
         let permit = self
             .authorization
             .authorize_run(&candidate, &normalized.facts)?;
@@ -2859,7 +2859,7 @@ impl ContainerRuntime {
             stderr_path: stderr_path.display().to_string(),
             status: "running".to_string(),
             netns: netns_name.clone(),
-            network_name: associated_network_name(associated_network, network_mode),
+            network_name: persisted_network_name(associated_network, network_mode),
             ip_address: container_ip.clone(),
             ipv6_address: container_ipv6.clone(),
             ports: port_mappings
@@ -5348,7 +5348,20 @@ fn setup_network(
         }
     }
 
-    ensure_bridge_backend_root(nix::unistd::Uid::effective().is_root(), network_backend)?;
+    let is_root = nix::unistd::Uid::effective().is_root();
+    if !is_root {
+        validate_rootless_bridge_network(
+            rootless_netns_enabled(),
+            !port_mappings.is_empty(),
+            network_backend,
+        )?;
+        // The unshared child network namespace is connected by slirp4netns
+        // after spawn. No privileged bridge, veth, firewall, or namespace
+        // mutation may be attempted in the rootless path.
+        return Ok(NetworkSetup::isolated(None, None, None));
+    }
+
+    ensure_bridge_backend_root(is_root, network_backend)?;
     let active_backend = resolve_network_backend(network_backend, &RuntimeBackendProbe)?;
     debug_assert_eq!(active_backend, network_backend);
     info!(
@@ -6817,6 +6830,24 @@ fn ensure_bridge_backend_root(
     Err(RuntimeError::Network(format!(
         "rootless bridge backend setup requires root; requested backend {requested_backend} cannot be established"
     )))
+}
+
+fn validate_rootless_bridge_network(
+    enabled: bool,
+    has_port_mappings: bool,
+    requested_backend: NetworkBackend,
+) -> Result<(), RuntimeError> {
+    if !enabled {
+        return Err(RuntimeError::Network(format!(
+            "rootless bridge networking is disabled; set FERROCRATE_ROOTLESS_NETNS=1 to use slirp4netns (requested backend {requested_backend})"
+        )));
+    }
+    if has_port_mappings {
+        return Err(RuntimeError::Network(
+            "rootless slirp4netns networking does not support host port mappings yet".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_port_mapping_conflicts(
@@ -8513,6 +8544,20 @@ fn associated_network_name(associated: Option<&str>, network_mode: &str) -> Opti
         "wireguard" => Some("wireguard".to_string()),
         _ => None,
     }
+}
+
+fn persisted_network_name(associated: Option<&str>, network_mode: &str) -> Option<String> {
+    // A rootless bridge is provided by slirp4netns rather than FerroCrate's
+    // privileged bridge lifecycle. Persisting it as the built-in `bridge`
+    // network would make teardown/recovery classify the record as a legacy
+    // kernel bridge with missing ownership metadata.
+    if network_mode == "bridge"
+        && !nix::unistd::Uid::effective().is_root()
+        && rootless_netns_enabled()
+    {
+        return None;
+    }
+    associated_network_name(associated, network_mode)
 }
 
 struct RuntimeBackendProbe;
@@ -11580,6 +11625,28 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(err
             .to_string()
             .contains("rootless bridge backend setup requires root"));
+    }
+
+    #[test]
+    fn rootless_bridge_requires_explicit_slirp_enablement() {
+        let err = super::validate_rootless_bridge_network(false, false, NetworkBackend::Iptables)
+            .expect_err("rootless networking must be opt-in");
+        assert!(err.to_string().contains("FERROCRATE_ROOTLESS_NETNS=1"));
+    }
+
+    #[test]
+    fn rootless_bridge_rejects_unimplemented_host_port_mapping() {
+        let err = super::validate_rootless_bridge_network(true, true, NetworkBackend::Iptables)
+            .expect_err("slirp port forwarding must fail closed until implemented");
+        assert!(err
+            .to_string()
+            .contains("does not support host port mappings"));
+    }
+
+    #[test]
+    fn rootless_bridge_accepts_slirp_without_privileged_mutations() {
+        super::validate_rootless_bridge_network(true, false, NetworkBackend::Nftables)
+            .expect("enabled slirp bridge should be admitted");
     }
 
     #[test]

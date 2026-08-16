@@ -7066,11 +7066,14 @@ impl DockerCompatState {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)
-            .map_err(|error| error.to_string())?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp).map_err(|error| error.to_string())?;
         use std::io::Write as _;
         if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
             let _ = std::fs::remove_file(&temp);
@@ -7080,6 +7083,12 @@ impl DockerCompatState {
             let _ = std::fs::remove_file(&temp);
             error.to_string()
         })?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &self.pending_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .map_err(|error| error.to_string())?;
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| error.to_string())
@@ -11250,6 +11259,17 @@ volumes:
             },
         );
         state.persist_pending().expect("persist pending");
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(temp.path().join("docker-pending.json"))
+                .expect("pending metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let reopened = DockerCompatState::new(temp.path()).expect("reopen state");
         assert!(reopened
             .pending

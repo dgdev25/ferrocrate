@@ -68,11 +68,11 @@ impl HostCapabilities {
 }
 
 fn command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|directory| directory.join(command))
+        .any(|path| path.is_file())
 }
 
 #[derive(Debug, Error)]
@@ -286,6 +286,12 @@ mod tests {
             capabilities.require_network_mutation(),
             Err(ExecError::CapabilityRequired { capability }) if capability == "root"
         ));
+    }
+
+    #[test]
+    fn command_probe_uses_path_resolution_not_version_exit_status() {
+        assert!(command_available("true"));
+        assert!(!command_available("ferrocrate-command-that-does-not-exist"));
     }
 
     #[test]

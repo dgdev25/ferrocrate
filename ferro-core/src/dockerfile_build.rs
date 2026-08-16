@@ -23,7 +23,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
-use std::io;
+use std::fs::File;
+use std::io::{self, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -807,8 +808,40 @@ fn save_build_cache(
     }
     let bytes = serde_json::to_vec(cache).map_err(|err| io::Error::other(err.to_string()))?;
     let temporary = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
+    let mut file = File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(temporary, &path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn validate_imported_cache_entry(
+    key: &str,
+    entry: &BuildCacheEntry,
+) -> Result<(), DockerfileBuildError> {
+    let valid_hex_digest = |value: &str| {
+        let Some(hex) = value.strip_prefix("sha256:") else {
+            return false;
+        };
+        hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    if key.len() != 64
+        || !key.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || entry.cache_key != key
+        || !valid_hex_digest(&entry.layer_digest)
+        || !valid_hex_digest(&entry.config_digest)
+        || entry.layer_size < 0
+        || entry.layer_media_type.is_empty()
+        || serde_json::from_str::<serde_json::Value>(&entry.config_json).is_err()
+        || serde_json::from_str::<serde_json::Value>(&entry.manifest_json).is_err()
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "imported build cache entry failed provenance validation".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -838,6 +871,9 @@ pub fn import_build_cache(
     let bytes = fs::read(source)?;
     let imported = serde_json::from_slice::<HashMap<String, BuildCacheEntry>>(&bytes)
         .map_err(|error| io::Error::other(error.to_string()))?;
+    for (key, entry) in &imported {
+        validate_imported_cache_entry(key, entry)?;
+    }
     let mut cache = load_build_cache(runtime_dir)?;
     let count = imported.len();
     cache.extend(imported);
@@ -2590,10 +2626,10 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_from_dockerfile_with_store_and_compression, dockerignore_matches, export_build_cache,
-        import_build_cache, load_build_cache, parse_limit_value, parse_run, parse_stages,
-        prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
-        save_build_cache, validate_mount_target, BuildCacheEntry,
+        build_cache_path, build_from_dockerfile_with_store_and_compression, dockerignore_matches,
+        export_build_cache, import_build_cache, load_build_cache, parse_limit_value, parse_run,
+        parse_stages, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
+        prune_build_cache, save_build_cache, validate_mount_target, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -2809,18 +2845,19 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         let mut cache = HashMap::new();
+        let cache_key = "a".repeat(64);
         cache.insert(
-            "key".to_string(),
+            cache_key.clone(),
             BuildCacheEntry {
-                cache_key: "key".to_string(),
+                cache_key: cache_key.clone(),
                 created_at_unix: 1,
                 context_digest: String::new(),
                 dockerfile_digest: String::new(),
                 base_digests: Vec::new(),
-                layer_digest: "sha256:layer".to_string(),
+                layer_digest: format!("sha256:{}", "1".repeat(64)),
                 layer_size: 1,
                 layer_media_type: "application/octet-stream".to_string(),
-                config_digest: "sha256:config".to_string(),
+                config_digest: format!("sha256:{}", "2".repeat(64)),
                 config_json: "{}".to_string(),
                 manifest_json: "{}".to_string(),
             },
@@ -2830,6 +2867,32 @@ mod tests {
         export_build_cache(source.path(), &export).unwrap();
         assert_eq!(import_build_cache(target.path(), &export).unwrap(), 1);
         assert_eq!(load_build_cache(target.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_build_cache_rejects_unbound_or_malformed_artifacts() {
+        let runtime = tempfile::tempdir().unwrap();
+        let source = runtime.path().join("invalid-cache.json");
+        let key = "b".repeat(64);
+        let payload = serde_json::json!({
+            key.clone(): {
+                "cache_key": "c".repeat(64),
+                "created_at_unix": 1,
+                "context_digest": "context",
+                "dockerfile_digest": "dockerfile",
+                "base_digests": [],
+                "layer_digest": "sha256:bad",
+                "layer_size": 1,
+                "layer_media_type": "application/octet-stream",
+                "config_digest": "sha256:bad",
+                "config_json": "{}",
+                "manifest_json": "{}"
+            }
+        });
+        fs::write(&source, serde_json::to_vec(&payload).unwrap()).unwrap();
+        let error = import_build_cache(runtime.path(), &source).expect_err("invalid cache");
+        assert!(error.to_string().contains("provenance validation"));
+        assert!(!build_cache_path(runtime.path()).exists());
     }
 
     #[test]

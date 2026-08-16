@@ -68,7 +68,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 
 ### 5. Release operations and scale
 
-- [ ] Add repeatable performance baselines and regression thresholds.
+- [x] Add repeatable performance baselines and regression thresholds; `scripts/perf/run-baseline.sh` produces metadata and benchmark artifacts, while existing scripts enforce their SLOs.
 - [ ] Expand rootless networking and supported-host prerequisites.
 - [ ] Add off-host witness retention, replication, and operational recovery procedures.
 
@@ -108,3 +108,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — audited seccomp wiring: resolved profiles are applied in the container launch `pre_exec` path; roadmap status corrected from stale unchecked state.
 - 2026-08-16 — published the Docker API compatibility declaration for advertised versions, endpoint groups, and authorization behavior.
 - 2026-08-16 — published the CRI method matrix; it records the implemented runtime/image RPCs and explicitly identifies absent pod/container lifecycle RPCs.
+- 2026-08-16 — wired repeatable startup/OCI/rootless performance baselines into a manual artifact-upload workflow.

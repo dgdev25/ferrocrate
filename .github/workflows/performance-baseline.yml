@@ -1,0 +1,18 @@
+name: performance-baseline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run repeatable baseline
+        run: bash scripts/perf/run-baseline.sh
+      - name: Upload baseline artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrocrate-performance-baseline
+          path: target/perf-baseline/

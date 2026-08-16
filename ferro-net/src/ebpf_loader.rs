@@ -3,7 +3,6 @@ use std::{
     fs,
     os::fd::{AsRawFd, OwnedFd},
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
 };
 
@@ -27,6 +26,7 @@ use crate::{
         POLICY_MAP_NAME, PORTS_MAP_NAME, PROGRAM_ABI_VERSION,
     },
     ebpf_maps::expected_map_metadata,
+    executor::exec_cmd_capture,
 };
 
 const BPFFS_ROOT: &str = "/sys/fs/bpf";
@@ -1844,20 +1844,22 @@ fn validate_attach_interface(interface: &str, expected_ifindex: u32) -> Result<(
             actual: actual_ifindex,
         });
     }
-    let qdisc = Command::new("tc")
-        .args(["qdisc", "show", "dev", interface])
-        .output()
-        .map_err(|error| EbpfError::TcUnavailable {
-            interface: interface.to_string(),
-            reason: error.to_string(),
-        })?;
-    if !qdisc.status.success() {
+    if let Err(error) = tc_probe(&["qdisc", "show", "dev", interface]) {
         return Err(EbpfError::TcUnavailable {
             interface: interface.to_string(),
-            reason: String::from_utf8_lossy(&qdisc.stderr).trim().to_string(),
+            reason: error,
         });
     }
     Ok(())
+}
+
+fn tc_probe(args: &[&str]) -> Result<(), String> {
+    let mut command = Vec::with_capacity(args.len() + 1);
+    command.push("tc".to_string());
+    command.extend(args.iter().map(|argument| (*argument).to_string()));
+    exec_cmd_capture(&command)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_environment(
@@ -1919,27 +1921,16 @@ fn validate_environment(
         });
     }
 
-    let tc = Command::new("tc")
-        .arg("-V")
-        .output()
-        .map_err(|error| loader_error("execute tc -V", error))?;
-    if !tc.status.success() {
+    if let Err(error) = tc_probe(&["-V"]) {
         return Err(EbpfError::TcUnavailable {
             interface: interface.to_string(),
-            reason: "tc -V failed".to_string(),
+            reason: error,
         });
     }
-    let qdisc = Command::new("tc")
-        .args(["qdisc", "show", "dev", interface])
-        .output()
-        .map_err(|error| EbpfError::TcUnavailable {
-            interface: interface.to_string(),
-            reason: error.to_string(),
-        })?;
-    if !qdisc.status.success() {
+    if let Err(error) = tc_probe(&["qdisc", "show", "dev", interface]) {
         return Err(EbpfError::TcUnavailable {
             interface: interface.to_string(),
-            reason: String::from_utf8_lossy(&qdisc.stderr).trim().to_string(),
+            reason: error,
         });
     }
     let status =

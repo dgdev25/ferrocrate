@@ -103,3 +103,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — container hosts publication now uses an atomic, symlink-safe, fsynced write with exact read-back; resolver publication uses the shared atomic DNS writer.
 - 2026-08-16 — nftables and traffic-control read-back now use the shared `ferro-net` command-capture executor instead of runtime-local subprocess handling.
 - 2026-08-16 — bridge-mode veth creation accepts a validated `FERROCRATE_VETH_MTU` and fails closed when kernel read-back does not report the requested MTU.
+- 2026-08-16 — idempotent network cleanup now routes through `ferro-net`’s executor, centralizing subprocess errors and safe missing-resource handling.

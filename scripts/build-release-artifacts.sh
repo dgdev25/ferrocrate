@@ -83,6 +83,14 @@ write_sha256_file() {
   exit 1
 }
 
+validate_version() {
+  # Require a v-prefixed semantic version with no leading-zero numeric parts.
+  if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    echo "invalid --version: $VERSION (expected vMAJOR.MINOR.PATCH[-prerelease][+build])" >&2
+    exit 1
+  fi
+}
+
 resolve_os() {
   if [[ -n "$TARGET_OS" ]]; then
     echo "$TARGET_OS"
@@ -131,6 +139,7 @@ main() {
     echo "--version is required" >&2
     exit 1
   fi
+  validate_version
   if [[ "$CHANNEL" != "public" && "$CHANNEL" != "paid" ]]; then
     echo "invalid --channel: $CHANNEL (expected public or paid)" >&2
     exit 1

@@ -16,6 +16,13 @@ Checks:
 USAGE
 }
 
+validate_version() {
+  if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    echo "invalid --version: $VERSION (expected vMAJOR.MINOR.PATCH[-prerelease][+build])" >&2
+    exit 1
+  fi
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +84,7 @@ main() {
     echo "--version is required" >&2
     exit 1
   fi
+  validate_version
 
   local checksum_file
   if [[ "$CHANNEL" == "public" ]]; then

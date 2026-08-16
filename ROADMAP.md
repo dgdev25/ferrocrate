@@ -209,7 +209,7 @@ corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
 
 - [ ] Publish production deployment, high-availability, backup/DR, monitoring, alerting, capacity, security, troubleshooting, FAQ, and glossary guides.
 - [ ] Publish CLI, Docker API, Compose, CRI, networking, rootless, plugin, and migration references.
-- [ ] Automate semantic versioning, changelog/release notes, signed artifacts, package repositories, and upgrade guides; channel packaging, checksum integrity verification, and fail-closed detached-signature verification are now documented in `docs/release-artifacts.md`, while semantic versioning, publication, and upgrade automation remain open.
+- [ ] Automate semantic versioning, changelog/release notes, signed artifacts, package repositories, and upgrade guides; channel packaging now rejects non-semver release tags before mutation, while checksum integrity verification and fail-closed detached-signature verification are documented in `docs/release-artifacts.md`; changelog generation, publication, repositories, and upgrade automation remain open.
 - [ ] Add ecosystem examples, compatibility fixtures, support policy, and a public evidence index for every advertised platform.
 
 ## Explicitly deferred decisions (not silently missing)

@@ -9,11 +9,14 @@
 //! isolation still require a dedicated cgroup/sandbox at deployment time.
 
 use crate::plugin_contract::{verify_plugin_signature, PluginManifest};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -24,6 +27,146 @@ pub struct PluginExecutionResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub timed_out: bool,
+}
+
+/// Signed parent authorization context for one plugin child mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginDelegation {
+    pub parent_operation_id: [u8; 16],
+    pub parent_action: String,
+    pub parent_resource: String,
+    pub child_operation_id: [u8; 16],
+    pub expires_at_unix: u64,
+    pub signature: String,
+}
+
+impl PluginDelegation {
+    pub fn signed(
+        parent_operation_id: [u8; 16],
+        parent_action: impl Into<String>,
+        parent_resource: impl Into<String>,
+        child_operation_id: [u8; 16],
+        expires_at_unix: u64,
+        signer: &SigningKey,
+    ) -> Result<Self, PluginExecutionError> {
+        let mut delegation = Self {
+            parent_operation_id,
+            parent_action: parent_action.into(),
+            parent_resource: parent_resource.into(),
+            child_operation_id,
+            expires_at_unix,
+            signature: String::new(),
+        };
+        let payload = serde_json::to_vec(&delegation)
+            .map_err(|error| PluginExecutionError::Delegation(error.to_string()))?;
+        delegation.signature = format!("ed25519:{}", hex::encode(signer.sign(&payload).to_bytes()));
+        Ok(delegation)
+    }
+
+    fn verify(&self, key: &VerifyingKey) -> Result<(), PluginExecutionError> {
+        if self.parent_operation_id == [0; 16]
+            || self.child_operation_id == [0; 16]
+            || self.parent_action.is_empty()
+            || self.parent_action.len() > 128
+            || self.parent_resource.is_empty()
+            || self.parent_resource.len() > 256
+        {
+            return Err(PluginExecutionError::Delegation(
+                "parent delegation bounds are invalid".to_string(),
+            ));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if self.expires_at_unix < now {
+            return Err(PluginExecutionError::Delegation(
+                "parent delegation has expired".to_string(),
+            ));
+        }
+        let encoded = self
+            .signature
+            .strip_prefix("ed25519:")
+            .ok_or_else(|| PluginExecutionError::Delegation("invalid signature encoding".into()))?;
+        let bytes = hex::decode(encoded)
+            .map_err(|_| PluginExecutionError::Delegation("invalid signature encoding".into()))?;
+        let signature = Signature::from_slice(&bytes)
+            .map_err(|_| PluginExecutionError::Delegation("invalid signature encoding".into()))?;
+        let mut unsigned = self.clone();
+        unsigned.signature.clear();
+        let payload = serde_json::to_vec(&unsigned)
+            .map_err(|error| PluginExecutionError::Delegation(error.to_string()))?;
+        key.verify(&payload, &signature)
+            .map_err(|_| PluginExecutionError::Delegation("parent signature rejected".into()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+enum PluginLifecycleStage {
+    Intent,
+    Effect,
+    Cleanup,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginLifecycleRecord<'a> {
+    schema: u8,
+    stage: PluginLifecycleStage,
+    timestamp_unix: u64,
+    parent_operation_id: [u8; 16],
+    child_operation_id: [u8; 16],
+    parent_action: &'a str,
+    parent_resource: &'a str,
+    plugin: &'a str,
+    manifest_digest: String,
+    result_digest: Option<String>,
+    succeeded: Option<bool>,
+    error: Option<String>,
+}
+
+/// Append-only, fsynced plugin lifecycle provenance.
+pub struct PluginLifecycleJournal {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl PluginLifecycleJournal {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, PluginExecutionError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| PluginExecutionError::Journal(error.to_string()))?;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if !metadata.file_type().is_file() {
+                return Err(PluginExecutionError::Journal(
+                    "plugin lifecycle journal must be a regular file".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            path,
+            lock: Mutex::new(()),
+        })
+    }
+
+    fn append(&self, record: &PluginLifecycleRecord<'_>) -> Result<(), PluginExecutionError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| PluginExecutionError::Journal("journal lock poisoned".into()))?;
+        let bytes = serde_json::to_vec(record)
+            .map_err(|error| PluginExecutionError::Journal(error.to_string()))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| PluginExecutionError::Journal(error.to_string()))?;
+        file.write_all(&bytes)
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.sync_data())
+            .map_err(|error| PluginExecutionError::Journal(error.to_string()))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -38,6 +181,10 @@ pub enum PluginExecutionError {
     ResourceLimits(String),
     #[error("plugin cgroup isolation failed: {0}")]
     Cgroup(String),
+    #[error("plugin delegation rejected: {0}")]
+    Delegation(String),
+    #[error("plugin lifecycle journal failed: {0}")]
+    Journal(String),
     #[error("plugin output exceeded the declared limit")]
     OutputLimit,
 }
@@ -127,6 +274,102 @@ pub fn execute_plugin_with_cgroup(
     cgroup_root: &Path,
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
     execute_plugin_inner(manifest, trust_root, args, stdin, Some(cgroup_root))
+}
+
+/// Execute a plugin as a signed child of a parent authorization decision and
+/// persist intent/effect/cleanup provenance. Output bytes are represented only
+/// by digests in the journal.
+pub fn execute_plugin_delegated(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    delegation: &PluginDelegation,
+    journal: &PluginLifecycleJournal,
+    args: &[String],
+    stdin: &[u8],
+) -> Result<PluginExecutionResult, PluginExecutionError> {
+    delegation.verify(trust_root)?;
+    let manifest_digest = digest_json(manifest)?;
+    let intent = PluginLifecycleRecord {
+        schema: 1,
+        stage: PluginLifecycleStage::Intent,
+        timestamp_unix: now_unix(),
+        parent_operation_id: delegation.parent_operation_id,
+        child_operation_id: delegation.child_operation_id,
+        parent_action: &delegation.parent_action,
+        parent_resource: &delegation.parent_resource,
+        plugin: &manifest.name,
+        manifest_digest: manifest_digest.clone(),
+        result_digest: None,
+        succeeded: None,
+        error: None,
+    };
+    journal.append(&intent)?;
+
+    let result = execute_plugin_inner(manifest, trust_root, args, stdin, None);
+    let (result_digest, succeeded, error) = match &result {
+        Ok(value) => (
+            Some(digest_bytes(&[&value.stdout, &value.stderr])?),
+            Some(true),
+            None,
+        ),
+        Err(error) => (None, Some(false), Some(error.to_string())),
+    };
+    let effect = PluginLifecycleRecord {
+        schema: 1,
+        stage: PluginLifecycleStage::Effect,
+        timestamp_unix: now_unix(),
+        parent_operation_id: delegation.parent_operation_id,
+        child_operation_id: delegation.child_operation_id,
+        parent_action: &delegation.parent_action,
+        parent_resource: &delegation.parent_resource,
+        plugin: &manifest.name,
+        manifest_digest: manifest_digest.clone(),
+        result_digest,
+        succeeded,
+        error,
+    };
+    let effect_error = journal.append(&effect).err();
+    let cleanup = PluginLifecycleRecord {
+        schema: 1,
+        stage: PluginLifecycleStage::Cleanup,
+        timestamp_unix: now_unix(),
+        parent_operation_id: delegation.parent_operation_id,
+        child_operation_id: delegation.child_operation_id,
+        parent_action: &delegation.parent_action,
+        parent_resource: &delegation.parent_resource,
+        plugin: &manifest.name,
+        manifest_digest,
+        result_digest: None,
+        succeeded: Some(true),
+        error: None,
+    };
+    let cleanup_error = journal.append(&cleanup).err();
+    if let Some(error) = effect_error.or(cleanup_error) {
+        return Err(error);
+    }
+    result
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn digest_json<T: Serialize>(value: &T) -> Result<String, PluginExecutionError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| PluginExecutionError::Journal(error.to_string()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn digest_bytes(parts: &[&[u8]]) -> Result<String, PluginExecutionError> {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn execute_plugin_inner(
@@ -449,5 +692,78 @@ mod tests {
             .expect("cgroup root entries")
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn delegated_plugin_execution_persists_intent_effect_and_cleanup_without_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[8u8; 32]);
+        let manifest = signed_manifest(
+            &script(&temp, "printf secret-output"),
+            PluginLimits::default(),
+            &key,
+        );
+        let delegation = PluginDelegation::signed(
+            [1; 16],
+            "container.run",
+            "container:abc",
+            [2; 16],
+            now_unix() + 60,
+            &key,
+        )
+        .expect("delegation");
+        let journal =
+            PluginLifecycleJournal::open(temp.path().join("plugin.jsonl")).expect("journal");
+        let result = execute_plugin_delegated(
+            &manifest,
+            &key.verifying_key(),
+            &delegation,
+            &journal,
+            &[],
+            b"",
+        )
+        .expect("delegated execution");
+        assert_eq!(result.stdout, b"secret-output");
+        let journal_text =
+            std::fs::read_to_string(temp.path().join("plugin.jsonl")).expect("journal bytes");
+        assert_eq!(journal_text.lines().count(), 3);
+        assert!(!journal_text.contains("secret-output"));
+        assert!(journal_text.contains("Intent"));
+        assert!(journal_text.contains("Effect"));
+        assert!(journal_text.contains("Cleanup"));
+    }
+
+    #[test]
+    fn delegated_plugin_rejects_tampered_parent_receipt_before_launch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let manifest = signed_manifest(
+            &script(&temp, "printf launched"),
+            PluginLimits::default(),
+            &key,
+        );
+        let mut delegation = PluginDelegation::signed(
+            [3; 16],
+            "container.run",
+            "container:abc",
+            [4; 16],
+            now_unix() + 60,
+            &key,
+        )
+        .expect("delegation");
+        delegation.parent_resource = "container:tampered".into();
+        let journal =
+            PluginLifecycleJournal::open(temp.path().join("plugin.jsonl")).expect("journal");
+        let error = execute_plugin_delegated(
+            &manifest,
+            &key.verifying_key(),
+            &delegation,
+            &journal,
+            &[],
+            b"",
+        )
+        .expect_err("tampered receipt must fail");
+        assert!(matches!(error, PluginExecutionError::Delegation(_)));
+        assert!(!temp.path().join("plugin.jsonl").exists());
     }
 }

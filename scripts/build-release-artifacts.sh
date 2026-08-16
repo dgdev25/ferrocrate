@@ -146,6 +146,7 @@ main() {
   fi
 
   require_cmd cargo
+  require_cmd python3
   if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
     echo "missing required command: sha256sum or shasum" >&2
     exit 1
@@ -204,8 +205,45 @@ main() {
   fi
   (cd "$OUTPUT_DIR" && write_sha256_file "$archive_name" "$checksum_name")
 
+  local provenance_name="${archive_name}.provenance.json"
+  local archive_digest git_commit rustc_version
+  archive_digest="$(awk 'NF >= 1 {print $1; exit}' "$OUTPUT_DIR/$checksum_name")"
+  git_commit="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  rustc_version="$(rustc --version 2>/dev/null || echo unknown)"
+  PROVENANCE_PATH="$OUTPUT_DIR/$provenance_name" \
+    PROVENANCE_VERSION="$VERSION" \
+    PROVENANCE_CHANNEL="$CHANNEL" \
+    PROVENANCE_ARCHIVE="$archive_name" \
+    PROVENANCE_DIGEST="$archive_digest" \
+    PROVENANCE_OS="$os" \
+    PROVENANCE_ARCH="$arch" \
+    PROVENANCE_COMMIT="$git_commit" \
+    PROVENANCE_RUSTC="$rustc_version" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = {
+    "schema": "ferrocrate-release-provenance-v1",
+    "version": os.environ["PROVENANCE_VERSION"],
+    "channel": os.environ["PROVENANCE_CHANNEL"],
+    "archive": os.environ["PROVENANCE_ARCHIVE"],
+    "sha256": os.environ["PROVENANCE_DIGEST"],
+    "target_os": os.environ["PROVENANCE_OS"],
+    "target_arch": os.environ["PROVENANCE_ARCH"],
+    "git_commit": os.environ["PROVENANCE_COMMIT"],
+    "rustc": os.environ["PROVENANCE_RUSTC"],
+}
+path = Path(os.environ["PROVENANCE_PATH"])
+temporary = path.with_suffix(path.suffix + ".tmp")
+temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+temporary.replace(path)
+PY
+
   echo "created artifact: $OUTPUT_DIR/$archive_name"
   echo "created checksums: $OUTPUT_DIR/$checksum_name"
+  echo "created provenance: $OUTPUT_DIR/$provenance_name"
 }
 
 main "$@"

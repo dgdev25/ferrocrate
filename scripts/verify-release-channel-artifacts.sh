@@ -12,6 +12,7 @@ Usage: verify-release-channel-artifacts.sh --channel <public|paid> --version <ta
 
 Checks:
   - Expected checksum file exists and contains the packaged archive
+  - Archive-bound provenance manifest matches the channel, version, archive, target, and digest
   - --require-signatures additionally verifies a detached GPG signature for the archive
   - Public channel archive contains CLI but not desktop binary
   - Paid channel archive contains both CLI and desktop binaries
@@ -116,6 +117,60 @@ main() {
     echo "artifact listed in checksum file is missing: $archive_path" >&2
     exit 1
   }
+
+  local provenance_path="${archive_path}.provenance.json"
+  [[ -f "$provenance_path" ]] || {
+    echo "missing provenance manifest: $provenance_path" >&2
+    exit 1
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    echo "release provenance verification requires python3" >&2
+    exit 1
+  }
+  PROVENANCE_PATH="$provenance_path" \
+    PROVENANCE_ARCHIVE="$archive" \
+    PROVENANCE_VERSION="$VERSION" \
+    PROVENANCE_CHANNEL="$CHANNEL" \
+    PROVENANCE_ARTIFACT="$archive_path" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+path = os.environ["PROVENANCE_PATH"]
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"invalid provenance manifest: {error}")
+
+expected = {
+    "schema": "ferrocrate-release-provenance-v1",
+    "archive": os.environ["PROVENANCE_ARCHIVE"],
+    "version": os.environ["PROVENANCE_VERSION"],
+    "channel": os.environ["PROVENANCE_CHANNEL"],
+}
+for key, value in expected.items():
+    if data.get(key) != value:
+        raise SystemExit(f"provenance mismatch for {key}: {data.get(key)!r} != {value!r}")
+for key in ("target_os", "target_arch", "git_commit", "rustc"):
+    if not isinstance(data.get(key), str) or not data[key]:
+        raise SystemExit(f"provenance field is missing or empty: {key}")
+if not isinstance(data.get("sha256"), str) or len(data["sha256"]) != 64:
+    raise SystemExit("provenance sha256 must be a 64-character hexadecimal digest")
+try:
+    int(data["sha256"], 16)
+except ValueError:
+    raise SystemExit("provenance sha256 is not hexadecimal")
+
+digest = hashlib.sha256()
+with open(os.environ["PROVENANCE_ARTIFACT"], "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if digest.hexdigest() != data["sha256"]:
+    raise SystemExit("provenance sha256 does not match archive bytes")
+PY
 
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$ARTIFACT_DIR" && sha256sum --ignore-missing -c "$(basename "$checksum_file")")

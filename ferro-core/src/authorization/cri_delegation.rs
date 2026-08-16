@@ -3,6 +3,8 @@
 use std::{collections::HashMap, path::Path};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use rusqlite::{params, Connection};
+use std::sync::Mutex;
 use thiserror::Error;
 
 use super::{Action, ResolvedPrincipal, Role};
@@ -313,7 +315,30 @@ pub struct CriDelegationVerifier {
     audience: String,
     boot_id: String,
     policy_digest: [u8; 32],
-    replay: sled::Db,
+    replay: Mutex<Connection>,
+}
+
+fn migrate_legacy_replay(path: &Path, sqlite: &Connection) -> Result<(), DelegationError> {
+    let marker = format!("{}.sqlite.migrated", path.display());
+    if std::path::Path::new(&marker).exists() || !path.join("conf").exists() {
+        return Ok(());
+    }
+    let legacy = sled::open(path).map_err(|_| DelegationError::ReplayStore)?;
+    for key in legacy.iter().keys() {
+        let key = key.map_err(|_| DelegationError::ReplayStore)?;
+        sqlite
+            .execute(
+                "INSERT OR IGNORE INTO delegation_replay (replay_key) VALUES (?1)",
+                params![key.to_vec()],
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+    }
+    sqlite
+        .execute_batch("PRAGMA wal_checkpoint(FULL);")
+        .map_err(|_| DelegationError::ReplayStore)?;
+    std::fs::write(marker, b"cri-delegation-replay-migration-v1\n")
+        .map_err(|_| DelegationError::ReplayStore)?;
+    Ok(())
 }
 
 impl CriDelegationVerifier {
@@ -340,13 +365,24 @@ impl CriDelegationVerifier {
             .into_iter()
             .map(|item| ((item.issuer, item.key_id), (item.key, item.role)))
             .collect();
-        let replay = sled::open(replay_path).map_err(|_| DelegationError::ReplayStore)?;
+        let legacy_path = replay_path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&legacy_path).map_err(|_| DelegationError::ReplayStore)?;
+        let sqlite_path = format!("{}.sqlite", legacy_path.display());
+        let replay = Connection::open(sqlite_path).map_err(|_| DelegationError::ReplayStore)?;
+        replay
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS delegation_replay (
+                    replay_key BLOB PRIMARY KEY NOT NULL
+                )",
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+        migrate_legacy_replay(&legacy_path, &replay)?;
         Ok(Self {
             keys,
             audience: audience.into(),
             boot_id: boot_id.into(),
             policy_digest,
-            replay,
+            replay: Mutex::new(replay),
         })
     }
 
@@ -385,16 +421,21 @@ impl CriDelegationVerifier {
             return Err(DelegationError::Scope);
         }
         let replay_key = claims.replay_key();
-        if self
+        let replay = self
             .replay
-            .compare_and_swap(replay_key, None as Option<&[u8]>, Some(&[1]))
-            .map_err(|_| DelegationError::ReplayStore)?
-            .is_err()
-        {
+            .lock()
+            .map_err(|_| DelegationError::ReplayStore)?;
+        let inserted = replay
+            .execute(
+                "INSERT OR IGNORE INTO delegation_replay (replay_key) VALUES (?1)",
+                params![replay_key],
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+        if inserted == 0 {
             return Err(DelegationError::Replay);
         }
-        self.replay
-            .flush()
+        replay
+            .execute_batch("PRAGMA wal_checkpoint(FULL);")
             .map_err(|_| DelegationError::ReplayStore)?;
         Ok(VerifiedCriDelegation(ResolvedPrincipal::new(
             claims.delegated_principal.clone(),
@@ -421,4 +462,39 @@ pub enum DelegationError {
     Replay,
     #[error("durable delegation replay store failed")]
     ReplayStore,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_legacy_replay;
+    use rusqlite::Connection;
+
+    #[test]
+    fn legacy_replay_keys_migrate_idempotently() {
+        let temp = tempfile::tempdir().expect("replay directory");
+        let legacy = sled::open(temp.path()).expect("legacy replay");
+        legacy
+            .insert(b"replay-key", &[1])
+            .expect("insert replay key");
+        legacy.flush().expect("flush replay key");
+        drop(legacy);
+
+        let sqlite_path = format!("{}.sqlite", temp.path().display());
+        let sqlite = Connection::open(&sqlite_path).expect("sqlite replay");
+        sqlite
+            .execute_batch("CREATE TABLE delegation_replay (replay_key BLOB PRIMARY KEY NOT NULL)")
+            .expect("schema");
+        migrate_legacy_replay(temp.path(), &sqlite).expect("migration");
+        migrate_legacy_replay(temp.path(), &sqlite).expect("idempotent migration");
+        let count: u32 = sqlite
+            .query_row("SELECT COUNT(*) FROM delegation_replay", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(count, 1);
+        assert!(
+            std::path::PathBuf::from(format!("{}.sqlite.migrated", temp.path().display()))
+                .is_file()
+        );
+    }
 }

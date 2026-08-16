@@ -5,6 +5,10 @@ package runtime.v1;
 service RuntimeService {
   rpc Version(VersionRequest) returns (VersionResponse);
   rpc Status(StatusRequest) returns (StatusResponse);
+  rpc RunPodSandbox(RunPodSandboxRequest) returns (RunPodSandboxResponse);
+  rpc StopPodSandbox(StopPodSandboxRequest) returns (StopPodSandboxResponse);
+  rpc RemovePodSandbox(RemovePodSandboxRequest) returns (RemovePodSandboxResponse);
+  rpc PodSandboxStatus(PodSandboxStatusRequest) returns (PodSandboxStatusResponse);
 }
 
 service ImageService {
@@ -33,6 +37,61 @@ message StatusRequest {
 message StatusResponse {
   RuntimeStatus status = 1;
   map<string, string> info = 2;
+}
+
+message RunPodSandboxRequest {
+  PodSandboxConfig config = 1;
+  string runtime_handler = 2;
+}
+
+message RunPodSandboxResponse {
+  string pod_sandbox_id = 1;
+}
+
+message StopPodSandboxRequest { string pod_sandbox_id = 1; }
+message StopPodSandboxResponse {}
+message RemovePodSandboxRequest { string pod_sandbox_id = 1; }
+message RemovePodSandboxResponse {}
+
+message PodSandboxStatusRequest {
+  string pod_sandbox_id = 1;
+  bool verbose = 2;
+}
+
+message PodSandboxStatusResponse {
+  PodSandboxStatus status = 1;
+  map<string, string> info = 2;
+}
+
+message PodSandboxStatus {
+  string id = 1;
+  string metadata_name = 2;
+  string metadata_uid = 3;
+  string metadata_namespace = 4;
+  PodSandboxState state = 5;
+  string created_at = 6;
+  string network_mode = 7;
+}
+
+enum PodSandboxState {
+  POD_SANDBOX_STATE_UNKNOWN = 0;
+  POD_SANDBOX_STATE_READY = 1;
+  POD_SANDBOX_STATE_NOTREADY = 2;
+}
+
+message PodSandboxConfig {
+  PodSandboxMetadata metadata = 1;
+  string hostname = 2;
+  string log_directory = 3;
+  string dns_config = 4;
+  string network_namespace = 5;
+}
+
+message PodSandboxMetadata {
+  string name = 1;
+  string uid = 2;
+  string namespace = 3;
+  uint32 attempt = 4;
 }
 
 message RuntimeStatus {

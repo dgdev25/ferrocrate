@@ -2,9 +2,11 @@ use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
     FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
-    ImageStatusResponse, ListImagesRequest, ListImagesResponse, PullImageRequest,
-    PullImageResponse, RemoveImageRequest, RemoveImageResponse, RuntimeCondition, RuntimeStatus,
-    StatusRequest, StatusResponse, VersionRequest, VersionResponse,
+    ImageStatusResponse, ListImagesRequest, ListImagesResponse, PodSandboxState, PodSandboxStatus,
+    PodSandboxStatusRequest, PodSandboxStatusResponse, PullImageRequest, PullImageResponse,
+    RemoveImageRequest, RemoveImageResponse, RemovePodSandboxRequest, RemovePodSandboxResponse,
+    RunPodSandboxRequest, RunPodSandboxResponse, RuntimeCondition, RuntimeStatus, StatusRequest,
+    StatusResponse, StopPodSandboxRequest, StopPodSandboxResponse, VersionRequest, VersionResponse,
 };
 pub use ferro_core::authorization::cri_delegation::{
     CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,
@@ -13,9 +15,11 @@ pub use ferro_core::authorization::cri_delegation::{
 use ferro_core::authorization::surface::SurfaceAuthorization;
 use ferro_core::authorization::{Action, PrincipalResolver, RequestOrigin, TransportPrincipal};
 use ferro_core::image_store::{ImageStoreError, LocalImageStore};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     pin::Pin,
@@ -252,11 +256,51 @@ pub enum CriError {
     Configuration(String),
 }
 
+#[derive(Clone)]
 pub struct CriRuntime {
     store: Arc<LocalImageStore>,
     runtime_dir: std::path::PathBuf,
     identity_policy: CriIdentityPolicy,
     authorization: Arc<SurfaceAuthorization>,
+    sandboxes: Arc<Mutex<BTreeMap<String, SandboxRecord>>>,
+}
+
+fn sandbox_state_path(runtime_dir: &Path) -> std::path::PathBuf {
+    runtime_dir.join("cri-sandboxes.json")
+}
+
+fn load_sandboxes(runtime_dir: &Path) -> BTreeMap<String, SandboxRecord> {
+    fs::read(sandbox_state_path(runtime_dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn persist_sandboxes(
+    runtime_dir: &Path,
+    sandboxes: &BTreeMap<String, SandboxRecord>,
+) -> Result<(), Status> {
+    fs::create_dir_all(runtime_dir)
+        .map_err(|error| Status::internal(format!("create CRI state directory: {error}")))?;
+    let path = sandbox_state_path(runtime_dir);
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(sandboxes)
+        .map_err(|error| Status::internal(format!("encode CRI sandbox state: {error}")))?;
+    fs::write(&temporary, bytes)
+        .map_err(|error| Status::internal(format!("write CRI sandbox state: {error}")))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| Status::internal(format!("publish CRI sandbox state: {error}")))
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct SandboxRecord {
+    id: String,
+    name: String,
+    uid: String,
+    namespace: String,
+    state: String,
+    created_at_unix: u64,
+    network_mode: String,
 }
 
 impl std::fmt::Debug for CriRuntime {
@@ -269,11 +313,14 @@ impl CriRuntime {
     pub fn new(store: Arc<LocalImageStore>, authorization: Arc<SurfaceAuthorization>) -> Self {
         let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
             .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
+        let runtime_dir = std::path::PathBuf::from(runtime_dir);
+        let sandboxes = load_sandboxes(&runtime_dir);
         Self {
             store,
-            runtime_dir: std::path::PathBuf::from(runtime_dir),
+            runtime_dir,
             identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
             authorization,
+            sandboxes: Arc::new(Mutex::new(sandboxes)),
         }
     }
 
@@ -282,11 +329,14 @@ impl CriRuntime {
         runtime_dir: impl Into<std::path::PathBuf>,
         authorization: Arc<SurfaceAuthorization>,
     ) -> Self {
+        let runtime_dir = runtime_dir.into();
+        let sandboxes = load_sandboxes(&runtime_dir);
         Self {
             store,
-            runtime_dir: runtime_dir.into(),
+            runtime_dir,
             identity_policy: CriIdentityPolicy::transport_only("cri:local-transport"),
             authorization,
+            sandboxes: Arc::new(Mutex::new(sandboxes)),
         }
     }
 
@@ -350,6 +400,149 @@ impl RuntimeService for CriRuntime {
                 conditions: vec![condition],
             }),
             info,
+        }))
+    }
+
+    async fn run_pod_sandbox(
+        &self,
+        request: Request<RunPodSandboxRequest>,
+    ) -> Result<Response<RunPodSandboxResponse>, Status> {
+        let identity = resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerRun,
+            "cri:pod-sandbox",
+        )?;
+        let config = request
+            .into_inner()
+            .config
+            .ok_or_else(|| Status::invalid_argument("pod sandbox config is required"))?;
+        let metadata = config
+            .metadata
+            .ok_or_else(|| Status::invalid_argument("pod sandbox metadata is required"))?;
+        if metadata.name.trim().is_empty() || metadata.uid.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "pod sandbox metadata name and uid are required",
+            ));
+        }
+        let id = format!(
+            "cri-sandbox-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let record = SandboxRecord {
+            id: id.clone(),
+            name: metadata.name,
+            uid: metadata.uid,
+            namespace: metadata.namespace,
+            state: "ready".to_string(),
+            created_at_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            network_mode: if config.network_namespace.is_empty() {
+                "none".to_string()
+            } else {
+                config.network_namespace
+            },
+        };
+        let mut sandboxes = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?;
+        if sandboxes
+            .values()
+            .any(|candidate| candidate.uid == record.uid)
+        {
+            return Err(Status::already_exists("pod sandbox uid already exists"));
+        }
+        sandboxes.insert(id.clone(), record);
+        persist_sandboxes(&self.runtime_dir, &sandboxes)?;
+        let _ = identity;
+        Ok(Response::new(RunPodSandboxResponse { pod_sandbox_id: id }))
+    }
+
+    async fn stop_pod_sandbox(
+        &self,
+        request: Request<StopPodSandboxRequest>,
+    ) -> Result<Response<StopPodSandboxResponse>, Status> {
+        resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerStop,
+            request.get_ref().pod_sandbox_id.as_str(),
+        )?;
+        let id = request.into_inner().pod_sandbox_id;
+        let mut sandboxes = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?;
+        let record = sandboxes
+            .get_mut(&id)
+            .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
+        record.state = "notready".to_string();
+        persist_sandboxes(&self.runtime_dir, &sandboxes)?;
+        Ok(Response::new(StopPodSandboxResponse {}))
+    }
+
+    async fn remove_pod_sandbox(
+        &self,
+        request: Request<RemovePodSandboxRequest>,
+    ) -> Result<Response<RemovePodSandboxResponse>, Status> {
+        resolve_request_identity(
+            &self.identity_policy,
+            &request,
+            Action::ContainerDelete,
+            request.get_ref().pod_sandbox_id.as_str(),
+        )?;
+        let id = request.into_inner().pod_sandbox_id;
+        let mut sandboxes = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?;
+        if sandboxes.remove(&id).is_none() {
+            return Err(Status::not_found("pod sandbox not found"));
+        }
+        persist_sandboxes(&self.runtime_dir, &sandboxes)?;
+        Ok(Response::new(RemovePodSandboxResponse {}))
+    }
+
+    async fn pod_sandbox_status(
+        &self,
+        request: Request<PodSandboxStatusRequest>,
+    ) -> Result<Response<PodSandboxStatusResponse>, Status> {
+        let id = request.get_ref().pod_sandbox_id.clone();
+        let sandboxes = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?;
+        let record = sandboxes
+            .get(&id)
+            .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
+        let state = if record.state == "ready" {
+            PodSandboxState::Ready
+        } else {
+            PodSandboxState::Notready
+        };
+        Ok(Response::new(PodSandboxStatusResponse {
+            status: Some(PodSandboxStatus {
+                id: record.id.clone(),
+                metadata_name: record.name.clone(),
+                metadata_uid: record.uid.clone(),
+                metadata_namespace: record.namespace.clone(),
+                state: state as i32,
+                created_at: record.created_at_unix.to_string(),
+                network_mode: record.network_mode.clone(),
+            }),
+            info: if request.get_ref().verbose {
+                [("runtime".to_string(), RUNTIME_NAME.to_string())]
+                    .into_iter()
+                    .collect()
+            } else {
+                Default::default()
+            },
         }))
     }
 }
@@ -762,8 +955,8 @@ async fn serve_configured(
 mod tests {
     use super::*;
     use crate::runtime::{
-        ImageFsInfoRequest, ImageSpec, ImageStatusRequest, ListImagesRequest, PullImageRequest,
-        RemoveImageRequest,
+        ImageFsInfoRequest, ImageSpec, ImageStatusRequest, ListImagesRequest, PodSandboxConfig,
+        PullImageRequest, RemoveImageRequest,
     };
     use tonic::Request;
 
@@ -868,6 +1061,65 @@ mod tests {
         assert!(condition.status);
         assert_eq!(condition.reason, "Ready");
         assert_eq!(condition.message, "FerroCrate CRI shim is ready");
+    }
+
+    #[tokio::test]
+    async fn pod_sandbox_lifecycle_persists_and_enforces_transport_identity() {
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        let run = runtime
+            .run_pod_sandbox(authenticated(RunPodSandboxRequest {
+                config: Some(PodSandboxConfig {
+                    metadata: Some(crate::runtime::PodSandboxMetadata {
+                        name: "pod".into(),
+                        uid: "uid-1".into(),
+                        namespace: "default".into(),
+                        attempt: 1,
+                    }),
+                    hostname: "pod".into(),
+                    log_directory: String::new(),
+                    dns_config: String::new(),
+                    network_namespace: "none".into(),
+                }),
+                runtime_handler: String::new(),
+            }))
+            .await
+            .expect("sandbox create")
+            .into_inner();
+        let status = runtime
+            .pod_sandbox_status(authenticated(PodSandboxStatusRequest {
+                pod_sandbox_id: run.pod_sandbox_id.clone(),
+                verbose: true,
+            }))
+            .await
+            .expect("sandbox status")
+            .into_inner();
+        assert_eq!(
+            status.status.expect("status").state,
+            PodSandboxState::Ready as i32
+        );
+        runtime
+            .stop_pod_sandbox(authenticated(StopPodSandboxRequest {
+                pod_sandbox_id: run.pod_sandbox_id.clone(),
+            }))
+            .await
+            .expect("sandbox stop");
+        runtime
+            .remove_pod_sandbox(authenticated(RemovePodSandboxRequest {
+                pod_sandbox_id: run.pod_sandbox_id.clone(),
+            }))
+            .await
+            .expect("sandbox remove");
+        let missing = runtime
+            .pod_sandbox_status(authenticated(PodSandboxStatusRequest {
+                pod_sandbox_id: run.pod_sandbox_id,
+                verbose: false,
+            }))
+            .await
+            .expect_err("removed sandbox must be absent");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]

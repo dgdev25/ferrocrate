@@ -273,6 +273,12 @@ pub enum Commands {
         follow: bool,
     },
     #[cfg(target_os = "linux")]
+    Top {
+        container: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    #[cfg(target_os = "linux")]
     Inspect {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2668,6 +2674,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 follow,
             } => handle_stats(&runtime, &container, &format, follow),
             #[cfg(target_os = "linux")]
+            Commands::Top { container, format } => handle_top(&runtime, &container, &format),
+            #[cfg(target_os = "linux")]
             Commands::Pause { container } => handle_pause(&runtime, &container),
             #[cfg(target_os = "linux")]
             Commands::Unpause { container } => handle_unpause(&runtime, &container),
@@ -4622,6 +4630,14 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 .and_then(|body| print_json(body, format))
             }
         }
+        Commands::Top { container, format } => request(
+            "GET",
+            format!(
+                "/containers/{}/top",
+                percent_encode_path_component(container)
+            ),
+        )
+        .and_then(|body| print_json(body, format)),
         Commands::Pause { container } => request(
             "POST",
             format!(
@@ -5946,6 +5962,57 @@ fn handle_stats(
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_top(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("top: container is required".to_string());
+    }
+    let resolved = resolve_container_id(runtime, container)?;
+    let payload = docker_top_payload(runtime, &resolved)?;
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    let titles = payload
+        .get("Titles")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    if !titles.is_empty() {
+        println!("{titles}");
+    }
+    if let Some(processes) = payload
+        .get("Processes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for process in processes {
+            let row = process
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            if !row.is_empty() {
+                println!("{row}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -10729,9 +10796,9 @@ mod tests {
         handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
         handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
         handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, import_rvf_image_at,
-        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
-        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        handle_stop, handle_top, handle_unpause, handle_volume, host_build_arch,
+        import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
+        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
@@ -13473,6 +13540,19 @@ volumes:
     }
 
     #[test]
+    fn parses_top_command() {
+        let cli = Cli::try_parse_from(["ferrocrate", "top", "c1", "--format", "json"])
+            .expect("parse top");
+        match cli.command {
+            Commands::Top { container, format } => {
+                assert_eq!(container, "c1");
+                assert_eq!(format, "json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn remote_run_rejects_local_only_options_before_connecting() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
         let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
@@ -13639,6 +13719,14 @@ volumes:
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let err = handle_stats(&runtime, "", "text", false).expect_err("container required");
         assert!(err.contains("stats: container is required"));
+    }
+
+    #[test]
+    fn top_handler_requires_container() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let err = handle_top(&runtime, "", "text").expect_err("container required");
+        assert!(err.contains("top: container is required"));
     }
 
     #[test]

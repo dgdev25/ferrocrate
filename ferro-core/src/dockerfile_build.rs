@@ -4,13 +4,14 @@ use crate::image_fetch::{pull_image_with_store, resolve_layer_paths_with_store};
 use crate::image_manifest::parse_image_manifest;
 use crate::image_manifest::{
     Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE, OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE,
-    OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+    OCI_IMAGE_LAYER_MEDIA_TYPE, OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::{canonicalize_reference, resolve_reference};
 use crate::layer_compression::{
     compress_bytes_gzip, compress_bytes_zstd, CompressionFormat, LayerCompressionError,
 };
+use crate::registry::{RegistryAuth, RegistryClient};
 #[cfg(target_os = "linux")]
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
@@ -63,6 +64,8 @@ pub enum DockerfileBuildError {
     LayerTooLarge(usize),
     #[error("image build authorization binding failed: {0}")]
     Authorization(String),
+    #[error("registry error: {0}")]
+    Registry(#[from] crate::registry::RegistryError),
 }
 
 #[derive(Clone, Debug)]
@@ -1178,6 +1181,207 @@ pub fn import_build_cache(
             }
         }
     }
+    Ok(count)
+}
+
+const REGISTRY_CACHE_KIND_ANNOTATION: &str = "org.ferrocrate.buildcache.kind";
+
+fn registry_cache_reference(value: &str) -> Result<&str, DockerfileBuildError> {
+    let reference = value.strip_prefix("registry://").ok_or_else(|| {
+        DockerfileBuildError::Invalid(
+            "registry cache reference must use the registry:// prefix".to_string(),
+        )
+    })?;
+    crate::registry::parse_image_reference(reference)?;
+    Ok(reference)
+}
+
+fn registry_cache_descriptor(digest: &str, size: i64, kind: &str) -> Descriptor {
+    Descriptor {
+        media_type: OCI_IMAGE_LAYER_MEDIA_TYPE.to_string(),
+        digest: digest.to_string(),
+        size,
+        urls: Vec::new(),
+        annotations: Some(HashMap::from([(
+            REGISTRY_CACHE_KIND_ANNOTATION.to_string(),
+            kind.to_string(),
+        )])),
+        artifact_type: None,
+        platform: None,
+    }
+}
+
+/// Export cache metadata and available layer/config blobs as an OCI registry
+/// artifact. The manifest annotations distinguish cache metadata from build
+/// artifacts so import can reconstruct a normal local cache sidecar.
+pub fn export_build_cache_to_registry(
+    runtime_dir: &Path,
+    destination: &str,
+    auth: Option<&RegistryAuth>,
+) -> Result<usize, DockerfileBuildError> {
+    let reference = registry_cache_reference(destination)?;
+    let cache = load_build_cache(runtime_dir)?;
+    let transfer_root = runtime_dir.join("build");
+    fs::create_dir_all(&transfer_root)?;
+    let transfer = transfer_root.join(format!(
+        "registry-cache-{}-{}.json",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    export_build_cache(runtime_dir, &transfer)?;
+    let artifacts = cache_artifacts_path(&transfer);
+    let client = RegistryClient::new()?;
+    let metadata_bytes = fs::read(&transfer)?;
+    let metadata_digest = sha256_digest_bytes(&metadata_bytes);
+    client.push_blob_from_file(reference, &metadata_digest, &transfer, auth)?;
+
+    let config_bytes =
+        br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#;
+    let config_path = transfer_root.join(format!(
+        "{}.config",
+        transfer.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    fs::write(&config_path, config_bytes)?;
+    let config_digest = sha256_digest_bytes(config_bytes);
+    client.push_blob_from_file(reference, &config_digest, &config_path, auth)?;
+
+    let mut layers = vec![registry_cache_descriptor(
+        &metadata_digest,
+        metadata_bytes.len() as i64,
+        "metadata",
+    )];
+    let mut pushed = 1usize;
+    let mut seen = HashSet::new();
+    for entry in cache.values() {
+        for (kind, digest, path) in [
+            (
+                "layer",
+                entry.layer_digest.as_str(),
+                artifacts
+                    .join("layers")
+                    .join(entry.layer_digest.replace(':', "_")),
+            ),
+            (
+                "config",
+                entry.config_digest.as_str(),
+                artifacts
+                    .join("configs")
+                    .join(entry.config_digest.replace(':', "_")),
+            ),
+        ] {
+            if !path.exists() || !seen.insert(digest.to_string()) {
+                continue;
+            }
+            if !file_matches_digest(&path, digest) {
+                return Err(DockerfileBuildError::Invalid(
+                    "local cache artifact failed digest verification before registry export"
+                        .to_string(),
+                ));
+            }
+            let size = fs::metadata(&path)?.len() as i64;
+            client.push_blob_from_file(reference, digest, &path, auth)?;
+            layers.push(registry_cache_descriptor(digest, size, kind));
+            pushed += 1;
+        }
+    }
+    let manifest = ImageManifest {
+        schema_version: 2,
+        media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+        config: Descriptor {
+            media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+            digest: config_digest,
+            size: config_bytes.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        },
+        layers,
+        artifact_type: None,
+        subject: None,
+        annotations: HashMap::from([(
+            "org.ferrocrate.buildcache.version".to_string(),
+            "1".to_string(),
+        )]),
+    };
+    let manifest_json = serde_json::to_string(&manifest).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("registry cache manifest serialization: {error}"))
+    })?;
+    client.push_manifest_raw(reference, &manifest_json, auth)?;
+    let _ = fs::remove_file(&transfer);
+    let _ = fs::remove_file(&config_path);
+    let _ = fs::remove_dir_all(&artifacts);
+    Ok(pushed)
+}
+
+/// Import an OCI registry cache artifact into the local cache and materialize
+/// its layer/config blobs for immediate cache-hit validation.
+pub fn import_build_cache_from_registry(
+    runtime_dir: &Path,
+    source: &str,
+    auth: Option<&RegistryAuth>,
+) -> Result<usize, DockerfileBuildError> {
+    let reference = registry_cache_reference(source)?;
+    let client = RegistryClient::new()?;
+    let manifest = client.pull_manifest(reference, auth)?;
+    let metadata = manifest
+        .layers
+        .iter()
+        .find(|descriptor| {
+            descriptor
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(REGISTRY_CACHE_KIND_ANNOTATION))
+                .is_some_and(|kind| kind == "metadata")
+        })
+        .ok_or_else(|| {
+            DockerfileBuildError::Invalid(
+                "registry cache manifest has no metadata layer".to_string(),
+            )
+        })?;
+    let transfer_root = runtime_dir.join("build");
+    fs::create_dir_all(&transfer_root)?;
+    let transfer = transfer_root.join(format!(
+        "registry-cache-import-{}-{}.json",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    client.pull_blob_to_file(reference, &metadata.digest, auth, &transfer)?;
+    if !file_matches_digest(&transfer, &metadata.digest) {
+        return Err(DockerfileBuildError::Invalid(
+            "registry cache metadata failed digest verification".to_string(),
+        ));
+    }
+    let artifacts = cache_artifacts_path(&transfer);
+    fs::create_dir_all(artifacts.join("layers"))?;
+    fs::create_dir_all(artifacts.join("configs"))?;
+    for descriptor in &manifest.layers {
+        let kind = descriptor
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(REGISTRY_CACHE_KIND_ANNOTATION));
+        let Some(kind @ ("layer" | "config")) = kind.map(String::as_str) else {
+            continue;
+        };
+        let destination = artifacts
+            .join(if kind == "layer" { "layers" } else { "configs" })
+            .join(descriptor.digest.replace(':', "_"));
+        client.pull_blob_to_file(reference, &descriptor.digest, auth, &destination)?;
+        if !file_matches_digest(&destination, &descriptor.digest) {
+            return Err(DockerfileBuildError::Invalid(
+                "registry cache artifact failed digest verification".to_string(),
+            ));
+        }
+    }
+    let count = import_build_cache(runtime_dir, &transfer)?;
+    let _ = fs::remove_file(&transfer);
+    let _ = fs::remove_dir_all(&artifacts);
     Ok(count)
 }
 
@@ -3037,8 +3241,9 @@ mod tests {
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, save_build_cache,
-        validate_mount_target, BuildCacheEntry,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
+        registry_cache_reference, save_build_cache, validate_mount_target, BuildCacheEntry,
+        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -3413,6 +3618,21 @@ mod tests {
         fs::write(&source, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
         let error = import_build_cache(runtime.path(), &source).expect_err("oversized source");
         assert!(error.to_string().contains("16 MiB"));
+    }
+
+    #[test]
+    fn registry_cache_references_are_explicit_and_descriptors_are_typed() {
+        assert!(registry_cache_reference("registry://registry.example/team/cache:latest").is_ok());
+        assert!(registry_cache_reference("/tmp/cache.json").is_err());
+        let descriptor = registry_cache_descriptor("sha256:abc", 3, "metadata");
+        assert_eq!(descriptor.media_type, OCI_IMAGE_LAYER_MEDIA_TYPE);
+        assert_eq!(
+            descriptor
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(REGISTRY_CACHE_KIND_ANNOTATION)),
+            Some(&"metadata".to_string())
+        );
     }
 
     #[test]

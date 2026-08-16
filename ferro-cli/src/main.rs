@@ -4374,8 +4374,18 @@ fn handle_build(
         return Err("build: --secret is only supported with Dockerfiles".to_string());
     }
     if let Some(source) = cache_from {
-        ferro_core::dockerfile_build::import_build_cache(&runtime_dir, Path::new(source))
-            .map_err(|error| format!("build: cache-from failed: {error}"))?;
+        let auth = registry_cache_auth();
+        if source.starts_with("registry://") {
+            ferro_core::dockerfile_build::import_build_cache_from_registry(
+                &runtime_dir,
+                source,
+                auth.as_ref(),
+            )
+            .map_err(|error| format!("build: registry cache-from failed: {error}"))?;
+        } else {
+            ferro_core::dockerfile_build::import_build_cache(&runtime_dir, Path::new(source))
+                .map_err(|error| format!("build: cache-from failed: {error}"))?;
+        }
     }
 
     let mut attempt = 0u32;
@@ -4481,8 +4491,21 @@ fn handle_build(
         let rvf = ferro_core::rvf_image::build_rvf_image(&params).map_err(|e| e.to_string())?;
 
         if let Some(destination) = cache_to {
-            ferro_core::dockerfile_build::export_build_cache(&runtime_dir, Path::new(destination))
+            let auth = registry_cache_auth();
+            if destination.starts_with("registry://") {
+                ferro_core::dockerfile_build::export_build_cache_to_registry(
+                    &runtime_dir,
+                    destination,
+                    auth.as_ref(),
+                )
+                .map_err(|error| format!("build: registry cache-to failed: {error}"))?;
+            } else {
+                ferro_core::dockerfile_build::export_build_cache(
+                    &runtime_dir,
+                    Path::new(destination),
+                )
                 .map_err(|error| format!("build: cache-to failed: {error}"))?;
+            }
         }
 
         println!(
@@ -4498,8 +4521,18 @@ fn handle_build(
     }
 
     if let Some(destination) = cache_to {
-        ferro_core::dockerfile_build::export_build_cache(&runtime_dir, Path::new(destination))
-            .map_err(|error| format!("build: cache-to failed: {error}"))?;
+        let auth = registry_cache_auth();
+        if destination.starts_with("registry://") {
+            ferro_core::dockerfile_build::export_build_cache_to_registry(
+                &runtime_dir,
+                destination,
+                auth.as_ref(),
+            )
+            .map_err(|error| format!("build: registry cache-to failed: {error}"))?;
+        } else {
+            ferro_core::dockerfile_build::export_build_cache(&runtime_dir, Path::new(destination))
+                .map_err(|error| format!("build: cache-to failed: {error}"))?;
+        }
     }
 
     println!(
@@ -4507,6 +4540,13 @@ fn handle_build(
         source_desc, result.reference, result.layer_digest, result.config_digest
     );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn registry_cache_auth() -> Option<ferro_core::registry::RegistryAuth> {
+    let username = std::env::var("FERROCRATE_REGISTRY_USERNAME").ok()?;
+    let password = std::env::var("FERROCRATE_REGISTRY_PASSWORD").ok()?;
+    Some(ferro_core::registry::RegistryAuth { username, password })
 }
 
 #[cfg(target_os = "linux")]

@@ -702,6 +702,12 @@ pub(crate) fn embedded_object() -> &'static [u8] {
 fn aya_object_metadata(bpf: &Ebpf, program_abi: u32) -> Result<ObjectMetadata, EbpfError> {
     let mut maps = Vec::new();
     for (name, map) in bpf.maps() {
+        // Aya exposes compiler-generated global-data maps alongside the
+        // declared ABI maps. They back `.rodata`, `.data`, and `.bss` globals
+        // and are not part of FerroCrate's pinned network schema.
+        if is_implicit_data_map(name) {
+            continue;
+        }
         let name = static_map_name(name)?;
         let data = match map {
             Map::Array(data)
@@ -2006,6 +2012,10 @@ fn static_map_name(name: &str) -> Result<&'static str, EbpfError> {
         }),
     }
 }
+
+fn is_implicit_data_map(name: &str) -> bool {
+    name.starts_with(".rodata") || name.starts_with(".data") || name.starts_with(".bss")
+}
 pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     const INITIAL: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
@@ -2110,6 +2120,14 @@ mod review_tests {
         let mut expected = expected_map_metadata();
         expected.sort_by(|left, right| left.name.cmp(&right.name));
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn compiler_generated_global_maps_are_not_network_schema_maps() {
+        for name in [".rodata._RNv_global", ".data.configuration", ".bss.runtime"] {
+            assert!(is_implicit_data_map(name), "{name} should be implicit data");
+        }
+        assert!(!is_implicit_data_map(ENDPOINTS_MAP_NAME));
     }
 
     #[test]

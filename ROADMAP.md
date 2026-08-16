@@ -30,7 +30,7 @@ network/security qualification gates remain open. *Size:* XL. *Sources:* NET-01,
 NET-04–10; SEC-08/09; `docs/compatibility`; host-matrix evidence.
 
 - [x] Define the release support matrix (distribution, kernel, architecture, rootful/rootless, required tools, unsupported combinations) in `docs/evidence/host-matrix/rows.tsv`; candidates remain non-claims until qualified.
-- [ ] Run and archive bridge, custom-network, IPv4/IPv6, DNS/hosts, firewall/port-map, MTU, `tc`, WireGuard, teardown, and recovery on every supported row; `scripts/run-host-matrix.sh` now orchestrates every manifest row, archives per-row logs/results, and distinguishes blocked prerequisites from failures, while matching-host qualification remains open.
+- [ ] Run and archive bridge, custom-network, IPv4/IPv6, DNS/hosts, firewall/port-map, MTU, `tc`, WireGuard, teardown, and recovery on every supported row; `scripts/run-host-matrix.sh` now orchestrates every manifest row, archives per-row logs/results, and distinguishes blocked prerequisites from failures. The 2026-08-16 attempt is archived in `docs/evidence/host-matrix/2026-08-16-run.md` with all six rows correctly blocked; matching-host qualification remains open.
 - [ ] Qualify rootless networking, volumes, image pulls, and CRI constraints on each supported row; record strict prerequisite failures.
 - [ ] Complete successful kernel-backed eBPF monitoring qualification; retain explicit iptables/nftables fallback and provenance when eBPF is unavailable.
 - [ ] Complete encrypted managed-overlay packet-flow qualification across the supported host matrix; preserve stale-revision, rollback, recovery, and key-rotation evidence.

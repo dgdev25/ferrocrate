@@ -520,6 +520,18 @@ pub enum WitnessCommands {
         #[arg(long)]
         predecessor: PathBuf,
     },
+    /// Compute a Merkle root from newline-delimited 32-byte record hashes.
+    MerkleRoot {
+        #[arg(long)]
+        leaves: PathBuf,
+    },
+    /// Verify a serialized inclusion or consistency proof without opening a journal.
+    MerkleVerify {
+        #[arg(long)]
+        proof: PathBuf,
+        #[arg(long, default_value = "inclusion", value_parser = validate_merkle_proof_kind)]
+        kind: String,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -1799,6 +1811,87 @@ fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), S
 }
 
 #[cfg(target_os = "linux")]
+fn validate_merkle_proof_kind(value: &str) -> Result<String, String> {
+    match value {
+        "inclusion" | "consistency" => Ok(value.to_string()),
+        _ => Err("proof kind must be inclusion or consistency".to_string()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn decode_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() % 2 != 0 {
+        return Err("hex value must have an even number of characters".to_string());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let chars = value.as_bytes();
+    for pair in chars.chunks_exact(2) {
+        let high = hex_digit(pair[0])?;
+        let low = hex_digit(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn hex_digit(value: u8) -> Result<u8, String> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(format!("invalid hexadecimal character: 0x{value:02x}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn encode_hex(value: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[cfg(target_os = "linux")]
+fn read_merkle_leaves(path: &Path) -> Result<Vec<[u8; 32]>, String> {
+    let content = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "witness merkle root: cannot read {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut leaves = Vec::new();
+    for (line_number, line) in content.lines().enumerate() {
+        let value = line.trim();
+        if value.is_empty() || value.starts_with('#') {
+            continue;
+        }
+        let value = value.strip_prefix("sha256:").unwrap_or(value);
+        let bytes = decode_hex_bytes(value).map_err(|error| {
+            format!(
+                "witness merkle root: line {} is not hexadecimal: {error}",
+                line_number + 1
+            )
+        })?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "witness merkle root: line {} must contain exactly 32 bytes",
+                line_number + 1
+            ));
+        }
+        let mut leaf = [0u8; 32];
+        leaf.copy_from_slice(&bytes);
+        leaves.push(leaf);
+    }
+    if leaves.is_empty() {
+        return Err("witness merkle root: leaf file contains no hashes".to_string());
+    }
+    Ok(leaves)
+}
+
+#[cfg(target_os = "linux")]
 fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(), String> {
     let output = match command {
         WitnessCommands::Show {
@@ -1890,6 +1983,40 @@ fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(),
                 &binding,
                 |open| authorization_admin::rotate_key_on(args, open),
             )
+        }
+        WitnessCommands::MerkleRoot { leaves } => {
+            let leaves = read_merkle_leaves(leaves)?;
+            let root = ferro_core::witness::merkle_root(&leaves)
+                .map_err(|error| format!("witness merkle root: {error}"))?;
+            Ok(format!("sha256:{}", encode_hex(&root)))
+        }
+        WitnessCommands::MerkleVerify { proof, kind } => {
+            let bytes = std::fs::read(proof).map_err(|error| {
+                format!(
+                    "witness merkle verify: cannot read {}: {error}",
+                    proof.display()
+                )
+            })?;
+            match kind.as_str() {
+                "inclusion" => {
+                    let parsed: ferro_core::witness::MerkleProof = serde_json::from_slice(&bytes)
+                        .map_err(|error| {
+                        format!("witness merkle verify: invalid inclusion proof: {error}")
+                    })?;
+                    ferro_core::witness::merkle_verify(&parsed)
+                        .map_err(|error| format!("witness merkle verify: {error}"))?;
+                }
+                "consistency" => {
+                    let parsed: ferro_core::witness::MerkleConsistencyProof =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            format!("witness merkle verify: invalid consistency proof: {error}")
+                        })?;
+                    ferro_core::witness::merkle_verify_consistency(&parsed)
+                        .map_err(|error| format!("witness merkle verify: {error}"))?;
+                }
+                _ => unreachable!("clap validates Merkle proof kind"),
+            }
+            Ok(format!("witness merkle verification=passed kind={kind}"))
         }
     }?;
     println!("{output}");
@@ -2152,7 +2279,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 command: command @ PolicyCommands::Check { .. },
             } => return dispatch_policy(command, &runtime_dir),
             Commands::Witness {
-                command: command @ (WitnessCommands::Show { .. } | WitnessCommands::Verify { .. }),
+                command:
+                    command @ (WitnessCommands::Show { .. }
+                    | WitnessCommands::Verify { .. }
+                    | WitnessCommands::MerkleRoot { .. }
+                    | WitnessCommands::MerkleVerify { .. }),
             } => return dispatch_witness(command, &runtime_dir),
             Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
             _ => {}
@@ -8666,13 +8797,13 @@ mod tests {
         parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
         parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
         parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
+        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, read_merkle_leaves,
         should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_image_prune_filters,
         validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
-        RvfCommands, VolumeCommands,
+        RvfCommands, VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8951,6 +9082,46 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_witness_merkle_commands_and_reads_hash_leaves() {
+        let root = Cli::parse_from([
+            "ferrocrate",
+            "witness",
+            "merkle-root",
+            "--leaves",
+            "leaves.txt",
+        ]);
+        assert!(matches!(
+            root.command,
+            Commands::Witness {
+                command: WitnessCommands::MerkleRoot { leaves }
+            } if leaves == PathBuf::from("leaves.txt")
+        ));
+
+        let verify = Cli::parse_from([
+            "ferrocrate",
+            "witness",
+            "merkle-verify",
+            "--proof",
+            "proof.json",
+            "--kind",
+            "consistency",
+        ]);
+        assert!(matches!(
+            verify.command,
+            Commands::Witness {
+                command: WitnessCommands::MerkleVerify { proof, kind }
+            } if proof == PathBuf::from("proof.json") && kind == "consistency"
+        ));
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("leaves.txt");
+        std::fs::write(&path, "# record hashes\nsha256:0000000000000000000000000000000000000000000000000000000000000001\n").unwrap();
+        let leaves = read_merkle_leaves(&path).expect("leaves");
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0][31], 1);
     }
 
     #[test]

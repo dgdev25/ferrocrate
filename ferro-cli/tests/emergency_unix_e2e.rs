@@ -163,7 +163,7 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
             "mutation_generation": 1
         }))
         .unwrap();
-    ferro_core::container_store::LocalContainerStore::open(runtime.join("containers.db"))
+    ferro_core::sqlite_container_store::SqliteContainerStore::open(runtime.join("containers.db"))
         .unwrap()
         .put(&record)
         .unwrap();
@@ -362,7 +362,7 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
             "status": "running", "mutation_generation": 1
         }))
         .unwrap();
-    ferro_core::container_store::LocalContainerStore::open(runtime.join("containers.db"))
+    ferro_core::sqlite_container_store::SqliteContainerStore::open(runtime.join("containers.db"))
         .unwrap()
         .put(&second_record)
         .unwrap();

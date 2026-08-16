@@ -1,13 +1,18 @@
 use crate::ai_runtime::AiRuntimeConfig;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "legacy-sled-importers")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "legacy-sled-importers")]
 use sled::transaction::Transactional;
 use std::collections::HashMap;
+#[cfg(feature = "legacy-sled-importers")]
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+#[cfg(feature = "legacy-sled-importers")]
 pub const CONTAINER_INDEX_TREE: &str = "container_index";
+#[cfg(feature = "legacy-sled-importers")]
 pub const LIFECYCLE_OPERATION_TREE: &str = "lifecycle_operations";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -314,6 +319,7 @@ pub struct HealthConfig {
 
 #[derive(Debug, Error)]
 pub enum ContainerStoreError {
+    #[cfg(feature = "legacy-sled-importers")]
     #[error("failed to open container store: {0}")]
     Open(#[from] sled::Error),
     #[error("failed to encode container record: {0}")]
@@ -332,11 +338,13 @@ pub enum ContainerStoreError {
     MutationConflict,
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 #[derive(Clone)]
 pub struct LocalContainerStore {
     db: sled::Db,
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 impl LocalContainerStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ContainerStoreError> {
         let db = sled::open(path)?;
@@ -1058,6 +1066,7 @@ impl LocalContainerStore {
     }
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 fn lifecycle_operation(
     record: &ContainerRecord,
     operation_id: [u8; 16],
@@ -1123,7 +1132,7 @@ fn default_health_status() -> String {
     "none".to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-sled-importers"))]
 mod tests {
     use super::{
         now_unix, ContainerRecord, ContainerStoreError, LifecyclePhase, LocalContainerStore,

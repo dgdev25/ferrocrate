@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 test-support = []
-legacy-sled-importers = []
+legacy-sled-importers = ["dep:sled"]
 
 [dependencies]
 flate2 = "1.0"
@@ -14,7 +14,7 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sled = "0.34"
+sled = { version = "0.34", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tar = "0.4"
 thiserror = { workspace = true }
@@ -42,3 +42,4 @@ libseccomp = "0.3"
 [dev-dependencies]
 httptest = "0.16"
 tempfile = { workspace = true }
+sled = "0.34"

@@ -626,6 +626,7 @@ fn lifecycle_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "legacy-sled-importers")]
     use crate::container_store::LocalContainerStore;
 
     fn record(id: &str) -> ContainerRecord {
@@ -676,9 +677,7 @@ mod tests {
     #[test]
     fn sqlite_store_rejects_legacy_directory_by_default() {
         let temp = tempfile::tempdir().expect("legacy store");
-        let legacy = LocalContainerStore::open(temp.path()).expect("legacy");
-        legacy.put(&record("legacy-1")).expect("legacy put");
-        drop(legacy);
+        std::fs::create_dir_all(temp.path().join("conf")).expect("legacy marker");
         let error = match SqliteContainerStore::open(temp.path()) {
             Ok(_) => panic!("legacy boundary"),
             Err(error) => error,

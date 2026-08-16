@@ -148,6 +148,7 @@ pub enum JournalError {
     ReaderStale,
     #[error("witness journal I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[cfg(feature = "legacy-sled-importers")]
     #[error("witness journal storage failed: {0}")]
     Storage(#[from] sled::Error),
     #[error("witness journal sqlite storage failed: {0}")]

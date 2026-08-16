@@ -1,8 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use ferro_core::authorization::RequestOrigin;
-use ferro_core::container_store::{ContainerRecord, LocalContainerStore};
+use ferro_core::container_store::ContainerRecord;
 use ferro_core::runtime::ContainerRuntime;
+use ferro_core::sqlite_container_store::SqliteContainerStore;
 use std::process::Command;
 use std::time::Duration;
 
@@ -28,7 +29,7 @@ fn unwitnessed_lifecycle_consumes_its_durable_reservation() {
         "mutation_generation": 1
     }))
     .unwrap();
-    LocalContainerStore::open(root.path().join("containers.db"))
+    SqliteContainerStore::open(root.path().join("containers.db"))
         .unwrap()
         .put(&record)
         .unwrap();

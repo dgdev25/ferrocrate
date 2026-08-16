@@ -48,6 +48,7 @@ pub enum ImageStoreError {
     Open(#[from] rusqlite::Error),
     #[error("failed to lock image store: {0}")]
     Lock(String),
+    #[cfg(feature = "legacy-sled-importers")]
     #[error("failed to read legacy image store: {0}")]
     Legacy(#[from] sled::Error),
     #[error("legacy image store detected; reopen with the `legacy-sled-importers` feature")]

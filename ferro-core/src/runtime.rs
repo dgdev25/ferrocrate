@@ -9014,10 +9014,11 @@ mod tests {
         Action, RequestOrigin,
     };
     use crate::cgroups::{CpuMax, ResourceLimits};
-    use crate::container_store::{
-        now_unix, ContainerRecord, LocalContainerStore, MutationReservation, PortMappingRecord,
-        RestartPolicy,
-    };
+    #[cfg(feature = "legacy-sled-importers")]
+    use crate::container_store::LocalContainerStore;
+    #[cfg(feature = "legacy-sled-importers")]
+    use crate::container_store::MutationReservation;
+    use crate::container_store::{now_unix, ContainerRecord, PortMappingRecord, RestartPolicy};
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
@@ -11598,6 +11599,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(!std::path::Path::new(&format!("/proc/{workload_pid}")).exists());
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     fn assert_sigkill_after_identity_persist_is_recoverable(action: &str) {
         let root = tempfile::tempdir().unwrap();
         let pid_file = root.path().join("pid");
@@ -11644,11 +11646,13 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(!std::path::Path::new(&format!("/proc/{workload_pid}")).exists());
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn run_sigkill_before_durable_launch_release_has_no_orphan() {
         assert_sigkill_before_release_leaves_no_workload("run");
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn restart_sigkill_before_durable_launch_release_has_no_replacement_orphan() {
         assert_sigkill_before_release_leaves_no_workload("restart");
@@ -11662,16 +11666,19 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert_sigkill_before_release_leaves_no_workload("run-user");
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn run_sigkill_after_identity_persist_retains_recovery_identity() {
         assert_sigkill_after_identity_persist_is_recoverable("run");
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn restart_sigkill_after_identity_persist_retains_replacement_identity() {
         assert_sigkill_after_identity_persist_is_recoverable("restart");
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn supervised_launch_sigkill_helper() {
         let Ok(pid_file) = std::env::var("FERRO_LAUNCH_HELPER_PID") else {

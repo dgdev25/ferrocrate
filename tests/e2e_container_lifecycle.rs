@@ -242,28 +242,31 @@ CMD ["cat", "/hello.txt"]
 
     #[test]
     #[ignore = "Requires container runtime"]
-    fn container_restart_across_cli_processes() {
+    fn container_restart_preserves_bind_mount_across_cli_processes() {
         if !should_run() {
             eprintln!("Skipping: container runtime not available");
             return;
         }
 
+        let temp_dir = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
 
-        // Create a long-lived container and exercise ownership across
-        // separate CLI processes.
+        // Create a long-lived container with a bind mount and exercise
+        // ownership plus mount replay across separate CLI processes.
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "run",
                 "--name",
                 "restart-test",
+                "--bind",
+                &format!("{}:data", temp_dir.path().display()),
                 "--network-backend",
                 "iptables",
                 "alpine:3.19",
                 "sh",
                 "-c",
-                "sleep 60",
+                "echo 'persistent' > /data/test.txt && sleep 60",
             ])
             .output()
             .expect("run");
@@ -291,20 +294,27 @@ CMD ["cat", "/hello.txt"]
 
         assert!(start_output.status.success(), "Container should restart");
 
-        // Verify the restarted record is live and discoverable by a fresh CLI.
+        // Verify the restarted record is live and the persisted bind mount
+        // still exposes the host-side data written by the workload.
+        let inspection = std::fs::read_to_string(temp_dir.path().join("test.txt"))
+            .expect("persisted bind mount file");
+        assert!(
+            inspection.contains("persistent"),
+            "Persisted bind mount should retain workload data"
+        );
         let inspect_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["inspect", "restart-test"])
+            .args(["inspect", "--format", "json", "restart-test"])
             .output()
             .expect("inspect");
         assert!(
             inspect_output.status.success(),
             "Container should be inspectable after restart"
         );
-        let inspection = String::from_utf8_lossy(&inspect_output.stdout);
+        let inspect_json = String::from_utf8_lossy(&inspect_output.stdout);
         assert!(
-            inspection.contains("running"),
-            "Container should be running after restart"
+            inspect_json.contains(temp_dir.path().to_string_lossy().as_ref()),
+            "inspect did not retain mounts: {inspect_json}"
         );
 
         // Cleanup

@@ -136,6 +136,14 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub ports: Vec<PortMappingRecord>,
     #[serde(default)]
+    pub mounts: Vec<ContainerMountRecord>,
+    #[serde(default)]
+    pub tmpfs_mounts: Vec<ContainerTmpfsMountRecord>,
+    #[serde(default)]
+    pub readonly_rootfs: bool,
+    #[serde(default)]
+    pub no_new_privileges: bool,
+    #[serde(default)]
     pub network_backend: Option<String>,
     #[serde(default)]
     pub network_ownership: Option<NetworkOwnershipRecord>,
@@ -153,6 +161,24 @@ pub struct ContainerRecord {
     pub mutation_generation: u64,
     #[serde(default)]
     pub pending_mutation: Option<MutationReservation>,
+}
+
+/// Durable bind-mount configuration required to replay a container after a
+/// stop, restart, or daemon/process recovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerMountRecord {
+    pub source: String,
+    pub target: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// Durable tmpfs configuration required to replay a container after restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerTmpfsMountRecord {
+    pub target: String,
+    #[serde(default)]
+    pub size: Option<String>,
 }
 
 fn default_mutation_generation() -> u64 {
@@ -196,6 +222,10 @@ impl ContainerRecord {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            readonly_rootfs: false,
+            no_new_privileges: false,
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,

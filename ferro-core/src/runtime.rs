@@ -12,7 +12,8 @@ use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
 use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
 use crate::container_store::{
-    now_unix, ContainerRecord, ContainerStoreError, CreationProvenance, EbpfFilterOwnershipRecord,
+    now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
+    ContainerTmpfsMountRecord, CreationProvenance, EbpfFilterOwnershipRecord,
     EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LifecycleOperation,
     LifecyclePhase, MutationReservation, NetworkOwnershipRecord, PortMappingRecord, RestartPolicy,
 };
@@ -2400,6 +2401,21 @@ impl ContainerRuntime {
             limits,
             &normalized.bind_mounts,
             &normalized.tmpfs_mounts,
+            &mounts
+                .iter()
+                .map(|mount| ContainerMountRecord {
+                    source: mount.source.display().to_string(),
+                    target: mount.target.display().to_string(),
+                    read_only: mount.read_only,
+                })
+                .collect::<Vec<_>>(),
+            &tmpfs_mounts
+                .iter()
+                .map(|mount| ContainerTmpfsMountRecord {
+                    target: mount.target.display().to_string(),
+                    size: mount.size.clone(),
+                })
+                .collect::<Vec<_>>(),
             normalized.facts.readonly_rootfs,
             normalized.facts.no_new_privileges,
             workdir,
@@ -2453,6 +2469,8 @@ impl ContainerRuntime {
         limits: Option<&ResourceLimits>,
         mounts: &[BindMount],
         tmpfs_mounts: &[TmpfsMount],
+        persisted_mounts: &[ContainerMountRecord],
+        persisted_tmpfs_mounts: &[ContainerTmpfsMountRecord],
         readonly_rootfs: bool,
         no_new_privs: bool,
         workdir: Option<&str>,
@@ -2852,6 +2870,10 @@ impl ContainerRuntime {
                     protocol: mapping.protocol.clone(),
                 })
                 .collect(),
+            mounts: persisted_mounts.to_vec(),
+            tmpfs_mounts: persisted_tmpfs_mounts.to_vec(),
+            readonly_rootfs,
+            no_new_privileges: no_new_privs,
             network_backend: network_setup.backend.map(|backend| backend.to_string()),
             network_ownership: network_setup.ownership.clone(),
             managed_overlay: network_setup.managed_overlay.clone(),
@@ -3373,6 +3395,10 @@ impl ContainerRuntime {
         // Load seccomp profile for restarted container.
         // Uses the authority stored in the container record, if present.
         let seccomp_profile = resolve_seccomp_profile(record.ai_runtime.as_ref())?;
+        replay_persisted_mounts(
+            &self.runtime_dir.join("containers").join(id).join("rootfs"),
+            &record,
+        )?;
 
         let child_id = spawn_process_with_logs(
             &record.command,
@@ -4300,6 +4326,51 @@ fn load_or_create_runtime_id(runtime_dir: &Path) -> Result<[u8; 16], RuntimeErro
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Reattach persisted mounts when a restarted container's rootfs no longer
+/// carries them. A stop normally leaves mounts in place; the mount-id check
+/// makes replay idempotent across daemon/process restarts and avoids stacking
+/// duplicate bind/tmpfs mounts over an already-owned target.
+fn replay_persisted_mounts(rootfs: &Path, record: &ContainerRecord) -> Result<(), RuntimeError> {
+    if record.mounts.is_empty() && record.tmpfs_mounts.is_empty() {
+        return Ok(());
+    }
+    let Some(root_mount_id) = mount_id_for_path(rootfs)? else {
+        // User-space test roots and unsupported mount namespaces cannot prove
+        // absence safely; retain the existing mount state and fail closed.
+        return Ok(());
+    };
+    let mut bind_mounts = Vec::new();
+    for mount in &record.mounts {
+        let target = PathBuf::from(&mount.target);
+        if mount_id_for_path(&rootfs.join(&target))? != Some(root_mount_id) {
+            continue;
+        }
+        bind_mounts.push(BindMount {
+            source: PathBuf::from(&mount.source),
+            target,
+            read_only: mount.read_only,
+        });
+    }
+    if !bind_mounts.is_empty() {
+        apply_authorized_bind_mounts(rootfs, &bind_mounts)?;
+    }
+    let mut tmpfs_mounts = Vec::new();
+    for mount in &record.tmpfs_mounts {
+        let target = PathBuf::from(&mount.target);
+        if mount_id_for_path(&rootfs.join(&target))? != Some(root_mount_id) {
+            continue;
+        }
+        tmpfs_mounts.push(TmpfsMount {
+            target,
+            size: mount.size.clone(),
+        });
+    }
+    if !tmpfs_mounts.is_empty() {
+        apply_tmpfs_mounts(rootfs, &tmpfs_mounts)?;
+    }
+    Ok(())
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -10170,6 +10241,10 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            readonly_rootfs: false,
+            no_new_privileges: false,
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,
@@ -10225,6 +10300,10 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            readonly_rootfs: false,
+            no_new_privileges: false,
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
@@ -10648,6 +10727,10 @@ mod tests {
             ip_address: Some("10.44.1.2".to_string()),
             ipv6_address: None,
             ports: Vec::new(),
+            mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            readonly_rootfs: false,
+            no_new_privileges: false,
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,
@@ -11513,6 +11596,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 container_port: 80,
                 protocol: "tcp".to_string(),
             }],
+            mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            readonly_rootfs: false,
+            no_new_privileges: false,
             network_backend: None,
             network_ownership: None,
             ai_runtime: None,

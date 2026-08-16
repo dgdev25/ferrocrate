@@ -20,7 +20,7 @@ gap. **Size:** L. *Source:* NET-01/04/05/06/07/08/09/10 status table and FCNET-1
 - [x] Add a non-destructive preflight that records distro, kernel, capabilities, WireGuard, iproute2, nftables/iptables, DNS, MTU, and traffic-control support.
 - [x] Parameterize the privileged bridge/IPv6, managed-overlay, and teardown harnesses by matrix row.
 - [x] Run and archive one green evidence bundle for the first supported row, including cleanup verification.
-- [ ] Add a CI/manual gate that rejects a claimed supported row without its evidence bundle.
+- [x] Add a CI/manual gate that rejects a claimed supported row without its evidence bundle.
 
 ### 2. Production `ferro-net` execution layers
 
@@ -104,3 +104,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — nftables and traffic-control read-back now use the shared `ferro-net` command-capture executor instead of runtime-local subprocess handling.
 - 2026-08-16 — bridge-mode veth creation accepts a validated `FERROCRATE_VETH_MTU` and fails closed when kernel read-back does not report the requested MTU.
 - 2026-08-16 — idempotent network cleanup now routes through `ferro-net`’s executor, centralizing subprocess errors and safe missing-resource handling.
+- 2026-08-16 — added a CI/manual host-matrix evidence gate that rejects qualified rows with missing or mismatched evidence artifacts.

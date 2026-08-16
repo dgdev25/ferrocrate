@@ -163,6 +163,12 @@ struct BuildCacheEntry {
     cache_key: String,
     #[serde(default)]
     created_at_unix: u64,
+    #[serde(default)]
+    context_digest: String,
+    #[serde(default)]
+    dockerfile_digest: String,
+    #[serde(default)]
+    base_digests: Vec<String>,
     layer_digest: String,
     layer_size: i64,
     layer_media_type: String,
@@ -226,17 +232,30 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
     let context_hash = hash_context_dir(context_dir, dockerfile_path)?;
+    let dockerfile_digest = hex::encode(Sha256::digest(dockerfile.as_bytes()));
     let mut base_infos = Vec::new();
     for stage in stages.iter() {
         let base_info = resolve_base_image(store, runtime_dir, &stage.base, authority)?;
         base_infos.push(base_info);
     }
     let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
+    let base_digests = base_infos
+        .iter()
+        .map(|info| info.digest.clone().unwrap_or_else(|| "scratch".to_string()))
+        .collect::<Vec<_>>();
     let mut cache = load_build_cache(runtime_dir)?;
     if let Some(entry) = cache.get(&cache_key).cloned() {
         if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
             return Err(DockerfileBuildError::Invalid(
                 "build cache provenance key mismatch".to_string(),
+            ));
+        }
+        if (!entry.context_digest.is_empty() && entry.context_digest != context_hash)
+            || (!entry.dockerfile_digest.is_empty() && entry.dockerfile_digest != dockerfile_digest)
+            || (!entry.base_digests.is_empty() && entry.base_digests != base_digests)
+        {
+            return Err(DockerfileBuildError::Invalid(
+                "build cache source provenance mismatch".to_string(),
             ));
         }
         let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
@@ -401,6 +420,9 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression(
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
+                    context_digest: context_hash.clone(),
+                    dockerfile_digest: dockerfile_digest.clone(),
+                    base_digests: base_digests.clone(),
                     layer_digest: layer_digest.clone(),
                     layer_size,
                     layer_media_type,
@@ -1959,7 +1981,47 @@ mod tests {
         let entry = cache.values().next().expect("cache entry");
         assert!(!entry.cache_key.is_empty());
         assert!(entry.created_at_unix > 0);
+        assert!(!entry.context_digest.is_empty());
+        assert!(!entry.dockerfile_digest.is_empty());
+        assert_eq!(entry.base_digests, vec!["scratch"]);
         assert!(!runtime_dir.join("images/build-cache.json.tmp").exists());
+    }
+
+    #[test]
+    fn cache_entry_records_source_provenance_when_context_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").unwrap();
+        fs::write(temp.path().join("hello.txt"), "one").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/test:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .unwrap();
+        let first_cache = load_build_cache(&runtime).unwrap();
+        let first_entry = first_cache.values().next().unwrap().clone();
+        fs::write(temp.path().join("hello.txt"), "two").unwrap();
+        let second = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/test:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .unwrap();
+        assert_ne!(first.layer_digest, second.layer_digest);
+        assert!(load_build_cache(&runtime)
+            .unwrap()
+            .values()
+            .any(|entry| entry.context_digest != first_entry.context_digest));
     }
 
     #[test]
@@ -1973,6 +2035,9 @@ mod tests {
                 BuildCacheEntry {
                     cache_key: key.to_string(),
                     created_at_unix: timestamp,
+                    context_digest: String::new(),
+                    dockerfile_digest: String::new(),
+                    base_digests: Vec::new(),
                     layer_digest: format!("sha256:{key}"),
                     layer_size: 1,
                     layer_media_type: "application/octet-stream".to_string(),
@@ -1999,6 +2064,9 @@ mod tests {
             BuildCacheEntry {
                 cache_key: "key".to_string(),
                 created_at_unix: 1,
+                context_digest: String::new(),
+                dockerfile_digest: String::new(),
+                base_digests: Vec::new(),
                 layer_digest: "sha256:layer".to_string(),
                 layer_size: 1,
                 layer_media_type: "application/octet-stream".to_string(),

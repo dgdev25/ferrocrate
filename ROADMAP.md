@@ -125,7 +125,7 @@ competitive-gap sequence; existing observability and authorization surfaces.
 reliability acceptance thresholds are not yet demonstrated. *Size:* L–XL. *Sources:*
 PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
 
-- [ ] Establish baselines and enforce thresholds for startup, warm start, pull, build, idle RSS, per-container overhead, binary size, and AI latency; the repeatable collector and strict verifier now cover these metrics plus Docker/OCI/rootless evidence, while archived cross-host baselines remain open.
+- [ ] Establish baselines and enforce thresholds for startup, warm start, pull, build, idle RSS, per-container overhead, binary size, and AI latency; the repeatable collector and strict verifier now cover these metrics plus Docker/OCI/rootless evidence, and the 2026-08-16 local run is archived in `docs/evidence/performance/2026-08-16-local.md`, while non-skipped cross-host baselines remain open.
 - [ ] Optimize image extraction, network setup, memory overhead, and parallel operations against those baselines.
 - [ ] Add sustained-load tests (100+ containers), resource exhaustion, daemon crash, OOM, interrupted network, disk-full, and kernel-effect fault matrices; `scripts/reliability-matrix.sh` now aggregates those suites plus a dedicated 100-process lifecycle stress case, while container-scale sustained load and host-kernel chaos remain open.
 - [ ] Verify AI-disabled graceful degradation and ensure AI monitoring overhead stays within the published budget.

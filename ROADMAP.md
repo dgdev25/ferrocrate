@@ -143,7 +143,7 @@ AI-08/09/11/12; `docs/RVF_INTEGRATION_PLAN.md`.
 - [ ] Populate explainability traces with decision inputs, model/version, confidence, and resulting action.
 - [ ] Replace brute-force vector paths where scale requires it; benchmark HNSW/index behavior and persistence.
 - [ ] Implement or explicitly defer GPU/VRAM discovery and scheduling with truthful CLI/API behavior.
-- [ ] Add end-to-end AI behavior tests and an AI overhead benchmark; keep `FERROCRATE_AI=0` fully functional.
+- [ ] Add end-to-end AI behavior tests and an AI overhead benchmark; keep `FERROCRATE_AI=0` fully functional. The lifecycle now gates monitor startup on explicit AI enablement and a non-zero memory limit, with a regression test for the disabled path; behavior coverage and benchmark evidence remain open.
 
 ## Later
 

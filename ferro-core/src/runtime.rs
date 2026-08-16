@@ -2835,12 +2835,12 @@ impl ContainerRuntime {
             });
         }
 
-        // Task 5.1: Start resource monitor for OOM prediction if AI is enabled
-        if is_ai_enabled() {
+        // Task 5.1: Start resource monitor for OOM prediction if AI is enabled.
+        let memory_limit = limits.and_then(|l| l.memory_max).unwrap_or(0);
+        if should_start_ai_monitor(memory_limit) {
             let store = self.store.clone_db();
             let id = record.id.clone();
             let cgroup_root = self.cgroup_root.clone();
-            let memory_limit = limits.and_then(|l| l.memory_max).unwrap_or(0);
             let cancel = Arc::new(AtomicBool::new(false));
             self.resource_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
@@ -3286,14 +3286,11 @@ impl ContainerRuntime {
             });
         }
 
-        // Task 5.1: Start resource monitor for OOM prediction if AI is enabled
-        if is_ai_enabled() {
-            let store = self.store.clone_db();
-            let id = record.id.clone();
-            let cgroup_root = self.cgroup_root.clone();
-            // Read memory limit from cgroup for restarted containers
-            let cgroup_path = cgroup_root.join("ferrocrate").join(&id);
-            let memory_limit = ferro_mind::ai::resource::read_cgroup_metrics(&cgroup_path)
+        // Task 5.1: Start resource monitor for OOM prediction if AI is enabled.
+        // Read memory limit from cgroup for restarted containers.
+        let memory_limit = if is_ai_enabled() {
+            let cgroup_path = self.cgroup_root.join("ferrocrate").join(&record.id);
+            ferro_mind::ai::resource::read_cgroup_metrics(&cgroup_path)
                 .ok()
                 .and_then(|m| {
                     if m.memory_max > 0 {
@@ -3302,7 +3299,14 @@ impl ContainerRuntime {
                         None
                     }
                 })
-                .unwrap_or(0);
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if should_start_ai_monitor(memory_limit) {
+            let store = self.store.clone_db();
+            let id = record.id.clone();
+            let cgroup_root = self.cgroup_root.clone();
             let cancel = Arc::new(AtomicBool::new(false));
             self.resource_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
@@ -8725,6 +8729,10 @@ fn is_ai_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn should_start_ai_monitor(memory_limit: u64) -> bool {
+    is_ai_enabled() && memory_limit > 0
+}
+
 /// Resource monitor thread for predictive OOM prevention (Task 5.1).
 ///
 /// This function runs in a background thread, periodically reading cgroup v2
@@ -11293,6 +11301,28 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             &["execve/open".into()],
         )
         .is_err());
+    }
+
+    #[test]
+    fn ai_disabled_never_starts_resource_monitor() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous = std::env::var("FERROCRATE_AI").ok();
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "0");
+        }
+        assert!(!super::is_ai_enabled());
+        assert!(!super::should_start_ai_monitor(1024));
+        assert!(!super::should_start_ai_monitor(0));
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+        }
+        assert!(super::is_ai_enabled());
+        assert!(super::should_start_ai_monitor(1024));
+        assert!(!super::should_start_ai_monitor(0));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
     }
 
     #[test]

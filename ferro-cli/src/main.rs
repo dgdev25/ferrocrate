@@ -6907,7 +6907,7 @@ struct DockerPortBinding {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DockerCreateSpec {
     image: String,
     cmd: Vec<String>,
@@ -6983,6 +6983,7 @@ fn validate_docker_exec_command(cmd: &[String]) -> Result<(), String> {
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
+    pending_path: PathBuf,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
     events: Mutex<DockerEventStore>,
 }
@@ -7027,12 +7028,61 @@ struct DockerEventStore {
 #[cfg(target_os = "linux")]
 impl DockerCompatState {
     fn new(runtime_dir: &Path) -> Result<Self, String> {
+        let pending_path = runtime_dir.join("docker-pending.json");
+        let pending = if pending_path.exists() {
+            let bytes = std::fs::read(&pending_path).map_err(|error| error.to_string())?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("docker: invalid pending state: {error}"))?
+        } else {
+            HashMap::new()
+        };
         Ok(Self {
             next_id: AtomicU64::new(0),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(pending),
+            pending_path,
             execs: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
         })
+    }
+
+    fn persist_pending(&self) -> Result<(), String> {
+        let bytes = {
+            let pending = self
+                .pending
+                .lock()
+                .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+            serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?
+        };
+        let parent = self
+            .pending_path
+            .parent()
+            .ok_or_else(|| "docker: pending state has no parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let temp = parent.join(format!(
+            ".docker-pending.{}.{}.tmp",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|error| error.to_string())?;
+        use std::io::Write as _;
+        if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.to_string());
+        }
+        std::fs::rename(&temp, &self.pending_path).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            error.to_string()
+        })?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -7649,6 +7699,12 @@ fn handle_docker_compat_connection(
                 } else {
                     return Err("failed to acquire lock".to_string());
                 }
+                if let Err(error) = state.persist_pending() {
+                    if let Ok(mut pending) = state.pending.lock() {
+                        pending.remove(&id);
+                    }
+                    return Err(error);
+                }
                 let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
@@ -7731,7 +7787,8 @@ fn handle_docker_compat_connection(
                     pending.remove(id)
                 }
                 .ok_or_else(|| format!("docker: unknown container {id}"))?;
-                handle_run(
+                state.persist_pending()?;
+                let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
                     &store,
@@ -7771,7 +7828,14 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     Some(id),
-                )?;
+                );
+                if let Err(error) = start_result {
+                    if let Ok(mut pending) = state.pending.lock() {
+                        pending.insert(id.to_string(), spec);
+                    }
+                    let _ = state.persist_pending();
+                    return Err(error);
+                }
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/stop") => {
@@ -9298,9 +9362,10 @@ mod tests {
         validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
-        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands, DockerEvent,
-        DockerEventStore, DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands,
-        VolumeCommands, WitnessCommands,
+        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
+        DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
+        DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands, VolumeCommands,
+        WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -11163,6 +11228,34 @@ volumes:
         )
         .expect_err("unsafe Docker names must fail closed");
         assert!(error.contains("unsupported characters"));
+    }
+
+    #[test]
+    fn docker_pending_create_state_reopens_atomically() {
+        let temp = tempfile::tempdir().expect("runtime");
+        let state = DockerCompatState::new(temp.path()).expect("state");
+        state.pending.lock().expect("pending lock").insert(
+            "dfixture".to_string(),
+            DockerCreateSpec {
+                image: "busybox".to_string(),
+                cmd: vec!["true".to_string()],
+                env: Vec::new(),
+                labels: Vec::new(),
+                binds: Vec::new(),
+                publish: Vec::new(),
+                workdir: None,
+                user: None,
+                name: Some("fixture".to_string()),
+                network_mode: "bridge".to_string(),
+            },
+        );
+        state.persist_pending().expect("persist pending");
+        let reopened = DockerCompatState::new(temp.path()).expect("reopen state");
+        assert!(reopened
+            .pending
+            .lock()
+            .expect("reopened pending lock")
+            .contains_key("dfixture"));
     }
 
     #[test]

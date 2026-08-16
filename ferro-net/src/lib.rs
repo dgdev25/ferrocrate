@@ -19,7 +19,7 @@ pub mod veth;
 pub mod wireguard;
 
 // Re-export executor types
-pub use executor::{exec_cmd, exec_cmd_capture, ExecError, Transaction};
+pub use executor::{exec_cmd, exec_cmd_capture, ExecError, HostCapabilities, Transaction};
 
 // Re-export backend selection types
 pub use backend::{BackendError, BackendProbe, NetworkBackend};

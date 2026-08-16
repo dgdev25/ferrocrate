@@ -28,7 +28,7 @@ gap. **Size:** L. *Source:* NET-01/04/05/06/07/08/09/10 status table and FCNET-1
 custom bridges, DNS, firewall/port mapping, eBPF fallback, and bandwidth
 limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08, NET-10.
 
-- [ ] Define one capability-aware execution boundary for privileged network mutations.
+- [x] Define one capability-aware execution boundary for privileged network mutations.
 - [ ] Implement bridge and route execution with read-back verification and rollback.
 - [ ] Implement DNS/hosts and MTU behavior with explicit unsupported-capability errors.
 - [ ] Implement nftables/iptables port mapping and eBPF fallback with provenance and cleanup.
@@ -88,3 +88,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 
 - 2026-08-16 `d283473` — created the follow-on qualification, execution-layer, multi-host, and parity roadmap; started host-matrix preflight.
 - 2026-08-16 — qualified the first Ubuntu 26.04/kernel 7.0 matrix row and fixed IPv6 DAD portability with `nodad`.
+- 2026-08-16 — added `HostCapabilities` admission to the shared executor and wired bridge mutations to fail closed before effects when Linux/root/CAP_NET_ADMIN/iproute2 are unavailable.

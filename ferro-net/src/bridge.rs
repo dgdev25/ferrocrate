@@ -126,6 +126,7 @@ pub fn build_ip_link_set_down_cmd(link: &str) -> Result<Vec<String>, ValidationE
 /// This is a transactional operation - if any step fails, all previous
 /// steps are rolled back automatically.
 pub fn create_bridge(config: &BridgeConfig) -> Result<(), ExecError> {
+    crate::executor::HostCapabilities::probe().require_network_mutation()?;
     let mut txn = Transaction::new();
 
     // Step 1: Create the bridge device
@@ -197,6 +198,7 @@ pub fn create_bridge(config: &BridgeConfig) -> Result<(), ExecError> {
 
 /// Destroy a bridge (bring down and delete).
 pub fn destroy_bridge(name: &str) -> Result<(), ExecError> {
+    crate::executor::HostCapabilities::probe().require_network_mutation()?;
     // Bring down first (best effort)
     let _ = crate::executor::exec_cmd(&build_ip_link_set_down_cmd(name).map_err(|e| {
         ExecError::CommandFailed {

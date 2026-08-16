@@ -8,6 +8,73 @@ use std::process::Command;
 use thiserror::Error;
 use tracing::warn;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCapabilities {
+    pub linux: bool,
+    pub root: bool,
+    pub cap_net_admin: bool,
+    pub ip: bool,
+    pub nft: bool,
+    pub iptables: bool,
+    pub tc: bool,
+    pub wg: bool,
+}
+
+impl HostCapabilities {
+    pub fn probe() -> Self {
+        let cap_eff = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("CapEff:").map(str::trim))
+                    .and_then(|value| u64::from_str_radix(value, 16).ok())
+            });
+        Self {
+            linux: cfg!(target_os = "linux"),
+            root: nix::unistd::geteuid().as_raw() == 0,
+            cap_net_admin: cap_eff.is_some_and(|value| value & (1 << 12) != 0),
+            ip: command_available("ip"),
+            nft: command_available("nft"),
+            iptables: command_available("iptables"),
+            tc: command_available("tc"),
+            wg: command_available("wg"),
+        }
+    }
+
+    pub fn require_network_mutation(&self) -> Result<(), ExecError> {
+        if !self.linux {
+            return Err(ExecError::CapabilityRequired {
+                capability: "Linux".into(),
+            });
+        }
+        if !self.root {
+            return Err(ExecError::CapabilityRequired {
+                capability: "root".into(),
+            });
+        }
+        if !self.cap_net_admin {
+            return Err(ExecError::CapabilityRequired {
+                capability: "CAP_NET_ADMIN".into(),
+            });
+        }
+        if !self.ip {
+            return Err(ExecError::CapabilityRequired {
+                capability: "iproute2 (ip)".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Error)]
 pub enum ExecError {
     #[error("command failed: {cmd} — {stderr}")]
@@ -18,6 +85,8 @@ pub enum ExecError {
         #[source]
         source: std::io::Error,
     },
+    #[error("required host capability is unavailable: {capability}")]
+    CapabilityRequired { capability: String },
 }
 
 /// Execute a command vector, returning Ok(()) on success or ExecError on failure.
@@ -199,6 +268,24 @@ mod tests {
         let result = exec_cmd(&["false".to_string()]);
         assert!(result.is_err());
         assert!(matches!(result, Err(ExecError::CommandFailed { .. })));
+    }
+
+    #[test]
+    fn capability_gate_reports_missing_privilege_without_running_a_command() {
+        let capabilities = HostCapabilities {
+            linux: true,
+            root: false,
+            cap_net_admin: false,
+            ip: true,
+            nft: false,
+            iptables: false,
+            tc: false,
+            wg: false,
+        };
+        assert!(matches!(
+            capabilities.require_network_mutation(),
+            Err(ExecError::CapabilityRequired { capability }) if capability == "root"
+        ));
     }
 
     #[test]

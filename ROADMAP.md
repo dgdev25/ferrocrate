@@ -4,7 +4,7 @@
      forward work is sourced from the PRD-backed roadmap, completion plan,
      security audit, RVF plan, platform plan, and compatibility contracts. -->
 
-**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `c467c71`
+**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `210b052`
 
 ## How to use this roadmap
 
@@ -246,3 +246,4 @@ corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
 - 2026-08-16 `9858e5f` — added a reproducible ten-feature Docker/Ferrocrate benchmark harness and archived rootful Ubuntu median timings.
 - 2026-08-16 — fixed executable capability detection for strict MAC tooling and qualified a self-contained AppArmor profile load/workload launch; SELinux and denial/rollback evidence remain open.
 - 2026-08-16 — wired the existing unprivileged namespace path to opt-in `slirp4netns` bridge networking, fixed rootless teardown classification, and archived pull/run/remove evidence; rootless port forwarding and broader row qualification remain open.
+- 2026-08-16 — corrected rootless bridge launch to create user and network namespaces together without invoking setuid mapping helpers after `no_new_privs`; long-lived workload retention now passes locally, while live network traffic evidence remains open.

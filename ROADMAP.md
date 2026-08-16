@@ -66,7 +66,7 @@ reduction remain open. *Size:* L–XL. *Sources:* SEC-03/08/09,
 - [x] Formally time-box `RUSTSEC-2025-0141` (`bincode` via `ruvector-core`) in the risk-acceptance register, with dependency-path evidence and a 2026-09-30 revalidation deadline; replacement remains future work.
 - [ ] Replace the remaining `sled` backends to remove `RUSTSEC-2025-0057` (`fxhash`) and `RUSTSEC-2024-0384` (`instant`), including migration and backward-compatibility tests. Volume, image, CRI replay, and Compose replay stores now use SQLite with tested legacy-sled imports and retained rollback copies; container stores now have conflict-safe transactional SQLite snapshot export/import with round-trip and conflict tests, but sled remains active and witness/container cutover remains to migrate.
 - [ ] Complete remaining PAL/security-audit continuation runs, triage new findings, and merge accepted remediations into this roadmap.
-- [ ] Run adversarial checks for symlink/path traversal, descriptor substitution, namespace identity, profile parsing, and fail-closed authorization on every new execution surface.
+- [ ] Run adversarial checks for symlink/path traversal, descriptor substitution, namespace identity, profile parsing, and fail-closed authorization on every new execution surface; MAC profile generation now rejects traversal, shell metacharacters, and oversized container IDs before file or policy-command creation, while the wider execution-surface audit remains open.
 
 ### 4. Compatibility and release qualification
 

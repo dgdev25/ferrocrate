@@ -7004,6 +7004,8 @@ struct DockerNetworkCreateSpec {
     name: String,
     #[serde(rename = "Driver")]
     driver: Option<String>,
+    #[serde(rename = "EnableIPv6", default)]
+    enable_ipv6: bool,
     #[serde(rename = "IPAM")]
     ipam: Option<DockerIpamSpec>,
 }
@@ -8107,16 +8109,31 @@ fn handle_docker_compat_connection(
                 if spec.driver.as_deref().unwrap_or("bridge") != "bridge" {
                     return Err("docker: only bridge network driver is supported".to_string());
                 }
-                let subnet = spec
+                let configs = spec
                     .ipam
                     .as_ref()
-                    .and_then(|ipam| ipam.config.first())
-                    .and_then(|cfg| cfg.subnet.clone());
-                let gateway = spec
-                    .ipam
-                    .as_ref()
-                    .and_then(|ipam| ipam.config.first())
-                    .and_then(|cfg| cfg.gateway.clone());
+                    .map(|ipam| ipam.config.as_slice())
+                    .unwrap_or(&[]);
+                let ipv4 = configs.iter().find(|cfg| {
+                    cfg.subnet
+                        .as_deref()
+                        .is_none_or(|subnet| !subnet.contains(':'))
+                });
+                let ipv6 = configs.iter().find(|cfg| {
+                    cfg.subnet
+                        .as_deref()
+                        .is_some_and(|subnet| subnet.contains(':'))
+                });
+                if spec.enable_ipv6 && ipv6.is_none() {
+                    return Err(
+                        "docker: EnableIPv6 requires an IPv6 IPAM subnet in the request"
+                            .to_string(),
+                    );
+                }
+                let subnet = ipv4.and_then(|cfg| cfg.subnet.clone());
+                let gateway = ipv4.and_then(|cfg| cfg.gateway.clone());
+                let ipv6_subnet = ipv6.and_then(|cfg| cfg.subnet.clone());
+                let ipv6_gateway = ipv6.and_then(|cfg| cfg.gateway.clone());
                 handle_network_authorized(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -8124,8 +8141,8 @@ fn handle_docker_compat_connection(
                         name: spec.name.clone(),
                         subnet,
                         gateway,
-                        ipv6_subnet: None,
-                        ipv6_gateway: None,
+                        ipv6_subnet,
+                        ipv6_gateway,
                     },
                     &origin,
                     &surface_authorization,
@@ -9500,11 +9517,12 @@ mod tests {
         handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
         host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
         parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
-        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, read_merkle_leaves,
-        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
+        parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
+        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, read_merkle_leaves, should_desktop_forward, split_path_query,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
         AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
@@ -10328,6 +10346,30 @@ volumes:
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parses_docker_dual_stack_network_ipam() {
+        let spec = parse_docker_network_create_spec(
+            br#"{
+                "Name":"dual-stack",
+                "Driver":"bridge",
+                "EnableIPv6":true,
+                "IPAM":{"Config":[
+                    {"Subnet":"10.88.0.0/24","Gateway":"10.88.0.1"},
+                    {"Subnet":"fd42:4242::/64","Gateway":"fd42:4242::1"}
+                ]}
+            }"#,
+        )
+        .expect("dual-stack payload");
+        assert!(spec.enable_ipv6);
+        assert_eq!(
+            spec.ipam
+                .as_ref()
+                .and_then(|ipam| ipam.config.get(1))
+                .and_then(|config| config.subnet.as_deref()),
+            Some("fd42:4242::/64")
+        );
     }
 
     #[test]

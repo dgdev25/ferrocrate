@@ -4275,7 +4275,22 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 percent_encode_path_component(container)
             ),
         )
-        .and_then(|body| print_json(body, format)),
+        .and_then(|body| {
+            if format == "json" {
+                let output = serde_json::json!({
+                    "container": container,
+                    "logs": String::from_utf8_lossy(&body),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+                );
+                Ok(())
+            } else {
+                print!("{}", String::from_utf8_lossy(&body));
+                Ok(())
+            }
+        }),
         Commands::Stats { container, format } => request(
             "GET",
             format!(

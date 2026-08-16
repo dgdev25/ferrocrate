@@ -236,6 +236,11 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    History {
+        image: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Rmi {
         image: String,
     },
@@ -958,6 +963,7 @@ fn is_runtime_command_name(command: &str) -> bool {
             | "build"
             | "containers"
             | "ps"
+            | "history"
             | "logs"
             | "inspect"
             | "stats"
@@ -2662,6 +2668,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &secret,
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
+            Commands::History { image, format } => handle_history(&image_store, &image, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
             Commands::ImagePrune => handle_image_prune(&image_store, &surface_authorization),
             Commands::Volume { command } => {
@@ -4474,6 +4481,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Commands::Images { format } => {
             request("GET", "/images/json".to_string()).and_then(|body| print_json(body, format))
         }
+        Commands::History { image, format } => request(
+            "GET",
+            format!("/images/{}/history", percent_encode_path_component(image)),
+        )
+        .and_then(|body| print_json(body, format)),
         Commands::Rmi { image } => (|| -> Result<(), String> {
             let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
             request(
@@ -5811,6 +5823,54 @@ fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
     }
     for record in records {
         println!("{} {}", record.reference.cyan(), record.digest);
+    }
+    Ok(())
+}
+
+fn handle_history(store: &LocalImageStore, image: &str, format: &str) -> Result<(), String> {
+    let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
+    let reference = resolve_reference(store, &canonical)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("history: not found {canonical}"))?;
+    let manifest = parse_image_manifest(&reference.manifest_json)
+        .map_err(|error| format!("history: invalid image manifest: {error}"))?;
+    let history = manifest
+        .layers
+        .into_iter()
+        .map(|layer| {
+            serde_json::json!({
+                "Id": layer.digest,
+                "Created": reference.created_at_unix,
+                "CreatedBy": "",
+                "Tags": serde_json::Value::Null,
+                "Size": layer.size,
+                "Comment": "",
+            })
+        })
+        .collect::<Vec<_>>();
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&history).map_err(|error| error.to_string())?
+        );
+    } else {
+        for entry in history {
+            println!(
+                "{} {} {}",
+                entry
+                    .get("Id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unknown>"),
+                entry
+                    .get("Size")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                entry
+                    .get("Created")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_default()
+            );
+        }
     }
     Ok(())
 }
@@ -11384,6 +11444,18 @@ volumes:
         let cli = Cli::parse_from(["ferrocrate", "rmi", "alpine:latest"]);
         match cli.command {
             Commands::Rmi { image } => assert_eq!(image, "alpine:latest"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_history_command() {
+        let cli = Cli::parse_from(["ferrocrate", "history", "alpine:latest", "--format", "json"]);
+        match cli.command {
+            Commands::History { image, format } => {
+                assert_eq!(image, "alpine:latest");
+                assert_eq!(format, "json");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

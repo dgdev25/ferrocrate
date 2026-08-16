@@ -43,8 +43,8 @@
 - ✅ **Custom networks** — Named networks with configurable subnets
 - ⚠️ **eBPF (optional)** — Requires an externally provided eBPF object; iptables/nftables is the default and fully supported path
 - ✅ **Port mapping** — TCP/UDP port forwarding to host (host-localhost access to published ports requires the iptables backend; the nftables backend reaches them via the external interface only)
-- ⚠️ **IPv6 support** — Dual-stack networking (in progress)
-- ⚠️ **Managed WireGuard overlay** — Authenticated manager/netd control plane and runtime attachment are implemented; two-host qualification remains pending
+- ✅ **IPv6 support** — Dual-stack named-network allocation, teardown, and single-host traffic are qualified; broader host coverage remains a release gate
+- ✅ **Managed WireGuard overlay** — Authenticated manager/netd control plane, runtime attachment, and isolated-host packet-flow qualification are implemented; physical-host qualification is conditional
 
 ### Storage & Volumes
 - ✅ **Named volumes** — Persistent storage across container lifecycle
@@ -62,8 +62,8 @@
 - ✅ **Image signature verification** — Cosign/Sigstore integration
 - ✅ **Audit logging** — Structured JSON logs for compliance
 - ✅ **Optional authorization and witness journal** — Explicit disabled, shadow, and enforce rollout modes; enforcement remains opt-in until an operator promotes it with local evidence
-- ⚠️ **AppArmor/SELinux** — MAC enforcement (in progress)
-- ⚠️ **eBPF security monitoring** — Runtime syscall auditing (planned)
+- ⚠️ **AppArmor/SELinux** — Opt-in MAC profile generation and launch enforcement are implemented; distribution policy qualification remains
+- ⚠️ **eBPF security monitoring** — Opt-in bpftool monitor path exists; production event qualification remains
 
 ### AI/Intelligence Layer (ferro-mind)
 - ✅ **Local model inference** — In-process linear model (JSON weights) + ruv-fann neural anomaly detection; no external API calls
@@ -80,7 +80,7 @@
 - ✅ **docker-compose.yml compatibility** — Version 3.x files work without modification
 - ✅ **Native compose subcommand** — No separate tool installation required
 - ✅ **Service dependencies** — depends_on with condition support
-- ⚠️ **Service scaling** — Planned (--scale not yet implemented)
+- ✅ **Service scaling** — Compose deploy replicas spawn service instances; multi-node scheduling remains planned
 - ✅ **Environment files** — .env support with variable substitution
 - ✅ **Profiles** — Named profiles for selective service activation
 - ✅ **Watch mode** — Automatic rebuild on source file changes
@@ -309,7 +309,7 @@ ferro-desktop     Windows/WSL proxy (standalone)
 - ✅ **Docker CLI** — 80%+ command compatibility
 - ✅ **docker-compose v3.x** — 90%+ directive coverage
 - ✅ **Dockerfile** — 95%+ directive coverage
-- ⚠️ **Kubernetes CRI v1** — In progress (ferro-cri)
+- ⚠️ **Kubernetes CRI v1** — Authorized durable lifecycle RPCs and UDS fixtures are implemented; sandbox networking and kubelet qualification remain
 
 ## Development
 

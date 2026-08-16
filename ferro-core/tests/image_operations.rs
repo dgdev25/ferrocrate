@@ -25,6 +25,40 @@ fn fixture_manifest_and_index_match_oci_media_types() {
 }
 
 #[test]
+fn malformed_oci_descriptors_fail_closed() {
+    let manifest = r#"{
+        "schemaVersion":2,
+        "mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:not-a-digest","size":1},
+        "layers":[]
+    }"#;
+    assert!(parse_image_manifest(manifest).is_err());
+
+    let manifest = r#"{
+        "schemaVersion":2,
+        "mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":-1},
+        "layers":[]
+    }"#;
+    assert!(parse_image_manifest(manifest).is_err());
+}
+
+#[test]
+fn malformed_oci_platform_descriptors_fail_closed() {
+    let index = r#"{
+        "schemaVersion":2,
+        "mediaType":"application/vnd.oci.image.index.v1+json",
+        "manifests":[{
+            "mediaType":"application/vnd.oci.image.manifest.v1+json",
+            "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size":1,
+            "platform":{"os":"","architecture":"amd64"}
+        }]
+    }"#;
+    assert!(ferro_core::image_manifest::parse_image_index(index).is_err());
+}
+
+#[test]
 fn integration_pull_store_and_tag_image() {
     let server = Server::run();
     let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;

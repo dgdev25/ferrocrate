@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
 use thiserror::Error;
 
+#[cfg(feature = "legacy-sled-importers")]
 const VOLUME_INDEX_TREE: &str = "volume_index";
 const VOLUME_SQLITE_FILE: &str = "volumes.sqlite";
 
@@ -32,6 +33,8 @@ pub enum VolumeStoreError {
     Lock(String),
     #[error("failed to read legacy volume store: {0}")]
     Legacy(#[from] sled::Error),
+    #[error("legacy volume store detected; reopen with the `legacy-sled-importers` feature")]
+    LegacyMigrationRequired,
     #[error("failed to encode volume record: {0}")]
     Encode(#[from] serde_json::Error),
     #[error("failed to decode volume record: {0}")]
@@ -160,6 +163,7 @@ fn volume_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VolumeRec
     })
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 fn migrate_legacy_sled(root: &Path, db: &Connection) -> Result<(), VolumeStoreError> {
     let legacy_path = root.join("volumes.db");
     let marker = root.join("volumes.sqlite.migrated");
@@ -195,6 +199,10 @@ impl LocalVolumeStore {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
         let db_path = root.join(VOLUME_SQLITE_FILE);
+        if !db_path.exists() && root.join("conf").exists() {
+            #[cfg(not(feature = "legacy-sled-importers"))]
+            return Err(VolumeStoreError::LegacyMigrationRequired);
+        }
         let connection = Connection::open(&db_path)?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS volumes (
@@ -205,6 +213,7 @@ impl LocalVolumeStore {
                 created_at_unix INTEGER NOT NULL
             )",
         )?;
+        #[cfg(feature = "legacy-sled-importers")]
         migrate_legacy_sled(&root, &connection)?;
         Ok(Self {
             db: Mutex::new(connection),
@@ -507,7 +516,9 @@ fn default_driver() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalVolumeStore, VolumeRecord, VolumeStoreError};
+    #[cfg(feature = "legacy-sled-importers")]
+    use super::VolumeRecord;
+    use super::{LocalVolumeStore, VolumeStoreError};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -582,6 +593,7 @@ mod tests {
         assert_eq!(restored, "hi");
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn migrates_legacy_sled_records_and_keeps_rollback_copy() {
         let temp = tempfile::tempdir().expect("volume store");
@@ -608,5 +620,17 @@ mod tests {
         assert!(temp.path().join("volumes.sqlite").is_file());
         assert!(temp.path().join("volumes.sqlite.migrated").is_file());
         assert!(temp.path().join("volumes.db").is_dir());
+    }
+
+    #[cfg(not(feature = "legacy-sled-importers"))]
+    #[test]
+    fn default_open_rejects_legacy_volume_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("conf")).unwrap();
+        let error = match LocalVolumeStore::open(temp.path()) {
+            Ok(_) => panic!("legacy boundary"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy-sled-importers"));
     }
 }

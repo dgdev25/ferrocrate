@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+#[cfg(feature = "legacy-sled-importers")]
 const IMAGE_INDEX_TREE: &str = "image_index";
+#[cfg(feature = "legacy-sled-importers")]
 const IMAGE_DIGEST_TREE: &str = "image_digest_index";
 const IMAGE_SQLITE_SUFFIX: &str = "sqlite";
 
@@ -48,6 +50,8 @@ pub enum ImageStoreError {
     Lock(String),
     #[error("failed to read legacy image store: {0}")]
     Legacy(#[from] sled::Error),
+    #[error("legacy image store detected; reopen with the `legacy-sled-importers` feature")]
+    LegacyMigrationRequired,
     #[error("image store io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to encode image record: {0}")]
@@ -73,6 +77,7 @@ fn image_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecor
     })
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 fn migrate_legacy_sled(path: &Path, db: &Connection) -> Result<(), ImageStoreError> {
     let marker = PathBuf::from(format!(
         "{}.{}.migrated",
@@ -102,6 +107,7 @@ fn migrate_legacy_sled(path: &Path, db: &Connection) -> Result<(), ImageStoreErr
     Ok(())
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 fn insert_image_record(db: &Connection, record: &ImageRecord) -> Result<(), ImageStoreError> {
     db.execute(
         "INSERT OR IGNORE INTO image_references
@@ -118,6 +124,7 @@ fn insert_image_record(db: &Connection, record: &ImageRecord) -> Result<(), Imag
     Ok(())
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 fn insert_image_digest(db: &Connection, record: &ImageRecord) -> Result<(), ImageStoreError> {
     db.execute(
         "INSERT OR IGNORE INTO image_digests
@@ -139,6 +146,10 @@ impl LocalImageStore {
         let legacy_path = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&legacy_path)?;
         let db_path = PathBuf::from(format!("{}.{}", legacy_path.display(), IMAGE_SQLITE_SUFFIX));
+        if !db_path.exists() && legacy_path.join("conf").exists() {
+            #[cfg(not(feature = "legacy-sled-importers"))]
+            return Err(ImageStoreError::LegacyMigrationRequired);
+        }
         let db = Connection::open(db_path)?;
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS image_references (
@@ -156,6 +167,7 @@ impl LocalImageStore {
                 created_at_unix INTEGER NOT NULL
             );",
         )?;
+        #[cfg(feature = "legacy-sled-importers")]
         migrate_legacy_sled(&legacy_path, &db)?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
@@ -639,6 +651,7 @@ mod tests {
         assert!(listed.is_empty());
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn migrates_legacy_sled_image_indexes_and_keeps_rollback_copy() {
         let temp = tempfile::tempdir().unwrap();
@@ -683,5 +696,17 @@ mod tests {
         assert!(temp.path().with_extension("sqlite").is_file());
         assert!(temp.path().with_extension("sqlite.migrated").is_file());
         assert!(temp.path().join("conf").is_file());
+    }
+
+    #[cfg(not(feature = "legacy-sled-importers"))]
+    #[test]
+    fn default_open_rejects_legacy_image_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("conf")).unwrap();
+        let error = match LocalImageStore::open(temp.path()) {
+            Ok(_) => panic!("legacy boundary"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy-sled-importers"));
     }
 }

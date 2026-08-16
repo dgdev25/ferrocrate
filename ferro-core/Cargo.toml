@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 test-support = []
+legacy-sled-importers = []
 
 [dependencies]
 flate2 = "1.0"

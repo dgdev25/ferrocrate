@@ -7,6 +7,8 @@ historical `compose-replay.db` sled format is supported only by the explicit
 ```text
 cargo test -p ferro-compose
 cargo test -p ferro-compose --features legacy-sled
+cargo test -p ferro-core --features legacy-sled-importers image_store::tests
+cargo test -p ferro-core --features legacy-sled-importers volume_store::tests
 ```
 
 Default builds do not include sled in `ferro-compose`'s dependency graph. If a
@@ -15,7 +17,9 @@ store fails closed with an actionable error; it never silently ignores or
 rewrites the old data. The feature-gated regression test verifies byte-level
 replay migration, idempotent claim rejection, and the migration marker.
 
-This boundary is one step in removing the remaining sled advisories. The
-container, image, volume, CRI delegation, and witness compatibility importers
-remain separate migration work and must not be considered complete based on
-this Compose-only change.
+The same explicit boundary now applies to the ferro-core image and volume
+importers through `legacy-sled-importers`. Default core opens fail closed when
+they discover a legacy Sled directory; the opt-in feature runs the importer and
+retains the rollback source. The active container store, CRI delegation, and
+witness compatibility importers remain separate migration work and must not be
+considered complete based on this boundary.

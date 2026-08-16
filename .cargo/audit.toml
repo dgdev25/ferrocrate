@@ -1,0 +1,8 @@
+[advisories]
+# These unmaintained transitive crates are explicitly tracked in
+# docs/SECURITY_RISK_ACCEPTANCE.md. New advisories remain fatal in CI.
+ignore = [
+  "RUSTSEC-2025-0141",
+  "RUSTSEC-2025-0057",
+  "RUSTSEC-2024-0384",
+]

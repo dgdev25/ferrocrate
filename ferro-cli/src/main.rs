@@ -269,6 +269,8 @@ pub enum Commands {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
+        #[arg(long)]
+        follow: bool,
     },
     #[cfg(target_os = "linux")]
     Inspect {
@@ -2660,7 +2662,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 handle_inspect(&runtime, &container, &format)
             }
             #[cfg(target_os = "linux")]
-            Commands::Stats { container, format } => handle_stats(&runtime, &container, &format),
+            Commands::Stats {
+                container,
+                format,
+                follow,
+            } => handle_stats(&runtime, &container, &format, follow),
             #[cfg(target_os = "linux")]
             Commands::Pause { container } => handle_pause(&runtime, &container),
             #[cfg(target_os = "linux")]
@@ -4580,14 +4586,42 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 })
             }
         }
-        Commands::Stats { container, format } => request(
-            "GET",
-            format!(
-                "/containers/{}/stats?stream=0",
-                percent_encode_path_component(container)
-            ),
-        )
-        .and_then(|body| print_json(body, format)),
+        Commands::Stats {
+            container,
+            format,
+            follow,
+        } => {
+            if *follow {
+                if format != "json" {
+                    Err("remote stats: --follow requires --format json".to_string())
+                } else {
+                    remote_docker_stream_request(
+                        &endpoint,
+                        "GET",
+                        &format!(
+                            "/containers/{}/stats?stream=1",
+                            percent_encode_path_component(container)
+                        ),
+                        None,
+                        |chunk| {
+                            std::io::stdout()
+                                .write_all(chunk)
+                                .and_then(|_| std::io::stdout().flush())
+                                .map_err(|error| error.to_string())
+                        },
+                    )
+                }
+            } else {
+                request(
+                    "GET",
+                    format!(
+                        "/containers/{}/stats?stream=0",
+                        percent_encode_path_component(container)
+                    ),
+                )
+                .and_then(|body| print_json(body, format))
+            }
+        }
         Commands::Pause { container } => request(
             "POST",
             format!(
@@ -5866,32 +5900,52 @@ struct StatsOutput {
 }
 
 #[cfg(target_os = "linux")]
-fn handle_stats(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
+fn handle_stats(
+    runtime: &ContainerRuntime,
+    container: &str,
+    format: &str,
+    follow: bool,
+) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("stats: container is required".to_string());
     }
-    let resolved = resolve_container_id(runtime, container)?;
-    let stats = runtime.stats(&resolved).map_err(|err| err.to_string())?;
-    if format == "json" {
-        let output = StatsOutput {
-            container: resolved.clone(),
-            stats,
-        };
-        let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
-        println!("{json}");
-    } else {
-        println!(
-            "container={} mem_current={} mem_max={} pids_current={} cpu_usage_usec={} cpu_user_usec={} cpu_system_usec={}",
-            resolved,
-            stats.memory_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
-            stats.memory_max.map(|v| v.to_string()).unwrap_or_else(|| "max".to_string()),
-            stats.pids_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
-            stats.cpu_usage_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
-            stats.cpu_user_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
-            stats.cpu_system_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
-        );
+    if follow && format != "json" {
+        return Err("stats: --follow requires --format json".to_string());
     }
-    Ok(())
+    let resolved = resolve_container_id(runtime, container)?;
+    loop {
+        let stats = runtime.stats(&resolved).map_err(|err| err.to_string())?;
+        if format == "json" {
+            let output = StatsOutput {
+                container: resolved.clone(),
+                stats,
+            };
+            if follow {
+                println!(
+                    "{}",
+                    serde_json::to_string(&output).map_err(|err| err.to_string())?
+                );
+            } else {
+                let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
+                println!("{json}");
+            }
+        } else {
+            println!(
+                "container={} mem_current={} mem_max={} pids_current={} cpu_usage_usec={} cpu_user_usec={} cpu_system_usec={}",
+                resolved,
+                stats.memory_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                stats.memory_max.map(|v| v.to_string()).unwrap_or_else(|| "max".to_string()),
+                stats.pids_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                stats.cpu_usage_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                stats.cpu_user_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                stats.cpu_system_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+            );
+        }
+        if !follow {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -13400,6 +13454,25 @@ volumes:
     }
 
     #[test]
+    fn parses_stats_follow_flag() {
+        let cli =
+            Cli::try_parse_from(["ferrocrate", "stats", "c1", "--follow", "--format", "json"])
+                .expect("parse stats follow");
+        match cli.command {
+            Commands::Stats {
+                container,
+                format,
+                follow,
+            } => {
+                assert_eq!(container, "c1");
+                assert_eq!(format, "json");
+                assert!(follow);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn remote_run_rejects_local_only_options_before_connecting() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
         let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
@@ -13564,7 +13637,7 @@ volumes:
     fn stats_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_stats(&runtime, "", "text").expect_err("container required");
+        let err = handle_stats(&runtime, "", "text", false).expect_err("container required");
         assert!(err.contains("stats: container is required"));
     }
 

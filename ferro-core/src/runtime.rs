@@ -3183,6 +3183,71 @@ impl ContainerRuntime {
         })
     }
 
+    /// Rename a stopped or running container while preserving its durable
+    /// lifecycle generation and authorization receipt. Names are metadata, but
+    /// changing them is still a mutation and therefore uses the same
+    /// intent/effect/store protocol as other container operations.
+    pub fn rename(&self, id: &str, name: &str) -> Result<(), RuntimeError> {
+        validate_container_name(name)?;
+        self.mediate_existing(Action::ContainerRename, id, |runtime, proof, intent| {
+            runtime.rename_authorized(proof, intent, id, name)
+        })
+    }
+
+    fn rename_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        name: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if self
+            .store
+            .list()?
+            .into_iter()
+            .any(|other| other.id != id && other.name.as_deref() == Some(name))
+        {
+            return Err(RuntimeError::InvalidState(format!(
+                "container name is already in use: {name}"
+            )));
+        }
+        let previous = record.name.clone();
+        record.name = Some(name.to_string());
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        self.store.put_for_mutation(&record, operation_id)?;
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event(
+                "rename",
+                Some(id),
+                Some(&record.image),
+                Some(name),
+                previous.as_deref(),
+            ),
+        );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "rename",
+                audit_actor().as_str(),
+                Some(id),
+                Some(&record.image),
+                Some(name),
+                previous.as_deref(),
+            ),
+        );
+        let _ = intent;
+        Ok(())
+    }
+
     fn restart_authorized(
         &self,
         _proof: &AuthorizedRequest,
@@ -3539,6 +3604,25 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+fn validate_container_name(name: &str) -> Result<(), RuntimeError> {
+    if name.is_empty() || name.len() > 255 || name == "." || name == ".." {
+        return Err(RuntimeError::InvalidCommand(
+            "container name must be 1-255 characters".to_string(),
+        ));
+    }
+    let mut bytes = name.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        return Err(RuntimeError::InvalidCommand(
+            "container name contains unsupported characters".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn production_authorization(
@@ -4072,6 +4156,7 @@ fn runtime_action_name(action: Action) -> &'static str {
         Action::ContainerKill => "container.kill",
         Action::ContainerRestart => "container.restart",
         Action::ContainerDelete => "container.delete",
+        Action::ContainerRename => "container.rename",
         _ => "container.unsupported",
     }
 }
@@ -4086,6 +4171,7 @@ fn runtime_witness_action_name(action: crate::witness::WitnessAction) -> &'stati
         crate::witness::WitnessAction::ContainerKill => "container.kill",
         crate::witness::WitnessAction::ContainerRestart => "container.restart",
         crate::witness::WitnessAction::ContainerDelete => "container.delete",
+        crate::witness::WitnessAction::ContainerRename => "container.rename",
         _ => "container.unsupported",
     }
 }
@@ -9704,6 +9790,19 @@ mod tests {
 
         let listed = runtime.list().expect("list");
         assert!(listed.iter().all(|c| c.id != record.id));
+    }
+
+    #[test]
+    fn container_names_are_deterministic_and_path_safe() {
+        for valid in ["web", "web_1", "web-1.2", "A9"] {
+            super::validate_container_name(valid).expect("valid container name");
+        }
+        for invalid in ["", ".", "..", "-web", "web/name", "web name", "web$name"] {
+            assert!(
+                super::validate_container_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 
     #[test]

@@ -562,6 +562,8 @@ pub enum Action {
     ContainerRestart,
     #[serde(rename = "container.delete")]
     ContainerDelete,
+    #[serde(rename = "container.rename")]
+    ContainerRename,
     #[serde(rename = "image.pull")]
     ImagePull,
     #[serde(rename = "image.delete")]

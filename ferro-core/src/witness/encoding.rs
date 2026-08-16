@@ -312,6 +312,7 @@ fn action(value: u8) -> Result<WitnessAction, WitnessError> {
         27 => CheckpointRecover,
         28 => KeyRotate,
         29 => RootlessMapping,
+        30 => ContainerRename,
         _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
     };
     Ok(action)

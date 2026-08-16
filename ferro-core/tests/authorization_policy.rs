@@ -28,6 +28,7 @@ fn actions_have_stable_domain_serialization() {
         (Action::ContainerKill, "\"container.kill\""),
         (Action::ContainerRestart, "\"container.restart\""),
         (Action::ContainerDelete, "\"container.delete\""),
+        (Action::ContainerRename, "\"container.rename\""),
         (Action::ImagePull, "\"image.pull\""),
         (Action::ImageDelete, "\"image.delete\""),
         (Action::VolumeCreate, "\"volume.create\""),

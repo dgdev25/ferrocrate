@@ -145,6 +145,7 @@ pub enum WitnessAction {
     CheckpointRecover = 27,
     KeyRotate = 28,
     RootlessMapping = 29,
+    ContainerRename = 30,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

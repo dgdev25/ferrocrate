@@ -7127,6 +7127,21 @@ fn handle_docker_compat_connection(
                 let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/rename") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/rename");
+                let body: serde_json::Value = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("docker: invalid rename payload: {error}"))?;
+                let name = body
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "docker: rename requires a string name".to_string())?;
+                runtime
+                    .rename(id, name)
+                    .map_err(|error| error.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/start") => {
                 let id = path
                     .trim_start_matches("/containers/")

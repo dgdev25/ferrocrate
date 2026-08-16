@@ -316,6 +316,8 @@ fn action(value: u8) -> Result<WitnessAction, JournalError> {
         26 => Ok(ImageReferenceWrite),
         27 => Ok(CheckpointRecover),
         28 => Ok(KeyRotate),
+        29 => Ok(RootlessMapping),
+        30 => Ok(ContainerRename),
         _ => Err(JournalError::Corrupt),
     }
 }

@@ -569,6 +569,13 @@ pub enum MigrateCommands {
         #[arg(long)]
         output: Option<String>,
     },
+    /// Validate a Compose file and emit a sanitized migration plan.
+    ComposeReport {
+        #[arg(long, short = 'f')]
+        file: PathBuf,
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -3254,6 +3261,9 @@ fn parse_shell(value: &str) -> Result<Shell, String> {
 fn handle_migrate(target: MigrateCommands) -> Result<(), String> {
     match target {
         MigrateCommands::DockerAuth { output } => handle_migrate_docker_auth(output.as_deref()),
+        MigrateCommands::ComposeReport { file, output } => {
+            handle_migrate_compose_report(&file, output.as_deref())
+        }
     }
 }
 
@@ -3519,6 +3529,75 @@ fn handle_migrate_docker_auth(output: Option<&str>) -> Result<(), String> {
     };
     ferro_core::docker_auth::write_ferrocrate_auth_file(&path, &auths)
         .map_err(|err| format!("migrate docker-auth: {err}"))?;
+    Ok(())
+}
+
+fn handle_migrate_compose_report(file: &Path, output: Option<&Path>) -> Result<(), String> {
+    let project = ferro_compose::compose::ComposeProject::load(file)
+        .map_err(|error| format!("migrate compose-report: {error}"))?;
+    let graph = project
+        .validate_dependencies()
+        .map_err(|error| format!("migrate compose-report: {error}"))?;
+    let mut services = serde_json::Map::new();
+    let mut manual_review = Vec::new();
+    for name in project.services() {
+        let service = project
+            .compose
+            .services
+            .get(&name)
+            .ok_or_else(|| format!("migrate compose-report: service disappeared: {name}"))?;
+        let has_image = service.image.is_some();
+        let has_build = service.build.is_some();
+        if !has_image && !has_build {
+            manual_review.push(format!("{name}: no image or build source"));
+        }
+        if let Some(mode) = service.network_mode.as_deref() {
+            if mode == "host" || mode.starts_with("service:") {
+                manual_review.push(format!("{name}: network_mode={mode}"));
+            }
+        }
+        if service.deploy.is_some() {
+            manual_review.push(format!("{name}: deploy constraints require review"));
+        }
+        services.insert(
+            name,
+            serde_json::json!({
+                "image": service.image,
+                "build": service.build.as_ref().map(|build| serde_json::json!({
+                    "context": build.context,
+                    "dockerfile": build.dockerfile,
+                })),
+                "ports": service.ports.as_ref().map(Vec::len).unwrap_or(0),
+                "volumes": service.volumes.as_ref().map(Vec::len).unwrap_or(0),
+                "networks": service.networks,
+                "depends_on": service.depends_on,
+                "restart": service.restart,
+                "profiles": service.profiles,
+            }),
+        );
+    }
+    let report = serde_json::json!({
+        "schema": "ferrocrate/migration-report/v1",
+        "source": file,
+        "compose_version": project.compose.version,
+        "services": services,
+        "networks": project.compose.networks.as_ref().map(|networks| networks.keys().collect::<Vec<_>>()).unwrap_or_default(),
+        "volumes": project.compose.volumes.as_ref().map(|volumes| volumes.keys().collect::<Vec<_>>()).unwrap_or_default(),
+        "dependency_order": graph.start_batches(),
+        "manual_review": manual_review,
+        "execution": "report-only; no containers, networks, volumes, or images were mutated",
+    });
+    let bytes = serde_json::to_vec_pretty(&report)
+        .map_err(|error| format!("migrate compose-report: {error}"))?;
+    if let Some(output) = output {
+        ferro_core::fs_atomic::write_atomic(output, &bytes)
+            .map_err(|error| format!("migrate compose-report: {error}"))?;
+    } else {
+        println!(
+            "{}",
+            String::from_utf8(bytes).map_err(|error| error.to_string())?
+        );
+    }
     Ok(())
 }
 
@@ -7987,7 +8066,8 @@ mod tests {
         read_http_request, should_desktop_forward, structured_desktop_error,
         top_level_command_name, validate_build_platform, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
+        ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
+        VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8072,6 +8152,28 @@ mod tests {
                 assert!(cpu_period.is_none());
                 assert!(pids_max.is_none());
                 assert!(cap_add.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compose_migration_report_command() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "migrate",
+            "compose-report",
+            "--file",
+            "compose.yaml",
+            "--output",
+            "report.json",
+        ]);
+        match cli.command {
+            Commands::Migrate {
+                target: MigrateCommands::ComposeReport { file, output },
+            } => {
+                assert_eq!(file, std::path::PathBuf::from("compose.yaml"));
+                assert_eq!(output, Some(std::path::PathBuf::from("report.json")));
             }
             other => panic!("unexpected command: {other:?}"),
         }

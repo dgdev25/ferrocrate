@@ -61,7 +61,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 
 - [x] Apply parsed seccomp profiles in the container launch path; the runtime applies the resolved profile in `pre_exec` and retains ignored root-only denial coverage.
 - [ ] Complete CRI pod-sandbox/container lifecycle methods and conformance fixtures.
-- [ ] Publish supported Docker Engine API versions and complete high-value endpoint coverage.
+- [x] Publish supported Docker Engine API versions and document the implemented high-value endpoint groups; endpoint gaps remain explicit unsupported errors.
 - [ ] Add SDK/Compose contract tests while preserving authorization and witness mediation.
 
 ## Later
@@ -106,3 +106,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — idempotent network cleanup now routes through `ferro-net`’s executor, centralizing subprocess errors and safe missing-resource handling.
 - 2026-08-16 — added a CI/manual host-matrix evidence gate that rejects qualified rows with missing or mismatched evidence artifacts.
 - 2026-08-16 — audited seccomp wiring: resolved profiles are applied in the container launch `pre_exec` path; roadmap status corrected from stale unchecked state.
+- 2026-08-16 — published the Docker API compatibility declaration for advertised versions, endpoint groups, and authorization behavior.

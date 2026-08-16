@@ -7,6 +7,7 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use thiserror::Error;
 
 const ALLOWED_PERMISSIONS: &[&str] = &[
@@ -100,6 +101,14 @@ pub enum PluginManifestError {
     SignatureInvalid,
     #[error("plugin manifest canonicalization failed: {0}")]
     Canonicalization(String),
+    #[error("plugin trust root could not be read: {0}")]
+    TrustRootIo(String),
+    #[error("plugin trust root must be a regular owner-only file")]
+    TrustRootPermissions,
+    #[error("plugin trust root must contain exactly 32 raw bytes or 64 hex characters")]
+    TrustRootEncoding,
+    #[error("plugin trust root public key is invalid")]
+    TrustRootKey,
 }
 
 pub fn validate_plugin_manifest(
@@ -159,6 +168,47 @@ pub fn parse_plugin_manifest(bytes: &[u8]) -> Result<PluginManifest, PluginManif
     validate_plugin_manifest(manifest)
 }
 
+/// Load the deployment-selected plugin trust root from an owner-only file.
+///
+/// Accepts either the raw 32-byte Ed25519 public key or its 64-character hex
+/// encoding. Symlinks, group/world-readable files, oversized files, and keys
+/// owned by another uid are rejected before parsing.
+pub fn load_plugin_trust_root(path: &Path) -> Result<VerifyingKey, PluginManifestError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| PluginManifestError::TrustRootIo(error.to_string()))?;
+    if !metadata.file_type().is_file() {
+        return Err(PluginManifestError::TrustRootPermissions);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
+            return Err(PluginManifestError::TrustRootPermissions);
+        }
+    }
+    if metadata.len() > 4096 {
+        return Err(PluginManifestError::TrustRootEncoding);
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| PluginManifestError::TrustRootIo(error.to_string()))?;
+    let raw = if bytes.len() == 32 {
+        bytes
+    } else {
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| PluginManifestError::TrustRootEncoding)?
+            .trim();
+        let decoded = hex::decode(text).map_err(|_| PluginManifestError::TrustRootEncoding)?;
+        if decoded.len() != 32 {
+            return Err(PluginManifestError::TrustRootEncoding);
+        }
+        decoded
+    };
+    let key: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| PluginManifestError::TrustRootEncoding)?;
+    VerifyingKey::from_bytes(&key).map_err(|_| PluginManifestError::TrustRootKey)
+}
+
 /// Verify the detached Ed25519 signature over canonical JSON with the
 /// manifest's signature field cleared. Trust-key selection remains the
 /// deployment authority's responsibility.
@@ -183,7 +233,7 @@ pub fn verify_plugin_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_plugin_manifest, PluginKind, PluginManifestError};
+    use super::{load_plugin_trust_root, parse_plugin_manifest, PluginKind, PluginManifestError};
     use ed25519_dalek::{Signer, SigningKey};
 
     fn valid() -> &'static [u8] {
@@ -242,6 +292,27 @@ mod tests {
         assert_eq!(
             super::verify_plugin_signature(&tampered, &key.verifying_key()).unwrap_err(),
             PluginManifestError::SignatureInvalid
+        );
+    }
+
+    #[test]
+    fn loads_owner_only_hex_trust_root_and_rejects_unsafe_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("plugin-root.pub");
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        std::fs::write(&path, hex::encode(key.verifying_key().to_bytes())).expect("write key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure key");
+        assert_eq!(
+            load_plugin_trust_root(&path).expect("trust root"),
+            key.verifying_key()
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("relax key");
+        assert_eq!(
+            load_plugin_trust_root(&path).unwrap_err(),
+            PluginManifestError::TrustRootPermissions
         );
     }
 }

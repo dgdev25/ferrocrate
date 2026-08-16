@@ -115,7 +115,7 @@ competitive-gap sequence; existing observability and authorization surfaces.
 
 - [ ] Provide a complete durable, filterable event stream distinct from the witness journal; the separate fsynced JSONL stream now projects Docker's core event wire shape with type/action/time/resource filters, Docker's JSON `filters` query form, and `/events` socket coverage, including chunked `follow=1` streaming until client disconnect; full event-attribute parity remains open.
 - [ ] Define versioned log-driver, volume-driver, network-driver, and plugin contracts with capability declarations; a strict v1 manifest parser now validates driver kind, entrypoint safety, allow-listed permissions, and signature metadata, while trust verification and runtime loading remain open.
-- [ ] Add plugin identity, signature/permission, lifecycle, retry, isolation, and resource limits; v1 now verifies canonical Ed25519 signatures, allow-listed permissions, and bounded memory/PID/timeout/output limits, while trust-root selection, lifecycle, and actual sandbox enforcement remain open.
+- [ ] Add plugin identity, signature/permission, lifecycle, retry, isolation, and resource limits; v1 now verifies canonical Ed25519 signatures, allow-listed permissions, bounded memory/PID/timeout/output limits, and owner-only trust-root loading, while lifecycle and actual sandbox enforcement remain open.
 - [ ] Make every plugin mutation a delegated child of a parent authorization decision with durable intent and cleanup provenance.
 - [ ] Add SDK fixtures and compatibility documentation for extension lifecycle and failure behavior.
 

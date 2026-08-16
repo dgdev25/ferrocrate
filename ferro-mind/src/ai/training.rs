@@ -867,6 +867,70 @@ impl TrainingPipeline {
 
         Ok(())
     }
+
+    /// Delete one content-addressed sample. Deletion is intentionally allowed
+    /// even when collection consent is disabled so an operator can honor a
+    /// retention or erasure request after turning collection off.
+    pub fn delete_sample(
+        &self,
+        model_type: ModelType,
+        digest: &str,
+    ) -> Result<bool, TrainingError> {
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(TrainingError::ParseError(
+                "sample digest must be exactly 64 hexadecimal characters".to_string(),
+            ));
+        }
+        let path = self
+            .config
+            .data_dir
+            .join(model_type.to_string())
+            .join(format!("sample_{digest}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(TrainingError::Io(error)),
+        }
+    }
+
+    /// Retain at most `max_samples` corpus files, removing the oldest by
+    /// filesystem modification time with a path tie-breaker for deterministic
+    /// behavior. Returns the number removed.
+    pub fn prune_samples(
+        &self,
+        model_type: ModelType,
+        max_samples: usize,
+    ) -> Result<usize, TrainingError> {
+        let data_dir = self.config.data_dir.join(model_type.to_string());
+        let mut entries = fs::read_dir(&data_dir)
+            .map_err(TrainingError::Io)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .map(|entry| {
+                let path = entry.path();
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (modified, path)
+            })
+            .collect::<Vec<_>>();
+        if entries.len() <= max_samples {
+            return Ok(0);
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let remove_count = entries.len() - max_samples;
+        for (_, path) in entries.into_iter().take(remove_count) {
+            fs::remove_file(path)?;
+        }
+        File::open(&data_dir)?.sync_all()?;
+        Ok(remove_count)
+    }
 }
 
 fn train_resource_predictor(samples: &[Vec<u8>]) -> Result<TrainedModel, TrainingError> {
@@ -2085,6 +2149,64 @@ mod tests {
                 .count(),
             5
         );
+    }
+
+    #[test]
+    fn sample_deletion_and_pruning_remain_available_after_consent_revocation() {
+        let (_temp, config) = setup_test_env();
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let sample_dir = config.data_dir.join("resource-predictor");
+        fs::remove_dir_all(&sample_dir).expect("clear fixture samples");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        let mut digests = Vec::new();
+        for timestamp in 1..=3 {
+            let sample = serde_json::json!({
+                "cpu_percent": timestamp as f32,
+                "memory_bytes": 1024,
+                "pids_count": 2,
+                "timestamp_secs": timestamp
+            });
+            let bytes = sample.to_string().into_bytes();
+            digests.push(format!("{:x}", Sha256::digest(&bytes)));
+            pipeline
+                .record_sample(ModelType::ResourcePredictor, &bytes)
+                .expect("record sample");
+        }
+        let removed = pipeline
+            .delete_sample(ModelType::ResourcePredictor, &digests[0])
+            .expect("delete sample");
+        assert!(removed);
+        assert!(!pipeline
+            .delete_sample(ModelType::ResourcePredictor, &digests[0])
+            .expect("idempotent delete"));
+        assert!(pipeline
+            .delete_sample(ModelType::ResourcePredictor, "not-a-digest")
+            .is_err());
+        assert_eq!(
+            pipeline
+                .prune_samples(ModelType::ResourcePredictor, 1)
+                .expect("prune samples"),
+            1
+        );
+        assert_eq!(
+            fs::read_dir(&sample_dir).expect("sample directory").count(),
+            1
+        );
+        // Deletion remains available after consent is revoked.
+        pipeline.config.data_collection_consent = false;
+        let remaining = fs::read_dir(&sample_dir)
+            .expect("sample directory")
+            .next()
+            .expect("remaining sample")
+            .expect("directory entry")
+            .file_name()
+            .to_string_lossy()
+            .trim_start_matches("sample_")
+            .trim_end_matches(".json")
+            .to_string();
+        assert!(pipeline
+            .delete_sample(ModelType::ResourcePredictor, &remaining)
+            .expect("delete after consent revocation"));
     }
 
     #[test]

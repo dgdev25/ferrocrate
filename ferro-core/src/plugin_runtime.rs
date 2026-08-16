@@ -10,10 +10,12 @@
 
 use crate::plugin_contract::{verify_plugin_signature, PluginManifest};
 use ed25519_dalek::VerifyingKey;
+use std::fs;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,8 @@ pub enum PluginExecutionError {
     Io(#[from] std::io::Error),
     #[error("plugin resource limits are unavailable: {0}")]
     ResourceLimits(String),
+    #[error("plugin cgroup isolation failed: {0}")]
+    Cgroup(String),
     #[error("plugin output exceeded the declared limit")]
     OutputLimit,
 }
@@ -105,6 +109,33 @@ pub fn execute_plugin(
     args: &[String],
     stdin: &[u8],
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
+    execute_plugin_inner(manifest, trust_root, args, stdin, None)
+}
+
+/// Verify and execute a plugin inside a dedicated cgroup-v2 subtree.
+///
+/// `cgroup_root` must be a pre-provisioned writable cgroup-v2 directory. The
+/// executor creates a per-invocation child, applies the manifest's memory and
+/// PID limits, moves the child into it before waiting, and kills the entire
+/// subtree during timeout or cleanup. A missing/unwritable cgroup boundary
+/// fails closed instead of silently degrading to per-process limits.
+pub fn execute_plugin_with_cgroup(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    args: &[String],
+    stdin: &[u8],
+    cgroup_root: &Path,
+) -> Result<PluginExecutionResult, PluginExecutionError> {
+    execute_plugin_inner(manifest, trust_root, args, stdin, Some(cgroup_root))
+}
+
+fn execute_plugin_inner(
+    manifest: &PluginManifest,
+    trust_root: &VerifyingKey,
+    args: &[String],
+    stdin: &[u8],
+    cgroup_root: Option<&Path>,
+) -> Result<PluginExecutionResult, PluginExecutionError> {
     verify_plugin_signature(manifest, trust_root)
         .map_err(|error| PluginExecutionError::Signature(error.to_string()))?;
     let metadata = std::fs::symlink_metadata(&manifest.entrypoint)?;
@@ -120,11 +151,41 @@ pub fn execute_plugin(
         }
     }
 
-    let mut child = plugin_command(manifest, args)?
+    let cgroup = cgroup_root.map(|root| prepare_plugin_cgroup(root, manifest));
+    let cgroup = cgroup.transpose()?;
+    let mut command = match plugin_command(manifest, args) {
+        Ok(command) => command,
+        Err(error) => {
+            if let Some(path) = cgroup.as_ref() {
+                cleanup_plugin_cgroup(path);
+            }
+            return Err(error);
+        }
+    };
+    let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(path) = cgroup.as_ref() {
+                cleanup_plugin_cgroup(path);
+            }
+            return Err(PluginExecutionError::Io(error));
+        }
+    };
+    if let Some(path) = cgroup.as_ref() {
+        if let Err(error) = fs::write(path.join("cgroup.procs"), child.id().to_string()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            cleanup_plugin_cgroup(path);
+            return Err(PluginExecutionError::Cgroup(format!(
+                "move child into cgroup: {error}"
+            )));
+        }
+    }
     if let Some(mut pipe) = child.stdin.take() {
         pipe.write_all(stdin)?;
     }
@@ -152,20 +213,58 @@ pub fn execute_plugin(
         if Instant::now() >= deadline {
             timed_out = true;
             let _ = child.kill();
+            if let Some(path) = cgroup.as_ref() {
+                kill_plugin_cgroup(path);
+            }
             break child.wait()?;
         }
         thread::sleep(Duration::from_millis(5));
     };
-    let stdout = stdout
-        .join()
-        .map_err(|_| std::io::Error::other("plugin stdout reader panicked"))??;
-    let stderr = stderr
-        .join()
-        .map_err(|_| std::io::Error::other("plugin stderr reader panicked"))??;
+    let stdout = match stdout.join() {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            if let Some(path) = cgroup.as_ref() {
+                cleanup_plugin_cgroup(path);
+            }
+            return Err(PluginExecutionError::Io(error));
+        }
+        Err(_) => {
+            if let Some(path) = cgroup.as_ref() {
+                cleanup_plugin_cgroup(path);
+            }
+            return Err(PluginExecutionError::Io(std::io::Error::other(
+                "plugin stdout reader panicked",
+            )));
+        }
+    };
+    let stderr = match stderr.join() {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            if let Some(path) = cgroup.as_ref() {
+                cleanup_plugin_cgroup(path);
+            }
+            return Err(PluginExecutionError::Io(error));
+        }
+        Err(_) => {
+            if let Some(path) = cgroup.as_ref() {
+                cleanup_plugin_cgroup(path);
+            }
+            return Err(PluginExecutionError::Io(std::io::Error::other(
+                "plugin stderr reader panicked",
+            )));
+        }
+    };
     if stdout.len() as u64 > manifest.limits.max_output_bytes
         || stderr.len() as u64 > manifest.limits.max_output_bytes
     {
+        if let Some(path) = cgroup.as_ref() {
+            cleanup_plugin_cgroup(path);
+        }
         return Err(PluginExecutionError::OutputLimit);
+    }
+    if let Some(path) = cgroup.as_ref() {
+        kill_plugin_cgroup(path);
+        cleanup_plugin_cgroup(path);
     }
     Ok(PluginExecutionResult {
         exit_code: status.code().unwrap_or(-1),
@@ -173,6 +272,57 @@ pub fn execute_plugin(
         stderr,
         timed_out,
     })
+}
+
+fn prepare_plugin_cgroup(
+    root: &Path,
+    manifest: &PluginManifest,
+) -> Result<PathBuf, PluginExecutionError> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| PluginExecutionError::Cgroup(format!("open root: {error}")))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(PluginExecutionError::Cgroup(
+            "cgroup root must be a real directory".to_string(),
+        ));
+    }
+    if !root.join("cgroup.controllers").is_file() {
+        return Err(PluginExecutionError::Cgroup(
+            "cgroup root is not a mounted cgroup-v2 hierarchy".to_string(),
+        ));
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = root.join(format!("plugin-{}-{stamp:x}", std::process::id()));
+    fs::create_dir(&path)
+        .map_err(|error| PluginExecutionError::Cgroup(format!("create subtree: {error}")))?;
+    let result = (|| {
+        fs::write(
+            path.join("memory.max"),
+            manifest.limits.memory_bytes.to_string(),
+        )
+        .map_err(|error| PluginExecutionError::Cgroup(format!("set memory.max: {error}")))?;
+        fs::write(path.join("pids.max"), manifest.limits.pids.to_string())
+            .map_err(|error| PluginExecutionError::Cgroup(format!("set pids.max: {error}")))?;
+        Ok(path.clone())
+    })();
+    if result.is_err() {
+        cleanup_plugin_cgroup(&path);
+    }
+    result
+}
+
+fn kill_plugin_cgroup(path: &Path) {
+    let kill = path.join("cgroup.kill");
+    if kill.exists() {
+        let _ = fs::write(kill, b"1");
+    }
+}
+
+fn cleanup_plugin_cgroup(path: &Path) {
+    kill_plugin_cgroup(path);
+    let _ = fs::remove_dir(path);
 }
 
 #[cfg(test)]
@@ -280,5 +430,24 @@ mod tests {
             execute_plugin(&manifest, &key.verifying_key(), &[], b""),
             Err(PluginExecutionError::Entrypoint)
         ));
+    }
+
+    #[test]
+    fn cgroup_execution_fails_closed_when_subtree_controls_are_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let manifest = signed_manifest(&script(&temp, "printf ok"), PluginLimits::default(), &key);
+        let cgroup_root = temp.path().join("cgroup");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        let result =
+            execute_plugin_with_cgroup(&manifest, &key.verifying_key(), &[], b"", &cgroup_root);
+        assert!(
+            matches!(result, Err(PluginExecutionError::Cgroup(_))),
+            "unexpected cgroup result: {result:?}"
+        );
+        assert!(std::fs::read_dir(&cgroup_root)
+            .expect("cgroup root entries")
+            .next()
+            .is_none());
     }
 }

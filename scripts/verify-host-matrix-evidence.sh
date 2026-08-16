@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 manifest="$repo_root/docs/evidence/host-matrix/rows.tsv"
 [[ -r "$manifest" ]] || { echo "matrix manifest is missing: $manifest" >&2; exit 1; }
+bash "$repo_root/scripts/verify-host-matrix-manifest.sh"
 
 failed=0
 while IFS='|' read -r row_id distribution kernel architecture status; do

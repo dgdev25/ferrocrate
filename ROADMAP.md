@@ -29,7 +29,7 @@ Ubuntu row, but the supported-host claim, broader kernel coverage, and some
 network/security qualification gates remain open. *Size:* XL. *Sources:* NET-01,
 NET-04–10; SEC-08/09; `docs/compatibility`; host-matrix evidence.
 
-- [ ] Define the release support matrix (distribution, kernel, architecture, rootful/rootless, required tools, unsupported combinations).
+- [x] Define the release support matrix (distribution, kernel, architecture, rootful/rootless, required tools, unsupported combinations) in `docs/evidence/host-matrix/rows.tsv`; candidates remain non-claims until qualified.
 - [ ] Run and archive bridge, custom-network, IPv4/IPv6, DNS/hosts, firewall/port-map, MTU, `tc`, WireGuard, teardown, and recovery on every supported row.
 - [ ] Qualify rootless networking, volumes, image pulls, and CRI constraints on each supported row; record strict prerequisite failures.
 - [ ] Complete successful kernel-backed eBPF monitoring qualification; retain explicit iptables/nftables fallback and provenance when eBPF is unavailable.
@@ -236,3 +236,4 @@ corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
 ## Update log
 
 - 2026-08-16 `7f36ac6` — consolidated all remaining work from the active roadmap, PRD-backed partials, security audit, RVF plan, platform plan, monetization plan, and compatibility contracts into this single Now/Next/Later backlog.
+- 2026-08-16 — added a six-row host qualification manifest with candidate/qualified/blocked status semantics and a CI-validating manifest gate; only the existing Ubuntu row remains qualified.

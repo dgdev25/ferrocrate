@@ -117,7 +117,7 @@ competitive-gap sequence; existing observability and authorization surfaces.
 - [ ] Define versioned log-driver, volume-driver, network-driver, and plugin contracts with capability declarations; a strict v1 manifest parser now validates driver kind, entrypoint safety, allow-listed permissions, and signature metadata, with trust verification and shell-free runtime loading covered by the v1 executor.
 - [ ] Add plugin identity, signature/permission, lifecycle, retry, isolation, and resource limits; v1 now verifies canonical Ed25519 signatures, allow-listed permissions, bounded memory/PID/timeout/output declarations, owner-only trust-root loading, and a shell-free executor applying Unix address-space limits plus timeout/output bounds, while cgroup PID/descendant isolation and durable lifecycle provenance remain open.
 - [ ] Make every plugin mutation a delegated child of a parent authorization decision with durable intent and cleanup provenance.
-- [ ] Add SDK fixtures and compatibility documentation for extension lifecycle and failure behavior; a canonical v1 log-driver manifest fixture and parser regression now pin the wire shape, while lifecycle failure/SDK behavior coverage remains open.
+- [x] Add SDK fixtures and compatibility documentation for extension lifecycle and failure behavior; the canonical v1 log-driver manifest fixture, parser regression, runtime failure table, and timeout/output/entrypoint regression tests pin the contract, while delegated lifecycle receipts remain a separate authorization-integration item.
 
 ### 8. Performance, reliability, and scale hard gates
 

@@ -26,12 +26,10 @@ veth_a="va$(printf '%s' "$prefix" | sha256sum | cut -c1-9)"
 veth_b="vb$(printf '%s' "$prefix" | sha256sum | cut -c1-9)"
 wg_a="wga$(printf '%s' "$prefix" | sha256sum | cut -c1-8)"
 wg_b="wgb$(printf '%s' "$prefix" | sha256sum | cut -c1-8)"
-state_dir="$(mktemp -d "/tmp/${prefix}.XXXXXX")"
 
 cleanup() {
   ip netns delete "$ns_a" 2>/dev/null || true
   ip netns delete "$ns_b" 2>/dev/null || true
-  rm -rf -- "$state_dir"
 }
 trap cleanup EXIT
 

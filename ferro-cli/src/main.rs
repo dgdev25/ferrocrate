@@ -6962,6 +6962,26 @@ fn handle_docker_compat_connection(
                 let body = serde_json::json!({ "Id": spec.name, "Warning": "" });
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
+            ("POST", "/networks/prune") => {
+                let associations = runtime.list().map_err(|error| error.to_string())?;
+                let records = load_networks(runtime_dir.as_ref())?;
+                let mut deleted = Vec::new();
+                for record in records {
+                    let proof = surface_authorization
+                        .authorize_named(
+                            &origin,
+                            AuthorizationAction::NetworkDelete,
+                            ResourceKind::Network,
+                            &record.name,
+                            record.generation,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    execute_network_remove(runtime_dir.as_ref(), &record, &associations, proof)?;
+                    deleted.push(record.name);
+                }
+                let body = serde_json::json!({"NetworksDeleted": deleted});
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("DELETE", path) if path.starts_with("/networks/") => {
                 let id = path.trim_start_matches("/networks/");
                 handle_network_authorized(

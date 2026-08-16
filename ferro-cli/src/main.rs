@@ -6508,7 +6508,8 @@ fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
         serde_json::json!({
             "ID": resource,
             "Attributes": {
-                "status": event.status,
+                "status": event.action,
+                "httpStatus": event.status.to_string(),
                 "scope": event.scope,
             }
         })
@@ -9543,6 +9544,8 @@ mod tests {
         assert_eq!(payload["Type"], "container");
         assert_eq!(payload["Action"], "start");
         assert_eq!(payload["Actor"]["ID"], "abc123");
+        assert_eq!(payload["Actor"]["Attributes"]["status"], "start");
+        assert_eq!(payload["Actor"]["Attributes"]["httpStatus"], "204");
         assert_eq!(payload["time"], 12);
         assert_eq!(payload["timeNano"], 12_345_678_901u64);
     }

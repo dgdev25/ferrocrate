@@ -34,7 +34,8 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 - [ ] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
 - [x] Implement atomic DNS resolver publication with fsync and exact read-back.
 - [ ] Implement hosts-file and MTU behavior with explicit unsupported-capability errors.
-- [ ] Implement nftables/iptables port mapping and eBPF fallback with provenance and cleanup.
+- [x] Add exact post-effect read-back to direct iptables/nftables rule application and deletion.
+- [ ] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
 - [ ] Implement `tc` bandwidth limits with read-back and recovery tests.
 - [ ] Migrate public runtime paths from direct shelling-out to the execution boundary.
 
@@ -96,3 +97,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — bridge execution now verifies post-effect identity/CIDRs and rolls back on read-back mismatch; the full matrix runner was rerun green.
 - 2026-08-16 — WireGuard apply now verifies expected IPv4/IPv6 routes and removal verifies interface absence.
 - 2026-08-16 — added atomic DNS resolver publication with symlink refusal, fsync, and exact read-back coverage.
+- 2026-08-16 — firewall rule application/deletion now verifies exact iptables presence or nftables handles after each mutation.

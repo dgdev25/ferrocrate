@@ -70,13 +70,27 @@ pub fn build_iptables_delete_cmd(rule: &IptablesRule) -> Result<Vec<String>, Str
     Ok(cmd)
 }
 
+fn build_iptables_check_cmd(rule: &IptablesRule) -> Result<Vec<String>, String> {
+    rule.validate()?;
+    let mut cmd = vec!["iptables".to_string(), "-t".to_string(), rule.table.clone()];
+    cmd.push("-C".to_string());
+    cmd.push(rule.chain.clone());
+    cmd.extend(rule.args.clone());
+    Ok(cmd)
+}
+
 pub fn apply_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
     crate::executor::HostCapabilities::probe().require_network_mutation()?;
     let cmd = build_iptables_cmd(rule).map_err(|err| ExecError::CommandFailed {
         cmd: "iptables build".to_string(),
         stderr: err,
     })?;
-    exec_cmd(&cmd)
+    exec_cmd(&cmd)?;
+    let check = build_iptables_check_cmd(rule).map_err(|err| ExecError::CommandFailed {
+        cmd: "iptables check build".to_string(),
+        stderr: err,
+    })?;
+    exec_cmd(&check)
 }
 
 pub fn delete_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
@@ -85,12 +99,26 @@ pub fn delete_iptables_rule(rule: &IptablesRule) -> Result<(), ExecError> {
         cmd: "iptables delete build".to_string(),
         stderr: err,
     })?;
-    exec_cmd(&cmd)
+    exec_cmd(&cmd)?;
+    let check = build_iptables_check_cmd(rule).map_err(|err| ExecError::CommandFailed {
+        cmd: "iptables check build".to_string(),
+        stderr: err,
+    })?;
+    match exec_cmd(&check) {
+        Err(ExecError::CommandFailed { .. }) => Ok(()),
+        Ok(()) => Err(ExecError::CommandFailed {
+            cmd: check.join(" "),
+            stderr: "rule remained after deletion".into(),
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_iptables_cmd, build_iptables_delete_cmd, IptablesRule};
+    use super::{
+        build_iptables_check_cmd, build_iptables_cmd, build_iptables_delete_cmd, IptablesRule,
+    };
 
     #[test]
     fn builds_iptables_command() {
@@ -154,5 +182,18 @@ mod tests {
             args: vec!["-p".to_string(), "tcp; rm -rf /".to_string()],
         };
         assert!(build_iptables_cmd(&rule).is_err());
+    }
+
+    #[test]
+    fn builds_exact_rule_check_command() {
+        let rule = IptablesRule {
+            table: "nat".into(),
+            chain: "PREROUTING".into(),
+            args: vec!["-p".into(), "tcp".into()],
+        };
+        assert_eq!(
+            build_iptables_check_cmd(&rule).unwrap(),
+            vec!["iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp"]
+        );
     }
 }

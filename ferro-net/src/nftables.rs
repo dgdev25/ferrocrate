@@ -129,7 +129,26 @@ pub fn apply_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
         cmd: "nft add build".to_string(),
         stderr: err,
     })?;
-    exec_cmd(&cmd)
+    exec_cmd(&cmd)?;
+    let list_cmd =
+        build_nft_list_chain_with_handles_cmd(rule).map_err(|err| ExecError::CommandFailed {
+            cmd: "nft list build".to_string(),
+            stderr: err,
+        })?;
+    let output = exec_cmd_capture(&list_cmd)?;
+    if nft_rule_handles_from_list(&output, rule)
+        .map_err(|err| ExecError::CommandFailed {
+            cmd: "nft handle parse".to_string(),
+            stderr: err,
+        })?
+        .is_empty()
+    {
+        return Err(ExecError::CommandFailed {
+            cmd: list_cmd.join(" "),
+            stderr: "rule missing after insertion".into(),
+        });
+    }
+    Ok(())
 }
 
 pub fn delete_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
@@ -153,6 +172,19 @@ pub fn delete_nft_rule(rule: &NftRule) -> Result<(), ExecError> {
             }
         })?;
         exec_cmd(&cmd)?;
+    }
+    let remaining = exec_cmd_capture(&list_cmd)?;
+    if !nft_rule_handles_from_list(&remaining, rule)
+        .map_err(|err| ExecError::CommandFailed {
+            cmd: "nft handle parse".to_string(),
+            stderr: err,
+        })?
+        .is_empty()
+    {
+        return Err(ExecError::CommandFailed {
+            cmd: list_cmd.join(" "),
+            stderr: "rule remained after deletion".into(),
+        });
     }
     Ok(())
 }

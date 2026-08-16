@@ -127,7 +127,7 @@ PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
 
 - [ ] Establish baselines and enforce thresholds for startup, warm start, pull, build, idle RSS, per-container overhead, binary size, and AI latency; the repeatable collector and strict verifier now cover these metrics plus Docker/OCI/rootless evidence, while archived cross-host baselines remain open.
 - [ ] Optimize image extraction, network setup, memory overhead, and parallel operations against those baselines.
-- [ ] Add sustained-load tests (100+ containers), resource exhaustion, daemon crash, OOM, interrupted network, disk-full, and kernel-effect fault matrices.
+- [ ] Add sustained-load tests (100+ containers), resource exhaustion, daemon crash, OOM, interrupted network, disk-full, and kernel-effect fault matrices; `scripts/reliability-matrix.sh` now aggregates the existing crash, journal-disk, checkpoint, network-recovery, CRI-restart, and helper-grant fault suites, while sustained-load and host-kernel chaos remain open.
 - [ ] Verify AI-disabled graceful degradation and ensure AI monitoring overhead stays within the published budget.
 - [ ] Add backup/restore, upgrade/downgrade, disaster-recovery, and capacity-planning tests and operator runbooks.
 

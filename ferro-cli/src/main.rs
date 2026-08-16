@@ -6302,6 +6302,8 @@ struct DockerCompatState {
 struct DockerEvent {
     id: u64,
     time: u64,
+    #[serde(default)]
+    time_nano: u64,
     event_type: String,
     action: String,
     scope: String,
@@ -6348,12 +6350,13 @@ impl DockerEventStore {
             return Ok(());
         };
         let resource = docker_event_resource(path);
+        let timestamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         let event = DockerEvent {
             id: self.next_id,
-            time: SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            time: timestamp.as_secs(),
+            time_nano: timestamp.as_nanos().min(u64::MAX as u128) as u64,
             event_type: event_type.to_string(),
             action,
             scope: "local".to_string(),
@@ -6493,7 +6496,11 @@ fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
             }
         })
     });
-    let time_nano = event.time.saturating_mul(1_000_000_000);
+    let time_nano = if event.time_nano == 0 {
+        event.time.saturating_mul(1_000_000_000)
+    } else {
+        event.time_nano
+    };
     serde_json::json!({
         "Type": event.event_type,
         "Action": event.action,
@@ -9508,6 +9515,7 @@ mod tests {
         let event = DockerEvent {
             id: 4,
             time: 12,
+            time_nano: 12_345_678_901,
             event_type: "container".to_string(),
             action: "start".to_string(),
             scope: "local".to_string(),
@@ -9519,7 +9527,7 @@ mod tests {
         assert_eq!(payload["Action"], "start");
         assert_eq!(payload["Actor"]["ID"], "abc123");
         assert_eq!(payload["time"], 12);
-        assert_eq!(payload["timeNano"], 12_000_000_000u64);
+        assert_eq!(payload["timeNano"], 12_345_678_901u64);
     }
 
     #[test]

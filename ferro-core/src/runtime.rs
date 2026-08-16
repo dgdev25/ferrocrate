@@ -5007,16 +5007,20 @@ fn setup_network(
     // it would collide with the host's own eth0 (common on VMs/cloud) → EEXIST.
     // Create it with a unique name, move it into the netns, then rename to eth0 there.
     let cont_veth = format!("vc{}", short_id(container_id, 8));
+    let veth_mtu = configured_veth_mtu()?;
     let veth_config = veth::VethConfig {
         pair: veth::VethPair {
             host: host_veth.clone(),
             container: cont_veth.clone(),
         },
-        mtu: None,
+        mtu: veth_mtu,
         host_addr: None,
         container_addr: None,
     };
     run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config)?)?;
+    if let Some(expected_mtu) = veth_mtu {
+        verify_interface_mtu(&host_veth, expected_mtu)?;
+    }
     rollback.track_veth_created(host_veth.clone())?;
     let host_ifindex = interface_ifindex(&host_veth)?;
     rollback.identify_veth(host_ifindex)?;
@@ -5179,6 +5183,44 @@ fn setup_network(
         managed_cleanup_provenance: None,
         managed_host_veth: None,
     })
+}
+
+fn configured_veth_mtu() -> Result<Option<u32>, RuntimeError> {
+    let Some(value) = std::env::var("FERROCRATE_VETH_MTU").ok() else {
+        return Ok(None);
+    };
+    let mtu = value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| RuntimeError::Network("FERROCRATE_VETH_MTU must be an integer".into()))?;
+    if !(576..=65_535).contains(&mtu) {
+        return Err(RuntimeError::Network(
+            "FERROCRATE_VETH_MTU must be between 576 and 65535".into(),
+        ));
+    }
+    Ok(Some(mtu))
+}
+
+fn verify_interface_mtu(interface: &str, expected: u32) -> Result<(), RuntimeError> {
+    let output = run_cmd_capture(&[
+        "ip".into(),
+        "-j".into(),
+        "link".into(),
+        "show".into(),
+        "dev".into(),
+        interface.into(),
+    ])?;
+    let mtu = serde_json::from_str::<serde_json::Value>(&output)
+        .ok()
+        .and_then(|value| value.as_array().and_then(|rows| rows.first().cloned()))
+        .and_then(|row| row.get("mtu").and_then(serde_json::Value::as_u64))
+        .and_then(|value| u32::try_from(value).ok());
+    if mtu != Some(expected) {
+        return Err(RuntimeError::Network(format!(
+            "interface {interface} MTU read-back mismatch: expected {expected}, got {mtu:?}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -11057,6 +11099,15 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(err.to_string().contains("positive integer"));
         let err = super::validate_bandwidth_limit("100").expect_err("missing unit");
         assert!(err.to_string().contains("must end with"));
+    }
+
+    #[test]
+    fn veth_mtu_validation_rejects_unsafe_values() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe { std::env::set_var("FERROCRATE_VETH_MTU", "500") };
+        let error = super::configured_veth_mtu().expect_err("invalid MTU");
+        assert!(error.to_string().contains("between 576 and 65535"));
+        unsafe { std::env::remove_var("FERROCRATE_VETH_MTU") };
     }
 
     #[test]

@@ -33,7 +33,7 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 - [x] Extend read-back verification and rollback coverage to WireGuard route installation and interface teardown.
 - [x] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
 - [x] Implement atomic DNS resolver publication with fsync and exact read-back.
-- [ ] Implement MTU behavior with explicit unsupported-capability errors.
+- [x] Implement configurable veth MTU behavior (`FERROCRATE_VETH_MTU`) with range validation and exact `ip -j` read-back.
 - [x] Publish container hosts files atomically with symlink refusal and exact read-back.
 - [x] Add exact post-effect read-back to direct iptables/nftables rule application and deletion.
 - [x] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
@@ -102,3 +102,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — traffic-control mutation now requires the shared host capability gate and verifies the requested TBF rate exactly; the existing runtime port-map/eBPF paths are recorded as the production integration boundary.
 - 2026-08-16 — container hosts publication now uses an atomic, symlink-safe, fsynced write with exact read-back; resolver publication uses the shared atomic DNS writer.
 - 2026-08-16 — nftables and traffic-control read-back now use the shared `ferro-net` command-capture executor instead of runtime-local subprocess handling.
+- 2026-08-16 — bridge-mode veth creation accepts a validated `FERROCRATE_VETH_MTU` and fails closed when kernel read-back does not report the requested MTU.

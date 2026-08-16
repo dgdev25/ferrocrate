@@ -1,0 +1,186 @@
+//! Domain-separated Merkle inclusion proofs for witness record hashes.
+//!
+//! The tree is an additive transparency primitive: leaves are already
+//! canonical witness-record hashes, so this module never hashes a JSON view.
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+const LEAF_DOMAIN: &[u8] = b"FERROCRATE-WITNESS-MERKLE-LEAF-V1";
+const NODE_DOMAIN: &[u8] = b"FERROCRATE-WITNESS-MERKLE-NODE-V1";
+pub const MAX_LEAVES: usize = 1 << 20;
+pub const MAX_PROOF_DEPTH: usize = 64;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MerkleError {
+    #[error("Merkle tree requires at least one leaf")]
+    Empty,
+    #[error("Merkle tree exceeds {MAX_LEAVES} leaves")]
+    TooManyLeaves,
+    #[error("Merkle leaf index is out of range")]
+    IndexOutOfRange,
+    #[error("Merkle proof exceeds {MAX_PROOF_DEPTH} levels")]
+    ProofTooDeep,
+    #[error("Merkle proof root does not match")]
+    RootMismatch,
+}
+
+/// A self-contained inclusion proof for one witness record hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MerkleProof {
+    pub leaf: [u8; 32],
+    pub index: u64,
+    pub tree_size: u64,
+    pub siblings: Vec<[u8; 32]>,
+    pub root: [u8; 32],
+}
+
+fn leaf_hash(leaf: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(LEAF_DOMAIN);
+    hasher.update(leaf);
+    hasher.finalize().into()
+}
+
+fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(NODE_DOMAIN);
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
+fn checked_leaves(leaves: &[[u8; 32]]) -> Result<(), MerkleError> {
+    if leaves.is_empty() {
+        return Err(MerkleError::Empty);
+    }
+    if leaves.len() > MAX_LEAVES {
+        return Err(MerkleError::TooManyLeaves);
+    }
+    Ok(())
+}
+
+fn next_level(level: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    level
+        .chunks(2)
+        .map(|pair| node_hash(&pair[0], pair.get(1).unwrap_or(&pair[0])))
+        .collect()
+}
+
+/// Compute the transparency root for canonical witness record hashes.
+pub fn root(leaves: &[[u8; 32]]) -> Result<[u8; 32], MerkleError> {
+    checked_leaves(leaves)?;
+    let mut level = leaves.iter().map(leaf_hash).collect::<Vec<_>>();
+    while level.len() > 1 {
+        level = next_level(&level);
+    }
+    Ok(level[0])
+}
+
+/// Produce an inclusion proof for `index`.
+pub fn prove(leaves: &[[u8; 32]], index: usize) -> Result<MerkleProof, MerkleError> {
+    checked_leaves(leaves)?;
+    if index >= leaves.len() {
+        return Err(MerkleError::IndexOutOfRange);
+    }
+
+    let mut level = leaves.iter().map(leaf_hash).collect::<Vec<_>>();
+    let mut cursor = index;
+    let mut siblings = Vec::new();
+    while level.len() > 1 {
+        let sibling = if cursor % 2 == 0 {
+            level.get(cursor + 1).copied().unwrap_or(level[cursor])
+        } else {
+            level[cursor - 1]
+        };
+        siblings.push(sibling);
+        if siblings.len() > MAX_PROOF_DEPTH {
+            return Err(MerkleError::ProofTooDeep);
+        }
+        cursor /= 2;
+        level = next_level(&level);
+    }
+
+    Ok(MerkleProof {
+        leaf: leaves[index],
+        index: index as u64,
+        tree_size: leaves.len() as u64,
+        siblings,
+        root: level[0],
+    })
+}
+
+/// Verify an inclusion proof without access to the original tree.
+pub fn verify(proof: &MerkleProof) -> Result<(), MerkleError> {
+    if proof.tree_size == 0 || proof.index >= proof.tree_size {
+        return Err(MerkleError::IndexOutOfRange);
+    }
+    if proof.siblings.len() > MAX_PROOF_DEPTH {
+        return Err(MerkleError::ProofTooDeep);
+    }
+    let mut hash = leaf_hash(&proof.leaf);
+    let mut cursor = proof.index as usize;
+    for sibling in &proof.siblings {
+        hash = if cursor % 2 == 0 {
+            node_hash(&hash, sibling)
+        } else {
+            node_hash(sibling, &hash)
+        };
+        cursor /= 2;
+    }
+    if hash == proof.root {
+        Ok(())
+    } else {
+        Err(MerkleError::RootMismatch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaves(count: usize) -> Vec<[u8; 32]> {
+        (0..count)
+            .map(|value| {
+                let mut leaf = [0u8; 32];
+                leaf[..8].copy_from_slice(&(value as u64).to_be_bytes());
+                leaf
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inclusion_proofs_verify_for_even_and_odd_trees() {
+        for count in [1, 2, 3, 7, 8, 17] {
+            let records = leaves(count);
+            let tree_root = root(&records).expect("root");
+            for index in 0..count {
+                let proof = prove(&records, index).expect("proof");
+                assert_eq!(proof.root, tree_root);
+                verify(&proof).expect("verify");
+            }
+        }
+    }
+
+    #[test]
+    fn tampered_leaf_or_sibling_is_rejected() {
+        let records = leaves(5);
+        let mut proof = prove(&records, 2).expect("proof");
+        proof.leaf[0] ^= 1;
+        assert_eq!(verify(&proof), Err(MerkleError::RootMismatch));
+
+        let mut proof = prove(&records, 2).expect("proof");
+        proof.siblings[0][0] ^= 1;
+        assert_eq!(verify(&proof), Err(MerkleError::RootMismatch));
+    }
+
+    #[test]
+    fn bounds_are_fail_closed() {
+        assert_eq!(root(&[]), Err(MerkleError::Empty));
+        assert_eq!(prove(&leaves(2), 2), Err(MerkleError::IndexOutOfRange));
+        let mut proof = prove(&leaves(2), 0).expect("proof");
+        proof.tree_size = 0;
+        assert_eq!(verify(&proof), Err(MerkleError::IndexOutOfRange));
+    }
+}

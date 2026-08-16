@@ -22,6 +22,7 @@ mod checkpoint_evidence;
 mod encoding;
 mod journal;
 mod keys;
+mod merkle;
 mod reader;
 mod recovery;
 mod validation;
@@ -40,6 +41,9 @@ pub use journal::{
     JournalMode, RecoveryClassification, WitnessJournal,
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
+pub use merkle::{
+    prove as merkle_prove, root as merkle_root, verify as merkle_verify, MerkleError, MerkleProof,
+};
 pub use reader::WitnessReader;
 pub(crate) use recovery::RecoveryEvidence;
 pub use recovery::{

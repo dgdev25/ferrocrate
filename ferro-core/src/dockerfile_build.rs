@@ -1355,6 +1355,13 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
 
 fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildError> {
     let trimmed = raw.trim();
+    for mount_type in ["secret", "ssh", "cache"] {
+        if trimmed.contains(&format!("--mount=type={mount_type}")) {
+            return Err(DockerfileBuildError::Unsupported(format!(
+                "RUN --mount=type={mount_type} is not supported"
+            )));
+        }
+    }
     if trimmed.starts_with('[') {
         let args = parse_json_array(trimmed)?;
         return Ok(RunSpec {
@@ -1889,7 +1896,7 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         build_from_dockerfile_with_store_and_compression, dockerignore_matches, export_build_cache,
-        import_build_cache, load_build_cache, parse_stages, prepare_dockerfile_build,
+        import_build_cache, load_build_cache, parse_run, parse_stages, prepare_dockerfile_build,
         prune_build_cache, save_build_cache, BuildCacheEntry,
     };
     use std::collections::HashMap;
@@ -2103,6 +2110,18 @@ mod tests {
             stage.entrypoint.clone().expect("entrypoint"),
             vec!["/bin/bash", "-lc", "echo bye"]
         );
+    }
+
+    #[test]
+    fn run_mount_features_fail_closed_until_secret_handling_exists() {
+        for mount_type in ["secret", "ssh", "cache"] {
+            let error = parse_run(
+                &format!("--mount=type={mount_type} echo value"),
+                &["/bin/sh".into(), "-c".into()],
+            )
+            .expect_err("unsupported mount must not be executed");
+            assert!(error.to_string().contains("not supported"));
+        }
     }
 
     #[test]

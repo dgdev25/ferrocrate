@@ -4173,6 +4173,39 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Commands::Images { format } => {
             request("GET", "/images/json".to_string()).and_then(|body| print_json(body, format))
         }
+        Commands::Rmi { image } => (|| -> Result<(), String> {
+            let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
+            request(
+                "DELETE",
+                format!("/images/{}", percent_encode_path_component(&canonical)),
+            )
+            .map(|_| ())
+        })(),
+        Commands::ImagePrune => request("POST", "/images/prune".to_string()).map(|body| {
+            if !body.is_empty() {
+                println!("{}", String::from_utf8_lossy(&body));
+            }
+        }),
+        Commands::Pull { image, lazy } => (|| -> Result<(), String> {
+            let parsed = ferro_core::registry::parse_image_reference(image)
+                .map_err(|error| error.to_string())?;
+            let from_image = format!("{}/{}", parsed.registry, parsed.repository);
+            let mut path = format!(
+                "/images/create?fromImage={}",
+                percent_encode_path_component(&from_image)
+            );
+            if matches!(
+                parsed.separator,
+                ferro_core::registry::ReferenceSeparator::Tag
+            ) {
+                path.push_str("&tag=");
+                path.push_str(&percent_encode_path_component(&parsed.reference));
+            }
+            if *lazy {
+                path.push_str("&lazy=1");
+            }
+            request("POST", path).map(|_| println!("pull: image={}", parsed.canonical()))
+        })(),
         Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
             .and_then(|body| print_json(body, format)),
         Commands::Inspect { container, format } => request(
@@ -8931,7 +8964,10 @@ fn handle_docker_compat_connection(
                 } else {
                     from_image.to_string()
                 };
-                handle_pull_authorized(&store, &reference, false, &origin, &surface_authorization)?;
+                let lazy = query
+                    .get("lazy")
+                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+                handle_pull_authorized(&store, &reference, lazy, &origin, &surface_authorization)?;
                 http_response(200, b"{}", "application/json")
             }
             ("POST", "/images/prune") => {

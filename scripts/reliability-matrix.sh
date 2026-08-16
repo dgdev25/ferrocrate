@@ -31,6 +31,10 @@ run_case cri-restart-and-wire \
   cargo test -p ferro-cri --offline --test socket_integration -- --test-threads=1
 run_case helper-grant-recovery \
   cargo test -p ferro-netd --offline --test transaction_fault_matrix -- --test-threads=1
+run_case sustained-process-lifecycle \
+  env FERROCRATE_SUSTAINED_COUNT="${FERROCRATE_SUSTAINED_COUNT:-100}" \
+  cargo test -p ferro-core --offline --test container_lifecycle \
+  lifecycle_handles_100_concurrent_processes -- --ignored --exact --test-threads=1
 
 if rg -q $'\tfail$' "$manifest"; then
   echo "reliability matrix failed; inspect $output_dir" >&2

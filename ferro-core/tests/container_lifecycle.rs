@@ -52,3 +52,27 @@ fn lifecycle_exec_command_builder_targets_process() {
     proc.stop(Duration::from_millis(200))
         .expect("process cleanup should succeed");
 }
+
+#[test]
+#[ignore = "sustained reliability gate"]
+fn lifecycle_handles_100_concurrent_processes() {
+    let count = std::env::var("FERROCRATE_SUSTAINED_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 256);
+    let mut processes = Vec::with_capacity(count);
+    for _ in 0..count {
+        processes
+            .push(ManagedProcess::start("sleep", &["5"]).expect("sustained process should start"));
+    }
+    assert!(processes
+        .iter()
+        .all(|process| process.state() == ProcessState::Running));
+    for process in &mut processes {
+        process
+            .stop(Duration::from_millis(500))
+            .expect("sustained process should stop");
+        assert_eq!(process.state(), ProcessState::Exited);
+    }
+}

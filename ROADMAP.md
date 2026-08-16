@@ -208,7 +208,7 @@ corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
 *Sources:* legacy roadmap Phase 7, README, release scripts.
 
 - [ ] Publish production deployment, high-availability, backup/DR, monitoring, alerting, capacity, security, troubleshooting, FAQ, and glossary guides. Backup/DR and capacity planning are documented in `docs/operations/disaster-recovery.md`; Compose migration report operation is documented in `docs/operations/docker-migration.md`, while HA, alerting, and full migration execution guides remain open.
-- [ ] Publish CLI, Docker API, Compose, CRI, networking, rootless, plugin, and migration references.
+- [ ] Publish CLI, Docker API, Compose, CRI, networking, rootless, plugin, and migration references; `docs/compatibility/reference-index.md` now provides a single status-aware index to the current contracts and evidence, while the individual reference guides and remaining parity gates stay open.
 - [ ] Automate semantic versioning, changelog/release notes, signed artifacts, package repositories, and upgrade guides; channel packaging now rejects non-semver release tags before mutation, and the tag-triggered workflow now invokes the verified builder, channel verifier, and atomic grouped changelog generator; signatures, publication repositories, and upgrade automation remain open.
 - [ ] Add ecosystem examples, compatibility fixtures, support policy, and a public evidence index for every advertised platform.
 

@@ -4516,7 +4516,11 @@ fn build_command(
         netns_cmd
     } else if unshare_netns {
         let mut unshare_cmd = Command::new("unshare");
-        unshare_cmd.arg("-n").arg("--");
+        // Creating a network namespace alone is not permitted for an
+        // unprivileged caller. Pair it with a user namespace. Avoid invoking
+        // setuid mapping helpers after no_new_privs is installed; callers
+        // needing subordinate-ID mappings use the authenticated mapping path.
+        unshare_cmd.args(["--user", "--net", "--fork", "--"]);
         unshare_cmd.arg(&cmd[0]);
         unshare_cmd.args(&cmd[1..]);
         unshare_cmd
@@ -11647,6 +11651,35 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn rootless_bridge_accepts_slirp_without_privileged_mutations() {
         super::validate_rootless_bridge_network(true, false, NetworkBackend::Nftables)
             .expect("enabled slirp bridge should be admitted");
+    }
+
+    #[test]
+    fn rootless_command_creates_user_and_network_namespaces_together() {
+        let command = super::build_command(
+            &["/bin/true".into()],
+            &[],
+            None,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .expect("rootless command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.ends_with(&[
+            "unshare".to_string(),
+            "--user".to_string(),
+            "--net".to_string(),
+            "--fork".to_string(),
+            "--".to_string(),
+            "/bin/true".to_string(),
+        ]));
     }
 
     #[test]

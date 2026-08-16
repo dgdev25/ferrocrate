@@ -19,7 +19,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 #[cfg(feature = "rvf-persistence")]
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -232,6 +232,9 @@ pub enum TrainingError {
     #[error("No active model for rollback")]
     NoActiveModel,
 
+    #[error("invalid model version history: {0}")]
+    InvalidVersionHistory(String),
+
     #[error("Parse error: {0}")]
     ParseError(String),
 }
@@ -339,6 +342,38 @@ impl TrainingPipeline {
             let file = File::open(&versions_file)?;
             let reader = BufReader::new(file);
             let versions: Vec<ModelVersion> = serde_json::from_reader(reader)?;
+            let mut seen = std::collections::HashSet::new();
+            let mut active = 0usize;
+            for version in &versions {
+                if version.model_type != model_type.to_string() {
+                    return Err(TrainingError::InvalidVersionHistory(format!(
+                        "{} contains {} metadata",
+                        versions_file.display(),
+                        version.model_type
+                    )));
+                }
+                if version.version == 0 || !seen.insert(version.version) {
+                    return Err(TrainingError::InvalidVersionHistory(format!(
+                        "duplicate or zero version in {}",
+                        versions_file.display()
+                    )));
+                }
+                if version.active {
+                    active += 1;
+                    if !version.path.is_file() {
+                        return Err(TrainingError::InvalidVersionHistory(format!(
+                            "active artifact is missing: {}",
+                            version.path.display()
+                        )));
+                    }
+                }
+            }
+            if active > 1 {
+                return Err(TrainingError::InvalidVersionHistory(format!(
+                    "multiple active versions in {}",
+                    versions_file.display()
+                )));
+            }
             Ok(versions.into_iter().collect())
         } else {
             Ok(VecDeque::new())
@@ -352,9 +387,14 @@ impl TrainingPipeline {
             fs::create_dir_all(&dir)?;
 
             let versions_file = dir.join("versions.json");
-            let file = File::create(&versions_file)?;
-            let writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(writer, versions)?;
+            let temporary = dir.join("versions.json.tmp");
+            let file = File::create(&temporary)?;
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer_pretty(&mut writer, versions)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            fs::rename(&temporary, &versions_file)?;
+            File::open(dir)?.sync_all()?;
         }
         Ok(())
     }
@@ -591,6 +631,13 @@ impl TrainingPipeline {
                 .versions
                 .get_mut(&model_type)
                 .expect("versions should exist (checked above)");
+
+            if !versions[target_idx].path.is_file() {
+                return Err(TrainingError::InvalidVersionHistory(format!(
+                    "rollback artifact is missing: {}",
+                    versions[target_idx].path.display()
+                )));
+            }
 
             // Deactivate all and activate target
             for v in versions.iter_mut() {
@@ -1504,6 +1551,71 @@ mod tests {
         let (_temp, config) = setup_test_env();
         let pipeline = TrainingPipeline::new(config);
         assert!(pipeline.is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_active_artifact_in_version_history() {
+        let (_temp, config) = setup_test_env();
+        let dir = config
+            .models_dir
+            .join(ModelType::ResourcePredictor.to_string());
+        fs::create_dir_all(&dir).expect("model directory");
+        let metadata = serde_json::json!([{
+            "model_type": "resource-predictor",
+            "version": 1,
+            "trained_at": "2026-01-01T00:00:00Z",
+            "samples_count": 3,
+            "loss": 0.1,
+            "path": dir.join("missing.bin"),
+            "active": true
+        }]);
+        fs::write(
+            dir.join("versions.json"),
+            serde_json::to_vec(&metadata).expect("metadata"),
+        )
+        .expect("write metadata");
+
+        let error = match TrainingPipeline::new(config) {
+            Err(error) => error,
+            Ok(_) => panic!("missing artifact must fail closed"),
+        };
+        assert!(matches!(error, TrainingError::InvalidVersionHistory(_)));
+    }
+
+    #[test]
+    fn rejects_multiple_active_versions() {
+        let (_temp, config) = setup_test_env();
+        let dir = config
+            .models_dir
+            .join(ModelType::ResourcePredictor.to_string());
+        fs::create_dir_all(&dir).expect("model directory");
+        for version in [1, 2] {
+            fs::write(dir.join(format!("model_v{version}.bin")), b"model").expect("artifact");
+        }
+        let metadata = (1..=2)
+            .map(|version| {
+                serde_json::json!({
+                    "model_type": "resource-predictor",
+                    "version": version,
+                    "trained_at": "2026-01-01T00:00:00Z",
+                    "samples_count": 3,
+                    "loss": 0.1,
+                    "path": dir.join(format!("model_v{version}.bin")),
+                    "active": true
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            dir.join("versions.json"),
+            serde_json::to_vec(&metadata).expect("metadata"),
+        )
+        .expect("write metadata");
+
+        let error = match TrainingPipeline::new(config) {
+            Err(error) => error,
+            Ok(_) => panic!("ambiguous active model"),
+        };
+        assert!(matches!(error, TrainingError::InvalidVersionHistory(_)));
     }
 
     #[test]

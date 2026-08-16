@@ -8,9 +8,9 @@ use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
 use ferro_cri::runtime::{
     ContainerConfig, ContainerStatusRequest, CreateContainerRequest, ImageFsInfoRequest,
-    ListImagesRequest, PodSandboxConfig, PodSandboxMetadata, RemoveContainerRequest,
-    RemovePodSandboxRequest, RunPodSandboxRequest, StartContainerRequest, StatusRequest,
-    StopPodSandboxRequest, VersionRequest,
+    ListImagesRequest, PodSandboxConfig, PodSandboxMetadata, PodSandboxStatusRequest,
+    RemoveContainerRequest, RemovePodSandboxRequest, RunPodSandboxRequest, StartContainerRequest,
+    StatusRequest, StopPodSandboxRequest, VersionRequest,
 };
 use ferro_cri::runtime::{ImageSpec, PullImageRequest, RemoveImageRequest};
 use ferro_cri::server::{
@@ -646,6 +646,165 @@ async fn cri_process_kill_recovers_sqlite_metadata_on_restart() {
         .expect("remove recovered sandbox");
     restarted.kill().expect("stop restarted CRI daemon");
     let _ = restarted.wait();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_process_kill_operation_matrix_reopens_each_durable_transition() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-operation-matrix.sock");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "matrix-pod".into(),
+                    uid: "matrix-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "matrix-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("run sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+
+    // Kill immediately after the sandbox transition and prove that the
+    // replacement daemon recovered the durable record before the next RPC.
+    daemon.kill().expect("kill after sandbox create");
+    let _ = daemon.wait();
+    daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox_status = client
+        .pod_sandbox_status(PodSandboxStatusRequest {
+            pod_sandbox_id: sandbox.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("sandbox status after restart")
+        .into_inner()
+        .status
+        .expect("sandbox record");
+    assert_eq!(sandbox_status.id, sandbox);
+
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox.clone(),
+            config: Some(ContainerConfig {
+                metadata_name: "matrix-container".into(),
+                image: "missing:latest".into(),
+                command: vec!["true".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("create container")
+        .into_inner()
+        .container_id;
+
+    // Kill after container persistence and verify both records survive.
+    daemon.kill().expect("kill after container create");
+    let _ = daemon.wait();
+    daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = client
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("container status after restart")
+        .into_inner()
+        .status
+        .expect("container record");
+    assert_eq!(status.id, container);
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Created as i32
+    );
+
+    client
+        .stop_pod_sandbox(StopPodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("stop sandbox");
+    daemon.kill().expect("kill after sandbox stop");
+    let _ = daemon.wait();
+    daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let stopped = client
+        .pod_sandbox_status(PodSandboxStatusRequest {
+            pod_sandbox_id: sandbox.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("stopped sandbox status after restart")
+        .into_inner()
+        .status
+        .expect("stopped sandbox record");
+    assert_eq!(
+        stopped.state,
+        ferro_cri::runtime::PodSandboxState::Notready as i32
+    );
+
+    client
+        .remove_container(RemoveContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect("remove container");
+    daemon.kill().expect("kill after container remove");
+    let _ = daemon.wait();
+    daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let removed_container = client
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect_err("removed container must remain absent after restart");
+    assert_eq!(removed_container.code(), tonic::Code::NotFound);
+
+    client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("remove sandbox");
+    daemon.kill().expect("kill after sandbox remove");
+    let _ = daemon.wait();
+    daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let removed_sandbox = client
+        .pod_sandbox_status(PodSandboxStatusRequest {
+            pod_sandbox_id: sandbox,
+            verbose: false,
+        })
+        .await
+        .expect_err("removed sandbox must remain absent after restart");
+    assert_eq!(removed_sandbox.code(), tonic::Code::NotFound);
+
+    daemon.kill().expect("stop matrix daemon");
+    let _ = daemon.wait();
 }
 
 fn seed_runnable_fixture_image(runtime_dir: &Path) {

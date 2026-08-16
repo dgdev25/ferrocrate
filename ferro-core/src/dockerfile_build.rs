@@ -28,7 +28,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::Builder;
 use thiserror::Error;
 
@@ -1558,6 +1559,7 @@ fn run_stage_commands(
     cache_root: &Path,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
+    let build_limits = load_build_limits()?;
     let running_as_root = nix::unistd::Uid::effective().is_root();
     fs::create_dir_all(cache_root)?;
     for run in runs {
@@ -1585,6 +1587,8 @@ fn run_stage_commands(
         let workdir = workdir.map(|v| v.to_string());
         let run_user = user.map(|v| v.to_string());
         let seccomp = seccomp_profile.clone();
+        let limits = build_limits.clone();
+        let child_limits = limits.clone();
         // SAFETY: pre_exec runs in the child process between fork and exec to install
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
@@ -1647,6 +1651,9 @@ fn run_stage_commands(
                         }
                     }
                 }
+                apply_build_limits(&child_limits).map_err(|err| {
+                    io::Error::new(err.kind(), format!("build pre_exec apply limits: {err}"))
+                })?;
                 Ok(())
             });
         }
@@ -1666,7 +1673,40 @@ fn run_stage_commands(
             copy_path_recursive(&cache, &target)?;
             mounted.push((target, backup, cache, existed));
         }
-        let status_result = cmd.status();
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                for (target, backup, _cache, existed) in mounted.iter().rev() {
+                    let _ = fs::remove_dir_all(&target);
+                    if *existed {
+                        fs::rename(backup, target)?;
+                    }
+                }
+                return Err(err.into());
+            }
+        };
+        let started = Instant::now();
+        let status_result = loop {
+            if let Some(status) = child.try_wait()? {
+                break Ok(status);
+            }
+            let cancelled = limits
+                .cancel_file
+                .as_ref()
+                .is_some_and(|path| path.exists());
+            let timed_out = limits
+                .timeout
+                .is_some_and(|timeout| started.elapsed() >= timeout);
+            if cancelled || timed_out {
+                let _ = child.kill();
+                let _ = child.wait();
+                let reason = if cancelled { "cancelled" } else { "timed out" };
+                break Err(DockerfileBuildError::Invalid(format!(
+                    "RUN {reason} by build control"
+                )));
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
         let mut cleanup_error = None;
         for (target, backup, cache, existed) in mounted.into_iter().rev() {
             if target.exists() {
@@ -1689,6 +1729,78 @@ fn run_stage_commands(
             return Err(DockerfileBuildError::Invalid(format!(
                 "RUN failed with status {status}"
             )));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct BuildLimits {
+    memory_bytes: Option<u64>,
+    cpu_seconds: Option<u64>,
+    timeout: Option<Duration>,
+    cancel_file: Option<PathBuf>,
+}
+
+fn load_build_limits() -> Result<BuildLimits, DockerfileBuildError> {
+    let memory_bytes = parse_limit_env("FERROCRATE_BUILD_MEMORY_MAX")?;
+    let cpu_seconds = parse_limit_env("FERROCRATE_BUILD_CPU_SECONDS")?;
+    let timeout = parse_limit_env("FERROCRATE_BUILD_TIMEOUT_MS")?.map(Duration::from_millis);
+    let cancel_file = std::env::var_os("FERROCRATE_BUILD_CANCEL_FILE").map(PathBuf::from);
+    if let Some(path) = &cancel_file {
+        if !path.is_absolute() {
+            return Err(DockerfileBuildError::Invalid(
+                "FERROCRATE_BUILD_CANCEL_FILE must be absolute".to_string(),
+            ));
+        }
+    }
+    Ok(BuildLimits {
+        memory_bytes,
+        cpu_seconds,
+        timeout,
+        cancel_file,
+    })
+}
+
+fn parse_limit_env(name: &str) -> Result<Option<u64>, DockerfileBuildError> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    parse_limit_value(name, &value.to_string_lossy()).map(Some)
+}
+
+fn parse_limit_value(name: &str, value: &str) -> Result<u64, DockerfileBuildError> {
+    let parsed = value.parse::<u64>().map_err(|_| {
+        DockerfileBuildError::Invalid(format!("{name} must be an unsigned integer"))
+    })?;
+    if parsed == 0 {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn apply_build_limits(limits: &BuildLimits) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(bytes) = limits.memory_bytes {
+            let limit = nix::libc::rlimit {
+                rlim_cur: bytes,
+                rlim_max: bytes,
+            };
+            if unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_AS, &limit) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        if let Some(seconds) = limits.cpu_seconds {
+            let limit = nix::libc::rlimit {
+                rlim_cur: seconds,
+                rlim_max: seconds,
+            };
+            if unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_CPU, &limit) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
     }
     Ok(())
@@ -2036,8 +2148,8 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         build_from_dockerfile_with_store_and_compression, dockerignore_matches, export_build_cache,
-        import_build_cache, load_build_cache, parse_run, parse_stages, prepare_dockerfile_build,
-        prune_build_cache, save_build_cache, BuildCacheEntry,
+        import_build_cache, load_build_cache, parse_limit_value, parse_run, parse_stages,
+        prepare_dockerfile_build, prune_build_cache, save_build_cache, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -2281,6 +2393,17 @@ mod tests {
             "--mount=type=cache,target=/tmp,id=bad/slash echo value",
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn build_limit_values_are_strictly_positive_unsigned_integers() {
+        assert_eq!(parse_limit_value("LIMIT", "4096").unwrap(), 4096);
+        for value in ["", "0", "-1", "1.5", "1e3"] {
+            assert!(
+                parse_limit_value("LIMIT", value).is_err(),
+                "accepted {value:?}"
+            );
         }
     }
 

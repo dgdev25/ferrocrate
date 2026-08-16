@@ -94,7 +94,7 @@ below full parity; secure cache and multi-platform workflows are adoption gaps.
 - [ ] Model builds as a content-addressed dependency graph with parallel independent stages.
 - [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance; local cache entries now persist their key/timestamp plus context/Dockerfile/base-image provenance, are written atomically, support deterministic oldest-entry pruning, and support validated atomic file import/export via `--cache-from`/`--cache-to`, while remote cache and graph-wide provenance remain open.
 - [ ] Add secrets, SSH mounts, named contexts, multi-platform output, and strict secret non-disclosure in logs/witnesses/cache metadata; shell-form cache mounts now persist through an isolated per-build cache directory with validated target/ID parsing and fail-closed symlink handling.
-- [ ] Add build cancellation, resource limits, retries, resumability, and authorization-bound source/context/image identities.
+- [ ] Add build cancellation, resource limits, retries, resumability, and authorization-bound source/context/image identities; Dockerfile `RUN` now supports validated per-command memory/CPU limits plus wall-clock timeout and absolute cancel-marker termination, with cache-mount restoration and controls documented in `docs/build-controls.md`, while retries/resumability and full identity binding remain open.
 
 ### 6. Rootless productization and operational lifecycle
 

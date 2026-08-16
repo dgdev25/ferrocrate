@@ -3576,13 +3576,27 @@ fn handle_migrate_compose_report(file: &Path, output: Option<&Path>) -> Result<(
             }),
         );
     }
+    let mut networks = project
+        .compose
+        .networks
+        .as_ref()
+        .map(|values| values.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    networks.sort();
+    let mut volumes = project
+        .compose
+        .volumes
+        .as_ref()
+        .map(|values| values.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    volumes.sort();
     let report = serde_json::json!({
         "schema": "ferrocrate/migration-report/v1",
         "source": file,
         "compose_version": project.compose.version,
         "services": services,
-        "networks": project.compose.networks.as_ref().map(|networks| networks.keys().collect::<Vec<_>>()).unwrap_or_default(),
-        "volumes": project.compose.volumes.as_ref().map(|volumes| volumes.keys().collect::<Vec<_>>()).unwrap_or_default(),
+        "networks": networks,
+        "volumes": volumes,
         "dependency_order": graph.start_batches(),
         "manual_review": manual_review,
         "execution": "report-only; no containers, networks, volumes, or images were mutated",
@@ -8057,9 +8071,9 @@ mod tests {
         docker_chunked_headers, docker_container_matches_filters, docker_event_payload,
         docker_tail_logs, docker_top_payload, effective_readonly, handle_build, handle_containers,
         handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
         parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_filters,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
@@ -8177,6 +8191,39 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn compose_migration_report_is_deterministic_and_flags_manual_review() {
+        let temp = tempfile::tempdir().expect("migration fixture");
+        let compose = temp.path().join("compose.yaml");
+        std::fs::write(
+            &compose,
+            r#"version: "3.8"
+services:
+  web:
+    image: nginx:latest
+    network_mode: host
+networks:
+  zeta: {}
+  alpha: {}
+volumes:
+  cache: {}
+"#,
+        )
+        .expect("compose");
+        let first = temp.path().join("first.json");
+        let second = temp.path().join("second.json");
+        handle_migrate_compose_report(&compose, Some(&first)).expect("first report");
+        handle_migrate_compose_report(&compose, Some(&second)).expect("second report");
+        assert_eq!(
+            std::fs::read(&first).expect("first bytes"),
+            std::fs::read(&second).expect("second bytes")
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&first).expect("report bytes")).expect("json");
+        assert_eq!(report["networks"], serde_json::json!(["alpha", "zeta"]));
+        assert_eq!(report["manual_review"].as_array().unwrap().len(), 1);
     }
 
     #[test]

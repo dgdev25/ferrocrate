@@ -14,3 +14,5 @@ source workload, and perform execution as a separately authorized change.
 
 The report schema is versioned as `ferrocrate/migration-report/v1` so future
 execution tooling can reject incompatible plans instead of silently guessing.
+Network and volume names are sorted, and identical input produces byte-stable
+output suitable for review diffs and signed change records.

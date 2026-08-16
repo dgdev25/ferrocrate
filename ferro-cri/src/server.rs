@@ -840,14 +840,7 @@ impl RuntimeService for CriRuntime {
         &self,
         request: Request<StartContainerRequest>,
     ) -> Result<Response<StartContainerResponse>, Status> {
-        let identity = resolve_request_identity(
-            &self.identity_policy,
-            &request,
-            Action::ContainerRun,
-            request.get_ref().container_id.as_str(),
-        )?;
-        let id = request.into_inner().container_id;
-        let cleanup_origin = identity.origin.clone();
+        let id = request.get_ref().container_id.clone();
         let record = {
             let containers = self
                 .containers
@@ -858,6 +851,13 @@ impl RuntimeService for CriRuntime {
                 .cloned()
                 .ok_or_else(|| Status::not_found("container not found"))?
         };
+        let action = if record.runtime_id.is_some() {
+            Action::ContainerStart
+        } else {
+            Action::ContainerRun
+        };
+        let identity = resolve_request_identity(&self.identity_policy, &request, action, &id)?;
+        let cleanup_origin = identity.origin.clone();
         if let Some(runtime_id) = record.runtime_id.as_deref() {
             let runtime_dir = self.runtime_dir.clone();
             let runtime_id = runtime_id.to_string();

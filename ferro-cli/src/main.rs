@@ -7398,7 +7398,18 @@ fn handle_docker_compat_connection(
                 http_response(200, b"{}", "application/json")
             }
             ("POST", "/images/prune") => {
-                let records = store.list_references().map_err(|error| error.to_string())?;
+                let filters = parse_docker_filters(&query)?;
+                validate_docker_image_prune_filters(&filters)?;
+                let records = store
+                    .list_references()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|record| docker_image_prune_matches_filters(record, &filters))
+                    .collect::<Vec<_>>();
+                let deleted = records
+                    .iter()
+                    .map(|record| record.reference.clone())
+                    .collect::<Vec<_>>();
                 let permits = records
                     .iter()
                     .map(|record| {
@@ -7417,7 +7428,7 @@ fn handle_docker_compat_connection(
                     .prune_references_authorized(permits)
                     .map_err(|error| error.to_string())?;
                 let body = serde_json::json!({
-                    "ImagesDeleted": [],
+                    "ImagesDeleted": deleted,
                     "SpaceReclaimed": 0,
                     "ferrocrateRemoved": removed,
                 });
@@ -7816,6 +7827,62 @@ fn docker_image_matches_filters(
                     .strip_suffix('*')
                     .is_some_and(|prefix| record.reference.starts_with(prefix))
         })
+}
+
+fn validate_docker_image_prune_filters(
+    filters: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    for key in filters.keys() {
+        if !matches!(key.as_str(), "dangling" | "until") {
+            return Err(format!(
+                "docker: image prune filter `{key}` is unsupported; supported filters: dangling, until"
+            ));
+        }
+    }
+    if let Some(values) = filters.get("dangling") {
+        if values.len() > 1
+            || values
+                .first()
+                .is_some_and(|value| !matches!(value.as_str(), "true" | "false"))
+        {
+            return Err("docker: image prune dangling filter must be true or false".to_string());
+        }
+    }
+    if let Some(values) = filters.get("until") {
+        if values.len() > 1 {
+            return Err(
+                "docker: image prune until filter accepts at most one selector".to_string(),
+            );
+        }
+        if let Some(value) = values.first() {
+            value.parse::<u64>().map_err(|_| {
+                format!("docker: image prune until filter must be a Unix timestamp: {value}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn docker_image_prune_matches_filters(
+    record: &ferro_core::image_store::ImageRecord,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    if let Some(value) = filters.get("dangling").and_then(|values| values.first()) {
+        let dangling =
+            record.reference.starts_with("sha256:") || record.reference.contains("@sha256:");
+        if dangling != (value == "true") {
+            return false;
+        }
+    }
+    if let Some(value) = filters.get("until").and_then(|values| values.first()) {
+        let Ok(until) = value.parse::<u64>() else {
+            return false;
+        };
+        if record.created_at_unix >= until {
+            return false;
+        }
+    }
+    true
 }
 
 fn docker_volume_matches_filters(
@@ -8370,21 +8437,22 @@ mod tests {
         desktop_forward_enabled, discover_rootless_socket, dispatch, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
         docker_image_apply_time_bounds, docker_image_matches_filters,
-        docker_network_matches_filters, docker_tail_logs, docker_top_payload,
-        docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
-        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_bool_query,
-        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, should_desktop_forward,
-        split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_network_filters, validate_docker_volume_filters,
-        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
-        ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
-        MigrateCommands, NetworkCommands, VolumeCommands,
+        docker_image_prune_matches_filters, docker_network_matches_filters, docker_tail_logs,
+        docker_top_payload, docker_volume_matches_filters, effective_readonly, handle_build,
+        handle_containers, handle_context, handle_exec, handle_image_prune, handle_images,
+        handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report, handle_network,
+        handle_pause, handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run,
+        handle_stats, handle_stop, handle_unpause, handle_volume, host_build_arch,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_capabilities,
+        parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
+        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
+        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
+        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_image_prune_filters,
+        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
+        VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -10373,6 +10441,28 @@ volumes:
         let mut filters = HashMap::new();
         filters.insert("since".to_string(), vec!["missing:tag".to_string()]);
         assert!(docker_image_apply_time_bounds(vec![image], &filters).is_err());
+    }
+
+    #[test]
+    fn docker_image_prune_filters_are_strict_and_deterministic() {
+        let make = |reference: &str, created_at_unix| ferro_core::image_store::ImageRecord {
+            reference: reference.to_string(),
+            digest: "sha256:digest".to_string(),
+            manifest_media_type: "application/json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix,
+        };
+        let tagged = make("alpine:latest", 10);
+        let dangling = make("sha256:orphan", 10);
+        let mut filters = HashMap::new();
+        filters.insert("dangling".to_string(), vec!["true".to_string()]);
+        assert!(!docker_image_prune_matches_filters(&tagged, &filters));
+        assert!(docker_image_prune_matches_filters(&dangling, &filters));
+        filters.insert("until".to_string(), vec!["10".to_string()]);
+        assert!(!docker_image_prune_matches_filters(&dangling, &filters));
+        let unsupported =
+            serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
+        assert!(validate_docker_image_prune_filters(&unsupported).is_err());
     }
 
     #[test]

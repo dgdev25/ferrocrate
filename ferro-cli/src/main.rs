@@ -6694,10 +6694,12 @@ fn handle_docker_compat_connection(
                 let limit = query
                     .get("limit")
                     .and_then(|value| value.parse::<usize>().ok());
+                let filters = parse_docker_filters(&query)?;
                 let mut records = runtime.list().map_err(|err| err.to_string())?;
                 if !all {
                     records.retain(|record| matches!(record.status.as_str(), "running" | "paused"));
                 }
+                records.retain(|record| docker_container_matches_filters(record, &filters));
                 if let Some(limit) = limit {
                     records.truncate(limit);
                 }
@@ -7358,6 +7360,79 @@ fn docker_tail_logs(logs: &str, tail: Option<&str>) -> Result<String, String> {
     Ok(result)
 }
 
+fn parse_docker_filters(
+    query: &HashMap<String, String>,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let Some(raw) = query.get("filters") else {
+        return Ok(HashMap::new());
+    };
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("docker: invalid filters JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "docker: filters must be a JSON object".to_string())?;
+    let mut filters = HashMap::new();
+    for (key, values) in object {
+        let values = values
+            .as_array()
+            .ok_or_else(|| format!("docker: filter {key} must be an array"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("docker: filter {key} values must be strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        filters.insert(key.clone(), values);
+    }
+    Ok(filters)
+}
+
+fn docker_container_matches_filters(
+    record: &ferro_core::container_store::ContainerRecord,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    let matches_any = |key: &str, value: &str| {
+        filters
+            .get(key)
+            .map(|values| values.is_empty() || values.iter().any(|candidate| candidate == value))
+            .unwrap_or(true)
+    };
+    if !matches_any("status", &record.status) {
+        return false;
+    }
+    if let Some(names) = filters.get("name") {
+        let name = record.name.as_deref().unwrap_or(&record.id);
+        if !names.is_empty() && !names.iter().any(|candidate| name.contains(candidate)) {
+            return false;
+        }
+    }
+    if let Some(images) = filters.get("ancestor") {
+        if !images.is_empty()
+            && !images
+                .iter()
+                .any(|candidate| record.image == *candidate || record.image.starts_with(candidate))
+        {
+            return false;
+        }
+    }
+    if let Some(labels) = filters.get("label") {
+        for selector in labels {
+            let mut parts = selector.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let matched = record
+                .labels
+                .get(key)
+                .is_some_and(|actual| parts.next().map_or(true, |expected| actual == expected));
+            if !matched {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(target_os = "linux")]
 fn normalize_docker_api_path(path: &str) -> String {
     if !path.starts_with("/v") {
@@ -7751,18 +7826,18 @@ mod tests {
 
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
-        docker_chunked_headers, docker_event_payload, docker_tail_logs, effective_readonly,
-        handle_build, handle_containers, handle_context, handle_exec, handle_image_prune,
-        handle_images, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, should_desktop_forward,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
-        ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
-        NetworkCommands, VolumeCommands,
+        docker_chunked_headers, docker_container_matches_filters, docker_event_payload,
+        docker_tail_logs, effective_readonly, handle_build, handle_containers, handle_context,
+        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
+        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
+        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_capabilities,
+        parse_docker_filters, parse_driver_opts, parse_env_entries, parse_key_values,
+        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, should_desktop_forward, structured_desktop_error,
+        top_level_command_name, validate_build_platform, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -9381,6 +9456,42 @@ mod tests {
         assert_eq!(docker_tail_logs("one\ntwo\n", Some("0")).unwrap(), "");
         assert_eq!(docker_tail_logs("one\n", Some("all")).unwrap(), "one\n");
         assert!(docker_tail_logs("one\n", Some("nope")).is_err());
+    }
+
+    #[test]
+    fn docker_container_filters_match_status_name_label_and_ancestor() {
+        let mut record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "abc",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": [],
+                "created_at_unix": 0,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running"
+            }))
+            .expect("record");
+        record.name = Some("web".to_string());
+        record.status = "running".to_string();
+        record.labels.insert("tier".into(), "frontend".into());
+        let filters = serde_json::from_value(serde_json::json!({
+            "status": ["running"],
+            "name": ["web"],
+            "label": ["tier=frontend"],
+            "ancestor": ["alpine"]
+        }))
+        .expect("filters");
+        assert!(docker_container_matches_filters(&record, &filters));
+        record.status = "exited".to_string();
+        assert!(!docker_container_matches_filters(&record, &filters));
+    }
+
+    #[test]
+    fn docker_filters_reject_malformed_json() {
+        let mut query = HashMap::new();
+        query.insert("filters".to_string(), "[]".to_string());
+        assert!(parse_docker_filters(&query).is_err());
     }
 
     #[test]

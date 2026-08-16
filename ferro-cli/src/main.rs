@@ -26,7 +26,10 @@ use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
-use ferro_core::image_manifest::parse_image_manifest;
+use ferro_core::image_manifest::{
+    parse_image_manifest, Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE,
+    OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+};
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{
     canonicalize_reference, execute_image_tag_authorized, prepare_image_tag, resolve_reference,
@@ -448,6 +451,12 @@ pub enum RvfCommands {
     },
     /// Validate an RVF image and atomically export its OCI layer blob.
     Extract { image: PathBuf, output: PathBuf },
+    /// Import a validated RVF image into the normal local OCI image store.
+    Import {
+        image: PathBuf,
+        #[arg(long)]
+        reference: Option<String>,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -2913,7 +2922,159 @@ fn dispatch_rvf(command: &RvfCommands) -> Result<(), String> {
             );
             Ok(())
         }
+        RvfCommands::Import { image, reference } => import_rvf_image(image, reference.as_deref()),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn import_rvf_image(image: &Path, requested_reference: Option<&str>) -> Result<(), String> {
+    let runtime_path = runtime_dir();
+    import_rvf_image_at(image, requested_reference, &runtime_path)
+}
+
+#[cfg(target_os = "linux")]
+fn import_rvf_image_at(
+    image: &Path,
+    requested_reference: Option<&str>,
+    runtime_path: &Path,
+) -> Result<(), String> {
+    let parsed = ferro_core::rvf_image::read_rvf_image(image)
+        .map_err(|error| format!("rvf import: {error}"))?;
+    if parsed.manifest.os != "linux" || parsed.manifest.arch != host_build_arch() {
+        return Err(format!(
+            "rvf import: image platform {}/{} does not match linux/{}",
+            parsed.manifest.os,
+            parsed.manifest.arch,
+            host_build_arch()
+        ));
+    }
+    let reference = requested_reference
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{}:{}", parsed.manifest.name, parsed.manifest.tag));
+    let reference = canonicalize_reference(&reference).map_err(|error| error.to_string())?;
+    let layer_path = runtime_path
+        .join("images")
+        .join("blobs")
+        .join(parsed.manifest.layer_digest.replace(':', "_"));
+
+    let config_json = serde_json::json!({
+        "architecture": parsed.manifest.arch,
+        "os": parsed.manifest.os,
+        "created": parsed.manifest.created_at,
+        "config": {
+            "Entrypoint": parsed.manifest.entrypoint,
+            "Cmd": parsed.manifest.cmd,
+            "Env": parsed.manifest.env,
+        },
+        "rootfs": {"type": "layers", "diff_ids": []},
+    });
+    let config_bytes = serde_json::to_vec(&config_json)
+        .map_err(|error| format!("rvf import: config serialization failed: {error}"))?;
+    let config_digest = format!("sha256:{:x}", sha2::Sha256::digest(&config_bytes));
+    let config_path = runtime_path
+        .join("images")
+        .join("configs")
+        .join(config_digest.replace(':', "_"));
+    let manifest = ImageManifest {
+        schema_version: 2,
+        media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+        config: Descriptor {
+            media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+            digest: config_digest.clone(),
+            size: config_bytes.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        },
+        layers: vec![Descriptor {
+            media_type: OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(),
+            digest: parsed.manifest.layer_digest.clone(),
+            size: parsed.manifest.layer_size as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        }],
+        artifact_type: None,
+        subject: None,
+        annotations: Default::default(),
+    };
+    let manifest_json = serde_json::to_string(&manifest)
+        .map_err(|error| format!("rvf import: manifest serialization failed: {error}"))?;
+    let runtime = ContainerRuntime::new(runtime_path).map_err(|error| error.to_string())?;
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let authorization = runtime
+        .surface_authorization()
+        .map_err(|error| error.to_string())?;
+    let store =
+        LocalImageStore::open(runtime_path.join("images")).map_err(|error| error.to_string())?;
+    let plan = store
+        .prepare_reference_write(
+            &reference,
+            &config_digest,
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            &manifest_json,
+        )
+        .map_err(|error| error.to_string())?;
+    let permit = authorization
+        .authorize_image_reference_write_plan(&origin, &plan)
+        .map_err(|error| error.to_string())?;
+    if let Some(parent) = layer_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("rvf import: {error}"))?;
+    }
+    copy_file_atomically(&layer_path, &parsed)
+        .map_err(|error| format!("rvf import: layer publication failed: {error}"))?;
+    write_bytes_atomically(&config_path, &config_bytes)
+        .map_err(|error| format!("rvf import: config publication failed: {error}"))?;
+    store
+        .put_reference_authorized(plan, permit)
+        .map_err(|error| error.to_string())?;
+    println!("rvf: imported {} as {}", image.display(), reference);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn import_rvf_image(_image: &Path, _requested_reference: Option<&str>) -> Result<(), String> {
+    Err("rvf import is currently supported only on Linux".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn copy_file_atomically(
+    destination: &Path,
+    parsed: &ferro_core::rvf_image::RvfImage,
+) -> Result<(), std::io::Error> {
+    let layer = parsed
+        .segments
+        .iter()
+        .find(|segment| segment.seg_type == ferro_core::rvf_image::SEG_LAYER)
+        .expect("validated RVF layer");
+    write_bytes_atomically(destination, &layer.payload)
+}
+
+#[cfg(target_os = "linux")]
+fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("rvf-import.tmp");
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
+    Ok(())
 }
 
 fn handle_ai(command: AiCommands) -> Result<(), String> {
@@ -10029,6 +10190,8 @@ mod network_lifecycle;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use ferro_core::image_manifest::parse_image_manifest;
+    use sha2::Digest;
     use std::collections::{BTreeMap, HashMap};
     use std::io::Read;
     use std::sync::Mutex;
@@ -10048,19 +10211,19 @@ mod tests {
         handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
         handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
         handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
-        parse_docker_bool_query, parse_docker_create_spec, parse_docker_filters,
-        parse_docker_limit_query, parse_docker_network_create_spec, parse_driver_opts,
-        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, percent_encode_path_component, read_docker_request_after_auth,
-        read_http_request, read_merkle_leaves, remote_docker_request, should_desktop_forward,
-        split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
-        validate_docker_image_prune_filters, validate_docker_network_filters,
-        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
-        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
-        DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
+        handle_unpause, handle_volume, host_build_arch, import_rvf_image_at,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
+        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
+        parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
+        read_docker_request_after_auth, read_http_request, read_merkle_leaves,
+        remote_docker_request, should_desktop_forward, split_path_query, structured_desktop_error,
+        top_level_command_name, validate_build_platform, validate_docker_container_name,
+        validate_docker_exec_command, validate_docker_image_prune_filters,
+        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
         DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands, VolumeCommands,
         WitnessCommands,
     };
@@ -10338,6 +10501,24 @@ volumes:
             } => {
                 assert_eq!(image, PathBuf::from("image.rvf"));
                 assert_eq!(output, PathBuf::from("layer.tar"));
+
+                let import = Cli::parse_from([
+                    "ferrocrate",
+                    "rvf",
+                    "import",
+                    "image.rvf",
+                    "--reference",
+                    "local/imported:latest",
+                ]);
+                match import.command {
+                    Commands::Rvf {
+                        command: RvfCommands::Import { image, reference },
+                    } => {
+                        assert_eq!(image, PathBuf::from("image.rvf"));
+                        assert_eq!(reference.as_deref(), Some("local/imported:latest"));
+                    }
+                    other => panic!("unexpected command: {other:?}"),
+                }
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -10381,6 +10562,57 @@ volumes:
         let leaves = read_merkle_leaves(&path).expect("leaves");
         assert_eq!(leaves.len(), 1);
         assert_eq!(leaves[0][31], 1);
+    }
+
+    #[test]
+    fn rvf_import_publishes_a_verified_oci_reference_and_layer() {
+        let runtime = configured_cli_runtime("disabled");
+        let layer = b"validated-rvf-layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer));
+        let image = runtime.path().join("demo.rvf");
+        let manifest = ferro_core::rvf_image::FerroImageManifest {
+            name: "local/demo".to_string(),
+            tag: "latest".to_string(),
+            entrypoint: vec!["/bin/demo".to_string()],
+            cmd: vec!["--serve".to_string()],
+            env: vec!["MODE=test".to_string()],
+            arch: host_build_arch().to_string(),
+            os: "linux".to_string(),
+            created_at: "2026-08-16T00:00:00Z".to_string(),
+            format_version: 1,
+            layer_digest,
+            layer_size: layer.len() as u64,
+            overlay_model_type: None,
+        };
+        let segments = vec![
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: ferro_core::rvf_image::SEG_MANIFEST,
+                payload: serde_json::to_vec(&manifest).expect("manifest"),
+            },
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: ferro_core::rvf_image::SEG_LAYER,
+                payload: layer,
+            },
+        ];
+        let mut bytes = Vec::new();
+        ferro_core::rvf_image::write_rvf(&mut bytes, &segments).expect("rvf bytes");
+        std::fs::write(&image, bytes).expect("write rvf");
+        import_rvf_image_at(&image, None, runtime.path()).expect("import rvf");
+        let store = LocalImageStore::open(runtime.path().join("images")).expect("store");
+        let imported_reference =
+            ferro_core::image_tagging::canonicalize_reference("local/demo:latest")
+                .expect("reference");
+        let record = store
+            .resolve_reference(&imported_reference)
+            .expect("resolve")
+            .expect("imported reference");
+        let parsed = parse_image_manifest(&record.manifest_json).expect("manifest");
+        assert_eq!(parsed.layers.len(), 1);
+        assert!(runtime
+            .path()
+            .join("images/blobs")
+            .join(parsed.layers[0].digest.replace(':', "_"))
+            .exists());
     }
 
     #[test]

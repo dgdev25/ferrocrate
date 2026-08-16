@@ -148,6 +148,8 @@ pub enum JournalError {
     Io(#[from] std::io::Error),
     #[error("witness journal storage failed: {0}")]
     Storage(#[from] sled::Error),
+    #[error("witness journal sqlite storage failed: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("witness record failed validation: {0}")]
     Record(#[from] super::super::WitnessError),
 }

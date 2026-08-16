@@ -1,5 +1,7 @@
 use super::{FaultPoint, FlushBoundary, JournalError, WitnessJournal};
 use crate::observability::{authorization_metrics, AuthorizationMetric, JournalMetric};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::sync::{Arc, Mutex};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -12,6 +14,165 @@ use std::{
 // that close-to-reopen hand-off; a live competing writer still fails closed.
 const LOCK_HANDOFF_RETRIES: usize = 16;
 const LOCK_HANDOFF_DELAY: Duration = Duration::from_millis(1);
+
+/// SQLite key/value storage used by the witness-journal cutover.
+///
+/// The journal deliberately keeps its existing tree names and byte keys. This
+/// makes migration auditable and lets the operation layer retain its current
+/// serialization while the remaining multi-tree transaction adapter is wired.
+#[derive(Clone)]
+pub(super) struct SqliteJournalStore {
+    connection: Arc<Mutex<Connection>>,
+}
+
+impl SqliteJournalStore {
+    pub(super) fn open(path: &Path) -> Result<Self, JournalError> {
+        let connection = Connection::open(path)?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kv (
+                 tree TEXT NOT NULL,
+                 key BLOB NOT NULL,
+                 value BLOB NOT NULL,
+                 PRIMARY KEY (tree, key)
+             );
+             CREATE INDEX IF NOT EXISTS kv_tree_key ON kv(tree, key);",
+        )?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+
+    /// Copy a legacy sled tree set into SQLite in one durable transaction.
+    /// The ready marker is created only after SQLite commits, so an interrupted
+    /// copy can be retried without treating a partial database as authoritative.
+    #[cfg(test)]
+    pub(super) fn migrate_from_sled(
+        sled_path: &Path,
+        sqlite_path: &Path,
+        ready_marker: &Path,
+        trees: &[&str],
+    ) -> Result<(), JournalError> {
+        if ready_marker.exists() {
+            return Ok(());
+        }
+        let legacy = sled::open(sled_path)?;
+        let store = Self::open(sqlite_path)?;
+        store.transaction(|transaction| {
+            for tree_name in trees {
+                let tree = legacy.open_tree(tree_name)?;
+                for entry in tree.iter() {
+                    let (key, value) = entry?;
+                    transaction.put(tree_name, &key, &value)?;
+                }
+            }
+            Ok(())
+        })?;
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(ready_marker)?;
+        marker.write_all(b"witness-sqlite-ready-v1")?;
+        marker.sync_all()?;
+        Ok(())
+    }
+
+    pub(super) fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>, JournalError> {
+        let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
+        Ok(connection
+            .query_row(
+                "SELECT value FROM kv WHERE tree = ?1 AND key = ?2",
+                params![tree, key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(super) fn put(&self, tree: &str, key: &[u8], value: &[u8]) -> Result<(), JournalError> {
+        let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
+        connection.execute(
+            "INSERT INTO kv(tree, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(tree, key) DO UPDATE SET value = excluded.value",
+            params![tree, key, value],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn remove(&self, tree: &str, key: &[u8]) -> Result<(), JournalError> {
+        let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
+        connection.execute(
+            "DELETE FROM kv WHERE tree = ?1 AND key = ?2",
+            params![tree, key],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn scan(&self, tree: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, JournalError> {
+        let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
+        let mut statement =
+            connection.prepare("SELECT key, value FROM kv WHERE tree = ?1 ORDER BY key")?;
+        let rows = statement.query_map(params![tree], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(JournalError::from)
+    }
+
+    /// Run one callback against a single SQLite transaction and connection.
+    ///
+    /// Keeping the connection borrowed for the complete callback prevents a
+    /// tree operation from accidentally committing independently of its
+    /// sibling updates.
+    pub(super) fn transaction<T>(
+        &self,
+        callback: impl for<'tx> FnOnce(&SqliteTransaction<'tx>) -> Result<T, JournalError>,
+    ) -> Result<T, JournalError> {
+        let mut connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
+        let transaction = connection.transaction()?;
+        let context = SqliteTransaction { transaction };
+        match callback(&context) {
+            Ok(value) => {
+                context.transaction.commit()?;
+                Ok(value)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+pub(super) struct SqliteTransaction<'tx> {
+    transaction: rusqlite::Transaction<'tx>,
+}
+
+impl SqliteTransaction<'_> {
+    pub(super) fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>, JournalError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT value FROM kv WHERE tree = ?1 AND key = ?2",
+                params![tree, key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(super) fn put(&self, tree: &str, key: &[u8], value: &[u8]) -> Result<(), JournalError> {
+        self.transaction.execute(
+            "INSERT INTO kv(tree, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(tree, key) DO UPDATE SET value = excluded.value",
+            params![tree, key, value],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn remove(&self, tree: &str, key: &[u8]) -> Result<(), JournalError> {
+        self.transaction.execute(
+            "DELETE FROM kv WHERE tree = ?1 AND key = ?2",
+            params![tree, key],
+        )?;
+        Ok(())
+    }
+}
 
 pub(super) fn transaction_error(
     error: sled::transaction::TransactionError<JournalError>,
@@ -120,5 +281,92 @@ impl WitnessJournal {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod sqlite_tests {
+    use super::SqliteJournalStore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sqlite_store_reopens_with_byte_stable_tree_entries() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("witness.sqlite3");
+        let store = SqliteJournalStore::open(&path).unwrap();
+        store
+            .put("witness-meta-v2", b"head", &[0, 1, 2, 3])
+            .unwrap();
+        store
+            .put("witness-records-v2", &[0, 0, 0, 1], b"record")
+            .unwrap();
+        drop(store);
+
+        let reopened = SqliteJournalStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.get("witness-meta-v2", b"head").unwrap(),
+            Some(vec![0, 1, 2, 3])
+        );
+        assert_eq!(
+            reopened.scan("witness-records-v2").unwrap(),
+            vec![(vec![0, 0, 0, 1], b"record".to_vec())]
+        );
+        reopened.remove("witness-meta-v2", b"head").unwrap();
+        assert_eq!(reopened.get("witness-meta-v2", b"head").unwrap(), None);
+    }
+
+    #[test]
+    fn sqlite_store_transaction_rolls_back_all_tree_updates_on_error() {
+        let directory = tempdir().unwrap();
+        let store = SqliteJournalStore::open(&directory.path().join("witness.sqlite3")).unwrap();
+        let result = store.transaction(|transaction| {
+            transaction.put("records", b"one", b"record")?;
+            transaction.put("meta", b"head", b"1")?;
+            assert_eq!(transaction.get("meta", b"head")?, Some(b"1".to_vec()));
+            transaction.remove("meta", b"head")?;
+            Err::<(), _>(super::JournalError::Corrupt)
+        });
+        assert!(matches!(result, Err(super::JournalError::Corrupt)));
+        assert_eq!(store.get("records", b"one").unwrap(), None);
+        assert_eq!(store.get("meta", b"head").unwrap(), None);
+    }
+
+    #[test]
+    fn sqlite_store_migrates_legacy_trees_before_marking_ready() {
+        let directory = tempdir().unwrap();
+        let sled_path = directory.path().join("witness.sled");
+        let sqlite_path = directory.path().join("witness.sqlite3");
+        let marker_path = directory.path().join("witness.sqlite3.ready");
+        let legacy = sled::open(&sled_path).unwrap();
+        legacy
+            .open_tree("witness-meta-v2")
+            .unwrap()
+            .insert(b"head", b"1")
+            .unwrap();
+        legacy
+            .open_tree("witness-records-v2")
+            .unwrap()
+            .insert([0, 0, 0, 1], b"record")
+            .unwrap();
+        legacy.flush().unwrap();
+        drop(legacy);
+
+        SqliteJournalStore::migrate_from_sled(
+            &sled_path,
+            &sqlite_path,
+            &marker_path,
+            &["witness-meta-v2", "witness-records-v2"],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&marker_path).unwrap(),
+            b"witness-sqlite-ready-v1"
+        );
+        let store = SqliteJournalStore::open(&sqlite_path).unwrap();
+        assert_eq!(
+            store.get("witness-meta-v2", b"head").unwrap(),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(store.scan("witness-records-v2").unwrap().len(), 1);
     }
 }

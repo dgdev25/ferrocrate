@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     agent::netd_client::{
-        GrantedEnvelope, NetdRequest, OverlayMode, ServiceHandshake, SignedEnvelope,
+        GrantedEnvelope, NetdRequest, OverlayMode, PeerSpec, ServiceHandshake, SignedEnvelope,
     },
     proto::DesiredState,
 };
@@ -122,12 +122,16 @@ impl ControllerGrantIssuer {
             .collect();
         let mut requests = Vec::new();
         for overlay in &desired.overlays {
-            let peers = overlay.peers.iter().map(|peer| serde_json::json!({
-                "node_id": peer.node_id,
-                "public_key": base64::engine::general_purpose::STANDARD.encode(&peer.public_key),
-                "endpoint": peer.endpoint,
-                "allowed_ips": peer.allowed_ips,
-            })).collect();
+            let peers = overlay
+                .peers
+                .iter()
+                .map(|peer| PeerSpec {
+                    node_id: peer.node_id.clone(),
+                    public_key: base64::engine::general_purpose::STANDARD.encode(&peer.public_key),
+                    endpoint: peer.endpoint.clone(),
+                    allowed_ips: peer.allowed_ips.clone(),
+                })
+                .collect();
             requests.push(NetdRequest::ApplyOverlay {
                 overlay_id: overlay.overlay_id.clone(),
                 mode: if overlay.wireguard == Some(true) {
@@ -401,7 +405,11 @@ pub enum ControllerAuthorizationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{desired_state::DesiredStateBuilder, proto::OverlayState};
+    use crate::{
+        agent::netd_client::{NetdRequest, OverlayMode},
+        desired_state::DesiredStateBuilder,
+        proto::{OverlayState, Peer},
+    };
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -446,5 +454,30 @@ mod tests {
                 resource: "overlay-a".into()
             })
         );
+    }
+
+    #[test]
+    fn peer_request_serialization_is_stable_across_netd_types() {
+        let peer = Peer {
+            node_id: "node-b".into(),
+            public_key: vec![7; 32],
+            endpoint: "10.0.0.2:51820".into(),
+            allowed_ips: vec!["10.99.0.2/32".into()],
+        };
+        let request = NetdRequest::ApplyOverlay {
+            overlay_id: "wg0".into(),
+            mode: OverlayMode::WireGuard,
+            peers: vec![PeerSpec {
+                node_id: peer.node_id,
+                public_key: base64::engine::general_purpose::STANDARD.encode(&peer.public_key),
+                endpoint: peer.endpoint,
+                allowed_ips: peer.allowed_ips,
+            }],
+            routes: vec!["10.99.0.2/32".into()],
+            addresses: vec!["10.99.0.1/24".into()],
+        };
+        let encoded = serde_json::to_vec(&request).unwrap();
+        let decoded: ferro_netd::protocol::NetdRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(encoded, serde_json::to_vec(&decoded).unwrap());
     }
 }

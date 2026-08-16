@@ -5,7 +5,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::netd_client::{GrantedEnvelope, NetdRequest};
+use super::netd_client::{GrantedEnvelope, NetdRequest, PeerSpec};
 use crate::proto::DesiredState;
 
 pub const DESIRED_AUTHORIZATION_VERSION: u16 = 1;
@@ -138,12 +138,17 @@ impl DesiredAuthorizationBundle {
                         .iter()
                         .find(|value| value.overlay_id == *overlay_id)
                         .ok_or(BundleError::Binding)?;
-                    let expected_peers = overlay.peers.iter().map(|peer| serde_json::json!({
-                        "node_id": peer.node_id,
-                        "public_key": base64::engine::general_purpose::STANDARD.encode(&peer.public_key),
-                        "endpoint": peer.endpoint,
-                        "allowed_ips": peer.allowed_ips,
-                    })).collect::<Vec<_>>();
+                    let expected_peers = overlay
+                        .peers
+                        .iter()
+                        .map(|peer| PeerSpec {
+                            node_id: peer.node_id.clone(),
+                            public_key: base64::engine::general_purpose::STANDARD
+                                .encode(&peer.public_key),
+                            endpoint: peer.endpoint.clone(),
+                            allowed_ips: peer.allowed_ips.clone(),
+                        })
+                        .collect::<Vec<_>>();
                     if peers != &expected_peers
                         || routes != &overlay.routes
                         || addresses != &overlay.addresses

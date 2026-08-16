@@ -35,7 +35,7 @@ use ferro_mgr::{
     },
     controller_authorization::{ControllerGrantIssuer, ControllerPolicy},
     desired_state::DesiredStateBuilder,
-    proto::OverlayState,
+    proto::{OverlayState, Peer},
 };
 use ferro_netd::{
     grants::{GrantLedger, GrantVerifier},
@@ -118,7 +118,12 @@ fn enforcing_controller_agent_and_local_api_attach_cleanup_replay_and_bypass() {
         vec![OverlayState {
             overlay_id: "wg0".into(),
             routes: vec![],
-            peers: vec![],
+            peers: vec![Peer {
+                node_id: "node-b".into(),
+                public_key: vec![6; 32],
+                endpoint: "10.0.0.2:51820".into(),
+                allowed_ips: vec!["10.99.0.2/32".into()],
+            }],
             wireguard: Some(true),
             addresses: vec!["10.0.0.1/24".into()],
         }],

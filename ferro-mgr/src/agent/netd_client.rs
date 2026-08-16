@@ -97,7 +97,7 @@ pub enum NetdRequest {
     ApplyOverlay {
         overlay_id: String,
         mode: OverlayMode,
-        peers: Vec<serde_json::Value>,
+        peers: Vec<PeerSpec>,
         routes: Vec<String>,
         addresses: Vec<String>,
     },
@@ -116,6 +116,14 @@ pub enum NetdRequest {
     Inspect {
         overlay_id: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerSpec {
+    pub node_id: String,
+    pub public_key: String,
+    pub endpoint: String,
+    pub allowed_ips: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

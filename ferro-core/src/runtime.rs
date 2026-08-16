@@ -8039,8 +8039,15 @@ fn execute_with_timeout(
 }
 
 fn command_available(bin: &str) -> bool {
-    // SEC-05: Use timeout to prevent hanging on --version check
-    execute_with_timeout(bin, &["--version"], Duration::from_secs(2)).is_ok()
+    // Capability discovery must not execute arbitrary helpers.  In particular,
+    // `aa-exec --version` can segfault on otherwise healthy AppArmor hosts;
+    // treating that probe as absence silently disables strict MAC enforcement.
+    // Resolve the executable instead and let the real, timeout-bounded call
+    // report an execution failure at the point of use.
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(bin).is_file())
 }
 
 fn apply_apparmor_if_enabled(
@@ -11962,6 +11969,26 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(error.to_string().contains("apparmor_parser"));
         unsafe {
             std::env::remove_var("FERROCRATE_APPARMOR");
+            if let Some(path) = previous_path {
+                std::env::set_var("PATH", path);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[test]
+    fn command_capability_probe_resolves_without_executing_version_flag() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin");
+        }
+        assert!(super::command_available("true"));
+        assert!(!super::command_available(
+            "ferrocrate-command-does-not-exist"
+        ));
+        unsafe {
             if let Some(path) = previous_path {
                 std::env::set_var("PATH", path);
             } else {

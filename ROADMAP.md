@@ -244,3 +244,4 @@ corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
 - 2026-08-16 `7f36ac6` — consolidated all remaining work from the active roadmap, PRD-backed partials, security audit, RVF plan, platform plan, monetization plan, and compatibility contracts into this single Now/Next/Later backlog.
 - 2026-08-16 — added a six-row host qualification manifest with candidate/qualified/blocked status semantics and a CI-validating manifest gate; only the existing Ubuntu row remains qualified.
 - 2026-08-16 `9858e5f` — added a reproducible ten-feature Docker/Ferrocrate benchmark harness and archived rootful Ubuntu median timings.
+- 2026-08-16 — fixed executable capability detection for strict MAC tooling and qualified a self-contained AppArmor profile load/workload launch; SELinux and denial/rollback evidence remain open.

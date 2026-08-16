@@ -27,7 +27,11 @@ pub fn generate_apparmor_profile(container_id: &str) -> Result<String, MacProfil
     validate_container_id(container_id)?;
 
     Ok(format!(
-        "profile ferrocrate-{id} flags=(attach_disconnected,mediate_deleted) {{\n  #include <abstractions/base>\n  network,\n  file,\n  capability,\n  deny /proc/kcore rw,\n}}\n",
+        // Keep the generated profile self-contained.  Distribution-provided
+        // abstraction includes can reference optional tunables (for example
+        // `@{HOMEDIRS}`), causing an explicitly enabled profile to fail closed
+        // before the workload starts on otherwise valid hosts.
+        "profile ferrocrate-{id} flags=(attach_disconnected,mediate_deleted) {{\n  network,\n  file,\n  capability,\n  deny /proc/kcore rw,\n}}\n",
         id = container_id
     ))
 }
@@ -50,6 +54,7 @@ mod tests {
         let profile = generate_apparmor_profile("abc123").expect("profile");
         assert!(profile.contains("profile ferrocrate-abc123"));
         assert!(profile.contains("deny /proc/kcore"));
+        assert!(!profile.contains("#include"));
     }
 
     #[test]

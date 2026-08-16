@@ -119,8 +119,8 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "GET",
         path: "/events",
-        coverage: Coverage::Unsupported,
-        expected_status: 404,
+        coverage: Coverage::Implemented,
+        expected_status: 200,
         body: "",
     },
     ApiCase {
@@ -230,4 +230,16 @@ fn docker_api_compatibility_matrix() {
             case.coverage, case.method, case.path, body
         );
     }
+}
+
+#[test]
+fn docker_events_are_durable_and_filterable_over_the_socket() {
+    let harness = DaemonHarness::spawn();
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"events-volume"}"#);
+    assert_eq!(status, 201);
+
+    let (status, body) = harness.request("GET", "/events?type=volume&event=create", "");
+    assert_eq!(status, 200, "events response: {body}");
+    assert!(body.contains("\"event_type\":\"volume\""), "{body}");
+    assert!(body.contains("\"action\":\"create\""), "{body}");
 }

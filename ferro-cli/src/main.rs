@@ -6036,10 +6036,154 @@ struct DockerIpamConfig {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Default)]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
+    events: Mutex<DockerEventStore>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DockerEvent {
+    id: u64,
+    time: u64,
+    event_type: String,
+    action: String,
+    scope: String,
+    resource: Option<String>,
+    status: u16,
+}
+
+#[cfg(target_os = "linux")]
+struct DockerEventStore {
+    path: PathBuf,
+    next_id: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl DockerCompatState {
+    fn new(runtime_dir: &Path) -> Result<Self, String> {
+        Ok(Self {
+            next_id: AtomicU64::new(0),
+            pending: Mutex::new(HashMap::new()),
+            events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl DockerEventStore {
+    fn open(path: PathBuf) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut next_id = 0;
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+                if let Ok(event) = serde_json::from_str::<DockerEvent>(line) {
+                    next_id = next_id.max(event.id.saturating_add(1));
+                }
+            }
+        }
+        Ok(Self { path, next_id })
+    }
+
+    fn append(&mut self, method: &str, path: &str, status: u16) -> Result<(), String> {
+        let Some((event_type, action)) = docker_event_kind(method, path) else {
+            return Ok(());
+        };
+        let resource = docker_event_resource(path);
+        let event = DockerEvent {
+            id: self.next_id,
+            time: SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            event_type: event_type.to_string(),
+            action,
+            scope: "local".to_string(),
+            resource,
+            status,
+        };
+        self.next_id = self.next_id.saturating_add(1);
+        let bytes = serde_json::to_vec(&event).map_err(|error| error.to_string())?;
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.write_all(b"\n").map_err(|error| error.to_string())?;
+        file.sync_data().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn query(&self, query: &HashMap<String, String>) -> Result<Vec<DockerEvent>, String> {
+        let contents = std::fs::read_to_string(&self.path).unwrap_or_default();
+        let since = query
+            .get("since")
+            .and_then(|value| value.parse::<u64>().ok());
+        let until = query
+            .get("until")
+            .and_then(|value| value.parse::<u64>().ok());
+        let event = query.get("event").or_else(|| query.get("action"));
+        let kind = query.get("type");
+        let resource = query.get("container").or_else(|| query.get("image"));
+        contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<DockerEvent>(line).ok())
+            .filter(|item| since.is_none_or(|value| item.time >= value))
+            .filter(|item| until.is_none_or(|value| item.time <= value))
+            .filter(|item| event.is_none_or(|value| item.action == *value))
+            .filter(|item| kind.is_none_or(|value| item.event_type == *value))
+            .filter(|item| resource.is_none_or(|value| item.resource.as_deref() == Some(value)))
+            .collect::<Vec<_>>()
+            .pipe(Ok)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_event_kind(method: &str, path: &str) -> Option<(&'static str, String)> {
+    if method == "GET" || path == "/_ping" || path == "/version" {
+        return None;
+    }
+    let event_type = if path.contains("/containers/") {
+        "container"
+    } else if path.contains("/images/") {
+        "image"
+    } else if path.contains("/networks/") {
+        "network"
+    } else if path.contains("/volumes/") {
+        "volume"
+    } else {
+        return None;
+    };
+    Some((
+        event_type,
+        path.rsplit('/').next().unwrap_or("request").to_string(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn docker_event_resource(path: &str) -> Option<String> {
+    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+    segments
+        .windows(2)
+        .find(|pair| matches!(pair[0], "containers" | "images" | "networks" | "volumes"))
+        .map(|pair| pair[1].to_string())
+}
+
+#[cfg(target_os = "linux")]
+trait Pipe: Sized {
+    fn pipe<T>(self, function: impl FnOnce(Self) -> T) -> T;
+}
+
+#[cfg(target_os = "linux")]
+impl<T> Pipe for T {
+    fn pipe<U>(self, function: impl FnOnce(Self) -> U) -> U {
+        function(self)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -6078,7 +6222,7 @@ fn run_daemon(
     let volume_store = Arc::new(
         LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,
     );
-    let state = Arc::new(DockerCompatState::default());
+    let state = Arc::new(DockerCompatState::new(runtime_dir.as_ref())?);
     if let Some(addr) = metrics_addr {
         start_metrics_server(runtime_dir.clone(), store.clone(), addr)?;
     }
@@ -6185,6 +6329,7 @@ fn handle_docker_compat_connection(
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
+    let mut event_request: Option<(String, String)> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -6203,7 +6348,21 @@ fn handle_docker_compat_connection(
 
         let (path, query) = split_path_query(&request.path);
         let path = normalize_docker_api_path(&path);
+        event_request = Some((request.method.clone(), path.clone()));
         let response = match (request.method.as_str(), path.as_str()) {
+            ("GET", "/events") => {
+                let events = state
+                    .events
+                    .lock()
+                    .map_err(|error| format!("docker: event store lock poisoned: {error}"))?
+                    .query(&query)?;
+                let body = events
+                    .iter()
+                    .map(|event| serde_json::to_string(event).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                http_response(200, body.as_bytes(), "application/x-ndjson")
+            }
             ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
             ("GET", "/version") => {
                 let body = serde_json::json!({
@@ -6601,6 +6760,18 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some((method, path)) = event_request {
+        let status = response
+            .get(..)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|text| text.lines().next())
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(500);
+        if let Ok(mut events) = state.events.lock() {
+            let _ = events.append(&method, &path, status);
+        }
+    }
     let fixture = ferro_core::observability::qualification_fixture("docker");
     let _ = ferro_core::observability::persist_authorization_fixture_evidence(
         &fixture,
@@ -6922,6 +7093,7 @@ mod network_lifecycle;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use std::collections::HashMap;
     use std::io::Read;
     use std::sync::Mutex;
 
@@ -6938,7 +7110,7 @@ mod tests {
         read_docker_request_after_auth, read_http_request, should_desktop_forward,
         structured_desktop_error, top_level_command_name, validate_build_platform,
         validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
-        ComposeCommands, ConfigCommands, NetworkCommands, VolumeCommands,
+        ComposeCommands, ConfigCommands, DockerEventStore, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8484,6 +8656,22 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
         handle_images(&store, "text").expect("images handler should succeed");
+    }
+
+    #[test]
+    fn docker_event_store_is_durable_and_filterable() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store.append("POST", "/containers/c1/start", 204).unwrap();
+        store.append("POST", "/networks/n1", 404).unwrap();
+        let reopened = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        assert_eq!(reopened.next_id, 2);
+        let mut filter = HashMap::new();
+        filter.insert("container".to_string(), "c1".to_string());
+        let events = reopened.query(&filter).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "start");
+        assert_eq!(events[0].status, 204);
     }
 
     #[test]

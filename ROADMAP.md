@@ -113,7 +113,7 @@ contexts, support boundaries, and upgrades are not yet a complete rootless produ
 provider extensions before ecosystem expansion. *Size:* L–XL. *Sources:* Docker
 competitive-gap sequence; existing observability and authorization surfaces.
 
-- [ ] Provide a durable, filterable event stream distinct from the witness journal.
+- [ ] Provide a complete durable, filterable event stream distinct from the witness journal; a separate fsynced JSONL stream with type/action/time/resource filters and `/events` socket coverage is implemented, while live-follow semantics and full Docker payload parity remain open.
 - [ ] Define versioned log-driver, volume-driver, network-driver, and plugin contracts with capability declarations.
 - [ ] Add plugin identity, signature/permission, lifecycle, retry, isolation, and resource limits.
 - [ ] Make every plugin mutation a delegated child of a parent authorization decision with durable intent and cleanup provenance.

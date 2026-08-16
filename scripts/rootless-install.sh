@@ -8,12 +8,13 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--upgrade] [--dry-run]
+Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--upgrade] [--dry-run] [--strict]
 
 Installs ~/.local/bin/ferrocrate and a systemd user unit. --enable starts the
 unit immediately when systemd --user is available. --upgrade atomically replaces
 an existing per-user binary and unit. Use --dry-run to inspect the plan without
-writing files.
+writing files. --strict fails before mutation when required rootless host
+prerequisites are unavailable.
 EOF
 }
 
@@ -22,6 +23,7 @@ socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ferrocrate.sock"
 enable=0
 upgrade=0
 dry_run=0
+strict=0
 while (($#)); do
   case "$1" in
     --binary) binary="${2:?missing path after --binary}"; shift 2 ;;
@@ -29,6 +31,7 @@ while (($#)); do
     --enable) enable=1; shift ;;
     --upgrade) upgrade=1; shift ;;
     --dry-run) dry_run=1; shift ;;
+    --strict) strict=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -66,13 +69,50 @@ else
   echo "rootless.install.mode=install"
 fi
 
+prerequisite_failures=0
 for helper in newuidmap newgidmap slirp4netns; do
   if command -v "$helper" >/dev/null 2>&1; then
     echo "rootless.install.$helper=pass"
   else
     echo "rootless.install.$helper=missing"
+    prerequisite_failures=1
   fi
 done
+
+if awk -F: -v user="$user" '$1 == user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 { found=1 } END { exit !found }' /etc/subuid 2>/dev/null; then
+  echo "rootless.install.subuid=pass"
+else
+  echo "rootless.install.subuid=missing"
+  prerequisite_failures=1
+fi
+if awk -F: -v user="$user" '$1 == user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 { found=1 } END { exit !found }' /etc/subgid 2>/dev/null; then
+  echo "rootless.install.subgid=pass"
+else
+  echo "rootless.install.subgid=missing"
+  prerequisite_failures=1
+fi
+if [[ -r /sys/fs/cgroup/cgroup.controllers ]]; then
+  echo "rootless.install.cgroup_v2=pass"
+else
+  echo "rootless.install.cgroup_v2=missing"
+  prerequisite_failures=1
+fi
+if [[ -r /proc/sys/user/max_user_namespaces ]] && (( $(< /proc/sys/user/max_user_namespaces) > 0 )); then
+  echo "rootless.install.user_namespaces=pass"
+else
+  echo "rootless.install.user_namespaces=missing"
+  prerequisite_failures=1
+fi
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" ]]; then
+  echo "rootless.install.runtime_dir=pass"
+else
+  echo "rootless.install.runtime_dir=missing"
+  prerequisite_failures=1
+fi
+if ((strict && prerequisite_failures)); then
+  echo "rootless-install: strict prerequisite check failed; no files were changed" >&2
+  exit 1
+fi
 
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit_path="$unit_dir/ferrocrate.service"

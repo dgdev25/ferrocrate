@@ -17,6 +17,11 @@ run_installer() {
 
 run_installer --dry-run >"$tmp_home/dry-run.txt"
 grep -q '^rootless.install.dry_run=pass$' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.subuid=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.subgid=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.cgroup_v2=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.user_namespaces=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
 run_installer >"$tmp_home/install.txt"
 test -x "$tmp_home/.local/bin/ferrocrate"
@@ -38,5 +43,16 @@ if HOME="$tmp_home" XDG_CONFIG_HOME="$tmp_home/config" XDG_RUNTIME_DIR="$runtime
   exit 1
 fi
 grep -q 'socket must be an absolute path' "$tmp_home/unsafe.txt"
+
+strict_home="$tmp_home/strict-home"
+mkdir -p "$strict_home"
+if HOME="$strict_home" XDG_CONFIG_HOME="$strict_home/config" XDG_RUNTIME_DIR="$strict_home/missing" \
+  "$installer" --binary /bin/true --socket "$strict_home/missing/ferrocrate.sock" --strict --dry-run \
+  >"$tmp_home/strict.txt" 2>&1; then
+  echo "strict prerequisite check unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -q 'strict prerequisite check failed' "$tmp_home/strict.txt"
+test ! -e "$strict_home/config/systemd/user/ferrocrate.service"
 
 echo "rootless installer regression checks passed"

@@ -51,7 +51,7 @@ compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
 - [x] Add UDS conformance fixtures for the exposed lifecycle path; malformed requests, deadlines, retries, and full method idempotency remain in the qualification expansion.
 - [x] Publish the supported CRI method/version/error matrix and wire-level malformed/unknown/idempotency fixtures; kubelet/containerd compatibility remains a separate qualification gate.
 - [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary.
-- [ ] Update the PRD-backed compatibility table when each method is actually qualified; do not claim kubelet compatibility prematurely.
+- [x] Update the PRD-backed compatibility table for the currently qualified methods; kubelet/containerd compatibility remains explicitly unclaimed until its separate gate passes.
 
 ### 3. Security enforcement and dependency hygiene
 

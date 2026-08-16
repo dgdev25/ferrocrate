@@ -41,6 +41,7 @@ run_benchmark idle-no-daemon scripts/perf/idle-no-daemon.sh
 run_benchmark per-container scripts/perf/per-container.sh
 run_benchmark binary-size scripts/perf/binary-size.sh
 run_benchmark ai-latency scripts/perf/ai-latency.sh
+run_benchmark ai-overhead scripts/perf/ai-overhead.sh
 run_benchmark docker-api scripts/perf/docker-api-compat.sh
 run_benchmark oci-compat scripts/perf/oci-compat.sh
 run_benchmark oci-conformance scripts/oci-conformance.sh

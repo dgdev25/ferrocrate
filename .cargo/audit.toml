@@ -5,4 +5,8 @@ ignore = [
   "RUSTSEC-2025-0141",
   "RUSTSEC-2025-0057",
   "RUSTSEC-2024-0384",
+  # No fixed release is published for these 2026 unsoundness warnings yet;
+  # each is tracked in the risk-acceptance register with a revalidation date.
+  "RUSTSEC-2026-0190",
+  "RUSTSEC-2026-0097",
 ]

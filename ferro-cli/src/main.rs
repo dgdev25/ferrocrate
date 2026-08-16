@@ -317,6 +317,11 @@ pub enum Commands {
         container: String,
     },
     #[cfg(target_os = "linux")]
+    Rename {
+        container: String,
+        name: String,
+    },
+    #[cfg(target_os = "linux")]
     Restart {
         container: String,
         #[arg(long, default_value = "10")]
@@ -961,6 +966,7 @@ fn is_runtime_command_name(command: &str) -> bool {
             | "stop"
             | "kill"
             | "rm"
+            | "rename"
             | "restart"
             | "exec"
             | "scan"
@@ -2702,6 +2708,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Kill { container } => handle_kill(&runtime, &container),
             #[cfg(target_os = "linux")]
             Commands::Rm { container } => handle_rm(&runtime, &container),
+            #[cfg(target_os = "linux")]
+            Commands::Rename { container, name } => handle_rename(&runtime, &container, &name),
             #[cfg(target_os = "linux")]
             Commands::Restart { container, timeout } => {
                 handle_restart(&runtime, &container, timeout)
@@ -4728,6 +4736,23 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/containers/{}", percent_encode_path_component(container)),
         )
         .map(|_| ()),
+        Commands::Rename { container, name } => (|| -> Result<(), String> {
+            if container.trim().is_empty() {
+                return Err("rename: container is required".to_string());
+            }
+            validate_docker_container_name(name)?;
+            let body = serde_json::to_vec(&serde_json::json!({"name": name}))
+                .map_err(|error| error.to_string())?;
+            request_with_body(
+                "POST",
+                format!(
+                    "/containers/{}/rename",
+                    percent_encode_path_component(container)
+                ),
+                Some(body),
+            )
+            .map(|_| println!("rename: container={container} name={name}"))
+        })(),
         Commands::Network {
             command: NetworkCommands::Ls,
         } => request("GET", "/networks".to_string()).and_then(|body| print_json(body, "json")),
@@ -6164,6 +6189,20 @@ fn handle_rm(runtime: &ContainerRuntime, container: &str) -> Result<(), String> 
     let resolved = resolve_container_id(runtime, container)?;
     runtime.remove(&resolved).map_err(|err| err.to_string())?;
     println!("rm: {resolved}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_rename(runtime: &ContainerRuntime, container: &str, name: &str) -> Result<(), String> {
+    if container.trim().is_empty() {
+        return Err("rename: container is required".to_string());
+    }
+    validate_docker_container_name(name)?;
+    let resolved = resolve_container_id(runtime, container)?;
+    runtime
+        .rename(&resolved, name)
+        .map_err(|err| err.to_string())?;
+    println!("rename: container={resolved} name={name}");
     Ok(())
 }
 
@@ -11634,6 +11673,18 @@ volumes:
         let cli = Cli::parse_from(["ferrocrate", "rm", "abc123"]);
         match cli.command {
             Commands::Rm { container } => assert_eq!(container, "abc123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rename_command() {
+        let cli = Cli::parse_from(["ferrocrate", "rename", "abc123", "web"]);
+        match cli.command {
+            Commands::Rename { container, name } => {
+                assert_eq!(container, "abc123");
+                assert_eq!(name, "web");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

@@ -141,7 +141,7 @@ AI-08/09/11/12; `docs/RVF_INTEGRATION_PLAN.md`.
 - [x] Remove the placeholder WASM inference success path: the legacy `noop` engine now fails closed with an explicit unsupported-mode error; the validated `linear` engine remains available, while a true sandboxed WASM runtime remains out of scope until separately adopted.
 - [ ] Implement real model/version routing, training-data collection, online-learning safeguards, and rollback gates.
 - [ ] Populate explainability traces with decision inputs, model/version, confidence, and resulting action; anomaly, predictive-OOM, and adaptive-restart traces now persist structured model/version and decision fields alongside bounded evidence, while broader AI behavior coverage remains open.
-- [ ] Replace brute-force vector paths where scale requires it; benchmark HNSW/index behavior and persistence.
+- [x] Replace brute-force vector paths where scale requires it; cosine search uses the HNSW-backed `ruvector-core` index, bounded-window Euclidean/Manhattan paths remain deliberately brute-force, and the persistent backend parity workload covers 1,200 inserts and 4,000 queries (`cargo test -p ferro-mind backend_parity_workload`).
 - [x] Implement truthful GPU/VRAM discovery and scheduling: `ai gpu` reports `nvidia-smi` discovery failures explicitly, emits JSON/text inventory, and selects a candidate only when requested free VRAM is available; non-NVIDIA/absent-GPU hosts remain an explicit no-capability result.
 - [ ] Add end-to-end AI behavior tests and an AI overhead benchmark; keep `FERROCRATE_AI=0` fully functional. The lifecycle now gates monitor startup on explicit AI enablement and a non-zero memory limit, with a regression test for the disabled path; behavior coverage and benchmark evidence remain open.
 

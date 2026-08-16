@@ -6863,6 +6863,20 @@ fn handle_docker_compat_connection(
                     .map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/pause") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/pause");
+                runtime.pause(id).map_err(|err| err.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/unpause") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/unpause");
+                runtime.resume(id).map_err(|err| err.to_string())?;
+                http_response(204, &[], "text/plain")
+            }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/kill") => {
                 let id = path
                     .trim_start_matches("/containers/")

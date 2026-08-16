@@ -6907,12 +6907,8 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/containers/json") => {
-                let all = query
-                    .get("all")
-                    .is_some_and(|value| matches!(value.as_str(), "1" | "true"));
-                let limit = query
-                    .get("limit")
-                    .and_then(|value| value.parse::<usize>().ok());
+                let all = parse_docker_bool_query(query.get("all"), "all")?;
+                let limit = parse_docker_limit_query(query.get("limit"))?;
                 let filters = parse_docker_filters(&query)?;
                 let mut records = runtime.list().map_err(|err| err.to_string())?;
                 if !all {
@@ -7597,6 +7593,30 @@ fn docker_tail_logs(logs: &str, tail: Option<&str>) -> Result<String, String> {
     Ok(result)
 }
 
+fn parse_docker_bool_query(value: Option<&String>, key: &str) -> Result<bool, String> {
+    match value.map(String::as_str) {
+        None => Ok(false),
+        Some("1" | "true" | "TRUE" | "True") => Ok(true),
+        Some("0" | "false" | "FALSE" | "False") => Ok(false),
+        Some(other) => Err(format!("docker: {key} must be a boolean, got {other}")),
+    }
+}
+
+fn parse_docker_limit_query(value: Option<&String>) -> Result<Option<usize>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| format!("docker: limit must be an integer, got {value}"))?;
+    if parsed < 0 {
+        return Ok(None);
+    }
+    usize::try_from(parsed)
+        .map(Some)
+        .map_err(|_| format!("docker: limit is too large, got {value}"))
+}
+
 fn parse_docker_filters(
     query: &HashMap<String, String>,
 ) -> Result<HashMap<String, Vec<String>>, String> {
@@ -8158,14 +8178,14 @@ mod tests {
         handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
         handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
         handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_filters,
-        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, should_desktop_forward, split_path_query, structured_desktop_error,
-        top_level_command_name, validate_build_platform, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
-        VolumeCommands,
+        parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_bool_query,
+        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, should_desktop_forward,
+        split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_network_backend, validate_network_mode, AiCommands, Cli,
+        Commands, ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
+        MigrateCommands, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -10040,6 +10060,21 @@ volumes:
         );
         assert!(split_path_query("/containers/json?filters=%zz").is_err());
         assert!(split_path_query("/containers/json?filters=%C3").is_err());
+    }
+
+    #[test]
+    fn docker_list_query_scalars_fail_closed() {
+        assert!(parse_docker_bool_query(Some(&"maybe".to_string()), "all").is_err());
+        assert!(parse_docker_limit_query(Some(&"ten".to_string())).is_err());
+        assert_eq!(parse_docker_bool_query(None, "all").unwrap(), false);
+        assert_eq!(
+            parse_docker_limit_query(Some(&"-1".to_string())).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_docker_limit_query(Some(&"2".to_string())).unwrap(),
+            Some(2)
+        );
     }
 
     #[test]

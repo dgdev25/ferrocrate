@@ -740,3 +740,85 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_socket_rejects_malformed_and_repeated_lifecycle_requests() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-errors.sock");
+    unsafe {
+        std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+    }
+    let socket_for_server = socket.clone();
+    let server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_server).await;
+    });
+    wait_for_socket(&socket).await;
+
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let invalid = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: None,
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect_err("missing sandbox config must fail");
+    assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+
+    let missing = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: "missing-sandbox".into(),
+            config: Some(ContainerConfig {
+                metadata_name: "bad".into(),
+                image: "missing:latest".into(),
+                command: vec!["true".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect_err("unknown sandbox must fail");
+    assert_eq!(missing.code(), tonic::Code::NotFound);
+
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "idempotent-pod".into(),
+                    uid: "idempotent-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "idempotent-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("first remove");
+    let repeated = client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox,
+        })
+        .await
+        .expect_err("repeated remove must be typed");
+    assert_eq!(repeated.code(), tonic::Code::NotFound);
+
+    server.abort();
+    let _ = server.await;
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+    }
+}

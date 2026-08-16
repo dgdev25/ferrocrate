@@ -49,7 +49,7 @@ compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
 - [x] Qualify Create/Start/Stop/RemoveContainer, ContainerStatus, and ExecSync with a real OCI image/rootfs, including exit code, stdout, and deadline behavior; broader image corpus and cancellation remain open.
 - [ ] Bind pod/container identity, sandbox, image digest, command, and resource state into the common authorization proof and witness lifecycle.
 - [x] Add UDS conformance fixtures for the exposed lifecycle path; malformed requests, deadlines, retries, and full method idempotency remain in the qualification expansion.
-- [ ] Add kubelet/containerd compatibility fixtures and publish the supported CRI method/version/error matrix.
+- [x] Publish the supported CRI method/version/error matrix and wire-level malformed/unknown/idempotency fixtures; kubelet/containerd compatibility remains a separate qualification gate.
 - [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary.
 - [ ] Update the PRD-backed compatibility table when each method is actually qualified; do not claim kubelet compatibility prematurely.
 

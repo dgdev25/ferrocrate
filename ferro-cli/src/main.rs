@@ -6849,7 +6849,7 @@ fn handle_docker_compat_connection(
             .surface_authorization()
             .map_err(|error| error.to_string())?;
 
-        let (path, query) = split_path_query(&request.path);
+        let (path, query) = split_path_query(&request.path)?;
         let path = normalize_docker_api_path(&path);
         event_request = Some((request.method.clone(), path.clone()));
         let response = match (request.method.as_str(), path.as_str()) {
@@ -8069,7 +8069,7 @@ fn write_chunk(stream: &mut UnixStream, body: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn split_path_query(path: &str) -> (String, HashMap<String, String>) {
+fn split_path_query(path: &str) -> Result<(String, HashMap<String, String>), String> {
     let mut query_map = HashMap::new();
     let mut parts = path.splitn(2, '?');
     let base = parts.next().unwrap_or("").to_string();
@@ -8079,10 +8079,40 @@ fn split_path_query(path: &str) -> (String, HashMap<String, String>) {
             continue;
         }
         if let Some((key, value)) = pair.split_once('=') {
-            query_map.insert(key.to_string(), value.to_string());
+            query_map.insert(
+                percent_decode_query_component(key)?,
+                percent_decode_query_component(value)?,
+            );
         }
     }
-    (base, query_map)
+    Ok((base, query_map))
+}
+
+fn percent_decode_query_component(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => decoded.push(b' '),
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err("docker: malformed percent-encoded query component".to_string());
+                }
+                let high = (bytes[index + 1] as char).to_digit(16).ok_or_else(|| {
+                    "docker: malformed percent-encoded query component".to_string()
+                })?;
+                let low = (bytes[index + 2] as char).to_digit(16).ok_or_else(|| {
+                    "docker: malformed percent-encoded query component".to_string()
+                })?;
+                decoded.push(((high << 4) | low) as u8);
+                index += 2;
+            }
+            byte => decoded.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8(decoded).map_err(|_| "docker: query component is not valid UTF-8".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -8131,7 +8161,7 @@ mod tests {
         parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_filters,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, should_desktop_forward, structured_desktop_error,
+        read_http_request, should_desktop_forward, split_path_query, structured_desktop_error,
         top_level_command_name, validate_build_platform, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
@@ -9994,6 +10024,22 @@ volumes:
         let mut query = HashMap::new();
         query.insert("filters".to_string(), "[]".to_string());
         assert!(parse_docker_filters(&query).is_err());
+    }
+
+    #[test]
+    fn docker_query_decodes_encoded_filters_and_plus_spaces() {
+        let (path, query) = split_path_query(
+            "/containers/json?filters=%7B%22label%22%3A%5B%22tier%3Dfront+end%22%5D%7D&name=web%2Done",
+        )
+        .expect("encoded query");
+        assert_eq!(path, "/containers/json");
+        assert_eq!(query.get("name").map(String::as_str), Some("web-one"));
+        assert_eq!(
+            query.get("filters").map(String::as_str),
+            Some(r#"{"label":["tier=front end"]}"#)
+        );
+        assert!(split_path_query("/containers/json?filters=%zz").is_err());
+        assert!(split_path_query("/containers/json?filters=%C3").is_err());
     }
 
     #[test]

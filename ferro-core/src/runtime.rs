@@ -4812,20 +4812,68 @@ fn supervise_child(
             seccomp_profile.as_ref(),
         ) {
             Ok(cmd) => cmd,
-            Err(_) => break,
+            Err(_) => {
+                if ai_enabled {
+                    log_ai_restart_lifecycle(
+                        &container_id,
+                        "ai_restart_failed",
+                        exit_code,
+                        restart_count,
+                        delay_secs,
+                        "build-command",
+                        None,
+                    );
+                }
+                break;
+            }
         };
         let (pid, new_child, new_pidfd) =
             match spawn_child_with_logs(command, &stdout_path, &stderr_path, append) {
                 Ok(tuple) => tuple,
-                Err(_) => break,
+                Err(_) => {
+                    if ai_enabled {
+                        log_ai_restart_lifecycle(
+                            &container_id,
+                            "ai_restart_failed",
+                            exit_code,
+                            restart_count,
+                            delay_secs,
+                            "spawn-child",
+                            None,
+                        );
+                    }
+                    break;
+                }
             };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             warn!("failed to update pid status for {container_id}: {e}");
+            if ai_enabled {
+                log_ai_restart_lifecycle(
+                    &container_id,
+                    "ai_restart_failed",
+                    exit_code,
+                    restart_count,
+                    delay_secs,
+                    "update-pid",
+                    Some(pid),
+                );
+            }
             let _ = kill_pid(pid);
             break;
         }
         if let Err(e) = release_prepared_child(pid) {
             warn!("failed to release supervised restart for {container_id}: {e}");
+            if ai_enabled {
+                log_ai_restart_lifecycle(
+                    &container_id,
+                    "ai_restart_failed",
+                    exit_code,
+                    restart_count,
+                    delay_secs,
+                    "release-child",
+                    Some(pid),
+                );
+            }
             let _ = kill_pid(pid);
             break;
         }
@@ -4834,24 +4882,15 @@ fn supervise_child(
         container_start_time = std::time::Instant::now();
         if ai_enabled {
             adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
-            if let Some(logger) = ai_decision_logger() {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                let trace = ferro_mind::ai::explain::DecisionTrace::new(
-                    format!("ai-restart-applied-{container_id}-{ts}"),
-                    format!("Adaptive restart applied to container {container_id}"),
-                )
-                .with_model("adaptive-restart-policy", "runtime-v1")
-                .with_decision("restart-applied")
-                .with_evidence("container_id", container_id.clone())
-                .with_evidence("previous_exit_code", exit_code.to_string())
-                .with_evidence("restart_count", restart_count.to_string())
-                .with_evidence("delay_secs", delay_secs.to_string())
-                .with_evidence("new_pid", pid.to_string());
-                let _ = logger.log("ai_restart_applied", &trace);
-            }
+            log_ai_restart_lifecycle(
+                &container_id,
+                "ai_restart_applied",
+                exit_code,
+                restart_count,
+                delay_secs,
+                "released",
+                Some(pid),
+            );
         }
         restart_count += 1;
     }
@@ -8917,6 +8956,39 @@ fn ai_decision_logger() -> Option<ferro_mind::ai::audit::AuditLogger> {
                 .join("decisions.jsonl")
         });
     Some(ferro_mind::ai::audit::AuditLogger::new(path))
+}
+
+fn log_ai_restart_lifecycle(
+    container_id: &str,
+    action: &str,
+    exit_code: i32,
+    restart_count: u32,
+    delay_secs: u64,
+    stage: &str,
+    pid: Option<u32>,
+) {
+    let Some(logger) = ai_decision_logger() else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut trace = ferro_mind::ai::explain::DecisionTrace::new(
+        format!("ai-restart-{action}-{container_id}-{ts}"),
+        format!("Adaptive restart lifecycle stage for container {container_id}"),
+    )
+    .with_model("adaptive-restart-policy", "runtime-v1")
+    .with_decision(action)
+    .with_evidence("container_id", container_id.to_string())
+    .with_evidence("previous_exit_code", exit_code.to_string())
+    .with_evidence("restart_count", restart_count.to_string())
+    .with_evidence("delay_secs", delay_secs.to_string())
+    .with_evidence("stage", stage.to_string());
+    if let Some(pid) = pid {
+        trace = trace.with_evidence("pid", pid.to_string());
+    }
+    let _ = logger.log(action, &trace);
 }
 
 fn ai_lifecycle_enabled(config: Option<&AiRuntimeConfig>) -> bool {

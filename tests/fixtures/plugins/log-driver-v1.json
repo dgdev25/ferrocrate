@@ -1,0 +1,15 @@
+{
+  "api_version": "1",
+  "name": "audit-log",
+  "version": "1.2.3",
+  "kind": "log_driver",
+  "entrypoint": "/usr/lib/ferrocrate/audit-log",
+  "permissions": ["write_logs"],
+  "limits": {
+    "memory_bytes": 67108864,
+    "pids": 16,
+    "timeout_secs": 30,
+    "max_output_bytes": 1048576
+  },
+  "signature": "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

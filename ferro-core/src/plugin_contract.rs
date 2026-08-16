@@ -256,6 +256,17 @@ mod tests {
     }
 
     #[test]
+    fn validates_published_v1_sdk_fixture() {
+        let manifest = parse_plugin_manifest(include_bytes!(
+            "../../tests/fixtures/plugins/log-driver-v1.json"
+        ))
+        .expect("published plugin fixture");
+        assert_eq!(manifest.api_version, "1");
+        assert_eq!(manifest.name, "audit-log");
+        assert_eq!(manifest.limits.pids, 16);
+    }
+
+    #[test]
     fn rejects_traversal_and_unknown_permissions() {
         let mut value: serde_json::Value = serde_json::from_slice(valid()).unwrap();
         value["entrypoint"] = serde_json::Value::String("/usr/../plugin".into());

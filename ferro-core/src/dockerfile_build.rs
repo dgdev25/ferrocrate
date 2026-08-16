@@ -988,7 +988,9 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 }
             }
             "STOPSIGNAL" | "MAINTAINER" | "ONBUILD" => {
-                // Accept but no-op for now to avoid failing common Dockerfiles.
+                return Err(DockerfileBuildError::Unsupported(format!(
+                    "instruction {keyword} is not supported"
+                )));
             }
             other => {
                 return Err(DockerfileBuildError::Unsupported(format!(
@@ -1917,6 +1919,19 @@ mod tests {
         let error = parse_stages("FROM scratch\nCOPY --chmod=999 app /app\n")
             .expect_err("invalid modes must be rejected");
         assert!(error.to_string().contains("invalid COPY --chmod mode"));
+    }
+
+    #[test]
+    fn unsupported_directives_fail_instead_of_being_silently_ignored() {
+        for directive in [
+            "STOPSIGNAL SIGTERM",
+            "MAINTAINER legacy",
+            "ONBUILD RUN echo hi",
+        ] {
+            let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
+                .expect_err("unsupported directive must fail deterministically");
+            assert!(error.to_string().contains("instruction"), "{error}");
+        }
     }
 
     #[cfg(unix)]

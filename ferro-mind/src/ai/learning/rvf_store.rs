@@ -2,7 +2,9 @@
 
 use crate::ruv::types::SearchResult;
 use parking_lot::Mutex;
-use rvf_runtime::{QueryOptions, RvfOptions, RvfStore as BackendStore};
+use rvf_runtime::{
+    options::CompressionProfile, QueryOptions, RvfOptions, RvfStore as BackendStore,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -51,6 +53,17 @@ impl RvfStore {
     const FLUSH_BATCH_SIZE: usize = 256;
 
     pub fn open_or_create<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
+        Self::open_or_create_with_compression(path, dimensions, CompressionProfile::None)
+    }
+
+    /// Open an existing RVF store or create one with the requested persistent
+    /// vector-compression profile. The profile is applied at file creation;
+    /// reopening an existing artifact never rewrites it implicitly.
+    pub fn open_or_create_with_compression<P: AsRef<Path>>(
+        path: P,
+        dimensions: usize,
+        compression: CompressionProfile,
+    ) -> Result<Self> {
         if dimensions == 0 || dimensions > u16::MAX as usize {
             return Err(RvfStoreError::InvalidDimensions(dimensions));
         }
@@ -62,6 +75,7 @@ impl RvfStore {
             let options = RvfOptions {
                 dimension: dimensions as u16,
                 metric: rvf_runtime::options::DistanceMetric::Cosine,
+                compression,
                 ..Default::default()
             };
             BackendStore::create(&path, options)
@@ -169,6 +183,7 @@ impl Drop for RvfStore {
 #[cfg(test)]
 mod tests {
     use super::RvfStore;
+    use rvf_runtime::options::CompressionProfile;
 
     #[test]
     fn persists_vectors_across_restarts() {
@@ -186,5 +201,25 @@ mod tests {
             let hits = store.search(&[1.0, 0.0, 0.0], 1).expect("query");
             assert_eq!(hits.len(), 1);
         }
+    }
+
+    #[test]
+    fn scalar_compression_persists_and_remains_queryable_after_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("compressed.rvf");
+        {
+            let store =
+                RvfStore::open_or_create_with_compression(&path, 3, CompressionProfile::Scalar)
+                    .expect("create compressed store");
+            store
+                .insert(Some("compressed-vector"), &[0.25, 0.5, 0.75])
+                .expect("insert");
+        }
+
+        let store = RvfStore::open_or_create(&path, 3).expect("reopen compressed store");
+        let hits = store
+            .search(&[0.25, 0.5, 0.75], 1)
+            .expect("query compressed store");
+        assert_eq!(hits.len(), 1);
     }
 }

@@ -7873,8 +7873,6 @@ mod tests {
             .clone()
             .expect("IdentityObserved retains exact kernel identity");
         assert!(observed.ifindex.is_some_and(|idx| idx != 0));
-        let retained_op_id = pending[0].op_id.clone();
-
         // Do not reset the in-process kernel adapter: recovery must observe the
         // same bridge the public create effect recorded.
         std::fs::set_permissions(&networks_dir, std::fs::Permissions::from_mode(0o755))
@@ -7899,39 +7897,15 @@ mod tests {
             effects_before_replacement,
             "replacement must not invoke kernel effects: {replacement_err}"
         );
-        let pending_blocked = crate::network_lifecycle::read_pending_operations(temp.path())
-            .expect("pending after replacement attempt");
-        assert_eq!(
-            pending_blocked.len(),
-            1,
-            "replacement must not open a second lifecycle operation"
-        );
-        assert_eq!(pending_blocked[0].op_id, retained_op_id);
-        assert_eq!(
-            pending_blocked[0].phase,
-            crate::network_lifecycle::NetworkLifecyclePhase::IdentityObserved
-        );
-        assert!(
-            super::load_networks(temp.path()).expect("load").is_empty(),
-            "blocked replacement must not publish a store record"
-        );
-
-        let recovery = crate::network_lifecycle::recover_network_lifecycles(
-            temp.path(),
-            super::cli_network_kernel().as_ref(),
-        )
-        .expect("recover pending IdentityObserved");
-        assert_eq!(recovery.entries.len(), 1);
-        assert_eq!(
-            recovery.entries[0].verdict,
-            crate::network_lifecycle::NetworkRecoveryVerdict::AppliedAndCommitted
-        );
-        assert!(recovery.entries[0].committed);
+        // The public handler performs recovery before dispatch. It must
+        // reconcile the retained operation, then reject the replacement
+        // against the recovered record without opening a second operation or
+        // invoking another kernel effect.
         assert!(
             crate::network_lifecycle::read_pending_operations(temp.path())
-                .expect("pending after recovery")
+                .expect("pending after replacement attempt")
                 .is_empty(),
-            "recovery must clear nonterminal lifecycle"
+            "handler recovery must clear the retained lifecycle"
         );
         let stored = super::load_networks(temp.path()).expect("store after recovery");
         assert_eq!(stored.len(), 1);

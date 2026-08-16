@@ -101,3 +101,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — firewall rule application/deletion now verifies exact iptables presence or nftables handles after each mutation.
 - 2026-08-16 — traffic-control mutation now requires the shared host capability gate and verifies the requested TBF rate exactly; the existing runtime port-map/eBPF paths are recorded as the production integration boundary.
 - 2026-08-16 — container hosts publication now uses an atomic, symlink-safe, fsynced write with exact read-back; resolver publication uses the shared atomic DNS writer.
+- 2026-08-16 — nftables and traffic-control read-back now use the shared `ferro-net` command-capture executor instead of runtime-local subprocess handling.

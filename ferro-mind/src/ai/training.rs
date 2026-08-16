@@ -109,6 +109,8 @@ pub struct TrainingConfig {
     pub min_samples: usize,
     /// Maximum relative loss regression accepted when activating a candidate.
     pub max_loss_regression: f32,
+    /// Explicit operator consent for durable training-data collection.
+    pub data_collection_consent: bool,
 }
 
 impl Default for TrainingConfig {
@@ -127,6 +129,9 @@ impl Default for TrainingConfig {
             max_versions: 10,
             min_samples: 100,
             max_loss_regression: 0.25,
+            data_collection_consent: std::env::var("FERROCRATE_AI_DATA_COLLECTION")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
         }
     }
 }
@@ -263,6 +268,9 @@ pub enum TrainingError {
 
     #[error("training sample exceeds the {0}-byte limit")]
     SampleTooLarge(usize),
+
+    #[error("training-data collection requires explicit operator consent")]
+    DataCollectionDisabled,
 }
 
 impl From<String> for TrainingError {
@@ -815,6 +823,9 @@ impl TrainingPipeline {
         model_type: ModelType,
         sample: &[u8],
     ) -> Result<(), TrainingError> {
+        if !self.config.data_collection_consent {
+            return Err(TrainingError::DataCollectionDisabled);
+        }
         const MAX_SAMPLE_BYTES: usize = 1 << 20;
         if sample.len() > MAX_SAMPLE_BYTES {
             return Err(TrainingError::SampleTooLarge(MAX_SAMPLE_BYTES));
@@ -1596,6 +1607,7 @@ mod tests {
             max_versions: 5,
             min_samples: 3, // Low for testing
             max_loss_regression: 0.25,
+            data_collection_consent: true,
         };
 
         // Create sample data
@@ -2049,6 +2061,29 @@ mod tests {
         assert_eq!(
             fs::read_dir(&sample_dir).expect("sample directory").count(),
             0
+        );
+    }
+
+    #[test]
+    fn training_collection_requires_explicit_consent() {
+        let (_temp, mut config) = setup_test_env();
+        config.data_collection_consent = false;
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let sample = serde_json::json!({
+            "cpu_percent": 1.0,
+            "memory_bytes": 1,
+            "pids_count": 1,
+            "timestamp_secs": 1
+        });
+        let error = pipeline
+            .record_sample(ModelType::ResourcePredictor, sample.to_string().as_bytes())
+            .expect_err("collection without consent must fail closed");
+        assert!(matches!(error, TrainingError::DataCollectionDisabled));
+        assert_eq!(
+            fs::read_dir(config.data_dir.join("resource-predictor"))
+                .expect("sample directory")
+                .count(),
+            5
         );
     }
 

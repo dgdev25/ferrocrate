@@ -931,6 +931,41 @@ impl TrainingPipeline {
         File::open(&data_dir)?.sync_all()?;
         Ok(remove_count)
     }
+
+    /// Delete samples whose filesystem publication time is older than the
+    /// caller-provided cutoff. The cutoff is explicit so policy layers can
+    /// apply legal/organizational retention windows without hidden clocks.
+    pub fn prune_samples_older_than(
+        &self,
+        model_type: ModelType,
+        cutoff: std::time::SystemTime,
+    ) -> Result<usize, TrainingError> {
+        let data_dir = self.config.data_dir.join(model_type.to_string());
+        let paths = fs::read_dir(&data_dir)
+            .map_err(TrainingError::Io)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .filter_map(|entry| {
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()?;
+                (modified < cutoff).then_some(entry.path())
+            })
+            .collect::<Vec<_>>();
+        for path in &paths {
+            fs::remove_file(path)?;
+        }
+        if !paths.is_empty() {
+            File::open(&data_dir)?.sync_all()?;
+        }
+        Ok(paths.len())
+    }
 }
 
 fn train_resource_predictor(samples: &[Vec<u8>]) -> Result<TrainedModel, TrainingError> {
@@ -2207,6 +2242,37 @@ mod tests {
         assert!(pipeline
             .delete_sample(ModelType::ResourcePredictor, &remaining)
             .expect("delete after consent revocation"));
+    }
+
+    #[test]
+    fn time_based_sample_pruning_uses_an_explicit_cutoff() {
+        let (_temp, config) = setup_test_env();
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let sample_dir = config.data_dir.join("resource-predictor");
+        fs::remove_dir_all(&sample_dir).expect("clear fixture samples");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        for timestamp in 1..=2 {
+            let sample = serde_json::json!({
+                "cpu_percent": timestamp as f32,
+                "memory_bytes": 1024,
+                "pids_count": 2,
+                "timestamp_secs": timestamp
+            });
+            pipeline
+                .record_sample(ModelType::ResourcePredictor, sample.to_string().as_bytes())
+                .expect("record sample");
+        }
+        let cutoff = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+        assert_eq!(
+            pipeline
+                .prune_samples_older_than(ModelType::ResourcePredictor, cutoff)
+                .expect("time prune"),
+            2
+        );
+        assert_eq!(
+            fs::read_dir(&sample_dir).expect("sample directory").count(),
+            0
+        );
     }
 
     #[test]

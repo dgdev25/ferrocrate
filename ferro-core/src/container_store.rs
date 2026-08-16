@@ -959,6 +959,97 @@ impl LocalContainerStore {
         transaction.commit()?;
         Ok(())
     }
+
+    /// Import a previously exported SQLite snapshot without overwriting
+    /// conflicting durable state. All rows are decoded and identity-checked
+    /// before either sled tree is mutated; the two trees are then committed as
+    /// one sled transaction so a failed migration cannot leave a partial
+    /// container/lifecycle view.
+    pub fn import_sqlite_snapshot(
+        &self,
+        sqlite_path: impl AsRef<Path>,
+    ) -> Result<(), ContainerStoreError> {
+        let connection = rusqlite::Connection::open(sqlite_path)?;
+        let mut containers_statement =
+            connection.prepare("SELECT id, payload FROM containers ORDER BY id")?;
+        let containers = containers_statement
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let payload: Vec<u8> = row.get(1)?;
+                Ok((id, payload))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut decoded_containers = Vec::with_capacity(containers.len());
+        for (id, payload) in containers {
+            let record: ContainerRecord =
+                serde_json::from_slice(&payload).map_err(ContainerStoreError::Decode)?;
+            if record.id != id {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            if record.pending_mutation.is_some() {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            decoded_containers.push((id.into_bytes(), payload));
+        }
+
+        let mut operations_statement = connection.prepare(
+            "SELECT operation_id, payload FROM lifecycle_operations ORDER BY operation_id",
+        )?;
+        let operations = operations_statement
+            .query_map([], |row| {
+                let operation_id: Vec<u8> = row.get(0)?;
+                let payload: Vec<u8> = row.get(1)?;
+                Ok((operation_id, payload))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut decoded_operations = Vec::with_capacity(operations.len());
+        for (operation_id, payload) in operations {
+            let operation: LifecycleOperation =
+                serde_json::from_slice(&payload).map_err(ContainerStoreError::Decode)?;
+            if operation_id.len() != 16 || operation.operation_id.as_slice() != operation_id {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            decoded_operations.push((operation_id, payload));
+        }
+
+        let containers_tree = self.db.open_tree(CONTAINER_INDEX_TREE)?;
+        let operations_tree = self.db.open_tree(LIFECYCLE_OPERATION_TREE)?;
+        (&containers_tree, &operations_tree)
+            .transaction(|(containers, operations)| {
+                for (id, payload) in &decoded_containers {
+                    if let Some(existing) = containers.get(id)? {
+                        if existing.as_ref() != payload.as_slice() {
+                            return Err(sled::transaction::ConflictableTransactionError::Abort(
+                                ContainerStoreError::MutationConflict,
+                            ));
+                        }
+                    } else {
+                        containers.insert(id.as_slice(), payload.as_slice())?;
+                    }
+                }
+                for (operation_id, payload) in &decoded_operations {
+                    if let Some(existing) = operations.get(operation_id)? {
+                        if existing.as_ref() != payload.as_slice() {
+                            return Err(sled::transaction::ConflictableTransactionError::Abort(
+                                ContainerStoreError::MutationConflict,
+                            ));
+                        }
+                    } else {
+                        operations.insert(operation_id.as_slice(), payload.as_slice())?;
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|error| match error {
+                sled::transaction::TransactionError::Abort(error) => error,
+                sled::transaction::TransactionError::Storage(error) => {
+                    ContainerStoreError::Open(error)
+                }
+            })?;
+        containers_tree.flush()?;
+        operations_tree.flush()?;
+        Ok(())
+    }
 }
 
 fn lifecycle_operation(
@@ -1108,6 +1199,62 @@ mod tests {
             .expect("operations count");
         assert_eq!(containers, 0);
         assert_eq!(operations, 0);
+    }
+
+    #[test]
+    fn imports_sqlite_snapshot_round_trip_without_overwriting_conflicts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = LocalContainerStore::open(temp.path().join("source.db")).expect("source");
+        let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "round-trip",
+            "pid": 0,
+            "image": "alpine:latest",
+            "command": ["true"],
+            "created_at_unix": 1,
+            "stdout_path": "stdout.log",
+            "stderr_path": "stderr.log",
+            "status": "created"
+        }))
+        .expect("record");
+        source.put(&record).expect("seed source");
+        let sqlite = temp.path().join("snapshot.sqlite");
+        source
+            .export_sqlite_snapshot(&sqlite)
+            .expect("export snapshot");
+
+        let destination =
+            LocalContainerStore::open(temp.path().join("destination.db")).expect("destination");
+        destination
+            .import_sqlite_snapshot(&sqlite)
+            .expect("import snapshot");
+        assert_eq!(destination.get("round-trip").unwrap(), Some(record.clone()));
+        destination
+            .import_sqlite_snapshot(&sqlite)
+            .expect("idempotent import");
+
+        let conflicting: ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "round-trip",
+            "pid": 0,
+            "image": "different:latest",
+            "command": ["false"],
+            "created_at_unix": 1,
+            "stdout_path": "stdout.log",
+            "stderr_path": "stderr.log",
+            "status": "created"
+        }))
+        .expect("conflicting record");
+        let conflict_source =
+            LocalContainerStore::open(temp.path().join("conflict.db")).expect("conflict source");
+        conflict_source.put(&conflicting).expect("seed conflict");
+        let conflict_sqlite = temp.path().join("conflict.sqlite");
+        conflict_source
+            .export_sqlite_snapshot(&conflict_sqlite)
+            .expect("export conflict");
+        assert!(matches!(
+            destination.import_sqlite_snapshot(&conflict_sqlite),
+            Err(ContainerStoreError::MutationConflict)
+        ));
+        assert_eq!(destination.get("round-trip").unwrap(), Some(record));
     }
 
     #[test]

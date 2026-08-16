@@ -2464,6 +2464,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
             _ => {}
         }
+        if let Some(result) = dispatch_remote_context(&command) {
+            return result;
+        }
         authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
         match &command {
             Commands::Policy { command } => return dispatch_policy(command, &runtime_dir),
@@ -3890,6 +3893,148 @@ fn ensure_context_routing_available() -> Result<(), String> {
         "selected context '{name}' targets {}; remote daemon routing is not implemented; use a local context or `context use` with a local socket",
         context.endpoint
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn selected_remote_context_endpoint() -> Result<Option<String>, String> {
+    let config = load_cli_config()?;
+    let Some(name) = config.current_context else {
+        return Ok(None);
+    };
+    let context = config
+        .contexts
+        .get(&name)
+        .ok_or_else(|| format!("selected context '{name}' is missing from the context store"))?;
+    if context_endpoint_is_local(&context.endpoint) {
+        Ok(None)
+    } else {
+        let socket = context
+            .endpoint
+            .strip_prefix("unix://")
+            .ok_or_else(|| "remote context endpoint must use unix://".to_string())?;
+        Ok(Some(socket.to_string()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_request(
+    socket_path: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<(u16, Vec<u8>), String> {
+    if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
+        return Err("remote context request has an invalid socket or path".to_string());
+    }
+    let body = body.unwrap_or_default();
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| format!("remote context connect failed: {error}"))?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .map_err(|error| format!("remote context request failed: {error}"))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| format!("remote context request shutdown failed: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("remote context response failed: {error}"))?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "remote context returned malformed HTTP response".to_string())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "remote context returned non-UTF-8 headers".to_string())?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "remote context returned an invalid HTTP status".to_string())?;
+    Ok((status, response[header_end + 4..].to_vec()))
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
+    let endpoint = match selected_remote_context_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(error) => return Some(Err(error)),
+    }?;
+    let request = |method: &str, path: String| {
+        remote_docker_request(&endpoint, method, &path, None).and_then(|(status, body)| {
+            if (200..300).contains(&status) {
+                Ok(body)
+            } else {
+                Err(format!(
+                    "remote context request returned HTTP {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ))
+            }
+        })
+    };
+    let print_json = |body: Vec<u8>, format: &str| -> Result<(), String> {
+        if format == "json" {
+            let value: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|error| format!("remote context returned invalid JSON: {error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+            );
+        } else {
+            println!("{}", String::from_utf8_lossy(&body));
+        }
+        Ok(())
+    };
+    let result = match command {
+        Commands::Images { format } => request("GET", "/images/json".to_string())
+            .and_then(|body| print_json(body, format)),
+        Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
+            .and_then(|body| print_json(body, format)),
+        Commands::Inspect { container, format } => request(
+            "GET",
+            format!("/containers/{}/json", percent_encode_path_component(container)),
+        )
+        .and_then(|body| print_json(body, format)),
+        Commands::Logs { container, format } => request(
+            "GET",
+            format!(
+                "/containers/{}/logs?stdout=1&stderr=1",
+                percent_encode_path_component(container)
+            ),
+        )
+        .and_then(|body| print_json(body, format)),
+        Commands::Stats { container, format } => request(
+            "GET",
+            format!(
+                "/containers/{}/stats?stream=0",
+                percent_encode_path_component(container)
+            ),
+        )
+        .and_then(|body| print_json(body, format)),
+        _ => Err(
+            "selected remote context is available only for images, containers, logs, stats, and inspect; this command has no remote transport yet"
+                .to_string(),
+        ),
+    };
+    Some(result)
+}
+
+#[cfg(target_os = "linux")]
+fn percent_encode_path_component(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
@@ -9687,8 +9832,9 @@ mod tests {
         parse_docker_bool_query, parse_docker_create_spec, parse_docker_filters,
         parse_docker_limit_query, parse_docker_network_create_spec, parse_driver_opts,
         parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, read_merkle_leaves,
-        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
+        parse_tmpfs_mounts, percent_encode_path_component, read_docker_request_after_auth,
+        read_http_request, read_merkle_leaves, remote_docker_request, should_desktop_forward,
+        split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
@@ -12209,6 +12355,30 @@ volumes:
             socket.display()
         )));
         assert!(!context_endpoint_available("tcp://127.0.0.1:2375"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_context_transport_forwards_http_over_unix_socket() {
+        let temp = tempfile::tempdir().expect("remote socket fixture");
+        let socket = temp.path().join("remote.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept remote request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).ok();
+            assert!(String::from_utf8_lossy(&request).contains("GET /images/json"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+                .expect("write response");
+        });
+        let (status, body) =
+            remote_docker_request(&socket.to_string_lossy(), "GET", "/images/json", None)
+                .expect("remote request");
+        worker.join().expect("remote worker");
+        assert_eq!(status, 200);
+        assert_eq!(body, b"[]");
+        assert_eq!(percent_encode_path_component("web/name"), "web%2Fname");
     }
 
     #[test]

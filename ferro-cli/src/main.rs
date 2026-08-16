@@ -69,6 +69,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
@@ -259,6 +261,8 @@ pub enum Commands {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
+        #[arg(long)]
+        follow: bool,
     },
     #[cfg(target_os = "linux")]
     Stats {
@@ -2646,7 +2650,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Containers { format } => handle_containers(&runtime, &format),
             #[cfg(target_os = "linux")]
-            Commands::Logs { container, format } => handle_logs(&runtime, &container, &format),
+            Commands::Logs {
+                container,
+                format,
+                follow,
+            } => handle_logs(&runtime, &container, &format, follow),
             #[cfg(target_os = "linux")]
             Commands::Inspect { container, format } => {
                 handle_inspect(&runtime, &container, &format)
@@ -4136,6 +4144,128 @@ fn remote_docker_request(
 }
 
 #[cfg(target_os = "linux")]
+fn remote_docker_stream_request<F>(
+    socket_path: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    mut on_chunk: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
+    if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
+        return Err("remote context request has an invalid socket or path".to_string());
+    }
+    let body = body.unwrap_or_default();
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| format!("remote context connect failed: {error}"))?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .map_err(|error| format!("remote context request failed: {error}"))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| format!("remote context request shutdown failed: {error}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|error| format!("remote context stream response failed: {error}"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "remote context returned an invalid HTTP status".to_string())?;
+    let mut chunked = false;
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("remote context stream headers failed: {error}"))?;
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            match key.trim().to_ascii_lowercase().as_str() {
+                "transfer-encoding" => chunked = value.trim().eq_ignore_ascii_case("chunked"),
+                "content-length" => {
+                    content_length = Some(value.trim().parse::<usize>().map_err(|_| {
+                        "remote context returned an invalid Content-Length".to_string()
+                    })?);
+                }
+                _ => {}
+            }
+        }
+    }
+    if !(200..300).contains(&status) {
+        let mut response = Vec::new();
+        reader
+            .read_to_end(&mut response)
+            .map_err(|error| format!("remote context error response failed: {error}"))?;
+        return Err(format!(
+            "remote context request returned HTTP {status}: {}",
+            String::from_utf8_lossy(&response)
+        ));
+    }
+    if chunked {
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .map_err(|error| format!("remote context stream chunk header failed: {error}"))?;
+            let size_text = line.trim().split(';').next().unwrap_or_default();
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| "remote context returned an invalid chunk size".to_string())?;
+            if size == 0 {
+                break;
+            }
+            let mut chunk = vec![0; size];
+            reader
+                .read_exact(&mut chunk)
+                .map_err(|error| format!("remote context stream chunk truncated: {error}"))?;
+            let mut terminator = [0_u8; 2];
+            reader.read_exact(&mut terminator).map_err(|error| {
+                format!("remote context stream chunk terminator failed: {error}")
+            })?;
+            if terminator != *b"\r\n" {
+                return Err("remote context stream chunk has an invalid terminator".to_string());
+            }
+            on_chunk(&chunk)?;
+        }
+    } else if let Some(size) = content_length {
+        let mut remaining = size;
+        let mut chunk = vec![0_u8; 16 * 1024];
+        while remaining > 0 {
+            let target = remaining.min(chunk.len());
+            reader
+                .read_exact(&mut chunk[..target])
+                .map_err(|error| format!("remote context stream body truncated: {error}"))?;
+            on_chunk(&chunk[..target])?;
+            remaining -= target;
+        }
+    } else {
+        let mut chunk = [0_u8; 16 * 1024];
+        loop {
+            let size = reader
+                .read(&mut chunk)
+                .map_err(|error| format!("remote context stream body failed: {error}"))?;
+            if size == 0 {
+                break;
+            }
+            on_chunk(&chunk[..size])?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
     let endpoint = match selected_remote_context_endpoint() {
         Ok(endpoint) => endpoint,
@@ -4400,29 +4530,56 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .and_then(|body| print_json(body, format)),
-        Commands::Logs { container, format } => request(
-            "GET",
-            format!(
-                "/containers/{}/logs?stdout=1&stderr=1",
-                percent_encode_path_component(container)
-            ),
-        )
-        .and_then(|body| {
-            if format == "json" {
-                let output = serde_json::json!({
-                    "container": container,
-                    "logs": String::from_utf8_lossy(&body),
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
-                );
-                Ok(())
+        Commands::Logs {
+            container,
+            format,
+            follow,
+        } => {
+            if *follow {
+                if format == "json" {
+                    Err("remote logs: --follow cannot be combined with --format json".to_string())
+                } else {
+                    remote_docker_stream_request(
+                        &endpoint,
+                        "GET",
+                        &format!(
+                            "/containers/{}/logs?stdout=1&stderr=1&follow=1",
+                            percent_encode_path_component(container)
+                        ),
+                        None,
+                        |chunk| {
+                            print!("{}", String::from_utf8_lossy(chunk));
+                            std::io::stdout().flush().map_err(|error| error.to_string())
+                        },
+                    )
+                }
             } else {
-                print!("{}", String::from_utf8_lossy(&body));
-                Ok(())
+                request(
+                    "GET",
+                    format!(
+                        "/containers/{}/logs?stdout=1&stderr=1",
+                        percent_encode_path_component(container)
+                    ),
+                )
+                .and_then(|body| {
+                    if format == "json" {
+                        let output = serde_json::json!({
+                            "container": container,
+                            "logs": String::from_utf8_lossy(&body),
+                        });
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&output)
+                                .map_err(|error| error.to_string())?
+                        );
+                        Ok(())
+                    } else {
+                        print!("{}", String::from_utf8_lossy(&body));
+                        Ok(())
+                    }
+                })
             }
-        }),
+        }
         Commands::Stats { container, format } => request(
             "GET",
             format!(
@@ -5639,23 +5796,44 @@ fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), Str
 }
 
 #[cfg(target_os = "linux")]
-fn handle_logs(runtime: &ContainerRuntime, container: &str, format: &str) -> Result<(), String> {
+fn handle_logs(
+    runtime: &ContainerRuntime,
+    container: &str,
+    format: &str,
+    follow: bool,
+) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
     }
-    let resolved = resolve_container_id(runtime, container)?;
-    let logs = runtime.logs(&resolved).map_err(|err| err.to_string())?;
-    if format == "json" {
-        let output = serde_json::json!({
-            "container": resolved,
-            "logs": logs,
-        });
-        let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
-        println!("{json}");
-        return Ok(());
+    if follow && format == "json" {
+        return Err("logs: --follow cannot be combined with --format json".to_string());
     }
-    print!("{logs}");
-    Ok(())
+    let resolved = resolve_container_id(runtime, container)?;
+    let mut emitted = 0usize;
+    loop {
+        let logs = runtime.logs(&resolved).map_err(|err| err.to_string())?;
+        if logs.len() < emitted {
+            emitted = 0;
+        }
+        if !follow && format == "json" {
+            let output = serde_json::json!({
+                "container": resolved,
+                "logs": logs,
+            });
+            let json = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
+            println!("{json}");
+            return Ok(());
+        }
+        if logs.len() > emitted {
+            print!("{}", &logs[emitted..]);
+            std::io::stdout().flush().map_err(|err| err.to_string())?;
+            emitted = logs.len();
+        }
+        if !follow {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -10504,12 +10682,13 @@ mod tests {
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
         read_docker_request_after_auth, read_http_request, read_merkle_leaves,
-        remote_docker_request, should_desktop_forward, split_path_query, structured_desktop_error,
-        top_level_command_name, validate_build_platform, validate_docker_container_name,
-        validate_docker_exec_command, validate_docker_image_prune_filters,
-        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
-        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
+        remote_docker_request, remote_docker_stream_request, should_desktop_forward,
+        split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
+        validate_docker_image_prune_filters, validate_docker_network_filters,
+        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
+        AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
+        DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
         DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands, VolumeCommands,
         WitnessCommands,
     };
@@ -13171,6 +13350,56 @@ volumes:
     }
 
     #[test]
+    fn remote_stream_transport_decodes_chunked_logs() {
+        let temp = tempfile::tempdir().expect("remote stream fixture");
+        let socket = temp.path().join("remote-stream.sock");
+        let listener = UnixListener::bind(&socket).expect("bind stream socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept stream request");
+            let mut request = Vec::new();
+            stream
+                .read_to_end(&mut request)
+                .expect("read stream request");
+            assert!(String::from_utf8_lossy(&request)
+                .contains("GET /containers/c1/logs?stdout=1&stderr=1&follow=1"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+                )
+                .expect("write stream response");
+        });
+        let mut output = Vec::new();
+        remote_docker_stream_request(
+            &socket.to_string_lossy(),
+            "GET",
+            "/containers/c1/logs?stdout=1&stderr=1&follow=1",
+            None,
+            |chunk| {
+                output.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+        .expect("decode stream");
+        worker.join().expect("stream worker");
+        assert_eq!(output, b"hello world");
+    }
+
+    #[test]
+    fn parses_logs_follow_flag() {
+        let cli = Cli::try_parse_from(["ferrocrate", "logs", "c1", "--follow"])
+            .expect("parse logs follow");
+        match cli.command {
+            Commands::Logs {
+                container, follow, ..
+            } => {
+                assert_eq!(container, "c1");
+                assert!(follow);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn remote_run_rejects_local_only_options_before_connecting() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
         let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
@@ -13319,7 +13548,7 @@ volumes:
     fn logs_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_logs(&runtime, "", "text").expect_err("container required");
+        let err = handle_logs(&runtime, "", "text", false).expect_err("container required");
         assert!(err.contains("logs: container is required"));
     }
 

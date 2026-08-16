@@ -895,7 +895,11 @@ pub fn prune_build_cache(
         .iter()
         .map(|(key, entry)| (key.clone(), entry.created_at_unix))
         .collect::<Vec<_>>();
-    entries.sort_by_key(|(_, created_at)| *created_at);
+    entries.sort_by(|(left_key, left_time), (right_key, right_time)| {
+        left_time
+            .cmp(right_time)
+            .then_with(|| left_key.cmp(right_key))
+    });
     let remove_count = entries.len() - max_entries;
     for (key, _) in entries.into_iter().take(remove_count) {
         cache.remove(&key);
@@ -2838,6 +2842,36 @@ mod tests {
         let retained = load_build_cache(&runtime).unwrap();
         assert!(retained.contains_key("new"));
         assert_eq!(retained.len(), 1);
+    }
+
+    #[test]
+    fn prunes_equal_timestamp_entries_by_cache_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().to_path_buf();
+        let mut cache = HashMap::new();
+        for key in ["zeta", "alpha"] {
+            cache.insert(
+                key.to_string(),
+                BuildCacheEntry {
+                    cache_key: key.to_string(),
+                    created_at_unix: 10,
+                    context_digest: String::new(),
+                    dockerfile_digest: String::new(),
+                    base_digests: Vec::new(),
+                    layer_digest: format!("sha256:{key}"),
+                    layer_size: 1,
+                    layer_media_type: "application/octet-stream".to_string(),
+                    config_digest: format!("sha256:config-{key}"),
+                    config_json: "{}".to_string(),
+                    manifest_json: "{}".to_string(),
+                },
+            );
+        }
+        save_build_cache(&runtime, &cache).unwrap();
+        assert_eq!(prune_build_cache(&runtime, 1).unwrap(), 1);
+        let retained = load_build_cache(&runtime).unwrap();
+        assert!(retained.contains_key("zeta"));
+        assert!(!retained.contains_key("alpha"));
     }
 
     #[test]

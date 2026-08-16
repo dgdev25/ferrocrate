@@ -716,6 +716,21 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         })
         .await
         .expect("stop");
+    let stopped_status = client
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("status after stop")
+        .into_inner()
+        .status
+        .expect("stopped status");
+    assert_eq!(
+        stopped_status.state,
+        ferro_cri::runtime::ContainerState::Exited as i32
+    );
+    assert_eq!(stopped_status.reason, "exited");
     client
         .remove_container(RemoveContainerRequest {
             container_id: container,

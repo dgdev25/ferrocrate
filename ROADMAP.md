@@ -50,7 +50,7 @@ compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
 - [x] Bind pod/container identity, sandbox parent, pinned image, normalized command/environment/resource execution digest, and lifecycle state into the common authorization facts and witness request digest; canonical-byte and CRI socket coverage are passing.
 - [x] Add UDS conformance fixtures for the exposed lifecycle path; malformed requests, deadlines, retries, and full method idempotency remain in the qualification expansion.
 - [x] Publish the supported CRI method/version/error matrix and wire-level malformed/unknown/idempotency fixtures; kubelet/containerd compatibility remains a separate qualification gate.
-- [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary; CRI status now exposes the persisted runtime exit code and lifecycle reason after reopening, but crash-boundary recovery evidence is still open.
+- [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary; CRI status now exposes the persisted runtime exit code and lifecycle reason after reopening, and the root-only OCI socket fixture verifies `Exited` projection after stop, but crash-boundary recovery evidence is still open.
 - [x] Update the PRD-backed compatibility table for the currently qualified methods; kubelet/containerd compatibility remains explicitly unclaimed until its separate gate passes.
 
 ### 3. Security enforcement and dependency hygiene

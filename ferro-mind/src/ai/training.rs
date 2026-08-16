@@ -175,6 +175,16 @@ pub struct RoutedModel {
     pub artifact_sha256: String,
 }
 
+/// Append-only evidence that a content-addressed sample was erased. The
+/// receipt intentionally contains no sample payload or identifying features.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeletionReceipt {
+    pub model_type: String,
+    pub digest: String,
+    pub reason: String,
+    pub deleted_at_unix: u64,
+}
+
 /// Stats for a direct RVF file inspection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RvfFileStats {
@@ -876,18 +886,60 @@ impl TrainingPipeline {
         model_type: ModelType,
         digest: &str,
     ) -> Result<bool, TrainingError> {
+        self.delete_sample_with_reason(model_type, digest, "operator-request")
+    }
+
+    /// Delete one sample and append a durable, payload-free erasure receipt.
+    pub fn delete_sample_with_reason(
+        &self,
+        model_type: ModelType,
+        digest: &str,
+        reason: &str,
+    ) -> Result<bool, TrainingError> {
         if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(TrainingError::ParseError(
                 "sample digest must be exactly 64 hexadecimal characters".to_string(),
             ));
         }
+        if reason.is_empty()
+            || reason.len() > 128
+            || !reason
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(TrainingError::ParseError(
+                "deletion reason must be 1-128 safe ASCII characters".to_string(),
+            ));
+        }
+        let data_dir = self.config.data_dir.join(model_type.to_string());
         let path = self
             .config
             .data_dir
             .join(model_type.to_string())
             .join(format!("sample_{digest}.json"));
         match fs::remove_file(&path) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                let receipt = DeletionReceipt {
+                    model_type: model_type.to_string(),
+                    digest: digest.to_string(),
+                    reason: reason.to_string(),
+                    deleted_at_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                let receipt_path = data_dir.join("deletion-receipts.jsonl");
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&receipt_path)?;
+                use std::io::Write as _;
+                serde_json::to_writer(&mut file, &receipt)?;
+                file.write_all(b"\n")?;
+                file.sync_all()?;
+                File::open(&data_dir)?.sync_all()?;
+                Ok(true)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(TrainingError::Io(error)),
         }
@@ -2211,6 +2263,12 @@ mod tests {
             .delete_sample(ModelType::ResourcePredictor, &digests[0])
             .expect("delete sample");
         assert!(removed);
+        let receipts = fs::read_to_string(sample_dir.join("deletion-receipts.jsonl"))
+            .expect("deletion receipt");
+        let receipt: DeletionReceipt =
+            serde_json::from_str(receipts.lines().next().unwrap()).expect("receipt schema");
+        assert_eq!(receipt.digest, digests[0]);
+        assert_eq!(receipt.reason, "operator-request");
         assert!(!pipeline
             .delete_sample(ModelType::ResourcePredictor, &digests[0])
             .expect("idempotent delete"));
@@ -2224,16 +2282,28 @@ mod tests {
             1
         );
         assert_eq!(
-            fs::read_dir(&sample_dir).expect("sample directory").count(),
+            fs::read_dir(&sample_dir)
+                .expect("sample directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json"))
+                .count(),
             1
         );
         // Deletion remains available after consent is revoked.
         pipeline.config.data_collection_consent = false;
         let remaining = fs::read_dir(&sample_dir)
             .expect("sample directory")
-            .next()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
             .expect("remaining sample")
-            .expect("directory entry")
             .file_name()
             .to_string_lossy()
             .trim_start_matches("sample_")
@@ -2270,7 +2340,14 @@ mod tests {
             2
         );
         assert_eq!(
-            fs::read_dir(&sample_dir).expect("sample directory").count(),
+            fs::read_dir(&sample_dir)
+                .expect("sample directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json"))
+                .count(),
             0
         );
     }

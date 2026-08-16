@@ -80,3 +80,97 @@ pub enum RecoveryError {
     #[error(transparent)]
     Store(#[from] StoreError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Enrollment, ManagerStore, ScopedToken};
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    #[test]
+    fn restore_backup_rotates_epoch_and_revokes_credentials() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("manager.sqlite");
+        let destination = temp.path().join("restored.sqlite");
+        let store = ManagerStore::open(&source).expect("open source");
+        store
+            .create_token(ScopedToken {
+                secret: [7; 32],
+                expected_node: "node-a".into(),
+                approved_endpoint: "10.0.0.2:51820".into(),
+                overlay_scope: "overlay-a".into(),
+                expires_at: 9_999,
+            })
+            .expect("create token");
+        store
+            .register_node(Enrollment {
+                node_id: "node-a".into(),
+                public_key: vec![1; 32],
+                endpoint: "10.0.0.2:51820".into(),
+            })
+            .expect("register node");
+
+        // Create a consistent, portable SQLite backup using the same primitive
+        // used by the manager's operational backup tooling.
+        let source_connection =
+            Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open backup source");
+        let escaped = destination.to_string_lossy().replace('\'', "''");
+        source_connection
+            .execute_batch(&format!("VACUUM INTO '{}';", escaped))
+            .expect("create backup");
+
+        let plan = restore_backup(
+            &destination,
+            &temp.path().join("recovered.sqlite"),
+            "lost host",
+            1234,
+        )
+        .expect("restore backup");
+        assert_eq!(plan.next_epoch, 2);
+        assert!(plan.rotate_issuing_ca);
+        assert!(plan.expire_all_credentials);
+
+        let recovered = Connection::open(plan.restored_database_path).expect("open recovered");
+        let epoch: u64 = recovered
+            .query_row(
+                "SELECT cluster_epoch FROM cluster_metadata WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("epoch");
+        assert_eq!(epoch, 2);
+        let revoked: Option<i64> = recovered
+            .query_row(
+                "SELECT revoked_at FROM nodes WHERE node_id = 'node-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("revocation");
+        assert_eq!(revoked, Some(1234));
+        let token_expiry: i64 = recovered
+            .query_row("SELECT expires_at FROM enrollment_tokens", [], |row| {
+                row.get(0)
+            })
+            .expect("token expiry");
+        assert_eq!(token_expiry, 1234);
+        let audit_reason: String = recovered
+            .query_row("SELECT reason FROM recovery_audit", [], |row| row.get(0))
+            .expect("recovery audit");
+        assert_eq!(audit_reason, "lost host");
+    }
+
+    #[test]
+    fn restore_backup_rejects_existing_destination_without_mutation() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source.sqlite");
+        let destination = temp.path().join("destination.sqlite");
+        ManagerStore::open(&source).expect("open source");
+        Connection::open(&destination).expect("create destination");
+
+        let error =
+            restore_backup(&source, &destination, "test", 1).expect_err("existing destination");
+        assert!(matches!(error, RecoveryError::DestinationExists));
+    }
+}

@@ -88,6 +88,9 @@ impl ImageManifest {
             ));
         }
         validate_descriptor(&self.config)?;
+        if let Some(subject) = &self.subject {
+            validate_descriptor(subject)?;
+        }
 
         for layer in &self.layers {
             let supported = layer.media_type == OCI_IMAGE_LAYER_MEDIA_TYPE
@@ -353,6 +356,29 @@ mod tests {
             err.to_string().contains("invalid descriptor digest")
                 || err.to_string().contains("invalid descriptor size")
         );
+    }
+
+    #[test]
+    fn rejects_manifest_with_invalid_subject_descriptor() {
+        let manifest = r#"
+        {
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size": 1
+          },
+          "subject": {
+            "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+            "digest": "sha256:not-a-digest",
+            "size": 1
+          },
+          "layers": []
+        }
+        "#;
+        let err = parse_image_manifest(manifest).expect_err("invalid subject must be rejected");
+        assert!(err.to_string().contains("invalid descriptor digest"));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 #[path = "cli_integration.rs"]
 mod cli_fixture;
 
-use ferro_core::container_store::{ContainerRecord, CreationProvenance, LocalContainerStore};
+use ferro_core::container_store::{ContainerRecord, CreationProvenance};
+use ferro_core::sqlite_container_store::SqliteContainerStore;
 use std::process::Command;
 
 fn compose_project(root: &std::path::Path) -> std::path::PathBuf {
@@ -97,7 +98,7 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
         "mutation_generation": 1
     }))
     .unwrap();
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     store.put(&record).unwrap();
     drop(store);
 
@@ -109,7 +110,7 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("stop failed; delete skipped"));
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     assert!(store.get(&record.id).unwrap().is_some());
 }
 
@@ -144,7 +145,7 @@ fn compose_down_stops_then_deletes_using_post_stop_record() {
         "mutation_generation": 1
     }))
     .unwrap();
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     store.put(&record).unwrap();
     drop(store);
 
@@ -160,7 +161,7 @@ fn compose_down_stops_then_deletes_using_post_stop_record() {
         "compose down failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     assert!(store.get(&record.id).unwrap().is_none());
 }
 
@@ -173,7 +174,7 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
         let root = cli_fixture::configured_runtime(mode);
         let project = compose_project(root.path());
         let (record, reaper) = live_web_record(root.path(), mode != "disabled");
-        let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+        let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
         store.put(&record).unwrap();
         drop(store);
 
@@ -193,7 +194,7 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
             "{mode}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+        let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
         assert!(
             store.get(&record.id).unwrap().is_none(),
             "{mode} retained record"
@@ -203,7 +204,7 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
     let root = cli_fixture::configured_runtime("enforce");
     let project = compose_project(root.path());
     let (record, reaper) = live_web_record(root.path(), true);
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     store.put(&record).unwrap();
     drop(store);
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
@@ -222,7 +223,7 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
         "stable enforce response: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let store = LocalContainerStore::open(root.path().join("containers.db")).unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
     assert!(
         store.get(&record.id).unwrap().is_some(),
         "enforce changed state"

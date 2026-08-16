@@ -9118,7 +9118,7 @@ mod tests {
         drop(runtime);
         drop(authorization);
 
-        let store = ferro_core::container_store::LocalContainerStore::open(
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
             temp.path().join("containers.db"),
         )
         .expect("container store");

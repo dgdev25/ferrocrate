@@ -79,6 +79,20 @@ fn fresh_journal_uses_sqlite_without_creating_a_runtime_sled_store() {
 }
 
 #[test]
+fn sqlite_ready_marker_without_database_fails_closed() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("witness.sqlite3.ready"),
+        b"witness-sqlite-ready-v1",
+    )
+    .unwrap();
+    assert!(matches!(
+        WitnessJournal::open(config(dir.path())),
+        Err(JournalError::Corrupt)
+    ));
+}
+
+#[test]
 fn checkpoint_publication_never_relabels_a_mismatched_epoch() {
     let dir = tempdir().unwrap();
     let journal = WitnessJournal::open(config(dir.path())).unwrap();

@@ -218,7 +218,10 @@ impl WitnessJournal {
             b"witness-segments-v1",
             b"witness-sealed-segments-v1",
         ];
-        if legacy_path.exists() && !sqlite_path.exists() {
+        if ready_marker.exists() && !sqlite_path.exists() {
+            return Err(JournalError::Corrupt);
+        }
+        if legacy_path.exists() && (!sqlite_path.exists() || !ready_marker.exists()) {
             let legacy = sled::open(&legacy_path)?;
             if legacy
                 .tree_names()

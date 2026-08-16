@@ -200,6 +200,11 @@ pub enum Commands {
         /// Path to a vector/embedding model to embed in the `.rvf` image (only with `--image-format rvf`).
         #[arg(long)]
         embed_model: Option<String>,
+        /// Target platform. Only the host platform is currently supported;
+        /// cross-platform output is rejected until a cross-target builder is
+        /// available.
+        #[arg(long)]
+        platform: Option<String>,
     },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2153,6 +2158,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 compress,
                 image_format,
                 embed_model,
+                platform,
             } => handle_build(
                 &image_store,
                 &runtime
@@ -2165,6 +2171,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 compress.as_str(),
                 image_format.as_str(),
                 embed_model.as_deref(),
+                platform.as_deref(),
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
@@ -3531,7 +3538,9 @@ fn handle_build(
     compression: &str,
     image_format: &str,
     embed_model: Option<&str>,
+    platform: Option<&str>,
 ) -> Result<(), String> {
+    validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
 
@@ -3641,6 +3650,63 @@ fn validate_image_format(value: &str) -> Result<String, String> {
     match value {
         "oci" | "rvf" => Ok(value.to_string()),
         _ => Err("image-format must be one of: oci, rvf".to_string()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_build_platform(platform: Option<&str>) -> Result<(), String> {
+    let Some(platform) = platform else {
+        return Ok(());
+    };
+    let (os, architecture) = platform
+        .split_once('/')
+        .ok_or_else(|| "build: platform must use OS/architecture form".to_string())?;
+    if os != "linux" {
+        return Err(format!(
+            "build: platform {platform} is unsupported; only linux/{host_arch} is available",
+            host_arch = host_build_arch()
+        ));
+    }
+    let requested = match architecture {
+        "amd64" | "x86_64" => "amd64",
+        "arm64" | "aarch64" => "arm64",
+        "riscv64" => "riscv64",
+        other => {
+            return Err(format!(
+                "build: unsupported architecture {other}; cross-platform output is not enabled"
+            ))
+        }
+    };
+    if requested != host_build_arch() {
+        return Err(format!(
+            "build: platform {platform} is unsupported; only linux/{host_arch} is available",
+            host_arch = host_build_arch()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn host_build_arch() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        "amd64"
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        "arm64"
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        "riscv64"
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        "unknown"
     }
 }
 
@@ -6866,12 +6932,13 @@ mod tests {
         effective_readonly, handle_build, handle_containers, handle_exec, handle_image_prune,
         handle_images, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
         handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
-        parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, should_desktop_forward, structured_desktop_error,
-        top_level_command_name, validate_network_backend, validate_network_mode, AiCommands, Cli,
-        Commands, ComposeCommands, ConfigCommands, NetworkCommands, VolumeCommands,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
+        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
+        read_docker_request_after_auth, read_http_request, should_desktop_forward,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
+        ComposeCommands, ConfigCommands, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -7022,6 +7089,7 @@ mod tests {
                 compress,
                 image_format,
                 embed_model,
+                platform,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
@@ -7029,6 +7097,7 @@ mod tests {
                 assert_eq!(compress, "gzip");
                 assert_eq!(image_format, "oci");
                 assert!(embed_model.is_none());
+                assert!(platform.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -8367,6 +8436,7 @@ mod tests {
             "gzip",
             "oci",
             None,
+            None,
         )
         .expect_err("dockerfile should be read");
         assert!(
@@ -8392,9 +8462,21 @@ mod tests {
             "gzip",
             "oci",
             None,
+            None,
         )
         .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn build_platform_validation_is_explicit_and_host_bound() {
+        validate_build_platform(None).expect("omitted platform uses host default");
+        validate_build_platform(Some(&format!("linux/{}", host_build_arch())))
+            .expect("host platform is supported");
+        let error = validate_build_platform(Some("windows/amd64")).expect_err("OS mismatch");
+        assert!(error.contains("only linux/"));
+        let error = validate_build_platform(Some("linux/other")).expect_err("unknown arch");
+        assert!(error.contains("unsupported architecture"));
     }
 
     #[test]

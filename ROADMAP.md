@@ -76,7 +76,7 @@ Docker Engine, and release claims are still marked partial or rework-needed.
 `docs/PROJECT_COMPLETION_PLAN.md`.
 
 - [ ] Establish full OCI Image, Runtime, and Distribution conformance suites beyond the current basic validation scripts; the repeatable repository fixture gate now runs all three smoke paths via `scripts/oci-conformance.sh`, but upstream corpus coverage remains open.
-- [ ] Close Dockerfile parity gaps: `COPY --chmod` and deterministic unsupported-flag errors are now covered; directive/flag breadth, secrets/SSH/cache mounts, named contexts, platform targets, and full parity remain open.
+- [ ] Close Dockerfile parity gaps: `COPY --chmod`, deterministic unsupported-flag errors, and explicit host-bound `build --platform` validation are now covered; directive/flag breadth, secrets/SSH/cache mounts, named contexts, cross-platform output, and full parity remain open.
 - [x] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
 - [ ] Complete high-value Docker container, image, network, volume, streaming, wait, and event endpoints while preserving authorization and witness receipts.
 - [x] Run the current Docker API matrix and Compose contract suites against the public Unix socket, including versioned paths and explicit unsupported endpoint errors; retries and streaming expansion remain in the endpoint completion work.

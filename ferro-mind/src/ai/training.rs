@@ -13,6 +13,7 @@ use rvf_runtime::options::DistanceMetric as RvfDistanceMetric;
 use rvf_runtime::{RvfOptions, RvfStore};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 #[cfg(feature = "rvf-persistence")]
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
@@ -82,6 +83,11 @@ pub struct ModelVersion {
     pub loss: Option<f32>,
     /// Path to the model file
     pub path: PathBuf,
+    /// SHA-256 digest of the exact artifact bytes selected by the router.
+    /// Empty values are retained only for pre-digest metadata and cannot be
+    /// returned by `resolve_active_model`.
+    #[serde(default)]
+    pub artifact_sha256: String,
     /// Whether this is the active model
     pub active: bool,
 }
@@ -148,6 +154,17 @@ pub struct ModelStats {
     pub active_version: Option<u32>,
     pub active_path: Option<PathBuf>,
     pub last_trained_at: Option<String>,
+}
+
+/// Immutable model selection returned to runtime consumers. The artifact is
+/// rehashed during resolution so a replaced file cannot silently inherit an
+/// authorized version number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedModel {
+    pub model_type: ModelType,
+    pub version: u32,
+    pub path: PathBuf,
+    pub artifact_sha256: String,
 }
 
 /// Stats for a direct RVF file inspection.
@@ -280,6 +297,11 @@ struct OnlineLearningState {
 struct TrainedModel {
     loss: f32,
     artifact: Value,
+}
+
+fn artifact_sha256(path: &Path) -> Result<String, TrainingError> {
+    let bytes = fs::read(path)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 /// Model training pipeline
@@ -494,6 +516,7 @@ impl TrainingPipeline {
             samples_count: samples.len(),
             loss: Some(trained.loss),
             path: model_path.clone(),
+            artifact_sha256: artifact_sha256(&model_path)?,
             active: true,
         };
 
@@ -657,6 +680,38 @@ impl TrainingPipeline {
     /// Get active model version
     pub fn get_active_version(&self, model_type: ModelType) -> Option<&ModelVersion> {
         self.versions.get(&model_type)?.iter().find(|v| v.active)
+    }
+
+    /// Resolve the active model only when its persisted digest matches the
+    /// current artifact. Callers receive a value that is safe to bind into a
+    /// runtime decision or authorization fact; missing legacy digests fail
+    /// closed until the model is retrained or explicitly imported again.
+    pub fn resolve_active_model(
+        &self,
+        model_type: ModelType,
+    ) -> Result<RoutedModel, TrainingError> {
+        let active = self
+            .get_active_version(model_type)
+            .ok_or_else(|| TrainingError::ModelNotFound(model_type.to_string()))?;
+        if active.artifact_sha256.is_empty() {
+            return Err(TrainingError::InvalidVersionHistory(format!(
+                "active model v{} has no artifact digest",
+                active.version
+            )));
+        }
+        let observed = artifact_sha256(&active.path)?;
+        if observed != active.artifact_sha256 {
+            return Err(TrainingError::InvalidVersionHistory(format!(
+                "active model v{} artifact digest mismatch",
+                active.version
+            )));
+        }
+        Ok(RoutedModel {
+            model_type,
+            version: active.version,
+            path: active.path.clone(),
+            artifact_sha256: active.artifact_sha256.clone(),
+        })
     }
 
     /// List all versions for a model
@@ -992,9 +1047,7 @@ pub fn handle_export_command(
     }
 
     let pipeline = TrainingPipeline::new(config)?;
-    let active = pipeline
-        .get_active_version(model_type)
-        .ok_or_else(|| TrainingError::ModelNotFound(model_type.to_string()))?;
+    let active = pipeline.resolve_active_model(model_type)?;
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
@@ -1040,6 +1093,7 @@ pub fn handle_import_command(
         }
     }
 
+    let imported_digest = artifact_sha256(&model_path)?;
     let imported = ModelVersion {
         model_type: model_type.to_string(),
         version,
@@ -1047,6 +1101,7 @@ pub fn handle_import_command(
         samples_count: 0,
         loss: None,
         path: model_path,
+        artifact_sha256: imported_digest,
         active: true,
     };
 
@@ -1616,6 +1671,75 @@ mod tests {
             Ok(_) => panic!("ambiguous active model"),
         };
         assert!(matches!(error, TrainingError::InvalidVersionHistory(_)));
+    }
+
+    #[test]
+    fn active_model_router_rejects_tampered_artifact() {
+        let (_temp, config) = setup_test_env();
+        let dir = config
+            .models_dir
+            .join(ModelType::ResourcePredictor.to_string());
+        fs::create_dir_all(&dir).expect("model directory");
+        let artifact = dir.join("model_v1.bin");
+        fs::write(&artifact, b"trusted-model").expect("artifact");
+        let digest = format!("sha256:{:x}", Sha256::digest(b"trusted-model"));
+        let metadata = serde_json::json!([{
+            "model_type": "resource-predictor",
+            "version": 1,
+            "trained_at": "2026-01-01T00:00:00Z",
+            "samples_count": 3,
+            "loss": 0.1,
+            "path": artifact,
+            "artifact_sha256": digest,
+            "active": true
+        }]);
+        fs::write(
+            dir.join("versions.json"),
+            serde_json::to_vec(&metadata).expect("metadata"),
+        )
+        .expect("write metadata");
+
+        let pipeline = TrainingPipeline::new(config).expect("pipeline");
+        let routed = pipeline
+            .resolve_active_model(ModelType::ResourcePredictor)
+            .expect("matching artifact digest");
+        assert_eq!(routed.version, 1);
+        fs::write(&routed.path, b"tampered-model").expect("tamper artifact");
+        let error = pipeline
+            .resolve_active_model(ModelType::ResourcePredictor)
+            .expect_err("tampered artifact must fail closed");
+        assert!(error.to_string().contains("digest mismatch"));
+    }
+
+    #[test]
+    fn active_model_router_rejects_legacy_metadata_without_digest() {
+        let (_temp, config) = setup_test_env();
+        let dir = config
+            .models_dir
+            .join(ModelType::ResourcePredictor.to_string());
+        fs::create_dir_all(&dir).expect("model directory");
+        let artifact = dir.join("model_v1.bin");
+        fs::write(&artifact, b"legacy-model").expect("artifact");
+        let metadata = serde_json::json!([{
+            "model_type": "resource-predictor",
+            "version": 1,
+            "trained_at": "2026-01-01T00:00:00Z",
+            "samples_count": 3,
+            "loss": 0.1,
+            "path": artifact,
+            "active": true
+        }]);
+        fs::write(
+            dir.join("versions.json"),
+            serde_json::to_vec(&metadata).expect("metadata"),
+        )
+        .expect("write metadata");
+
+        let pipeline = TrainingPipeline::new(config).expect("pipeline");
+        let error = pipeline
+            .resolve_active_model(ModelType::ResourcePredictor)
+            .expect_err("legacy metadata must not route an unbound artifact");
+        assert!(error.to_string().contains("no artifact digest"));
     }
 
     #[test]

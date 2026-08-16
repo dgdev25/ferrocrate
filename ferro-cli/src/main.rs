@@ -4206,6 +4206,14 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             }
             request("POST", path).map(|_| println!("pull: image={}", parsed.canonical()))
         })(),
+        Commands::Push { image } => (|| -> Result<(), String> {
+            let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
+            request(
+                "POST",
+                format!("/images/{}/push", percent_encode_path_component(&canonical)),
+            )
+            .map(|_| println!("push: image={canonical}"))
+        })(),
         Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
             .and_then(|body| print_json(body, format)),
         Commands::Exec { container, cmd } => (|| -> Result<(), String> {
@@ -9050,6 +9058,14 @@ fn handle_docker_compat_connection(
                     .get("lazy")
                     .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
                 handle_pull_authorized(&store, &reference, lazy, &origin, &surface_authorization)?;
+                http_response(200, b"{}", "application/json")
+            }
+            ("POST", path) if path.starts_with("/images/") && path.ends_with("/push") => {
+                let encoded = path
+                    .trim_start_matches("/images/")
+                    .trim_end_matches("/push");
+                let reference = percent_decode_query_component(encoded)?;
+                handle_push(&store, &reference)?;
                 http_response(200, b"{}", "application/json")
             }
             ("POST", "/images/prune") => {

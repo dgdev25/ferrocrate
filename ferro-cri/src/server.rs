@@ -631,8 +631,15 @@ impl RuntimeService for CriRuntime {
         {
             return Err(Status::already_exists("pod sandbox uid already exists"));
         }
+        let created_netns = record.netns_name.clone();
         sandboxes.insert(id.clone(), record);
-        persist_sandboxes(&self.runtime_dir, &sandboxes)?;
+        if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
+            sandboxes.remove(&id);
+            if let Some(netns_name) = created_netns {
+                let _ = ferro_net::destroy_netns(&netns_name);
+            }
+            return Err(error);
+        }
         let _ = identity;
         Ok(Response::new(RunPodSandboxResponse { pod_sandbox_id: id }))
     }
@@ -655,8 +662,14 @@ impl RuntimeService for CriRuntime {
         let record = sandboxes
             .get_mut(&id)
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
+        let previous_state = record.state.clone();
         record.state = "notready".to_string();
-        persist_sandboxes(&self.runtime_dir, &sandboxes)?;
+        if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
+            if let Some(record) = sandboxes.get_mut(&id) {
+                record.state = previous_state;
+            }
+            return Err(error);
+        }
         Ok(Response::new(StopPodSandboxResponse {}))
     }
 
@@ -678,11 +691,23 @@ impl RuntimeService for CriRuntime {
         let record = sandboxes
             .remove(&id)
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
-        if let Some(netns_name) = record.netns_name {
-            ferro_net::destroy_netns(&netns_name)
-                .map_err(|error| Status::internal(format!("remove CRI sandbox netns: {error}")))?;
+        let netns_name = record.netns_name.clone();
+        if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
+            sandboxes.insert(id, record);
+            return Err(error);
         }
-        persist_sandboxes(&self.runtime_dir, &sandboxes)?;
+        if let Some(netns_name) = netns_name {
+            if let Err(error) = ferro_net::destroy_netns(&netns_name) {
+                sandboxes.insert(id.clone(), record);
+                let restore = persist_sandboxes(&self.runtime_dir, &sandboxes).err();
+                let detail = restore
+                    .map(|restore| format!("; restore CRI sandbox state: {restore}"))
+                    .unwrap_or_default();
+                return Err(Status::internal(format!(
+                    "remove CRI sandbox netns: {error}{detail}"
+                )));
+            }
+        }
         Ok(Response::new(RemovePodSandboxResponse {}))
     }
 
@@ -804,7 +829,10 @@ impl RuntimeService for CriRuntime {
             .lock()
             .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
         containers.insert(id.clone(), record);
-        persist_containers(&self.runtime_dir, &containers)?;
+        if let Err(error) = persist_containers(&self.runtime_dir, &containers) {
+            containers.remove(&id);
+            return Err(error);
+        }
         Ok(Response::new(CreateContainerResponse { container_id: id }))
     }
 
@@ -881,8 +909,19 @@ impl RuntimeService for CriRuntime {
         let stored = containers
             .get_mut(&id)
             .ok_or_else(|| Status::not_found("container not found"))?;
-        stored.runtime_id = Some(started.id);
-        persist_containers(&self.runtime_dir, &containers)?;
+        let runtime_id = started.id;
+        stored.runtime_id = Some(runtime_id.clone());
+        if let Err(error) = persist_containers(&self.runtime_dir, &containers) {
+            if let Some(stored) = containers.get_mut(&id) {
+                stored.runtime_id = None;
+            }
+            if let Err(cleanup) = runtime.remove(&runtime_id) {
+                return Err(Status::internal(format!(
+                    "persist CRI container state: {error}; cleanup runtime effect: {cleanup}"
+                )));
+            }
+            return Err(error);
+        }
         Ok(Response::new(StartContainerResponse {}))
     }
 

@@ -175,7 +175,7 @@ sequence and FCNET-105 decisions.
 checkpoint model. *Size:* XL. *Source:* ADR-0014 and witness foundation plan.
 
 - [ ] Add independently replicated/off-host checkpoint retention and export.
-- [ ] Add Merkle inclusion/consistency proofs and external verifier tooling. Domain-separated, bounded Merkle roots and self-contained inclusion proofs over canonical witness record hashes are now available through `ferro_core::witness`; consistency proofs, off-host publication, and standalone verifier tooling remain open.
+- [ ] Add Merkle inclusion/consistency proofs and external verifier tooling. Domain-separated, bounded Merkle roots, self-contained inclusion proofs, and append-only consistency proofs over canonical witness record hashes are now available through `ferro_core::witness`; compact frontier proofs, off-host publication, and standalone verifier tooling remain open.
 - [ ] Add attenuated, revocable delegated credentials within the existing action/resource vocabulary.
 - [ ] Define key compromise, revocation, verifier-fleet rollout, and continuity procedures.
 

@@ -36,6 +36,22 @@ pub struct MerkleProof {
     pub root: [u8; 32],
 }
 
+/// A bounded append-only consistency witness.
+///
+/// The proof carries the opaque record-hash sequence so an external verifier
+/// can independently recompute both tree roots and confirm that the old tree
+/// is exactly the prefix of the new tree. It is intentionally bounded by
+/// `MAX_LEAVES`; a compact frontier proof can be added without changing the
+/// root or domain-separation rules.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MerkleConsistencyProof {
+    pub old_size: u64,
+    pub new_size: u64,
+    pub leaves: Vec<[u8; 32]>,
+    pub old_root: [u8; 32],
+    pub new_root: [u8; 32],
+}
+
 fn leaf_hash(leaf: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(LEAF_DOMAIN);
@@ -136,6 +152,44 @@ pub fn verify(proof: &MerkleProof) -> Result<(), MerkleError> {
     }
 }
 
+/// Create a consistency proof showing that the tree at `old_size` is a
+/// prefix of the supplied tree.
+pub fn consistency_proof(
+    leaves: &[[u8; 32]],
+    old_size: usize,
+) -> Result<MerkleConsistencyProof, MerkleError> {
+    checked_leaves(leaves)?;
+    if old_size == 0 || old_size > leaves.len() {
+        return Err(MerkleError::IndexOutOfRange);
+    }
+    let old_root = root(&leaves[..old_size])?;
+    let new_root = root(leaves)?;
+    Ok(MerkleConsistencyProof {
+        old_size: old_size as u64,
+        new_size: leaves.len() as u64,
+        leaves: leaves.to_vec(),
+        old_root,
+        new_root,
+    })
+}
+
+/// Verify an append-only consistency proof without trusting either root.
+pub fn verify_consistency(proof: &MerkleConsistencyProof) -> Result<(), MerkleError> {
+    checked_leaves(&proof.leaves)?;
+    if proof.old_size == 0
+        || proof.new_size != proof.leaves.len() as u64
+        || proof.old_size > proof.new_size
+    {
+        return Err(MerkleError::IndexOutOfRange);
+    }
+    let old_root = root(&proof.leaves[..proof.old_size as usize])?;
+    let new_root = root(&proof.leaves)?;
+    if old_root != proof.old_root || new_root != proof.new_root {
+        return Err(MerkleError::RootMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +227,20 @@ mod tests {
         let mut proof = prove(&records, 2).expect("proof");
         proof.siblings[0][0] ^= 1;
         assert_eq!(verify(&proof), Err(MerkleError::RootMismatch));
+    }
+
+    #[test]
+    fn consistency_proof_binds_old_prefix_and_new_root() {
+        let records = leaves(9);
+        let mut proof = consistency_proof(&records, 4).expect("consistency proof");
+        verify_consistency(&proof).expect("verify consistency");
+
+        proof.leaves[0][0] ^= 1;
+        assert_eq!(verify_consistency(&proof), Err(MerkleError::RootMismatch));
+
+        let mut proof = consistency_proof(&records, 4).expect("consistency proof");
+        proof.old_size = 5;
+        assert_eq!(verify_consistency(&proof), Err(MerkleError::RootMismatch));
     }
 
     #[test]

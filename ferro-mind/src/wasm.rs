@@ -55,7 +55,10 @@ impl WasmRegistry {
     }
 }
 
-/// No-op WASM inference engine for testing
+/// Explicitly unsupported WASM engine retained only for compatibility with
+/// callers that used the old test fixture. It must never report a successful
+/// inference: echoing input is not model execution and could silently produce
+/// invalid decisions in production.
 #[derive(Default)]
 pub struct NoopWasmEngine;
 
@@ -65,13 +68,11 @@ impl WasmInferenceEngine for NoopWasmEngine {
     }
 
     fn infer(&self, request: WasmRequest) -> Result<WasmResponse, String> {
-        let mut metadata = HashMap::new();
-        metadata.insert("engine".to_string(), "noop".to_string());
-        metadata.insert("model".to_string(), request.model);
-        Ok(WasmResponse {
-            output: request.input,
-            metadata,
-        })
+        let _ = request;
+        Err(
+            "noop WASM inference is unsupported; configure a validated inference engine"
+                .to_string(),
+        )
     }
 }
 
@@ -270,5 +271,16 @@ mod tests {
             .expect("registry infer");
         let output = decode(&response.output);
         assert_eq!(output, vec![11.0]);
+    }
+
+    #[test]
+    fn noop_engine_fails_closed_instead_of_echoing_input() {
+        let error = NoopWasmEngine
+            .infer(WasmRequest {
+                input: vec![0, 0, 0, 0],
+                model: "unused".to_string(),
+            })
+            .expect_err("unsupported inference must not report success");
+        assert!(error.contains("unsupported"));
     }
 }

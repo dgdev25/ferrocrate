@@ -48,7 +48,7 @@ compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
 - [ ] Attach each pod sandbox to an authorized, durable network namespace and reconcile its network state on restart.
 - [ ] Qualify Create/Start/Stop/RemoveContainer, ContainerStatus, and ExecSync with a real OCI image/rootfs, including exit codes, stdout/stderr, timeout, and cancellation behavior.
 - [ ] Bind pod/container identity, sandbox, image digest, command, and resource state into the common authorization proof and witness lifecycle.
-- [ ] Add UDS conformance fixtures for all exposed RuntimeService and ImageService methods, malformed requests, deadlines, retries, and idempotency.
+- [x] Add UDS conformance fixtures for the exposed lifecycle path; malformed requests, deadlines, retries, and full method idempotency remain in the qualification expansion.
 - [ ] Add kubelet/containerd compatibility fixtures and publish the supported CRI method/version/error matrix.
 - [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary.
 - [ ] Update the PRD-backed compatibility table when each method is actually qualified; do not claim kubelet compatibility prematurely.

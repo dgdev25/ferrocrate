@@ -6,7 +6,12 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_core::witness::{JournalConfig, JournalMode, WitnessJournal};
 use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
-use ferro_cri::runtime::{ImageFsInfoRequest, ListImagesRequest, StatusRequest, VersionRequest};
+use ferro_cri::runtime::{
+    ContainerConfig, ContainerStatusRequest, CreateContainerRequest, ImageFsInfoRequest,
+    ListImagesRequest, PodSandboxConfig, PodSandboxMetadata, RemoveContainerRequest,
+    RemovePodSandboxRequest, RunPodSandboxRequest, StartContainerRequest, StatusRequest,
+    StopPodSandboxRequest, VersionRequest,
+};
 use ferro_cri::runtime::{ImageSpec, PullImageRequest, RemoveImageRequest};
 use ferro_cri::server::{
     CriDelegationClaims, CriDelegationVerifier, CriIdentityPolicy, DelegationAssertion,
@@ -434,6 +439,106 @@ async fn cri_socket_serves_runtime_and_image_requests() {
     server.abort();
     let _ = server.await;
 
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-lifecycle.sock");
+
+    unsafe {
+        std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+    }
+    let socket_for_server = socket.clone();
+    let server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_server).await;
+    });
+    wait_for_socket(&socket).await;
+
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "wire-pod".into(),
+                    uid: "wire-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "wire-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("run sandbox rpc")
+        .into_inner()
+        .pod_sandbox_id;
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox.clone(),
+            config: Some(ContainerConfig {
+                metadata_name: "wire-container".into(),
+                image: "missing:latest".into(),
+                command: vec!["true".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("create container rpc")
+        .into_inner()
+        .container_id;
+    assert_eq!(
+        client
+            .container_status(ContainerStatusRequest {
+                container_id: container.clone(),
+                verbose: true,
+            })
+            .await
+            .expect("container status rpc")
+            .into_inner()
+            .status
+            .expect("container status")
+            .state,
+        ferro_cri::runtime::ContainerState::Created as i32
+    );
+    let start_error = client
+        .start_container(StartContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect_err("missing image must fail over socket");
+    assert_eq!(start_error.code(), tonic::Code::Internal);
+    client
+        .remove_container(RemoveContainerRequest {
+            container_id: container,
+        })
+        .await
+        .expect("remove container rpc");
+    client
+        .stop_pod_sandbox(StopPodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("stop sandbox rpc");
+    client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox,
+        })
+        .await
+        .expect("remove sandbox rpc");
+
+    server.abort();
+    let _ = server.await;
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }

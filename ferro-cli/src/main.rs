@@ -6919,6 +6919,13 @@ fn handle_docker_compat_connection(
                     records.retain(|record| matches!(record.status.as_str(), "running" | "paused"));
                 }
                 records.retain(|record| docker_container_matches_filters(record, &filters));
+                records = docker_container_apply_time_bounds(records, &filters)?;
+                records.sort_by(|left, right| {
+                    right
+                        .created_at_unix
+                        .cmp(&left.created_at_unix)
+                        .then_with(|| right.id.cmp(&left.id))
+                });
                 if let Some(limit) = limit {
                     records.truncate(limit);
                 }
@@ -7659,6 +7666,42 @@ fn docker_container_matches_filters(
     true
 }
 
+/// Apply Docker's `since` and `before` list selectors after ordinary filters.
+/// Selectors may name a container (ID or name) or provide a Unix timestamp.
+/// The comparison is strict, matching Docker's boundary semantics: `since`
+/// excludes the anchor and `before` excludes containers created at/after it.
+fn docker_container_apply_time_bounds(
+    records: Vec<ferro_core::container_store::ContainerRecord>,
+    filters: &HashMap<String, Vec<String>>,
+) -> Result<Vec<ferro_core::container_store::ContainerRecord>, String> {
+    let resolve = |selector: &str| {
+        selector.parse::<u64>().ok().or_else(|| {
+            records.iter().find_map(|record| {
+                let name = record.name.as_deref().unwrap_or_default();
+                (record.id == selector || name == selector).then_some(record.created_at_unix)
+            })
+        })
+    };
+    let bound = |key: &str| -> Result<Option<u64>, String> {
+        let values = filters.get(key).cloned().unwrap_or_default();
+        if values.len() > 1 {
+            return Err(format!("docker: {key} accepts at most one selector"));
+        }
+        values.first().map_or(Ok(None), |selector| {
+            resolve(selector).map(Some).ok_or_else(|| {
+                format!("docker: {key} selector not found or not a Unix timestamp: {selector}")
+            })
+        })
+    };
+    let since = bound("since")?;
+    let before = bound("before")?;
+    Ok(records
+        .into_iter()
+        .filter(|record| since.is_none_or(|value| record.created_at_unix > value))
+        .filter(|record| before.is_none_or(|value| record.created_at_unix < value))
+        .collect())
+}
+
 #[cfg(target_os = "linux")]
 fn normalize_docker_api_path(path: &str) -> String {
     if !path.starts_with("/v") {
@@ -8078,12 +8121,12 @@ mod tests {
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled,
         discover_rootless_socket, dispatch, docker_chunked_headers,
-        docker_container_matches_filters, docker_event_payload, docker_tail_logs,
-        docker_top_payload, effective_readonly, handle_build, handle_containers, handle_context,
-        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
+        docker_tail_logs, docker_top_payload, effective_readonly, handle_build, handle_containers,
+        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
         parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_filters,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
@@ -9872,6 +9915,72 @@ volumes:
         assert!(docker_container_matches_filters(&record, &filters));
         record.status = "exited".to_string();
         assert!(!docker_container_matches_filters(&record, &filters));
+    }
+
+    #[test]
+    fn docker_container_time_bounds_resolve_ids_names_and_timestamps() {
+        let make = |id: &str, name: &str, created_at_unix| {
+            let mut record: ferro_core::container_store::ContainerRecord =
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "pid": 0,
+                    "image": "alpine:3.20",
+                    "command": [],
+                    "created_at_unix": created_at_unix,
+                    "stdout_path": "",
+                    "stderr_path": "",
+                    "status": "running"
+                }))
+                .expect("record");
+            record.name = Some(name.to_string());
+            record
+        };
+        let records = vec![
+            make("a", "first", 10),
+            make("b", "second", 20),
+            make("c", "third", 30),
+        ];
+
+        let mut filters = HashMap::new();
+        filters.insert("since".to_string(), vec!["first".to_string()]);
+        filters.insert("before".to_string(), vec!["c".to_string()]);
+        let bounded = docker_container_apply_time_bounds(records.clone(), &filters).unwrap();
+        assert_eq!(
+            bounded.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+
+        filters.insert("since".to_string(), vec!["20".to_string()]);
+        filters.remove("before");
+        let timestamp_bounded = docker_container_apply_time_bounds(records, &filters).unwrap();
+        assert_eq!(
+            timestamp_bounded
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
+    }
+
+    #[test]
+    fn docker_container_time_bounds_reject_unknown_or_ambiguous_selectors() {
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "a",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": [],
+                "created_at_unix": 10,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running"
+            }))
+            .expect("record");
+        let mut filters = HashMap::new();
+        filters.insert("since".to_string(), vec!["missing".to_string()]);
+        assert!(docker_container_apply_time_bounds(vec![record.clone()], &filters).is_err());
+        filters.insert("before".to_string(), vec!["1".to_string(), "2".to_string()]);
+        assert!(docker_container_apply_time_bounds(vec![record], &filters).is_err());
     }
 
     #[test]

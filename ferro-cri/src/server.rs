@@ -306,6 +306,8 @@ struct SandboxRecord {
     state: String,
     created_at_unix: u64,
     network_mode: String,
+    #[serde(default)]
+    netns_name: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -495,7 +497,15 @@ impl RuntimeService for CriRuntime {
             } else {
                 config.network_namespace
             },
+            netns_name: None,
         };
+        let mut record = record;
+        if record.network_mode != "none" {
+            let netns_name = format!("cri-{}", &record.id[12..]);
+            ferro_net::create_netns(&netns_name)
+                .map_err(|error| Status::internal(format!("create CRI sandbox netns: {error}")))?;
+            record.netns_name = Some(netns_name);
+        }
         let mut sandboxes = self
             .sandboxes
             .lock()
@@ -550,8 +560,12 @@ impl RuntimeService for CriRuntime {
             .sandboxes
             .lock()
             .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?;
-        if sandboxes.remove(&id).is_none() {
-            return Err(Status::not_found("pod sandbox not found"));
+        let record = sandboxes
+            .remove(&id)
+            .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
+        if let Some(netns_name) = record.netns_name {
+            ferro_net::destroy_netns(&netns_name)
+                .map_err(|error| Status::internal(format!("remove CRI sandbox netns: {error}")))?;
         }
         persist_sandboxes(&self.runtime_dir, &sandboxes)?;
         Ok(Response::new(RemovePodSandboxResponse {}))
@@ -1491,6 +1505,64 @@ mod tests {
             .await
             .expect_err("removed sandbox must be absent");
         assert_eq!(missing.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn pod_sandbox_bridge_mode_creates_and_removes_kernel_netns() {
+        let uid = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .expect("id")
+            .stdout;
+        if String::from_utf8_lossy(&uid).trim() != "0" {
+            eprintln!("skipping kernel sandbox netns fixture: root is required");
+            return;
+        }
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        let id = runtime
+            .run_pod_sandbox(authenticated(RunPodSandboxRequest {
+                config: Some(PodSandboxConfig {
+                    metadata: Some(crate::runtime::PodSandboxMetadata {
+                        name: "bridge-pod".into(),
+                        uid: "bridge-uid".into(),
+                        namespace: "default".into(),
+                        attempt: 1,
+                    }),
+                    hostname: "bridge-pod".into(),
+                    log_directory: String::new(),
+                    dns_config: String::new(),
+                    network_namespace: "bridge".into(),
+                }),
+                runtime_handler: String::new(),
+            }))
+            .await
+            .expect("bridge sandbox create")
+            .into_inner()
+            .pod_sandbox_id;
+        let netns_name = runtime
+            .sandboxes
+            .lock()
+            .expect("sandbox lock")
+            .get(&id)
+            .and_then(|record| record.netns_name.clone())
+            .expect("sandbox netns");
+        assert!(ferro_net::netns_path(&netns_name).exists());
+        runtime
+            .stop_pod_sandbox(authenticated(StopPodSandboxRequest {
+                pod_sandbox_id: id.clone(),
+            }))
+            .await
+            .expect("bridge sandbox stop");
+        runtime
+            .remove_pod_sandbox(authenticated(RemovePodSandboxRequest {
+                pod_sandbox_id: id,
+            }))
+            .await
+            .expect("bridge sandbox remove");
+        assert!(!ferro_net::netns_path(&netns_name).exists());
     }
 
     #[tokio::test]

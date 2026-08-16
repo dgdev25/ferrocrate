@@ -145,6 +145,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/volumes/prune",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/volumes/missing",
         coverage: Coverage::Implemented,

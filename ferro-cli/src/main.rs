@@ -7087,6 +7087,26 @@ fn handle_docker_compat_connection(
                 let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
+            ("POST", "/volumes/prune") => {
+                let records = volume_store.list().map_err(|error| error.to_string())?;
+                let mut deleted = Vec::new();
+                for record in records {
+                    let proof = surface_authorization
+                        .authorize_named(
+                            &origin,
+                            AuthorizationAction::VolumeDelete,
+                            ResourceKind::Volume,
+                            &record.name,
+                            1,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    if execute_volume_remove(&volume_store, &record.name, proof)? {
+                        deleted.push(record.name);
+                    }
+                }
+                let body = serde_json::json!({"VolumesDeleted": deleted, "SpaceReclaimed": 0});
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("DELETE", path) if path.starts_with("/volumes/") => {
                 let name = path.trim_start_matches("/volumes/");
                 let proof = surface_authorization

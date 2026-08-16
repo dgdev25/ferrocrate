@@ -6322,6 +6322,8 @@ impl DockerEventStore {
         let filter_types = filter_values("type");
         let filter_containers = filter_values("container");
         let filter_images = filter_values("image");
+        let filter_networks = filter_values("network");
+        let filter_volumes = filter_values("volume");
         contents
             .lines()
             .filter_map(|line| serde_json::from_str::<DockerEvent>(line).ok())
@@ -6344,6 +6346,8 @@ impl DockerEventStore {
                 let values = match item.event_type.as_str() {
                     "container" => filter_containers.as_ref(),
                     "image" => filter_images.as_ref(),
+                    "network" => filter_networks.as_ref(),
+                    "volume" => filter_volumes.as_ref(),
                     _ => None,
                 };
                 values.is_none_or(|values| {
@@ -8923,6 +8927,12 @@ mod tests {
             r#"{"event":["create"],"type":["volume"]}"#.to_string(),
         );
         assert_eq!(reopened.query(&docker_filters).unwrap().len(), 0);
+
+        docker_filters.insert(
+            "filters".to_string(),
+            r#"{"type":["network"],"network":["n1"]}"#.to_string(),
+        );
+        assert_eq!(reopened.query(&docker_filters).unwrap().len(), 1);
     }
 
     #[test]

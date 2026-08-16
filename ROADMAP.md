@@ -33,7 +33,8 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 - [x] Extend read-back verification and rollback coverage to WireGuard route installation and interface teardown.
 - [x] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
 - [x] Implement atomic DNS resolver publication with fsync and exact read-back.
-- [ ] Implement hosts-file and MTU behavior with explicit unsupported-capability errors.
+- [ ] Implement MTU behavior with explicit unsupported-capability errors.
+- [x] Publish container hosts files atomically with symlink refusal and exact read-back.
 - [x] Add exact post-effect read-back to direct iptables/nftables rule application and deletion.
 - [x] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
 - [x] Implement `tc` bandwidth limits with capability admission and exact rate read-back; privileged recovery coverage remains in the host matrix.
@@ -99,3 +100,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — added atomic DNS resolver publication with symlink refusal, fsync, and exact read-back coverage.
 - 2026-08-16 — firewall rule application/deletion now verifies exact iptables presence or nftables handles after each mutation.
 - 2026-08-16 — traffic-control mutation now requires the shared host capability gate and verifies the requested TBF rate exactly; the existing runtime port-map/eBPF paths are recorded as the production integration boundary.
+- 2026-08-16 — container hosts publication now uses an atomic, symlink-safe, fsynced write with exact read-back; resolver publication uses the shared atomic DNS writer.

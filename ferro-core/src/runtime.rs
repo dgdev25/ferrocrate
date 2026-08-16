@@ -7684,7 +7684,6 @@ fn update_container_hosts(
     }
 
     let hosts_body = render_hosts(&entries);
-    let resolv_body = ferro_net::dns::render_resolv_conf(&runtime_dns_config());
     for record in containers {
         if record.status != "running" && record.status != "paused" {
             continue;
@@ -7701,7 +7700,7 @@ fn update_container_hosts(
         if let Some(parent) = hosts_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&hosts_path, &hosts_body)?;
+        write_runtime_file_atomically(&hosts_path, hosts_body.as_bytes())?;
 
         let resolv_path = runtime_dir
             .join("containers")
@@ -7712,9 +7711,53 @@ fn update_container_hosts(
         if let Some(parent) = resolv_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&resolv_path, &resolv_body)?;
+        ferro_net::dns::write_resolv_conf(&resolv_path, &runtime_dns_config())
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
     }
     Ok(())
+}
+
+fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<(), RuntimeError> {
+    if path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(RuntimeError::Network(format!(
+            "refusing to replace symlinked runtime file {}",
+            path.display()
+        )));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        RuntimeError::Network(format!("runtime file has no parent: {}", path.display()))
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.tmp",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o644)
+            .open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        OpenOptions::new().read(true).open(parent)?.sync_all()?;
+        let read_back = fs::read(path)?;
+        if read_back != contents {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime file read-back mismatch",
+            ));
+        }
+        Ok::<(), io::Error>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(RuntimeError::Io)
 }
 
 fn runtime_dns_config() -> ferro_net::dns::DnsConfig {

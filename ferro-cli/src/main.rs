@@ -6584,6 +6584,7 @@ fn handle_docker_compat_connection(
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let mut event_request: Option<(String, String)> = None;
     let mut event_follow_query: Option<HashMap<String, String>> = None;
+    let mut log_follow: Option<(String, Option<String>)> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -6708,11 +6709,21 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/logs");
-                let logs = docker_tail_logs(
-                    &runtime.logs(id).map_err(|err| err.to_string())?,
-                    query.get("tail").map(String::as_str),
-                )?;
-                http_response(200, logs.as_bytes(), "text/plain")
+                let tail = query.get("tail").cloned();
+                if query.get("follow").is_some_and(|value| value == "1") {
+                    // Validate the container and tail before committing to a
+                    // long-lived chunked response.
+                    let raw = runtime.logs(id).map_err(|err| err.to_string())?;
+                    let _ = docker_tail_logs(&raw, tail.as_deref())?;
+                    log_follow = Some((id.to_string(), tail));
+                    docker_chunked_headers(200, "text/plain")
+                } else {
+                    let logs = docker_tail_logs(
+                        &runtime.logs(id).map_err(|err| err.to_string())?,
+                        tail.as_deref(),
+                    )?;
+                    http_response(200, logs.as_bytes(), "text/plain")
+                }
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
                 let id = path
@@ -7037,6 +7048,12 @@ fn handle_docker_compat_connection(
     stream.write_all(&response).map_err(|err| err.to_string())?;
     if let Some(query) = event_follow_query {
         stream_docker_events(&mut stream, &state, &query)?;
+        return Ok(());
+    }
+    if let Some((id, tail)) = log_follow {
+        let follow_runtime =
+            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        stream_docker_logs(&mut stream, &follow_runtime, &id, tail.as_deref())?;
         return Ok(());
     }
     if let Some((method, path)) = event_request {
@@ -7396,6 +7413,46 @@ fn stream_docker_events(
         stream.flush().map_err(|error| error.to_string())?;
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn stream_docker_logs(
+    stream: &mut UnixStream,
+    runtime: &ContainerRuntime,
+    id: &str,
+    tail: Option<&str>,
+) -> Result<(), String> {
+    let mut emitted = 0usize;
+    loop {
+        let raw = runtime.logs(id).map_err(|error| error.to_string())?;
+        if emitted == 0 {
+            let initial = docker_tail_logs(&raw, tail)?;
+            if !initial.is_empty() {
+                write_chunk(stream, initial.as_bytes())?;
+            }
+            emitted = raw.len();
+        } else if raw.len() >= emitted {
+            if raw.len() > emitted {
+                write_chunk(stream, &raw.as_bytes()[emitted..])?;
+                emitted = raw.len();
+            }
+        } else {
+            // The log files were rotated or truncated; resume from the new
+            // beginning rather than indexing stale bytes.
+            emitted = 0;
+        }
+        stream.flush().map_err(|error| error.to_string())?;
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_chunk(stream: &mut UnixStream, body: &[u8]) -> Result<(), String> {
+    stream
+        .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .and_then(|_| stream.write_all(b"\r\n"))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]

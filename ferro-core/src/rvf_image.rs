@@ -11,6 +11,7 @@
 //! The format is AI-native: it can embed vector models (SEG_VEC) alongside
 //! the container layer, enabling zero-pull inference at runtime.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -122,6 +123,15 @@ pub enum RvfError {
 
 /// Serialise `segments` into the RVF binary format.
 pub fn write_rvf<W: Write>(writer: &mut W, segments: &[RvfSegment]) -> Result<(), RvfError> {
+    let mut seen = HashSet::with_capacity(segments.len());
+    for segment in segments {
+        if segment.payload.len() > MAX_SEGMENT_PAYLOAD {
+            return Err(RvfError::PayloadTooLarge(segment.payload.len()));
+        }
+        if !seen.insert(segment.seg_type) {
+            return Err(RvfError::DuplicateSegment(segment.seg_type));
+        }
+    }
     writer.write_all(RVF_MAGIC)?;
     writer.write_all(&[RVF_FORMAT_VERSION])?;
     writer.write_all(&(segments.len() as u32).to_le_bytes())?;
@@ -247,7 +257,22 @@ pub fn build_rvf_image(params: &RvfBuildParams<'_>) -> Result<RvfBuildResult, Rv
     let file_digest = hex::encode(rvf_crypto::shake256_256(&buf));
     let file_size = buf.len() as u64;
 
-    std::fs::write(params.output_path, &buf)?;
+    let temporary = params.output_path.with_extension("rvf.tmp");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(&buf)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, params.output_path)?;
+    if let Some(parent) = params.output_path.parent() {
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
 
     Ok(RvfBuildResult {
         output_path: params.output_path.to_path_buf(),
@@ -321,6 +346,32 @@ mod tests {
         assert_eq!(read_back.len(), 3);
         assert_eq!(read_back[1].seg_type, SEG_LAYER);
         assert_eq!(read_back[2].payload, vec![9u8; 32]);
+    }
+
+    #[test]
+    fn writer_rejects_duplicate_or_oversized_segments() {
+        let duplicate = vec![
+            RvfSegment {
+                seg_type: SEG_LAYER,
+                payload: vec![1],
+            },
+            RvfSegment {
+                seg_type: SEG_LAYER,
+                payload: vec![2],
+            },
+        ];
+        assert!(matches!(
+            write_rvf(&mut Vec::new(), &duplicate),
+            Err(RvfError::DuplicateSegment(SEG_LAYER))
+        ));
+        let oversized = vec![RvfSegment {
+            seg_type: SEG_LAYER,
+            payload: vec![0; MAX_SEGMENT_PAYLOAD + 1],
+        }];
+        assert!(matches!(
+            write_rvf(&mut Vec::new(), &oversized),
+            Err(RvfError::PayloadTooLarge(size)) if size == MAX_SEGMENT_PAYLOAD + 1
+        ));
     }
 
     #[test]

@@ -700,6 +700,15 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         .into_inner();
     assert_eq!(exec.exit_code, 0);
     assert_eq!(String::from_utf8_lossy(&exec.stdout).trim(), "cri-ok");
+    let timed_out = client
+        .exec_sync(ferro_cri::runtime::ExecSyncRequest {
+            container_id: container.clone(),
+            cmd: vec!["/bin/busybox".into(), "sleep".into(), "30".into()],
+            timeout: 1,
+        })
+        .await
+        .expect_err("exec timeout must be reported");
+    assert_eq!(timed_out.code(), tonic::Code::DeadlineExceeded);
     client
         .stop_container(ferro_cri::runtime::StopContainerRequest {
             container_id: container.clone(),

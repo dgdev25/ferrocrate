@@ -861,9 +861,21 @@ impl RuntimeService for CriRuntime {
         let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
             .map_err(|error| Status::internal(error.to_string()))?
             .with_request_origin(identity.origin);
-        let result = runtime
-            .exec(&runtime_id, &req.cmd)
-            .map_err(|error| Status::internal(error.to_string()))?;
+        let command = req.cmd;
+        let timeout_seconds = req.timeout;
+        let result = tokio::task::spawn_blocking(move || {
+            runtime.exec_with_timeout(
+                &runtime_id,
+                &command,
+                (timeout_seconds > 0).then(|| std::time::Duration::from_secs(timeout_seconds)),
+            )
+        })
+        .await
+        .map_err(|error| Status::internal(format!("exec task failed: {error}")))?
+        .map_err(|error| Status::internal(error.to_string()))?;
+        if timeout_seconds > 0 && result.exit_code == 124 && result.stderr == "command timed out" {
+            return Err(Status::deadline_exceeded("exec command timed out"));
+        }
         Ok(Response::new(ExecSyncResponse {
             stdout: result.stdout.into_bytes(),
             stderr: result.stderr.into_bytes(),

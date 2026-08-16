@@ -2852,10 +2852,19 @@ impl ContainerRuntime {
         id: &str,
         cmd: &[String],
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        self.exec_with_timeout(id, cmd, None)
+    }
+
+    pub fn exec_with_timeout(
+        &self,
+        id: &str,
+        cmd: &[String],
+        timeout: Option<Duration>,
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let permit = self.authorize_existing(Action::ContainerExec, id)?;
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
-        let result = self.exec_authorized(proof, intent, id, cmd);
+        let result = self.exec_authorized(proof, intent, id, cmd, timeout);
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
@@ -2875,12 +2884,18 @@ impl ContainerRuntime {
         _intent: Option<&crate::witness::DurableIntent>,
         id: &str,
         cmd: &[String],
+        timeout: Option<Duration>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let record = self
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let result = exec_in_container(record.pid, cmd)?;
+        let result = match timeout {
+            Some(timeout) => {
+                crate::container_exec::exec_in_container_with_timeout(record.pid, cmd, timeout)?
+            }
+            None => exec_in_container(record.pid, cmd)?,
+        };
         let _ = log_event(
             &self.runtime_dir,
             make_event("exec", Some(&record.id), Some(&record.image), None, None),

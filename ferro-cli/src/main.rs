@@ -6877,6 +6877,13 @@ fn handle_docker_compat_connection(
                     http_response(200, logs.as_bytes(), "text/plain")
                 }
             }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/top") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/top");
+                let body = docker_top_payload(&runtime, id)?;
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
                 let id = path
                     .trim_start_matches("/containers/")
@@ -7857,6 +7864,31 @@ fn docker_stats_payload(stats: &ferro_core::cgroups::CgroupStats) -> serde_json:
 }
 
 #[cfg(target_os = "linux")]
+fn docker_top_payload(runtime: &ContainerRuntime, id: &str) -> Result<serde_json::Value, String> {
+    let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+    let pid = record.pid;
+    if pid == 0 {
+        return Ok(serde_json::json!({
+            "Titles": ["PID", "CMD", "STATE"],
+            "Processes": []
+        }));
+    }
+    let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.split_whitespace().nth(2).map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_string());
+    let command = if record.command.is_empty() {
+        record.image
+    } else {
+        record.command.join(" ")
+    };
+    Ok(serde_json::json!({
+        "Titles": ["PID", "CMD", "STATE"],
+        "Processes": [[pid.to_string(), command, state]]
+    }))
+}
+
+#[cfg(target_os = "linux")]
 fn stream_docker_stats(
     stream: &mut UnixStream,
     runtime: &ContainerRuntime,
@@ -7936,18 +7968,18 @@ mod tests {
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
         docker_chunked_headers, docker_container_matches_filters, docker_event_payload,
-        docker_tail_logs, effective_readonly, handle_build, handle_containers, handle_context,
-        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
-        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
-        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_capabilities, parse_docker_filters, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, should_desktop_forward,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
-        ComposeCommands, ConfigCommands, ContextCommands, DockerEvent, DockerEventStore,
-        NetworkCommands, VolumeCommands,
+        docker_tail_logs, docker_top_payload, effective_readonly, handle_build, handle_containers,
+        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_filters,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
+        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, should_desktop_forward, structured_desktop_error,
+        top_level_command_name, validate_build_platform, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -9644,6 +9676,14 @@ mod tests {
         assert!(docker_container_matches_filters(&record, &filters));
         record.status = "exited".to_string();
         assert!(!docker_container_matches_filters(&record, &filters));
+    }
+
+    #[test]
+    fn docker_top_rejects_unknown_container_without_procfs_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(temp.path()).unwrap();
+        let error = docker_top_payload(&runtime, "missing").expect_err("unknown container");
+        assert!(error.contains("not found") || error.contains("unknown"));
     }
 
     #[test]

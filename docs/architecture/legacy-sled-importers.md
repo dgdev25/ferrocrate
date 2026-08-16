@@ -10,6 +10,7 @@ cargo test -p ferro-compose --features legacy-sled
 cargo test -p ferro-core --features legacy-sled-importers image_store::tests
 cargo test -p ferro-core --features legacy-sled-importers volume_store::tests
 cargo test -p ferro-core --features legacy-sled-importers authorization::cri_delegation::tests
+cargo test -p ferro-core --features legacy-sled-importers witness::journal::storage::sqlite_tests
 ```
 
 Default builds do not include sled in `ferro-compose`'s dependency graph. If a
@@ -22,5 +23,8 @@ The same explicit boundary now applies to the ferro-core image and volume
 importers through `legacy-sled-importers`. Default core opens fail closed when
 they discover a legacy Sled directory; the opt-in feature runs the importer and
 retains the rollback source. The active container store and witness compatibility
-importers remain separate migration work and must not be considered complete
-based on this boundary.
+importer is also isolated behind `legacy-sled-importers`; default journal opens
+fail closed on legacy directories and the feature-gated test preserves the
+atomic migration and readiness marker. The active container Sled backend itself
+still remains separate migration work and must not be considered complete based
+on this boundary.

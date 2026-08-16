@@ -59,9 +59,14 @@ impl SqliteContainerStore {
         if let Some(legacy_path) = legacy_path.as_ref() {
             let marker = legacy_path.join("containers.sqlite3.imported");
             if !sqlite_path.exists() && !marker.exists() && legacy_path.join("conf").exists() {
-                let legacy = super::container_store::LocalContainerStore::open(&legacy_path)?;
-                legacy.export_sqlite_snapshot(&sqlite_path)?;
-                std::fs::write(marker, b"sqlite-v1\n")?;
+                #[cfg(not(feature = "legacy-sled-importers"))]
+                return Err(ContainerStoreError::LegacyMigrationRequired);
+                #[cfg(feature = "legacy-sled-importers")]
+                {
+                    let legacy = super::container_store::LocalContainerStore::open(&legacy_path)?;
+                    legacy.export_sqlite_snapshot(&sqlite_path)?;
+                    std::fs::write(marker, b"sqlite-v1\n")?;
+                }
             }
         }
         let connection = Connection::open(&sqlite_path)?;
@@ -655,6 +660,7 @@ mod tests {
         assert_eq!(store.lifecycle_operations().expect("operations").len(), 0);
     }
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn sqlite_store_imports_existing_legacy_sled_directory() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -664,5 +670,19 @@ mod tests {
         let sqlite = SqliteContainerStore::open(temp.path()).expect("sqlite");
         assert!(sqlite.get("legacy-1").expect("get").is_some());
         assert!(temp.path().join("containers.sqlite3.imported").exists());
+    }
+
+    #[cfg(not(feature = "legacy-sled-importers"))]
+    #[test]
+    fn sqlite_store_rejects_legacy_directory_by_default() {
+        let temp = tempfile::tempdir().expect("legacy store");
+        let legacy = LocalContainerStore::open(temp.path()).expect("legacy");
+        legacy.put(&record("legacy-1")).expect("legacy put");
+        drop(legacy);
+        let error = match SqliteContainerStore::open(temp.path()) {
+            Ok(_) => panic!("legacy boundary"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy-sled-importers"));
     }
 }

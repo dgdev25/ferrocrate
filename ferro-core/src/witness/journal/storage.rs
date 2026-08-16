@@ -48,6 +48,7 @@ impl SqliteJournalStore {
     /// Copy a legacy sled tree set into SQLite in one durable transaction.
     /// The ready marker is created only after SQLite commits, so an interrupted
     /// copy can be retried without treating a partial database as authoritative.
+    #[cfg(feature = "legacy-sled-importers")]
     pub(super) fn migrate_from_sled(
         sled_path: &Path,
         sqlite_path: &Path,
@@ -392,6 +393,8 @@ impl WitnessJournal {
 #[cfg(test)]
 mod sqlite_tests {
     use super::SqliteJournalStore;
+    #[cfg(not(feature = "legacy-sled-importers"))]
+    use crate::witness::{JournalConfig, JournalMode, WitnessJournal};
     use tempfile::tempdir;
 
     #[test]
@@ -436,6 +439,23 @@ mod sqlite_tests {
         assert_eq!(store.get("meta", b"head").unwrap(), None);
     }
 
+    #[cfg(not(feature = "legacy-sled-importers"))]
+    #[test]
+    fn witness_open_rejects_legacy_directory_by_default() {
+        let directory = tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("witness.sled")).unwrap();
+        let error = match WitnessJournal::open(JournalConfig::new(
+            directory.path(),
+            [0x71; 16],
+            JournalMode::Required,
+        )) {
+            Ok(_) => panic!("legacy boundary"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy-sled-importers"));
+    }
+
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn sqlite_store_migrates_legacy_trees_before_marking_ready() {
         let directory = tempdir().unwrap();

@@ -9757,9 +9757,10 @@ mod tests {
     fn startup_reconcile_marks_stale_running_pid_exited() {
         let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
-        let store =
-            crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
-                .expect("store");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("store");
 
         let record = ContainerRecord {
             id: "stale-running".to_string(),
@@ -9811,9 +9812,10 @@ mod tests {
     fn startup_reconcile_keeps_live_running_pid() {
         let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
-        let store =
-            crate::container_store::LocalContainerStore::open(temp.path().join("containers.db"))
-                .expect("store");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("store");
 
         let record = ContainerRecord {
             id: "live-running".to_string(),

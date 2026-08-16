@@ -324,6 +324,8 @@ pub enum ContainerStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("container store filesystem error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("legacy container store detected; reopen with the `legacy-sled-importers` feature")]
+    LegacyMigrationRequired,
     #[error("container store lock failed: {0}")]
     Lock(String),
     #[error("container mutation compare-and-swap failed")]

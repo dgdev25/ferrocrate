@@ -188,7 +188,7 @@ struct BaseImageInfo {
     digest: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BuildCacheEntry {
     #[serde(default)]
     cache_key: String,
@@ -897,6 +897,13 @@ pub fn import_build_cache(
         validate_imported_cache_entry(key, entry)?;
     }
     let mut cache = load_build_cache(runtime_dir)?;
+    for (key, entry) in &imported {
+        if cache.get(key).is_some_and(|existing| existing != entry) {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "imported build cache conflicts with local key {key}"
+            )));
+        }
+    }
     let count = imported.len();
     cache.extend(imported);
     save_build_cache(runtime_dir, &cache)?;
@@ -2923,6 +2930,14 @@ mod tests {
         export_build_cache(source.path(), &export).unwrap();
         assert_eq!(import_build_cache(target.path(), &export).unwrap(), 1);
         assert_eq!(load_build_cache(target.path()).unwrap().len(), 1);
+
+        cache.values_mut().next().unwrap().context_digest = "conflict".to_string();
+        save_build_cache(source.path(), &cache).unwrap();
+        let conflicting_export = source.path().join("conflicting-export.json");
+        export_build_cache(source.path(), &conflicting_export).unwrap();
+        let error = import_build_cache(target.path(), &conflicting_export)
+            .expect_err("conflicting cache metadata must fail closed");
+        assert!(error.to_string().contains("conflicts with local key"));
     }
 
     #[test]

@@ -236,6 +236,11 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    ImageInspect {
+        image: String,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     Tag {
         source: String,
         target: String,
@@ -970,6 +975,7 @@ fn is_runtime_command_name(command: &str) -> bool {
             | "containers"
             | "ps"
             | "history"
+            | "image-inspect"
             | "tag"
             | "logs"
             | "inspect"
@@ -2676,6 +2682,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
+            Commands::ImageInspect { image, format } => {
+                handle_image_inspect(&image_store, &image, &format)
+            }
             Commands::Tag { source, target } => {
                 handle_tag(&image_store, &source, &target, &surface_authorization)
             }
@@ -4496,6 +4505,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/images/{}/history", percent_encode_path_component(image)),
         )
         .and_then(|body| print_json(body, format)),
+        Commands::ImageInspect { image, format } => request(
+            "GET",
+            format!("/images/{}/json", percent_encode_path_component(image)),
+        )
+        .and_then(|body| print_json(body, format)),
         Commands::Tag { source, target } => (|| -> Result<(), String> {
             let source = canonicalize_reference(source).map_err(|error| error.to_string())?;
             let target = canonicalize_reference(target).map_err(|error| error.to_string())?;
@@ -5906,6 +5920,31 @@ fn handle_history(store: &LocalImageStore, image: &str, format: &str) -> Result<
                     .unwrap_or_default()
             );
         }
+    }
+    Ok(())
+}
+
+fn handle_image_inspect(store: &LocalImageStore, image: &str, format: &str) -> Result<(), String> {
+    let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
+    let reference = resolve_reference(store, &canonical)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("image inspect: not found {canonical}"))?;
+    let payload = serde_json::json!({
+        "Id": reference.digest,
+        "RepoTags": [reference.reference],
+        "Created": reference.created_at_unix,
+        "Size": 0,
+        "VirtualSize": 0,
+    });
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("Id: {}", payload["Id"]);
+        println!("RepoTags: {}", payload["RepoTags"][0]);
+        println!("Created: {}", payload["Created"]);
     }
     Ok(())
 }
@@ -11557,11 +11596,28 @@ volumes:
 
     #[test]
     fn parses_tag_command() {
-        let cli = Cli::parse_from(["ferrocrate", "tag", "alpine:latest", "registry.local/app:v2"]);
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "tag",
+            "alpine:latest",
+            "registry.local/app:v2",
+        ]);
         match cli.command {
             Commands::Tag { source, target } => {
                 assert_eq!(source, "alpine:latest");
                 assert_eq!(target, "registry.local/app:v2");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_image_inspect_command() {
+        let cli = Cli::parse_from(["ferrocrate", "image-inspect", "alpine:latest"]);
+        match cli.command {
+            Commands::ImageInspect { image, format } => {
+                assert_eq!(image, "alpine:latest");
+                assert_eq!(format, "text");
             }
             other => panic!("unexpected command: {other:?}"),
         }

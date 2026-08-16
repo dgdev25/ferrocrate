@@ -1861,7 +1861,7 @@ fn run_stage_commands(
         }
         let mut mounted = Vec::new();
         for (index, mount) in run.cache_mounts.iter().enumerate() {
-            let target = rootfs.join(mount.target.trim_start_matches('/'));
+            let target = validate_mount_target(&rootfs, &mount.target, "cache")?;
             let backup = rootfs.join(format!(".ferrocrate-cache-backup-{index}"));
             let existed = target.exists();
             if existed {
@@ -1877,7 +1877,7 @@ fn run_stage_commands(
         let mut secret_mounted = Vec::new();
         for (index, mount) in run.secret_mounts.iter().enumerate() {
             let source = secrets.get(&mount.id).expect("secret source prevalidated");
-            let target = rootfs.join(mount.target.trim_start_matches('/'));
+            let target = validate_mount_target(&rootfs, &mount.target, "secret")?;
             let backup = rootfs.join(format!(".ferrocrate-secret-backup-{index}"));
             let existed = target.exists();
             if existed {
@@ -1972,6 +1972,38 @@ fn run_stage_commands(
         }
     }
     Ok(())
+}
+
+/// Resolve a Dockerfile mount target without following symlinks in the
+/// rootfs. Mount targets are build-controlled paths, so accepting a symlinked
+/// component would allow a Dockerfile to redirect cache or secret material
+/// outside the intended rootfs. Missing components are permitted and created
+/// by the caller after this check.
+fn validate_mount_target(
+    rootfs: &Path,
+    target: &str,
+    kind: &str,
+) -> Result<PathBuf, DockerfileBuildError> {
+    let relative = target.strip_prefix('/').ok_or_else(|| {
+        DockerfileBuildError::Invalid(format!("{kind} mount target must be absolute: {target}"))
+    })?;
+    let mut resolved = rootfs.to_path_buf();
+    for component in Path::new(relative).components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "{kind} mount target contains traversal: {target}"
+            )));
+        };
+        resolved.push(part);
+        if let Ok(metadata) = fs::symlink_metadata(&resolved) {
+            if metadata.file_type().is_symlink() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "{kind} mount target may not traverse a symlink: {target}"
+                )));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2434,7 +2466,7 @@ mod tests {
         build_from_dockerfile_with_store_and_compression, dockerignore_matches, export_build_cache,
         import_build_cache, load_build_cache, parse_limit_value, parse_run, parse_stages,
         prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
-        save_build_cache, BuildCacheEntry,
+        save_build_cache, validate_mount_target, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -2716,6 +2748,17 @@ mod tests {
             &["/bin/sh".into(), "-c".into()]
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mount_target_rejects_symlinked_rootfs_components() {
+        let root = tempfile::tempdir().expect("rootfs");
+        std::fs::create_dir(root.path().join("run")).expect("run");
+        std::os::unix::fs::symlink("/tmp", root.path().join("run/secrets")).expect("symlink");
+        let error = validate_mount_target(root.path(), "/run/secrets/token", "secret")
+            .expect_err("symlinked mount target must fail closed");
+        assert!(error.to_string().contains("symlink"));
     }
 
     #[test]

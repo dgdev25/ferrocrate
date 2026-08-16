@@ -207,6 +207,15 @@ pub struct BuildResult {
     pub config_digest: String,
 }
 
+#[derive(Debug)]
+struct BuiltStage {
+    root: PathBuf,
+    name: Option<String>,
+    layer_digest: String,
+    layer_media_type: String,
+    layer_size: i64,
+}
+
 #[derive(Debug, Clone)]
 struct BaseImageInfo {
     layers: Vec<PathBuf>,
@@ -310,6 +319,95 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn build_one_stage(
+    idx: usize,
+    stage: &StageSpec,
+    base_info: &BaseImageInfo,
+    runtime_dir: &Path,
+    context_dir: &Path,
+    dockerfile_path: &Path,
+    compression: CompressionFormat,
+    ignore_patterns: &[String],
+    named_contexts: &HashMap<String, PathBuf>,
+    secrets: &HashMap<String, PathBuf>,
+    stage_roots: &[PathBuf],
+    stage_names: &HashMap<String, PathBuf>,
+) -> Result<BuiltStage, DockerfileBuildError> {
+    let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
+    if stage_root.exists() {
+        let _ = fs::remove_dir_all(&stage_root);
+    }
+    let cas_root = runtime_dir.join("images").join("cas").join("blake3");
+    if !base_info.layers.is_empty() {
+        construct_rootfs_with_dedup(&stage_root, &base_info.layers, &cas_root)
+            .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+    } else {
+        fs::create_dir_all(&stage_root)?;
+    }
+
+    let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
+    if stage.copy_paths.is_empty() {
+        copy_context_dir(
+            context_dir,
+            context_dir,
+            &context_root,
+            dockerfile_path,
+            ignore_patterns,
+        )?;
+    } else {
+        copy_from_context(context_dir, &context_root, &stage.copy_paths)?;
+    }
+    for copy in &stage.copy_from {
+        let source_root = resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
+            .ok_or_else(|| {
+                DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
+            })?;
+        let source = safe_context_source(&source_root, &copy.src)?;
+        let dest = safe_context_destination(&context_root, &copy.dest)?;
+        copy_path_recursive(&source, &dest)?;
+    }
+
+    let (mut layer_bytes, mut layer_media_type) =
+        build_layer_from_dir(&context_root, Some(dockerfile_path), compression)?;
+    let mut layer_digest = sha256_digest_bytes(&layer_bytes);
+    let mut layer_size = layer_bytes.len() as i64;
+    write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
+    let layer_path = layer_blob_path(runtime_dir, &layer_digest);
+    apply_layer_tar(&stage_root, &layer_path)
+        .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+
+    if !stage.run.is_empty() {
+        apply_stage_workdir(&stage_root, stage.workdir.as_deref())?;
+        run_stage_commands(
+            &stage_root,
+            &stage.run,
+            &stage.env,
+            stage.workdir.as_deref(),
+            stage.user.as_deref(),
+            &runtime_dir
+                .join("build")
+                .join("cache")
+                .join(format!("stage-{idx}")),
+            secrets,
+        )?;
+        let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
+        layer_bytes = rebuilt;
+        layer_media_type = media_type;
+        layer_digest = sha256_digest_bytes(&layer_bytes);
+        layer_size = layer_bytes.len() as i64;
+        write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
+    }
+
+    Ok(BuiltStage {
+        root: stage_root,
+        name: stage.name.clone(),
+        layer_digest,
+        layer_media_type,
+        layer_size,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
     dockerfile_path: &Path,
     tag: Option<&str>,
@@ -388,177 +486,175 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             }
         }
     }
-    let mut stage_roots: Vec<PathBuf> = Vec::new();
+    let mut stage_roots = vec![None; stages.len()];
     let mut stage_names: HashMap<String, PathBuf> = HashMap::new();
-    let mut final_result = None;
     let ignore_patterns = load_dockerignore_patterns(context_dir)?;
 
-    for (idx, stage) in stages.iter().enumerate() {
-        let base_info = &base_infos[idx];
-        let base_layers = &base_info.layers;
-        let base_descriptors = base_info.descriptors.clone();
-        let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
-        if stage_root.exists() {
-            let _ = fs::remove_dir_all(&stage_root);
-        }
-        let cas_root = runtime_dir.join("images").join("cas").join("blake3");
-        if !base_layers.is_empty() {
-            construct_rootfs_with_dedup(&stage_root, base_layers, &cas_root)
-                .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+    let batches =
+        build_stage_execution_batches(&build_stage_dependency_graph(&stages, &named_contexts)?)?;
+    let mut built: Vec<Option<BuiltStage>> = (0..stages.len()).map(|_| None).collect();
+    for batch in batches {
+        let roots_snapshot = stage_roots
+            .iter()
+            .map(|root| {
+                root.clone()
+                    .unwrap_or_else(|| runtime_dir.join("build").join("unbuilt-stage"))
+            })
+            .collect::<Vec<_>>();
+        let names_snapshot = stage_names.clone();
+        let can_parallel = batch.len() > 1 && batch.iter().all(|idx| stages[*idx].run.is_empty());
+        let outputs = if can_parallel {
+            std::thread::scope(|scope| {
+                let handles = batch
+                    .iter()
+                    .map(|idx| {
+                        let stage = &stages[*idx];
+                        let base_info = &base_infos[*idx];
+                        scope.spawn(|| {
+                            build_one_stage(
+                                *idx,
+                                stage,
+                                base_info,
+                                runtime_dir,
+                                context_dir,
+                                dockerfile_path,
+                                compression,
+                                &ignore_patterns,
+                                &named_contexts,
+                                secrets,
+                                &roots_snapshot,
+                                &names_snapshot,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().map_err(|_| {
+                            DockerfileBuildError::Invalid(
+                                "parallel stage worker panicked".to_string(),
+                            )
+                        })?
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })?
         } else {
-            fs::create_dir_all(&stage_root)?;
-        }
-
-        let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
-        if stage.copy_paths.is_empty() {
-            copy_context_dir(
-                context_dir,
-                context_dir,
-                &context_root,
-                dockerfile_path,
-                &ignore_patterns,
-            )?;
-        } else {
-            copy_from_context(context_dir, &context_root, &stage.copy_paths)?;
-        }
-
-        for copy in &stage.copy_from {
-            let source_root =
-                resolve_stage_root(&stage_roots, &stage_names, &named_contexts, &copy.from)
-                    .ok_or_else(|| {
-                        DockerfileBuildError::Invalid(format!(
-                            "unknown COPY --from stage: {}",
-                            copy.from
-                        ))
-                    })?;
-            let source = safe_context_source(&source_root, &copy.src)?;
-            let dest = safe_context_destination(&context_root, &copy.dest)?;
-            copy_path_recursive(&source, &dest)?;
-        }
-
-        let (mut layer_bytes, mut layer_media_type) =
-            build_layer_from_dir(&context_root, Some(dockerfile_path), compression)?;
-        let mut layer_digest = sha256_digest_bytes(&layer_bytes);
-        let mut layer_size = layer_bytes.len() as i64;
-        write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
-
-        let layer_path = layer_blob_path(runtime_dir, &layer_digest);
-        apply_layer_tar(&stage_root, &layer_path)
-            .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
-
-        if !stage.run.is_empty() {
-            apply_stage_workdir(&stage_root, stage.workdir.as_deref())?;
-            run_stage_commands(
-                &stage_root,
-                &stage.run,
-                &stage.env,
-                stage.workdir.as_deref(),
-                stage.user.as_deref(),
-                &runtime_dir.join("build").join("cache"),
-                secrets,
-            )?;
-            let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
-            layer_bytes = rebuilt;
-            layer_media_type = media_type;
-            layer_digest = sha256_digest_bytes(&layer_bytes);
-            layer_size = layer_bytes.len() as i64;
-            write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
-        }
-
-        stage_roots.push(stage_root.clone());
-        if let Some(name) = stage.name.as_ref() {
-            stage_names.insert(name.to_string(), stage_root.clone());
-        }
-
-        if idx == stages.len() - 1 {
-            let config_json = build_config_json(
-                stage.healthcheck.clone(),
-                &stage.env,
-                &stage.labels,
-                stage.workdir.as_deref(),
-                stage.user.as_deref(),
-                stage.entrypoint.clone(),
-                stage.cmd.clone(),
-                &stage.exposed_ports,
-                &stage.volumes,
-            );
-            let config_bytes = config_json.as_bytes();
-            let config_digest = sha256_digest_bytes(config_bytes);
-
-            let mut layers = base_descriptors;
-            layers.push(Descriptor {
-                media_type: layer_media_type.clone(),
-                digest: layer_digest.clone(),
-                size: layer_size,
-                urls: Vec::new(),
-                annotations: None,
-                artifact_type: None,
-                platform: None,
-            });
-
-            let manifest = ImageManifest {
-                schema_version: 2,
-                media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
-                config: Descriptor {
-                    media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
-                    digest: config_digest.clone(),
-                    size: config_bytes.len() as i64,
-                    urls: Vec::new(),
-                    annotations: None,
-                    artifact_type: None,
-                    platform: None,
-                },
-                layers,
-                artifact_type: None,
-                subject: None,
-                annotations: Default::default(),
-            };
-            let manifest_json = serde_json::to_string(&manifest)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-
-            let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
-            store.put_reference(
-                authority,
-                &reference,
-                &config_digest,
-                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-                &manifest_json,
-            )?;
-
-            write_config(runtime_dir, &config_digest, config_bytes)?;
-
-            if !has_sensitive_mounts(&stages) {
-                cache.insert(
-                    cache_key.clone(),
-                    BuildCacheEntry {
-                        cache_key: cache_key.clone(),
-                        created_at_unix: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        context_digest: context_hash.clone(),
-                        dockerfile_digest: dockerfile_digest.clone(),
-                        base_digests: base_digests.clone(),
-                        layer_digest: layer_digest.clone(),
-                        layer_size,
-                        layer_media_type,
-                        config_digest: config_digest.clone(),
-                        config_json: config_json.clone(),
-                        manifest_json: manifest_json.clone(),
-                    },
-                );
-                save_build_cache(runtime_dir, &cache)?;
+            batch
+                .iter()
+                .map(|idx| {
+                    build_one_stage(
+                        *idx,
+                        &stages[*idx],
+                        &base_infos[*idx],
+                        runtime_dir,
+                        context_dir,
+                        dockerfile_path,
+                        compression,
+                        &ignore_patterns,
+                        &named_contexts,
+                        secrets,
+                        &roots_snapshot,
+                        &names_snapshot,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (idx, output) in batch.into_iter().zip(outputs) {
+            stage_roots[idx] = Some(output.root.clone());
+            if let Some(name) = output.name.as_ref() {
+                stage_names.insert(name.clone(), output.root.clone());
             }
-
-            final_result = Some(BuildResult {
-                reference,
-                layer_digest,
-                config_digest,
-            });
+            built[idx] = Some(output);
         }
     }
 
-    final_result.ok_or_else(|| DockerfileBuildError::Invalid("no stages built".to_string()))
+    let final_idx = stages
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| DockerfileBuildError::Invalid("no stages built".to_string()))?;
+    let final_stage = &stages[final_idx];
+    let final_output = built[final_idx]
+        .take()
+        .ok_or_else(|| DockerfileBuildError::Invalid("final stage was not built".to_string()))?;
+    let config_json = build_config_json(
+        final_stage.healthcheck.clone(),
+        &final_stage.env,
+        &final_stage.labels,
+        final_stage.workdir.as_deref(),
+        final_stage.user.as_deref(),
+        final_stage.entrypoint.clone(),
+        final_stage.cmd.clone(),
+        &final_stage.exposed_ports,
+        &final_stage.volumes,
+    );
+    let config_bytes = config_json.as_bytes();
+    let config_digest = sha256_digest_bytes(config_bytes);
+    let mut layers = base_infos[final_idx].descriptors.clone();
+    layers.push(Descriptor {
+        media_type: final_output.layer_media_type.clone(),
+        digest: final_output.layer_digest.clone(),
+        size: final_output.layer_size,
+        urls: Vec::new(),
+        annotations: None,
+        artifact_type: None,
+        platform: None,
+    });
+    let manifest = ImageManifest {
+        schema_version: 2,
+        media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+        config: Descriptor {
+            media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+            digest: config_digest.clone(),
+            size: config_bytes.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        },
+        layers,
+        artifact_type: None,
+        subject: None,
+        annotations: Default::default(),
+    };
+    let manifest_json =
+        serde_json::to_string(&manifest).map_err(|err| io::Error::other(err.to_string()))?;
+    let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+    store.put_reference(
+        authority,
+        &reference,
+        &config_digest,
+        OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        &manifest_json,
+    )?;
+    write_config(runtime_dir, &config_digest, config_bytes)?;
+    if !has_sensitive_mounts(&stages) {
+        cache.insert(
+            cache_key.clone(),
+            BuildCacheEntry {
+                cache_key: cache_key.clone(),
+                created_at_unix: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                context_digest: context_hash.clone(),
+                dockerfile_digest: dockerfile_digest.clone(),
+                base_digests: base_digests.clone(),
+                layer_digest: final_output.layer_digest.clone(),
+                layer_size: final_output.layer_size,
+                layer_media_type: final_output.layer_media_type,
+                config_digest: config_digest.clone(),
+                config_json: config_json.clone(),
+                manifest_json: manifest_json.clone(),
+            },
+        );
+        save_build_cache(runtime_dir, &cache)?;
+    }
+    Ok(BuildResult {
+        reference,
+        layer_digest: final_output.layer_digest,
+        config_digest,
+    })
 }
 
 pub fn execute_dockerfile_build_authorized(
@@ -2925,8 +3021,8 @@ mod tests {
     use super::{
         build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
-        export_build_cache, file_matches_digest, import_build_cache, load_build_cache,
-        parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
+        export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
+        load_build_cache, parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, save_build_cache,
         validate_mount_target, BuildCacheEntry,
     };
@@ -3355,6 +3451,34 @@ mod tests {
             .expect_err("forward stage edge must fail");
         assert!(error.to_string().contains("earlier stage"));
         assert!(build_stage_execution_batches(&[vec![1], vec![0]]).is_err());
+    }
+
+    #[test]
+    fn independent_stage_batch_executes_before_dependent_final_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS left\nCOPY left /left\nFROM scratch AS right\nCOPY right /right\nFROM scratch AS final\nCOPY --from=left /left /left\nCOPY --from=right /right /right\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("left"), "left").unwrap();
+        fs::write(temp.path().join("right"), "right").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let result = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/parallel:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("parallel independent stages build");
+        assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
+        assert!(runtime.join("build/stage-0").exists());
+        assert!(runtime.join("build/stage-1").exists());
+        assert!(runtime.join("build/stage-2").exists());
     }
 
     #[test]

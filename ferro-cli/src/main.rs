@@ -7919,8 +7919,20 @@ fn handle_docker_compat_connection(
             }
             ("DELETE", path) if path.starts_with("/containers/") => {
                 let id = path.trim_start_matches("/containers/");
-                runtime.remove(id).map_err(|err| err.to_string())?;
-                http_response(204, &[], "text/plain")
+                let _force = parse_docker_bool_query(query.get("force"), "force")?;
+                let removed_pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                    .remove(id)
+                    .is_some();
+                if removed_pending {
+                    state.persist_pending()?;
+                    http_response(204, &[], "text/plain")
+                } else {
+                    runtime.remove(id).map_err(|err| err.to_string())?;
+                    http_response(204, &[], "text/plain")
+                }
             }
             ("GET", "/images/json") => {
                 let filters = parse_docker_filters(&query)?;

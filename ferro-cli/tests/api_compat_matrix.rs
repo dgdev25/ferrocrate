@@ -387,4 +387,23 @@ fn docker_create_identity_is_inspectable_before_start() {
     let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("post-restart JSON");
     assert_eq!(inspect["Id"], id);
     assert_eq!(inspect["State"]["Status"], "created");
+
+    let (status, body) = harness.request(
+        "POST",
+        "/containers/create?name=remove-before-start",
+        r#"{"Image":"busybox","Cmd":["true"]}"#,
+    );
+    assert_eq!(status, 201, "second create response: {body}");
+    let remove_id = serde_json::from_str::<serde_json::Value>(&body).expect("second create JSON")
+        ["Id"]
+        .as_str()
+        .expect("second create id")
+        .to_string();
+    let (status, body) = harness.request("DELETE", &format!("/containers/{remove_id}"), "");
+    assert_eq!(status, 204, "pending remove response: {body}");
+    let (status, body) = harness.request("GET", &format!("/containers/{remove_id}/json"), "");
+    assert_eq!(status, 404, "removed inspect response: {body}");
+    harness.restart();
+    let (status, body) = harness.request("GET", &format!("/containers/{remove_id}/json"), "");
+    assert_eq!(status, 404, "removed post-restart inspect response: {body}");
 }

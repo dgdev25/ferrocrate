@@ -681,6 +681,13 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Discover GPUs and optionally select one with enough free VRAM.
+    Gpu {
+        #[arg(long = "required-vram-bytes")]
+        required_vram_bytes: Option<u64>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     #[cfg(target_os = "linux")]
     Branch {
         source: String,
@@ -2743,6 +2750,44 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
                     .last_trained_at
                     .unwrap_or_else(|| "<none>".to_string())
             );
+            Ok(())
+        }
+        AiCommands::Gpu {
+            required_vram_bytes,
+            format,
+        } => {
+            let gpus = ferro_mind::ai::gpu::discover_gpus()
+                .map_err(|error| format!("ai gpu discovery: {error}"))?;
+            let selected = required_vram_bytes
+                .and_then(|required| ferro_mind::ai::gpu::select_gpu(&gpus, required));
+            if format == "json" {
+                let payload = serde_json::json!({
+                    "gpus": gpus,
+                    "required_vram_bytes": required_vram_bytes,
+                    "selected": selected,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload)
+                        .map_err(|error| format!("ai gpu: {error}"))?
+                );
+            } else {
+                for gpu in &gpus {
+                    println!(
+                        "ai gpu: id={} name={} vram_total_bytes={} vram_free_bytes={} utilization_percent={:.1}",
+                        gpu.id,
+                        gpu.name,
+                        gpu.vram_total_bytes,
+                        gpu.vram_free_bytes,
+                        gpu.utilization_percent
+                    );
+                }
+                if let Some(selected) = selected {
+                    println!("ai gpu selected: {}", selected.id);
+                } else if required_vram_bytes.is_some() {
+                    println!("ai gpu selected: none");
+                }
+            }
             Ok(())
         }
         #[cfg(target_os = "linux")]
@@ -8105,6 +8150,32 @@ mod tests {
                 assert_eq!(path, "model.rvf");
                 assert!(verify);
                 assert_eq!(parent_file.as_deref(), Some("parent.rvf"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_gpu_selection_options() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "ai",
+            "gpu",
+            "--required-vram-bytes",
+            "4096",
+            "--format",
+            "json",
+        ]);
+        match cli.command {
+            Commands::Ai {
+                command:
+                    AiCommands::Gpu {
+                        required_vram_bytes,
+                        format,
+                    },
+            } => {
+                assert_eq!(required_vram_bytes, Some(4096));
+                assert_eq!(format, "json");
             }
             other => panic!("unexpected command: {other:?}"),
         }

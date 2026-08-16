@@ -1,6 +1,7 @@
+use serde::Serialize;
 use std::process::Command;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GpuInfo {
     pub id: String,
     pub name: String,

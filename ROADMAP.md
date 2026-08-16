@@ -4,7 +4,7 @@
      forward work is sourced from the PRD-backed roadmap, completion plan,
      security audit, RVF plan, platform plan, and compatibility contracts. -->
 
-**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `f97846a`
+**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `7a9184e`
 
 ## How to use this roadmap
 

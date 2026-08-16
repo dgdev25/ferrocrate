@@ -886,6 +886,55 @@ fn validate_imported_cache_entry(
     Ok(())
 }
 
+fn cache_artifacts_path(metadata_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.artifacts", metadata_path.display()))
+}
+
+fn copy_cache_artifact(
+    source: &Path,
+    destination: &Path,
+    expected: &str,
+) -> Result<(), DockerfileBuildError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_file() || !file_matches_digest(source, expected) {
+        return Err(DockerfileBuildError::Invalid(
+            "build cache artifact is not a regular file with the expected digest".to_string(),
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if destination.exists() {
+        if file_matches_digest(destination, expected) {
+            return Ok(());
+        }
+        return Err(DockerfileBuildError::Invalid(
+            "imported build cache artifact conflicts with local artifact".to_string(),
+        ));
+    }
+    let temporary = destination.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::copy(source, &temporary)?;
+    let copied = file_matches_digest(&temporary, expected);
+    if !copied {
+        let _ = fs::remove_file(&temporary);
+        return Err(DockerfileBuildError::Invalid(
+            "imported build cache artifact failed digest verification".to_string(),
+        ));
+    }
+    fs::rename(temporary, destination)?;
+    if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Export validated local cache metadata to a caller-selected file.
 pub fn export_build_cache(
     runtime_dir: &Path,
@@ -913,6 +962,47 @@ pub fn export_build_cache(
     file.sync_all()?;
     fs::rename(temporary, destination)?;
     if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    let artifacts = cache_artifacts_path(destination);
+    let temporary_artifacts = PathBuf::from(format!(
+        "{}.tmp.{}.{}",
+        artifacts.display(),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::create_dir_all(temporary_artifacts.join("layers"))?;
+    fs::create_dir_all(temporary_artifacts.join("configs"))?;
+    for entry in cache.values() {
+        let layer = layer_blob_path(runtime_dir, &entry.layer_digest);
+        if layer.exists() {
+            copy_cache_artifact(
+                &layer,
+                &temporary_artifacts
+                    .join("layers")
+                    .join(entry.layer_digest.replace(':', "_")),
+                &entry.layer_digest,
+            )?;
+        }
+        let config = config_path(runtime_dir, &entry.config_digest);
+        if config.exists() {
+            copy_cache_artifact(
+                &config,
+                &temporary_artifacts
+                    .join("configs")
+                    .join(entry.config_digest.replace(':', "_")),
+                &entry.config_digest,
+            )?;
+        }
+    }
+    if artifacts.exists() {
+        fs::remove_dir_all(&artifacts)?;
+    }
+    fs::rename(temporary_artifacts, &artifacts)?;
+    if let Some(parent) = artifacts.parent() {
         File::open(parent)?.sync_all()?;
     }
     Ok(())
@@ -958,6 +1048,37 @@ pub fn import_build_cache(
     let count = imported.len();
     cache.extend(imported);
     save_build_cache(runtime_dir, &cache)?;
+    let artifacts = cache_artifacts_path(source);
+    if artifacts.exists() {
+        let metadata = fs::symlink_metadata(&artifacts)?;
+        if !metadata.file_type().is_dir() {
+            return Err(DockerfileBuildError::Invalid(
+                "build cache artifacts must be a directory".to_string(),
+            ));
+        }
+        for entry in cache.values() {
+            let layer_source = artifacts
+                .join("layers")
+                .join(entry.layer_digest.replace(':', "_"));
+            if layer_source.exists() {
+                copy_cache_artifact(
+                    &layer_source,
+                    &layer_blob_path(runtime_dir, &entry.layer_digest),
+                    &entry.layer_digest,
+                )?;
+            }
+            let config_source = artifacts
+                .join("configs")
+                .join(entry.config_digest.replace(':', "_"));
+            if config_source.exists() {
+                copy_cache_artifact(
+                    &config_source,
+                    &config_path(runtime_dir, &entry.config_digest),
+                    &entry.config_digest,
+                )?;
+            }
+        }
+    }
     Ok(count)
 }
 
@@ -3096,6 +3217,45 @@ mod tests {
         let error = import_build_cache(target.path(), &conflicting_export)
             .expect_err("conflicting cache metadata must fail closed");
         assert!(error.to_string().contains("conflicts with local key"));
+    }
+
+    #[test]
+    fn exports_and_imports_cache_artifacts_for_portable_hits() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let context = source.path().join("context");
+        fs::create_dir_all(&context).unwrap();
+        fs::write(context.join("Dockerfile"), "FROM scratch\nCOPY . /\n").unwrap();
+        fs::write(context.join("payload"), "portable cache").unwrap();
+        let source_runtime = source.path().join("runtime");
+        let source_store = LocalImageStore::open(source_runtime.join("images")).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &context.join("Dockerfile"),
+            Some("local/portable:latest"),
+            &source_runtime,
+            CompressionFormat::Gzip,
+            &source_store,
+            &authority,
+        )
+        .unwrap();
+        let export = source.path().join("cache.json");
+        export_build_cache(&source_runtime, &export).unwrap();
+
+        let target_runtime = target.path().join("runtime");
+        let target_store = LocalImageStore::open(target_runtime.join("images")).unwrap();
+        assert_eq!(import_build_cache(&target_runtime, &export).unwrap(), 1);
+        let second = build_from_dockerfile_with_store_and_compression(
+            &context.join("Dockerfile"),
+            Some("local/portable:latest"),
+            &target_runtime,
+            CompressionFormat::Gzip,
+            &target_store,
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(first.layer_digest, second.layer_digest);
+        assert_eq!(first.config_digest, second.config_digest);
     }
 
     #[test]

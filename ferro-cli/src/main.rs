@@ -236,6 +236,10 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    Tag {
+        source: String,
+        target: String,
+    },
     History {
         image: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -966,6 +970,7 @@ fn is_runtime_command_name(command: &str) -> bool {
             | "containers"
             | "ps"
             | "history"
+            | "tag"
             | "logs"
             | "inspect"
             | "stats"
@@ -2671,6 +2676,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
+            Commands::Tag { source, target } => {
+                handle_tag(&image_store, &source, &target, &surface_authorization)
+            }
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
             Commands::ImagePrune => handle_image_prune(&image_store, &surface_authorization),
             Commands::Volume { command } => {
@@ -4488,6 +4496,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/images/{}/history", percent_encode_path_component(image)),
         )
         .and_then(|body| print_json(body, format)),
+        Commands::Tag { source, target } => (|| -> Result<(), String> {
+            let source = canonicalize_reference(source).map_err(|error| error.to_string())?;
+            let target = canonicalize_reference(target).map_err(|error| error.to_string())?;
+            let (repo, tag) = split_reference(&target);
+            request(
+                "POST",
+                format!(
+                    "/images/{}/tag?repo={}&tag={}",
+                    percent_encode_path_component(&source),
+                    percent_encode_path_component(repo),
+                    percent_encode_path_component(tag)
+                ),
+            )
+            .map(|_| println!("tag: source={source} target={target}"))
+        })(),
         Commands::Rmi { image } => (|| -> Result<(), String> {
             let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
             request(
@@ -5884,6 +5907,24 @@ fn handle_history(store: &LocalImageStore, image: &str, format: &str) -> Result<
             );
         }
     }
+    Ok(())
+}
+
+fn handle_tag(
+    store: &LocalImageStore,
+    source: &str,
+    target: &str,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    let source = canonicalize_reference(source).map_err(|error| error.to_string())?;
+    let target = canonicalize_reference(target).map_err(|error| error.to_string())?;
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let plan = prepare_image_tag(store, &source, &target).map_err(|error| error.to_string())?;
+    let permit = authorization
+        .authorize_image_tag_plan(&origin, &plan)
+        .map_err(|error| error.to_string())?;
+    execute_image_tag_authorized(store, plan, permit).map_err(|error| error.to_string())?;
+    println!("tag: source={source} target={target}");
     Ok(())
 }
 
@@ -11509,6 +11550,18 @@ volumes:
             Commands::History { image, format } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(format, "json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tag_command() {
+        let cli = Cli::parse_from(["ferrocrate", "tag", "alpine:latest", "registry.local/app:v2"]);
+        match cli.command {
+            Commands::Tag { source, target } => {
+                assert_eq!(source, "alpine:latest");
+                assert_eq!(target, "registry.local/app:v2");
             }
             other => panic!("unexpected command: {other:?}"),
         }

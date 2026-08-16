@@ -7596,6 +7596,9 @@ fn handle_docker_compat_connection(
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                     for (id, spec) in pending.iter() {
+                        if !docker_pending_matches_filters(id, spec, &filters) {
+                            continue;
+                        }
                         let name = spec.name.as_deref().unwrap_or(id);
                         entries.push(serde_json::json!({
                             "Id": id,
@@ -8545,6 +8548,53 @@ fn docker_container_matches_filters(
     true
 }
 
+#[cfg(target_os = "linux")]
+fn docker_pending_matches_filters(
+    id: &str,
+    spec: &DockerCreateSpec,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    let matches_any = |key: &str, value: &str| {
+        filters
+            .get(key)
+            .map(|values| values.is_empty() || values.iter().any(|candidate| candidate == value))
+            .unwrap_or(true)
+    };
+    if !matches_any("status", "created") {
+        return false;
+    }
+    if let Some(names) = filters.get("name") {
+        let name = spec.name.as_deref().unwrap_or(id);
+        if !names.is_empty() && !names.iter().any(|candidate| name.contains(candidate)) {
+            return false;
+        }
+    }
+    if let Some(images) = filters.get("ancestor") {
+        if !images
+            .iter()
+            .any(|candidate| spec.image == *candidate || spec.image.starts_with(candidate))
+        {
+            return false;
+        }
+    }
+    if let Some(labels) = filters.get("label") {
+        for selector in labels {
+            let mut parts = selector.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let matched = spec.labels.iter().any(|entry| {
+                let Some((actual_key, actual_value)) = entry.split_once('=') else {
+                    return false;
+                };
+                actual_key == key && parts.next().is_none_or(|expected| actual_value == expected)
+            });
+            if !matched {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Apply Docker's `since` and `before` list selectors after ordinary filters.
 /// Selectors may name a container (ID or name) or provide a Unix timestamp.
 /// The comparison is strict, matching Docker's boundary semantics: `since`
@@ -9368,19 +9418,20 @@ mod tests {
         docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_event_payload, docker_hijack_headers,
         docker_image_apply_time_bounds, docker_image_matches_filters,
-        docker_image_prune_matches_filters, docker_network_matches_filters, docker_raw_stream,
-        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
-        handle_build, handle_containers, handle_context, handle_exec, handle_image_prune,
-        handle_images, handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report,
-        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
-        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
-        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
-        parse_docker_filters, parse_docker_limit_query, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, read_merkle_leaves,
-        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
+        docker_image_prune_matches_filters, docker_network_matches_filters,
+        docker_pending_matches_filters, docker_raw_stream, docker_tail_logs, docker_top_payload,
+        docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
+        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
+        parse_docker_bool_query, parse_docker_create_spec, parse_docker_filters,
+        parse_docker_limit_query, parse_driver_opts, parse_env_entries, parse_key_values,
+        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, read_merkle_leaves, should_desktop_forward, split_path_query,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
         AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
@@ -11288,6 +11339,30 @@ volumes:
             .lock()
             .expect("reopened pending lock")
             .contains_key("dfixture"));
+    }
+
+    #[test]
+    fn docker_pending_list_applies_name_status_ancestor_and_label_filters() {
+        let spec = DockerCreateSpec {
+            image: "busybox:latest".to_string(),
+            cmd: vec!["true".to_string()],
+            env: Vec::new(),
+            labels: vec!["tier=frontend".to_string()],
+            binds: Vec::new(),
+            publish: Vec::new(),
+            workdir: None,
+            user: None,
+            name: Some("frontend".to_string()),
+            network_mode: "bridge".to_string(),
+        };
+        let mut filters = HashMap::new();
+        filters.insert("status".to_string(), vec!["created".to_string()]);
+        filters.insert("name".to_string(), vec!["front".to_string()]);
+        filters.insert("ancestor".to_string(), vec!["busybox".to_string()]);
+        filters.insert("label".to_string(), vec!["tier=frontend".to_string()]);
+        assert!(docker_pending_matches_filters("dfixture", &spec, &filters));
+        filters.insert("status".to_string(), vec!["running".to_string()]);
+        assert!(!docker_pending_matches_filters("dfixture", &spec, &filters));
     }
 
     #[test]

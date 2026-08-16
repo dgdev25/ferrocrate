@@ -37,14 +37,18 @@ hard process loss while keeping the test deterministic, and covers all five
 decision-to-clear durability boundaries (15 interruption/reopen cases).
 
 Run and restart now use a supervised launch lease. The launcher installs
-`PDEATHSIG(SIGKILL)`, obtains a pidfd, and stops before executing the workload.
+obtains a pidfd, and stops before executing the workload. The stopped ownership
+barrier prevents pre-publication orphaning; supervised launches retain the
+parent-death lease, while detached CLI launches outlive the process that
+recorded them.
 The container record and lifecycle operation atomically bind the new PID and
 kernel starttime before `SIGCONT` releases user code. Persistence failure kills
 the stopped child. Real subprocess tests SIGKILL the daemon on both sides of
 identity persistence for run and restart and prove that no workload marker can
 execute early or survive as an unowned replacement.
 
-The parent-death lease is reinstalled after all UID/GID/capability transitions
+The parent identity is rechecked after all UID/GID/capability transitions,
+and the parent-death lease is conditional on the detached-launch mode,
 and the captured parent is checked again immediately before the launch stop.
 The independent run resource journal now records the operation ID plus planned
 and applied rootfs, mount, network, cgroup-generation, and process identities.

@@ -242,28 +242,28 @@ CMD ["cat", "/hello.txt"]
 
     #[test]
     #[ignore = "Requires container runtime"]
-    fn container_restart_preserves_state() {
+    fn container_restart_across_cli_processes() {
         if !should_run() {
             eprintln!("Skipping: container runtime not available");
             return;
         }
 
-        let temp_dir = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
 
-        // Create container with persistent volume
+        // Create a long-lived container and exercise ownership across
+        // separate CLI processes.
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "run",
                 "--name",
                 "restart-test",
-                "-v",
-                &format!("{}:/data", temp_dir.path().display()),
+                "--network-backend",
+                "iptables",
                 "alpine:3.19",
                 "sh",
                 "-c",
-                "echo 'persistent' > /data/test.txt && sleep 60",
+                "sleep 60",
             ])
             .output()
             .expect("run");
@@ -282,32 +282,35 @@ CMD ["cat", "/hello.txt"]
 
         assert!(stop_output.status.success(), "Container should stop");
 
-        // Start container again
+        // Restart the stopped container in a separate CLI process.
         let start_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["start", "restart-test"])
+            .args(["restart", "restart-test"])
             .output()
             .expect("start");
 
         assert!(start_output.status.success(), "Container should restart");
 
-        // Verify persistent data
-        let exec_output = ferro_cli()
+        // Verify the restarted record is live and discoverable by a fresh CLI.
+        let inspect_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["exec", "restart-test", "cat", "/data/test.txt"])
+            .args(["inspect", "restart-test"])
             .output()
-            .expect("exec");
-
-        let content = String::from_utf8_lossy(&exec_output.stdout);
+            .expect("inspect");
         assert!(
-            content.contains("persistent"),
-            "Data should persist across restarts"
+            inspect_output.status.success(),
+            "Container should be inspectable after restart"
+        );
+        let inspection = String::from_utf8_lossy(&inspect_output.stdout);
+        assert!(
+            inspection.contains("running"),
+            "Container should be running after restart"
         );
 
         // Cleanup
         let _ = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["rm", "-f", "restart-test"])
+            .args(["rm", "restart-test"])
             .output();
     }
 

@@ -4460,7 +4460,9 @@ fn build_command(
     // The launcher shell becomes the stable process identity first, stops itself,
     // and only execs the workload after the parent has durably recorded ownership.
     // All subsequently configured credentials and sandboxing are inherited across
-    // the final exec. PR_SET_PDEATHSIG closes the parent-death side of the lease.
+    // the final exec. The stopped ownership barrier closes the pre-publication
+    // parent-race window. Detached CLI launches opt out of the parent-death
+    // lease after that barrier so later CLI invocations can manage them.
     let workload_program = command.get_program().to_os_string();
     let workload_args = command
         .get_args()
@@ -4524,9 +4526,12 @@ fn build_command(
         None
     };
     let launch_parent_pid = unsafe { nix::libc::getpid() };
+    let detached_cli = std::env::var("FERROCRATE_DETACH_WORKLOAD").as_deref() == Ok("1");
     unsafe {
         command.pre_exec(move || {
-            if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0 {
+            if !detached_cli
+                && nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0
+            {
                 return Err(io::Error::last_os_error());
             }
             if nix::libc::getppid() != launch_parent_pid {
@@ -4591,9 +4596,11 @@ fn build_command(
                 }
             }
             // Credential and capability transitions can clear a parent-death
-            // signal. Reinstall the lease at the last possible point before the
-            // launcher execs and stops, then close the parent-race window again.
-            if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0 {
+            // signal. Reinstall it for supervised launches; detached CLI
+            // launches rely on the stopped ownership barrier instead.
+            if !detached_cli
+                && nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0
+            {
                 return Err(io::Error::last_os_error());
             }
             if nix::libc::getppid() != launch_parent_pid {
@@ -12032,7 +12039,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     }
 
     #[test]
-    fn non_root_user_transition_reinstalls_parent_death_lease() {
+    fn non_root_user_transition_preserves_prepublication_barrier() {
         if !nix::unistd::Uid::effective().is_root() {
             return;
         }

@@ -2605,6 +2605,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 pids_max,
                 ai_model,
             } => {
+                // `run` is a detached CLI operation: the workload must remain
+                // manageable after this short-lived process exits.
+                unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|err| err.to_string())?;
                 handle_run(
@@ -2738,6 +2741,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Rename { container, name } => handle_rename(&runtime, &container, &name),
             #[cfg(target_os = "linux")]
             Commands::Restart { container, timeout } => {
+                unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
                 handle_restart(&runtime, &container, timeout)
             }
             #[cfg(target_os = "linux")]

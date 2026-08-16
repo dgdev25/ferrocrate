@@ -137,7 +137,7 @@ PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
 partial, disconnected, or placeholder-backed. *Size:* XL. *Sources:* AI-01–06,
 AI-08/09/11/12; `docs/RVF_INTEGRATION_PLAN.md`.
 
-- [ ] Wire anomaly detection, adaptive restart, and resource prediction outcomes into the runtime lifecycle with durable per-container persistence.
+- [ ] Wire anomaly detection, adaptive restart, and resource prediction outcomes into the runtime lifecycle with durable per-container persistence. Anomaly and predictive-OOM decisions now persist explainability records to the runtime JSONL audit stream when AI is enabled; adaptive restart and lifecycle action integration remain open.
 - [ ] Replace placeholder WASM inference with a validated engine or explicitly remove the unsupported mode.
 - [ ] Implement real model/version routing, training-data collection, online-learning safeguards, and rollback gates.
 - [ ] Populate explainability traces with decision inputs, model/version, confidence, and resulting action.

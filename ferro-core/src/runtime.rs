@@ -8767,7 +8767,23 @@ fn run_resource_monitor(
     // Initialize predictor with memory limit
     let mut predictor =
         ferro_mind::ai::resource::ResourcePredictor::new(60).with_memory_limit(memory_limit);
-    let ai_logger = ferro_mind::ai::audit::AuditLogger::from_env();
+    // Persist AI decisions by default when the monitor is enabled. Operators
+    // may override the location, but enabling AI must not silently discard
+    // per-container evidence when no optional audit variable is configured.
+    let ai_logger = if is_ai_enabled() {
+        let audit_path = std::env::var_os("FERROCRATE_AI_AUDIT_LOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("FERROCRATE_RUNTIME_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/var/lib/ferrocrate"))
+                    .join("ai")
+                    .join("decisions.jsonl")
+            });
+        Some(ferro_mind::ai::audit::AuditLogger::new(audit_path))
+    } else {
+        None
+    };
 
     let mut anomaly_detector = ferro_mind::ai::anomaly::NeuralAnomalyDetector::new(3, 0.5);
     let mut anomaly_training_samples: Vec<Vec<f32>> = Vec::new();
@@ -8832,6 +8848,23 @@ fn run_resource_monitor(
                         threshold = format!("{:.3}", score.threshold),
                         "anomaly detected"
                     );
+                    if let Some(logger) = ai_logger.as_ref() {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let trace = ferro_mind::ai::explain::DecisionTrace::new(
+                            format!("ai-anomaly-{id}-{ts}"),
+                            format!("Container {id} exceeded the learned resource baseline"),
+                        )
+                        .with_evidence("container_id", id.clone())
+                        .with_evidence("score", format!("{:.6}", score.score))
+                        .with_evidence("threshold", format!("{:.6}", score.threshold))
+                        .with_evidence("cpu_norm", format!("{:.6}", cpu_norm))
+                        .with_evidence("memory_norm", format!("{:.6}", mem_norm))
+                        .with_evidence("pids_norm", format!("{:.6}", pids_norm));
+                        let _ = logger.log("ai_anomaly", &trace);
+                    }
                 }
             }
 

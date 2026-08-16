@@ -63,6 +63,7 @@ impl AuditLogger {
         let mut bytes = serde_json::to_vec(&entry)?;
         bytes.push(b'\n');
         file.write_all(&bytes)?;
+        file.sync_data()?;
         Ok(())
     }
 }

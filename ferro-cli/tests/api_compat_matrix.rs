@@ -322,3 +322,27 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
     assert!(body.contains("\"Actor\":"), "{body}");
     assert!(body.contains("\"timeNano\":"), "{body}");
 }
+
+#[test]
+fn docker_create_identity_is_inspectable_before_start() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request(
+        "POST",
+        "/containers/create?name=created-before-start",
+        r#"{"Image":"busybox","Cmd":["true"]}"#,
+    );
+    assert_eq!(status, 201, "create response: {body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("create id")
+        .to_string();
+
+    let (status, body) = harness.request("GET", &format!("/containers/{id}/json"), "");
+    assert_eq!(status, 200, "inspect response: {body}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("inspect JSON");
+    assert_eq!(inspect["Id"], id);
+    assert_eq!(inspect["Name"], "/created-before-start");
+    assert_eq!(inspect["State"]["Status"], "created");
+}

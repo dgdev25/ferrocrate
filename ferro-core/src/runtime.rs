@@ -2209,7 +2209,68 @@ impl ContainerRuntime {
         network_backend: NetworkBackend,
         ai_config: Option<&AiRuntimeConfig>,
     ) -> Result<ContainerRecord, RuntimeError> {
-        let container_id = generate_container_id();
+        self.run_with_store_with_id(
+            generate_container_id(),
+            store,
+            image,
+            cmd,
+            env,
+            labels,
+            annotations,
+            health,
+            restart_policy,
+            capabilities,
+            limits,
+            mounts,
+            tmpfs_mounts,
+            readonly_rootfs,
+            no_new_privs,
+            workdir,
+            user,
+            name,
+            port_mappings,
+            network_mode,
+            associated_network,
+            network_backend,
+            ai_config,
+        )
+    }
+
+    /// Run a container using a caller-provided identity. This is used by
+    /// compatibility surfaces such as Docker create/start, which must return
+    /// the same identity before and after the start transition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_with_store_with_id(
+        &self,
+        container_id: String,
+        store: &LocalImageStore,
+        image: &str,
+        cmd: &[String],
+        env: &[String],
+        labels: &HashMap<String, String>,
+        annotations: &HashMap<String, String>,
+        health: Option<HealthConfig>,
+        restart_policy: RestartPolicy,
+        capabilities: &[caps::Capability],
+        limits: Option<&ResourceLimits>,
+        mounts: &[BindMount],
+        tmpfs_mounts: &[TmpfsMount],
+        readonly_rootfs: bool,
+        no_new_privs: bool,
+        workdir: Option<&str>,
+        user: Option<&str>,
+        name: Option<&str>,
+        port_mappings: &[crate::container_store::PortMappingRecord],
+        network_mode: &str,
+        associated_network: Option<&str>,
+        network_backend: NetworkBackend,
+        ai_config: Option<&AiRuntimeConfig>,
+    ) -> Result<ContainerRecord, RuntimeError> {
+        if self.store.get(&container_id)?.is_some() {
+            return Err(RuntimeError::InvalidState(format!(
+                "container identity already exists: {container_id}"
+            )));
+        }
         let pinned_image = store.resolve_reference(image)?.map_or_else(
             || image.to_owned(),
             |record| {

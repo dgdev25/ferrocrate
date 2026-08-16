@@ -2555,6 +2555,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     pids_max,
                     ai_model.as_deref(),
                     None,
+                    None,
                 )
             }
             #[cfg(target_os = "linux")]
@@ -3432,6 +3433,7 @@ fn handle_run(
     pids_max: Option<u64>,
     ai_model: Option<&str>,
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
+    forced_id: Option<&str>,
 ) -> Result<(), String> {
     let binding = bind_run_network(runtime_dir, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
@@ -3517,32 +3519,61 @@ fn handle_run(
         cmd.to_vec()
     };
 
-    let record = runtime
-        .run_with_store(
-            store,
-            image,
-            &effective_cmd,
-            &env,
-            &labels,
-            &annotations,
-            health,
-            restart_policy,
-            &caps,
-            limits.as_ref(),
-            &mounts,
-            &tmpfs,
-            read_only_rootfs,
-            no_new_privs,
-            workdir,
-            user,
-            name,
-            &port_mappings,
-            &effective_network,
-            selected_network_name.as_deref(),
-            effective_backend,
-            effective_ai_config,
-        )
-        .map_err(|err| err.to_string())?;
+    let run = |container_id: Option<&str>| {
+        if let Some(container_id) = container_id {
+            runtime.run_with_store_with_id(
+                container_id.to_string(),
+                store,
+                image,
+                &effective_cmd,
+                &env,
+                &labels,
+                &annotations,
+                health.clone(),
+                restart_policy.clone(),
+                &caps,
+                limits.as_ref(),
+                &mounts,
+                &tmpfs,
+                read_only_rootfs,
+                no_new_privs,
+                workdir,
+                user,
+                name,
+                &port_mappings,
+                &effective_network,
+                selected_network_name.as_deref(),
+                effective_backend,
+                effective_ai_config,
+            )
+        } else {
+            runtime.run_with_store(
+                store,
+                image,
+                &effective_cmd,
+                &env,
+                &labels,
+                &annotations,
+                health,
+                restart_policy,
+                &caps,
+                limits.as_ref(),
+                &mounts,
+                &tmpfs,
+                read_only_rootfs,
+                no_new_privs,
+                workdir,
+                user,
+                name,
+                &port_mappings,
+                &effective_network,
+                selected_network_name.as_deref(),
+                effective_backend,
+                effective_ai_config,
+            )
+        }
+    };
+    let record = run(forced_id).map_err(|err| err.to_string())?;
     println!(
         "run: container_id={} pid={} network_backend={}",
         record.id, record.pid, effective_backend
@@ -6648,6 +6679,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            None,
         )?;
     }
     Ok(())
@@ -6953,6 +6985,18 @@ struct DockerCompatState {
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
     events: Mutex<DockerEventStore>,
+}
+
+#[cfg(target_os = "linux")]
+fn docker_compat_id(prefix: &str, sequence: &AtomicU64) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{prefix}{timestamp:x}-{}",
+        sequence.fetch_add(1, Ordering::SeqCst)
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -7498,34 +7542,16 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/json");
-                let record = runtime.inspect(id).map_err(|err| err.to_string())?;
-                let name = record.name.clone().unwrap_or_else(|| record.id.clone());
-                let health = record.health.as_ref().map(|_| {
-                    serde_json::json!({
-                        "Status": record.health_status.clone(),
-                        "FailingStreak": record.health_failures,
-                        "Log": [],
-                    })
-                });
-                let body = serde_json::json!({
-                    "Id": record.id,
-                    "Name": format!("/{name}"),
-                    "Image": record.image,
-                    "Config": {
-                        "Env": record.env,
-                        "Cmd": record.command,
-                        "WorkingDir": record.workdir,
-                        "User": record.user,
-                        "Labels": record.labels,
-                    },
-                    "State": {
-                        "Status": record.status,
-                        "Pid": record.pid,
-                        "ExitCode": record.last_exit_code,
-                        "StartedAt": record.created_at_unix,
-                        "Health": health,
+                let body = match runtime.inspect(id) {
+                    Ok(record) => docker_inspect_payload(&record),
+                    Err(error) => {
+                        let pending = state.pending.lock().map_err(|lock_error| {
+                            format!("docker: pending lock poisoned: {lock_error}")
+                        })?;
+                        let spec = pending.get(id).ok_or_else(|| error.to_string())?;
+                        docker_pending_inspect_payload(id, spec)
                     }
-                });
+                };
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
@@ -7599,7 +7625,7 @@ fn handle_docker_compat_connection(
             ("POST", "/containers/create") => {
                 let name = query.get("name").cloned();
                 let spec = parse_docker_create_spec(&request.body, name)?;
-                let id = format!("d{}", state.next_id.fetch_add(1, Ordering::SeqCst));
+                let id = docker_compat_id("d", &state.next_id);
                 if let Ok(mut pending) = state.pending.lock() {
                     pending.insert(id.clone(), spec);
                 } else {
@@ -7618,7 +7644,7 @@ fn handle_docker_compat_connection(
                 runtime
                     .inspect(container)
                     .map_err(|error| error.to_string())?;
-                let id = format!("e{}", state.next_id.fetch_add(1, Ordering::SeqCst));
+                let id = docker_compat_id("e", &state.next_id);
                 state
                     .execs
                     .lock()
@@ -7726,6 +7752,7 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     None,
+                    Some(id),
                 )?;
                 http_response(204, &[], "text/plain")
             }
@@ -8712,6 +8739,68 @@ fn validate_docker_container_name(name: &str) -> Result<(), String> {
         return Err("docker: container name contains unsupported characters".to_string());
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_inspect_payload(
+    record: &ferro_core::container_store::ContainerRecord,
+) -> serde_json::Value {
+    let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+    let health = record.health.as_ref().map(|_| {
+        serde_json::json!({
+            "Status": record.health_status.clone(),
+            "FailingStreak": record.health_failures,
+            "Log": [],
+        })
+    });
+    serde_json::json!({
+        "Id": record.id,
+        "Name": format!("/{name}"),
+        "Image": record.image,
+        "Config": {
+            "Env": record.env,
+            "Cmd": record.command,
+            "WorkingDir": record.workdir,
+            "User": record.user,
+            "Labels": record.labels,
+        },
+        "State": {
+            "Status": record.status,
+            "Pid": record.pid,
+            "ExitCode": record.last_exit_code,
+            "StartedAt": record.created_at_unix,
+            "Health": health,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_json::Value {
+    let labels = spec
+        .labels
+        .iter()
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    serde_json::json!({
+        "Id": id,
+        "Name": format!("/{}", spec.name.as_deref().unwrap_or(id)),
+        "Image": spec.image,
+        "Config": {
+            "Env": spec.env,
+            "Cmd": spec.cmd,
+            "WorkingDir": spec.workdir,
+            "User": spec.user,
+            "Labels": labels,
+        },
+        "State": {
+            "Status": "created",
+            "Pid": 0,
+            "ExitCode": 0,
+            "StartedAt": 0,
+            "Health": serde_json::Value::Null,
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -10805,6 +10894,7 @@ volumes:
             None,
             "no",
             false,
+            None,
             None,
             None,
             None,

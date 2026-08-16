@@ -9014,8 +9014,38 @@ fn stream_docker_attach(
     runtime: &ContainerRuntime,
     id: &str,
 ) -> Result<(), String> {
+    let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+    if record.pid == 0 {
+        return Err("docker: interactive attach requires a running container".to_string());
+    }
+    let mut stdin = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/{}/fd/0", record.pid))
+        .map_err(|error| format!("docker: container stdin is unavailable: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| error.to_string())?;
     let mut emitted = 0usize;
+    let mut input = [0_u8; 16 * 1024];
     loop {
+        match stream.read(&mut input) {
+            Ok(0) => return Ok(()),
+            Ok(size) => {
+                use std::io::Write as _;
+                stdin
+                    .write_all(&input[..size])
+                    .map_err(|error| format!("docker: writing container stdin: {error}"))?;
+                stdin
+                    .flush()
+                    .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error.to_string()),
+        }
         let raw = runtime.logs(id).map_err(|error| error.to_string())?;
         if raw.len() < emitted {
             emitted = 0;

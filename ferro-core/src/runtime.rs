@@ -7763,11 +7763,13 @@ fn start_slirp4netns(pid: u32) -> Result<(u32, u64), RuntimeError> {
         ))));
     }
     let helper_pid = child.id();
-    let helper_start_time = process_start_time_for_pid(helper_pid).ok_or_else(|| {
-        RuntimeError::Io(std::io::Error::other(
+    let Some(helper_start_time) = process_start_time_for_pid(helper_pid) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(RuntimeError::Io(std::io::Error::other(
             "slirp4netns helper has no stable process start time",
-        ))
-    })?;
+        )));
+    };
     thread::spawn(move || {
         let _ = child.wait();
     });

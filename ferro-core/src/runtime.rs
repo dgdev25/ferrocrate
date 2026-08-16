@@ -6709,6 +6709,7 @@ fn tc_filter_snapshot(
         };
         let name = options
             .get("name")
+            .or_else(|| options.get("bpf_name"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         if !matches!(name, "ferro_ingress" | "ferro_egress") {
@@ -6721,7 +6722,8 @@ fn tc_filter_snapshot(
                 value => value.to_string(),
             })
             .ok_or_else(|| RuntimeError::Network("owned tc filter has no handle".to_string()))?;
-        let program_id = options
+        let program = options.get("prog").unwrap_or(options);
+        let program_id = program
             .get("id")
             .and_then(serde_json::Value::as_u64)
             .map(u32::try_from)
@@ -6729,7 +6731,7 @@ fn tc_filter_snapshot(
             .map_err(|_| {
                 RuntimeError::Network("owned tc program id is out of range".to_string())
             })?;
-        let program_tag = options
+        let program_tag = program
             .get("tag")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);

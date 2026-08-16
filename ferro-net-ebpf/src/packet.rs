@@ -58,17 +58,31 @@ where
     Ok(u16::from_be_bytes([high, low]))
 }
 
-fn parse_with<F>(packet_len: usize, mut read_byte: F) -> Result<PacketView, PacketError>
+fn parse_with<F>(packet_len: usize, read_byte: F) -> Result<PacketView, PacketError>
 where
     F: FnMut(usize) -> Result<u8, PacketError>,
 {
-    require_bytes(packet_len, 0, ETHERNET_HEADER_LEN + IPV4_HEADER_LEN)?;
+    parse_with_link(packet_len, ETHERNET_HEADER_LEN, true, read_byte)
+}
 
-    if read_be_u16(&mut read_byte, 12)? != ETHERTYPE_IPV4 {
-        return Err(PacketError::UnsupportedNetwork);
+fn parse_with_link<F>(
+    packet_len: usize,
+    ipv4_offset: usize,
+    ethernet: bool,
+    mut read_byte: F,
+) -> Result<PacketView, PacketError>
+where
+    F: FnMut(usize) -> Result<u8, PacketError>,
+{
+    if ethernet {
+        require_bytes(packet_len, 0, ETHERNET_HEADER_LEN)?;
+        if read_be_u16(&mut read_byte, ipv4_offset - 2)? != ETHERTYPE_IPV4 {
+            return Err(PacketError::UnsupportedNetwork);
+        }
     }
+    require_bytes(packet_len, ipv4_offset, IPV4_HEADER_LEN)?;
 
-    let version_ihl = read_byte(ETHERNET_HEADER_LEN)?;
+    let version_ihl = read_byte(ipv4_offset)?;
     if version_ihl >> 4 != 4 {
         return Err(PacketError::InvalidIpv4Header);
     }
@@ -76,22 +90,22 @@ where
     if ipv4_header_len < IPV4_HEADER_LEN {
         return Err(PacketError::InvalidIpv4Header);
     }
-    require_bytes(packet_len, ETHERNET_HEADER_LEN, ipv4_header_len)?;
+    require_bytes(packet_len, ipv4_offset, ipv4_header_len)?;
 
-    let total_len = usize::from(read_be_u16(&mut read_byte, ETHERNET_HEADER_LEN + 2)?);
+    let total_len = usize::from(read_be_u16(&mut read_byte, ipv4_offset + 2)?);
     if total_len < ipv4_header_len {
         return Err(PacketError::InvalidIpv4Header);
     }
-    let packet_end = checked_end(ETHERNET_HEADER_LEN, total_len)?;
-    require_bytes(packet_len, ETHERNET_HEADER_LEN, total_len)?;
+    let packet_end = checked_end(ipv4_offset, total_len)?;
+    require_bytes(packet_len, ipv4_offset, total_len)?;
 
-    let fragments = read_be_u16(&mut read_byte, ETHERNET_HEADER_LEN + 6)?;
+    let fragments = read_be_u16(&mut read_byte, ipv4_offset + 6)?;
     if fragments & 0x3fff != 0 {
         return Err(PacketError::Fragmented);
     }
 
-    let transport_offset = checked_end(ETHERNET_HEADER_LEN, ipv4_header_len)?;
-    let transport = match read_byte(ETHERNET_HEADER_LEN + 9)? {
+    let transport_offset = checked_end(ipv4_offset, ipv4_header_len)?;
+    let transport = match read_byte(ipv4_offset + 9)? {
         IP_PROTOCOL_TCP => {
             require_bytes(packet_end, transport_offset, TCP_HEADER_LEN)?;
             let data_offset = usize::from(read_byte(transport_offset + 12)? >> 4) * 4;
@@ -114,7 +128,7 @@ where
     };
 
     Ok(PacketView {
-        ipv4_offset: ETHERNET_HEADER_LEN,
+        ipv4_offset,
         ipv4_header_len,
         transport_offset,
         transport,
@@ -267,7 +281,7 @@ pub fn rewrite_transport_port(
 
 #[cfg(target_arch = "bpf")]
 mod tc {
-    use super::{parse_with, PacketError, PacketView};
+    use super::{parse_with_link, PacketError, PacketView, ETHERTYPE_IPV4};
     use crate::datapath::{Decision, Packet, Translation};
     use aya_ebpf::programs::TcContext;
     use core::mem;
@@ -297,10 +311,17 @@ mod tc {
                 .checked_sub(ctx.data())
                 .ok_or(PacketError::Truncated)?;
 
-            // SAFETY: header_at proves the complete network-types Ethernet layout is
-            // within the verifier-provided packet bounds before returning its pointer.
-            unsafe { header_at::<EthHdr>(ctx, 0)? };
-            let view = parse_with(packet_len, |offset| byte_at(ctx, offset))?;
+            let ethernet = ctx.load::<u8>(12).ok() == Some((ETHERTYPE_IPV4 >> 8) as u8)
+                && ctx.load::<u8>(13).ok() == Some(ETHERTYPE_IPV4 as u8);
+            let ipv4_offset = if ethernet { 14 } else { 0 };
+            if ethernet {
+                // SAFETY: header_at proves the complete network-types Ethernet layout is
+                // within the verifier-provided packet bounds before returning its pointer.
+                unsafe { header_at::<EthHdr>(ctx, 0)? };
+            }
+            let view = parse_with_link(packet_len, ipv4_offset, ethernet, |offset| {
+                byte_at(ctx, offset)
+            })?;
             // SAFETY: parse_with checked the dynamic IPv4 offset and header length;
             // header_at additionally proves the fixed network-types layout is in bounds.
             unsafe { header_at::<Ipv4Hdr>(ctx, view.ipv4_offset)? };
@@ -332,7 +353,7 @@ mod tc {
                 if packet.source.address != decision.source.address {
                     rewrite_ipv4_address_context(
                         ctx,
-                        26,
+                        view.ipv4_offset + 12,
                         packet.source.address,
                         decision.source.address,
                         view,
@@ -352,7 +373,7 @@ mod tc {
                 if packet.destination.address != decision.destination.address {
                     rewrite_ipv4_address_context(
                         ctx,
-                        30,
+                        view.ipv4_offset + 16,
                         packet.destination.address,
                         decision.destination.address,
                         view,
@@ -369,17 +390,19 @@ mod tc {
                 }
             }
         }
-        if let Some(mac) = decision.destination_mac {
-            for (offset, value) in [
-                (0, mac[0]),
-                (1, mac[1]),
-                (2, mac[2]),
-                (3, mac[3]),
-                (4, mac[4]),
-                (5, mac[5]),
-            ] {
-                ctx.store(offset, &value, 0)
-                    .map_err(|_| PacketError::Truncated)?;
+        if view.ipv4_offset == 14 {
+            if let Some(mac) = decision.destination_mac {
+                for (offset, value) in [
+                    (0, mac[0]),
+                    (1, mac[1]),
+                    (2, mac[2]),
+                    (3, mac[3]),
+                    (4, mac[4]),
+                    (5, mac[5]),
+                ] {
+                    ctx.store(offset, &value, 0)
+                        .map_err(|_| PacketError::Truncated)?;
+                }
             }
         }
         Ok(())
@@ -414,6 +437,17 @@ mod tc {
             super::TransportProtocol::Udp => 6,
         };
         match view.transport_offset {
+            20 => Some((20 + port_delta, 20 + checksum_delta)),
+            24 => Some((24 + port_delta, 24 + checksum_delta)),
+            28 => Some((28 + port_delta, 28 + checksum_delta)),
+            32 => Some((32 + port_delta, 32 + checksum_delta)),
+            36 => Some((36 + port_delta, 36 + checksum_delta)),
+            40 => Some((40 + port_delta, 40 + checksum_delta)),
+            44 => Some((44 + port_delta, 44 + checksum_delta)),
+            48 => Some((48 + port_delta, 48 + checksum_delta)),
+            52 => Some((52 + port_delta, 52 + checksum_delta)),
+            56 => Some((56 + port_delta, 56 + checksum_delta)),
+            60 => Some((60 + port_delta, 60 + checksum_delta)),
             34 => Some((34 + port_delta, 34 + checksum_delta)),
             38 => Some((38 + port_delta, 38 + checksum_delta)),
             42 => Some((42 + port_delta, 42 + checksum_delta)),
@@ -436,7 +470,8 @@ mod tc {
         new_address: [u8; 4],
         view: PacketView,
     ) -> Result<(), PacketError> {
-        let old_checksum = load_u16(ctx, 24)?;
+        let ipv4_checksum_offset = view.ipv4_offset + 10;
+        let old_checksum = load_u16(ctx, ipv4_checksum_offset)?;
         let new_checksum = super::update_ipv4_checksum(old_checksum, old_address, new_address);
         let (_, transport_checksum_offset) =
             transport_offsets(view, false).ok_or(PacketError::Truncated)?;
@@ -455,7 +490,7 @@ mod tc {
         store_byte(ctx, address_offset + 1, new_address[1])?;
         store_byte(ctx, address_offset + 2, new_address[2])?;
         store_byte(ctx, address_offset + 3, new_address[3])?;
-        store_u16(ctx, 24, new_checksum)?;
+        store_u16(ctx, ipv4_checksum_offset, new_checksum)?;
         store_u16(ctx, transport_checksum_offset, new_transport_checksum)
     }
 

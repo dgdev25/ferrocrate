@@ -124,22 +124,13 @@ fn disposition(decision: &Decision) -> (Action, i32) {
 }
 
 fn packet_from_context(ctx: &TcContext, view: PacketView) -> Result<Packet, PacketError> {
-    let source = load_address(ctx, 26)?;
-    let destination = load_address(ctx, 30)?;
-    let (source_port, destination_port) = match view.transport_offset {
-        34 => (load_u16(ctx, 34)?, load_u16(ctx, 36)?),
-        38 => (load_u16(ctx, 38)?, load_u16(ctx, 40)?),
-        42 => (load_u16(ctx, 42)?, load_u16(ctx, 44)?),
-        46 => (load_u16(ctx, 46)?, load_u16(ctx, 48)?),
-        50 => (load_u16(ctx, 50)?, load_u16(ctx, 52)?),
-        54 => (load_u16(ctx, 54)?, load_u16(ctx, 56)?),
-        58 => (load_u16(ctx, 58)?, load_u16(ctx, 60)?),
-        62 => (load_u16(ctx, 62)?, load_u16(ctx, 64)?),
-        66 => (load_u16(ctx, 66)?, load_u16(ctx, 68)?),
-        70 => (load_u16(ctx, 70)?, load_u16(ctx, 72)?),
-        74 => (load_u16(ctx, 74)?, load_u16(ctx, 76)?),
-        _ => return Err(PacketError::Truncated),
-    };
+    let source = load_address(ctx, view.ipv4_offset + 12)?;
+    let destination = load_address(ctx, view.ipv4_offset + 16)?;
+    let (source_port, destination_port) = transport_port_offsets(view)
+        .map(|(source, destination)| (load_u16(ctx, source), load_u16(ctx, destination)))
+        .ok_or(PacketError::Truncated)?;
+    let source_port = source_port?;
+    let destination_port = destination_port?;
     let protocol = match view.transport {
         TransportProtocol::Tcp => IP_PROTOCOL_TCP,
         TransportProtocol::Udp => IP_PROTOCOL_UDP,
@@ -155,6 +146,34 @@ fn packet_from_context(ctx: &TcContext, view: PacketView) -> Result<Packet, Pack
             port: destination_port,
         },
     })
+}
+
+fn transport_port_offsets(view: PacketView) -> Option<(usize, usize)> {
+    match view.transport_offset {
+        20 => Some((20, 22)),
+        24 => Some((24, 26)),
+        28 => Some((28, 30)),
+        32 => Some((32, 34)),
+        36 => Some((36, 38)),
+        40 => Some((40, 42)),
+        44 => Some((44, 46)),
+        48 => Some((48, 50)),
+        52 => Some((52, 54)),
+        56 => Some((56, 58)),
+        60 => Some((60, 62)),
+        34 => Some((34, 36)),
+        38 => Some((38, 40)),
+        42 => Some((42, 44)),
+        46 => Some((46, 48)),
+        50 => Some((50, 52)),
+        54 => Some((54, 56)),
+        58 => Some((58, 60)),
+        62 => Some((62, 64)),
+        66 => Some((66, 68)),
+        70 => Some((70, 72)),
+        74 => Some((74, 76)),
+        _ => None,
+    }
 }
 
 fn load_address(ctx: &TcContext, offset: usize) -> Result<[u8; 4], PacketError> {
@@ -181,12 +200,11 @@ fn invalid_packet_is_owned_context<S: DatapathState>(
     direction: Direction,
     state: &S,
 ) -> bool {
-    if load_u16(ctx, 12) != Ok(0x0800) {
-        return false;
-    }
+    let ethernet = load_u16(ctx, 12) == Ok(0x0800);
+    let ipv4_offset = if ethernet { 14 } else { 0 };
     let address_offset = match direction {
-        Direction::Ingress => 30,
-        Direction::Egress => 26,
+        Direction::Ingress => ipv4_offset + 16,
+        Direction::Egress => ipv4_offset + 12,
     };
     if let Ok(address) = load_address(ctx, address_offset) {
         if state.endpoint(address).is_some() {
@@ -196,28 +214,40 @@ fn invalid_packet_is_owned_context<S: DatapathState>(
     if direction != Direction::Ingress {
         return false;
     }
-    let version_ihl = match load_byte(ctx, 14) {
+    let version_ihl = match load_byte(ctx, ipv4_offset) {
         Ok(value) if value >> 4 == 4 => value,
         _ => return false,
     };
-    let protocol = match load_byte(ctx, 23) {
+    let protocol = match load_byte(ctx, ipv4_offset + 9) {
         Ok(value) if value == IP_PROTOCOL_TCP || value == IP_PROTOCOL_UDP => value,
         _ => return false,
     };
-    let destination_port = match version_ihl & 0x0f {
-        5 => load_u16(ctx, 36),
-        6 => load_u16(ctx, 40),
-        7 => load_u16(ctx, 44),
-        8 => load_u16(ctx, 48),
-        9 => load_u16(ctx, 52),
-        10 => load_u16(ctx, 56),
-        11 => load_u16(ctx, 60),
-        12 => load_u16(ctx, 64),
-        13 => load_u16(ctx, 68),
-        14 => load_u16(ctx, 72),
-        15 => load_u16(ctx, 76),
+    let destination_offset = match (ipv4_offset, version_ihl & 0x0f) {
+        (0, 5) => 22,
+        (0, 6) => 26,
+        (0, 7) => 30,
+        (0, 8) => 34,
+        (0, 9) => 38,
+        (0, 10) => 42,
+        (0, 11) => 46,
+        (0, 12) => 50,
+        (0, 13) => 54,
+        (0, 14) => 58,
+        (0, 15) => 62,
+        (14, 5) => 36,
+        (14, 6) => 40,
+        (14, 7) => 44,
+        (14, 8) => 48,
+        (14, 9) => 52,
+        (14, 10) => 56,
+        (14, 11) => 60,
+        (14, 12) => 64,
+        (14, 13) => 68,
+        (14, 14) => 72,
+        (14, 15) => 76,
         _ => return false,
     };
+    let destination_port = load_u16(ctx, destination_offset);
     match destination_port {
         Ok(port) => state.published_port(protocol, port).is_some(),
         Err(_) => false,

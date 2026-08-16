@@ -102,7 +102,7 @@ below full parity; secure cache and multi-platform workflows are adoption gaps.
 contexts, support boundaries, and upgrades are not yet a complete rootless product.
 *Size:* L. *Sources:* rootless verification, README, Docker rootless parity sequence.
 
-- [ ] Ship rootless installer and upgrade flows for subordinate IDs, mapping helpers, cgroup delegation, user services, and slirp networking.
+- [ ] Ship rootless installer and upgrade flows for subordinate IDs, mapping helpers, cgroup delegation, user services, and slirp networking; `scripts/rootless-install.sh` now provides a non-privileged per-user binary/systemd-unit install with prerequisite diagnostics and dry-run mode, while helper provisioning, upgrades, and full networking qualification remain open.
 - [ ] Add rootless contexts, socket discovery, diagnostics, logs, and explicit unsupported-feature messaging; Linux doctor now reports mapping/socket context and the CLI now persists validated named contexts (`context create/list/inspect/use/rm`), while daemon routing, log streaming, and feature qualification remain open.
 - [ ] Qualify rootless CRI, Compose, volumes, networking, image signing, and resource limits.
 - [ ] Add rootless release evidence to CI/manual host gates and document operator recovery; the release gate now archives prerequisite diagnostics, including explicit missing-helper results, but full rootless qualification remains open.

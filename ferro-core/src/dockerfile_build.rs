@@ -857,8 +857,13 @@ pub fn export_build_cache(
         fs::create_dir_all(parent)?;
     }
     let temporary = destination.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&temporary, bytes)?;
+    let mut file = File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     fs::rename(temporary, destination)?;
+    if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -868,9 +873,26 @@ pub fn import_build_cache(
     runtime_dir: &Path,
     source: &Path,
 ) -> Result<usize, DockerfileBuildError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_file() {
+        return Err(DockerfileBuildError::Invalid(
+            "build cache source must be a regular file".to_string(),
+        ));
+    }
+    const MAX_CACHE_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+    if metadata.len() > MAX_CACHE_IMPORT_BYTES {
+        return Err(DockerfileBuildError::Invalid(
+            "build cache source exceeds the 16 MiB limit".to_string(),
+        ));
+    }
     let bytes = fs::read(source)?;
     let imported = serde_json::from_slice::<HashMap<String, BuildCacheEntry>>(&bytes)
         .map_err(|error| io::Error::other(error.to_string()))?;
+    if imported.len() > 4096 {
+        return Err(DockerfileBuildError::Invalid(
+            "build cache source contains too many entries".to_string(),
+        ));
+    }
     for (key, entry) in &imported {
         validate_imported_cache_entry(key, entry)?;
     }
@@ -2927,6 +2949,27 @@ mod tests {
         let error = import_build_cache(runtime.path(), &source).expect_err("invalid cache");
         assert!(error.to_string().contains("provenance validation"));
         assert!(!build_cache_path(runtime.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_build_cache_rejects_symlink_sources() {
+        let runtime = tempfile::tempdir().unwrap();
+        let target = runtime.path().join("target.json");
+        let source = runtime.path().join("source.json");
+        fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+        let error = import_build_cache(runtime.path(), &source).expect_err("symlink source");
+        assert!(error.to_string().contains("regular file"));
+    }
+
+    #[test]
+    fn import_build_cache_rejects_oversized_sources() {
+        let runtime = tempfile::tempdir().unwrap();
+        let source = runtime.path().join("oversized.json");
+        fs::write(&source, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
+        let error = import_build_cache(runtime.path(), &source).expect_err("oversized source");
+        assert!(error.to_string().contains("16 MiB"));
     }
 
     #[test]

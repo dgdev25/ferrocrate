@@ -50,6 +50,7 @@ pub mod mounts;
 pub mod observability;
 #[cfg(target_os = "linux")]
 pub mod overlayfs;
+pub mod plugin_contract;
 #[cfg(target_os = "linux")]
 pub mod process_lifecycle;
 pub mod registry;

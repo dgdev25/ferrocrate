@@ -704,6 +704,7 @@ pub enum VolumeCommands {
         path: String,
     },
     Ls,
+    Prune,
     Inspect {
         name: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -4780,6 +4781,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             command: VolumeCommands::Ls,
         } => request("GET", "/volumes".to_string()).and_then(|body| print_json(body, "json")),
         Commands::Volume {
+            command: VolumeCommands::Prune,
+        } => {
+            request("POST", "/volumes/prune".to_string()).and_then(|body| print_json(body, "json"))
+        }
+        Commands::Volume {
             command: VolumeCommands::Inspect { name, format },
         } => request(
             "GET",
@@ -6377,6 +6383,24 @@ fn handle_volume_authorized(
                 println!("Driver: {}", payload["Driver"]);
                 println!("Mountpoint: {}", payload["Mountpoint"]);
             }
+        }
+        VolumeCommands::Prune => {
+            let mut deleted = Vec::new();
+            for record in store.list().map_err(|error| error.to_string())? {
+                let proof = authorization
+                    .authorize_named(
+                        origin,
+                        AuthorizationAction::VolumeDelete,
+                        ResourceKind::Volume,
+                        &record.name,
+                        1,
+                    )
+                    .map_err(|error| error.to_string())?;
+                if execute_volume_remove(&store, &record.name, proof)? {
+                    deleted.push(record.name);
+                }
+            }
+            println!("volume prune: removed={}", deleted.len());
         }
         VolumeCommands::Rm { name } => {
             let proof = authorization
@@ -11892,6 +11916,14 @@ volumes:
         match prune.command {
             Commands::Network { command } => {
                 assert!(matches!(command, NetworkCommands::Prune))
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let prune = Cli::parse_from(["ferrocrate", "volume", "prune"]);
+        match prune.command {
+            Commands::Volume { command } => {
+                assert!(matches!(command, VolumeCommands::Prune))
             }
             _ => panic!("unexpected command"),
         }

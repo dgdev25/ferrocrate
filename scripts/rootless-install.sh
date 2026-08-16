@@ -119,6 +119,12 @@ else
   echo "rootless.install.user_namespaces=missing"
   prerequisite_failures=1
 fi
+if command -v unshare >/dev/null 2>&1 && unshare --user --mount --fork true >/dev/null 2>&1; then
+  echo "rootless.install.userns_mount=pass"
+else
+  echo "rootless.install.userns_mount=missing"
+  prerequisite_failures=1
+fi
 if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" ]]; then
   echo "rootless.install.runtime_dir=pass"
 else

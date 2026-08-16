@@ -21,6 +21,7 @@ grep -q '^rootless.install.subuid=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.subgid=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.cgroup_v2=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.user_namespaces=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.userns_mount=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
 run_installer >"$tmp_home/install.txt"

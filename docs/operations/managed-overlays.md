@@ -30,4 +30,4 @@ After a netd restart, its ownership journal is reconciled against current kernel
 
 ## Release gates
 
-Run `scripts/test-managed-overlay.sh` from the repository root. The script always runs the manager, netd, core, and CLI focused tests. Its privileged section additionally requires root, a configured test interface, and a configured WireGuard key path; it refuses to guess those values.
+Run `scripts/test-managed-overlay.sh` from the repository root. The script always runs the manager, netd, core, and CLI focused tests. Its privileged section additionally requires root, a configured test interface, a configured WireGuard key path, and an executable `FERROCRATE_TWO_HOST_DEPLOYMENT_HARNESS` that drives the authenticated manager → agent → netd deployment. It refuses to guess those values or claim two-host completion from the local kernel smoke test alone.

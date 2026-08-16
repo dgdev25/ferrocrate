@@ -38,4 +38,7 @@ bash scripts/test-managed-overlay-kernel.sh
 : "${FERRO_EBPF_TEST_IFINDEX:?FERRO_EBPF_TEST_IFINDEX is required}"
 
 bash scripts/test-ebpf-networking.sh
-echo "privileged managed-overlay prerequisites validated; two-host traffic qualification must be run with the deployment harness"
+: "${FERROCRATE_TWO_HOST_DEPLOYMENT_HARNESS:?FERROCRATE_TWO_HOST_DEPLOYMENT_HARNESS must point to the authenticated manager→agent→netd two-host harness}"
+[[ -x "$FERROCRATE_TWO_HOST_DEPLOYMENT_HARNESS" ]] \
+  || { echo "configured two-host deployment harness is not executable: $FERROCRATE_TWO_HOST_DEPLOYMENT_HARNESS" >&2; exit 1; }
+"$FERROCRATE_TWO_HOST_DEPLOYMENT_HARNESS"

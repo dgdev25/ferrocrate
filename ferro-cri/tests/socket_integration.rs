@@ -41,12 +41,22 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 async fn wait_for_socket(path: &std::path::Path) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        if path.exists() {
+        if path.exists() && UnixStream::connect(path).await.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("CRI socket did not appear: {}", path.display());
+}
+
+fn spawn_cri_process(runtime: &std::path::Path, socket: &std::path::Path) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_ferro-cri"))
+        .env("FERROCRATE_RUNTIME_DIR", runtime)
+        .env("FERROCRATE_CRI_SOCKET", socket)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn CRI daemon")
 }
 
 #[tokio::test]
@@ -547,6 +557,95 @@ async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_process_kill_recovers_sqlite_metadata_on_restart() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-process-restart.sock");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "kill-pod".into(),
+                    uid: "kill-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "kill-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("run sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox.clone(),
+            config: Some(ContainerConfig {
+                metadata_name: "kill-container".into(),
+                image: "missing:latest".into(),
+                command: vec!["true".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("create container")
+        .into_inner()
+        .container_id;
+
+    daemon.kill().expect("kill CRI daemon");
+    let _ = daemon.wait();
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered_client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = recovered_client
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("status after process restart")
+        .into_inner()
+        .status
+        .expect("recovered container status");
+    assert_eq!(status.id, container);
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Created as i32
+    );
+    recovered_client
+        .remove_container(RemoveContainerRequest {
+            container_id: container,
+        })
+        .await
+        .expect("remove recovered container");
+    recovered_client
+        .stop_pod_sandbox(StopPodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("stop recovered sandbox");
+    recovered_client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox,
+        })
+        .await
+        .expect("remove recovered sandbox");
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
 }
 
 fn seed_runnable_fixture_image(runtime_dir: &Path) {

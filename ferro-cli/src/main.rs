@@ -7274,19 +7274,11 @@ impl DockerEventStore {
         let contents = std::fs::read_to_string(&self.path).unwrap_or_default();
         let since = query
             .get("since")
-            .map(|value| {
-                value
-                    .parse::<u64>()
-                    .map_err(|_| format!("event query parameter `since` is not a u64: {value}"))
-            })
+            .map(|value| parse_event_time_bound(value, "since"))
             .transpose()?;
         let until = query
             .get("until")
-            .map(|value| {
-                value
-                    .parse::<u64>()
-                    .map_err(|_| format!("event query parameter `until` is not a u64: {value}"))
-            })
+            .map(|value| parse_event_time_bound(value, "until"))
             .transpose()?;
         let event = query.get("event").or_else(|| query.get("action"));
         let kind = query.get("type");
@@ -7334,8 +7326,8 @@ impl DockerEventStore {
             .collect::<Result<Vec<_>, _>>()?;
         parsed_events
             .into_iter()
-            .filter(|item| since.is_none_or(|value| item.time >= value))
-            .filter(|item| until.is_none_or(|value| item.time <= value))
+            .filter(|item| since.is_none_or(|value| event_time_nanos(item) >= value))
+            .filter(|item| until.is_none_or(|value| event_time_nanos(item) <= value))
             .filter(|item| event.is_none_or(|value| item.action == *value))
             .filter(|item| kind.is_none_or(|value| item.event_type == *value))
             .filter(|item| scope.is_none_or(|value| item.scope == *value))
@@ -7397,6 +7389,39 @@ impl DockerEventStore {
             })
             .collect::<Vec<_>>()
             .pipe(Ok)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_event_time_bound(value: &str, name: &str) -> Result<u64, String> {
+    let (seconds, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if seconds.is_empty()
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!(
+            "event query parameter `{name}` must be a Unix timestamp with up to 9 fractional digits: {value}"
+        ));
+    }
+    let seconds = seconds
+        .parse::<u64>()
+        .map_err(|_| format!("event query parameter `{name}` is out of range: {value}"))?;
+    let fraction = format!("{fraction:0<9}")
+        .parse::<u64>()
+        .map_err(|_| format!("event query parameter `{name}` is invalid: {value}"))?;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(fraction))
+        .ok_or_else(|| format!("event query parameter `{name}` is out of range: {value}"))
+}
+
+#[cfg(target_os = "linux")]
+fn event_time_nanos(event: &DockerEvent) -> u64 {
+    if event.time_nano == 0 {
+        event.time.saturating_mul(1_000_000_000)
+    } else {
+        event.time_nano
     }
 }
 
@@ -12085,6 +12110,24 @@ volumes:
             .query(&query)
             .expect_err("invalid since must fail closed");
         assert!(error.contains("since"), "error={error}");
+    }
+
+    #[test]
+    fn docker_event_query_supports_nanosecond_time_bounds() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store
+            .append("POST", "/containers/early/start", 200)
+            .unwrap();
+        store.append("POST", "/containers/late/start", 200).unwrap();
+        let mut query = HashMap::new();
+        query.insert("since".to_string(), "0.000000001".to_string());
+        query.insert("until".to_string(), "18446744072.000000000".to_string());
+        assert_eq!(store.query(&query).unwrap().len(), 2);
+        query.insert("since".to_string(), "18446744072.000000000".to_string());
+        assert!(store.query(&query).unwrap().is_empty());
+        query.insert("since".to_string(), "1.1234567890".to_string());
+        assert!(store.query(&query).is_err());
     }
 
     #[test]

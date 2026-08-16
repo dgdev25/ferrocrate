@@ -274,30 +274,85 @@ fn sandbox_state_path(runtime_dir: &Path) -> std::path::PathBuf {
     runtime_dir.join("cri-sandboxes.json")
 }
 
-fn load_sandboxes(runtime_dir: &Path) -> BTreeMap<String, SandboxRecord> {
-    fs::read(sandbox_state_path(runtime_dir))
+fn cri_state_db(runtime_dir: &Path) -> Result<rusqlite::Connection, String> {
+    fs::create_dir_all(runtime_dir).map_err(|error| error.to_string())?;
+    let connection = rusqlite::Connection::open(runtime_dir.join("cri-state.sqlite"))
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS cri_state (
+                kind TEXT PRIMARY KEY NOT NULL,
+                payload BLOB NOT NULL
+            )",
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(connection)
+}
+
+fn load_cri_state<T: for<'de> serde::Deserialize<'de> + serde::Serialize>(
+    runtime_dir: &Path,
+    kind: &str,
+    legacy_path: &Path,
+) -> BTreeMap<String, T> {
+    if let Ok(connection) = cri_state_db(runtime_dir) {
+        let payload = connection
+            .query_row(
+                "SELECT payload FROM cri_state WHERE kind=?1",
+                rusqlite::params![kind],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .ok();
+        if let Some(payload) = payload {
+            if let Ok(state) = serde_json::from_slice(&payload) {
+                return state;
+            }
+        }
+    }
+    let state = fs::read(legacy_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Import legacy JSON exactly once when the new store is available. A
+    // failed import is intentionally non-fatal here; the next open retries it
+    // and the legacy file remains available for rollback diagnostics.
+    let _ = persist_cri_state(runtime_dir, kind, &state);
+    state
+}
+
+fn persist_cri_state<T: serde::Serialize>(
+    runtime_dir: &Path,
+    kind: &str,
+    state: &BTreeMap<String, T>,
+) -> Result<(), String> {
+    let mut connection = cri_state_db(runtime_dir)?;
+    let payload = serde_json::to_vec(state).map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO cri_state(kind, payload) VALUES (?1, ?2)
+             ON CONFLICT(kind) DO UPDATE SET payload=excluded.payload",
+            rusqlite::params![kind, payload],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn load_sandboxes(runtime_dir: &Path) -> BTreeMap<String, SandboxRecord> {
+    load_cri_state(runtime_dir, "sandboxes", &sandbox_state_path(runtime_dir))
 }
 
 fn persist_sandboxes(
     runtime_dir: &Path,
     sandboxes: &BTreeMap<String, SandboxRecord>,
 ) -> Result<(), Status> {
-    fs::create_dir_all(runtime_dir)
-        .map_err(|error| Status::internal(format!("create CRI state directory: {error}")))?;
-    let path = sandbox_state_path(runtime_dir);
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(sandboxes)
-        .map_err(|error| Status::internal(format!("encode CRI sandbox state: {error}")))?;
-    fs::write(&temporary, bytes)
-        .map_err(|error| Status::internal(format!("write CRI sandbox state: {error}")))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| Status::internal(format!("publish CRI sandbox state: {error}")))
+    persist_cri_state(runtime_dir, "sandboxes", sandboxes)
+        .map_err(|error| Status::internal(format!("persist CRI sandbox state: {error}")))
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SandboxRecord {
     id: String,
     name: String,
@@ -310,7 +365,7 @@ struct SandboxRecord {
     netns_name: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ContainerSpecRecord {
     id: String,
     sandbox_id: String,
@@ -327,26 +382,19 @@ fn container_state_path(runtime_dir: &Path) -> std::path::PathBuf {
 }
 
 fn load_containers(runtime_dir: &Path) -> BTreeMap<String, ContainerSpecRecord> {
-    fs::read(container_state_path(runtime_dir))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    load_cri_state(
+        runtime_dir,
+        "containers",
+        &container_state_path(runtime_dir),
+    )
 }
 
 fn persist_containers(
     runtime_dir: &Path,
     containers: &BTreeMap<String, ContainerSpecRecord>,
 ) -> Result<(), Status> {
-    fs::create_dir_all(runtime_dir)
-        .map_err(|error| Status::internal(format!("create CRI state directory: {error}")))?;
-    let path = container_state_path(runtime_dir);
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(containers)
-        .map_err(|error| Status::internal(format!("encode CRI container state: {error}")))?;
-    fs::write(&temporary, bytes)
-        .map_err(|error| Status::internal(format!("write CRI container state: {error}")))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| Status::internal(format!("publish CRI container state: {error}")))
+    persist_cri_state(runtime_dir, "containers", containers)
+        .map_err(|error| Status::internal(format!("persist CRI container state: {error}")))
 }
 
 impl std::fmt::Debug for CriRuntime {
@@ -1416,6 +1464,39 @@ mod tests {
             &format!("sha256:{}", "b".repeat(64)),
         );
         seed_test_image(store, "digest-only", &format!("sha256:{}", "c".repeat(64)));
+    }
+
+    #[test]
+    fn cri_state_imports_legacy_json_into_sqlite_and_reopens() {
+        let root = tempfile::tempdir().expect("runtime dir");
+        let sandbox = SandboxRecord {
+            id: "sandbox-1".into(),
+            name: "web".into(),
+            uid: "uid-1".into(),
+            namespace: "default".into(),
+            state: "ready".into(),
+            created_at_unix: 1,
+            network_mode: "none".into(),
+            netns_name: None,
+        };
+        let mut legacy = BTreeMap::new();
+        legacy.insert(sandbox.id.clone(), sandbox.clone());
+        fs::write(
+            sandbox_state_path(root.path()),
+            serde_json::to_vec(&legacy).expect("legacy state"),
+        )
+        .expect("write legacy state");
+
+        let imported = load_sandboxes(root.path());
+        assert_eq!(
+            imported.get("sandbox-1").expect("imported sandbox").name,
+            "web"
+        );
+        assert!(root.path().join("cri-state.sqlite").is_file());
+
+        fs::write(sandbox_state_path(root.path()), b"{}").expect("replace legacy state");
+        let reopened = load_sandboxes(root.path());
+        assert_eq!(reopened, imported);
     }
 
     #[tokio::test]

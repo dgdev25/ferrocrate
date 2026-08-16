@@ -1,11 +1,11 @@
 use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore, RequestOrigin};
-use ferro_core::container_store::CreationProvenance;
 use ferro_core::container_store::ContainerRecord;
-use ferro_core::sqlite_container_store::SqliteContainerStore;
+use ferro_core::container_store::CreationProvenance;
 use ferro_core::image_store::LocalImageStore;
 use ferro_core::runtime::{
     ContainerRuntime, LifecyclePhaseHook, LifecyclePhasePoint, RuntimeError,
 };
+use ferro_core::sqlite_container_store::SqliteContainerStore;
 use ferro_core::witness::{
     decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage,
 };

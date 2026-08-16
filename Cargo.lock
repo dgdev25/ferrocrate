@@ -977,6 +977,7 @@ dependencies = [
  "prost 0.12.6",
  "prost-types 0.12.6",
  "protoc-bin-vendored",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

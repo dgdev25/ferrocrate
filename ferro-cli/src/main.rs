@@ -6215,6 +6215,28 @@ fn docker_event_resource(path: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
+    let actor = event.resource.as_ref().map(|resource| {
+        serde_json::json!({
+            "ID": resource,
+            "Attributes": {
+                "status": event.status,
+                "scope": event.scope,
+            }
+        })
+    });
+    let time_nano = event.time.saturating_mul(1_000_000_000);
+    serde_json::json!({
+        "Type": event.event_type,
+        "Action": event.action,
+        "Actor": actor.unwrap_or_else(|| serde_json::json!({"Attributes": {}})),
+        "scope": event.scope,
+        "time": event.time,
+        "timeNano": time_nano,
+    })
+}
+
+#[cfg(target_os = "linux")]
 trait Pipe: Sized {
     fn pipe<T>(self, function: impl FnOnce(Self) -> T) -> T;
 }
@@ -6398,7 +6420,8 @@ fn handle_docker_compat_connection(
                     .query(&query)?;
                 let body = events
                     .iter()
-                    .map(|event| serde_json::to_string(event).unwrap_or_default())
+                    .map(docker_event_payload)
+                    .map(|event| serde_json::to_string(&event).unwrap_or_default())
                     .collect::<Vec<_>>()
                     .join("\n");
                 http_response(200, body.as_bytes(), "application/x-ndjson")
@@ -7141,16 +7164,17 @@ mod tests {
 
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
-        effective_readonly, handle_build, handle_containers, handle_exec, handle_image_prune,
-        handle_images, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
-        parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
-        parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
-        read_docker_request_after_auth, read_http_request, should_desktop_forward,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_network_backend, validate_network_mode, AiCommands, Cli, Commands,
-        ComposeCommands, ConfigCommands, DockerEventStore, NetworkCommands, VolumeCommands,
+        docker_event_payload, effective_readonly, handle_build, handle_containers, handle_exec,
+        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
+        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
+        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_capabilities,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
+        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, should_desktop_forward, structured_desktop_error,
+        top_level_command_name, validate_build_platform, validate_network_backend,
+        validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8712,6 +8736,25 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "start");
         assert_eq!(events[0].status, 204);
+    }
+
+    #[test]
+    fn docker_event_payload_uses_engine_wire_shape() {
+        let event = DockerEvent {
+            id: 4,
+            time: 12,
+            event_type: "container".to_string(),
+            action: "start".to_string(),
+            scope: "local".to_string(),
+            resource: Some("abc123".to_string()),
+            status: 204,
+        };
+        let payload = docker_event_payload(&event);
+        assert_eq!(payload["Type"], "container");
+        assert_eq!(payload["Action"], "start");
+        assert_eq!(payload["Actor"]["ID"], "abc123");
+        assert_eq!(payload["time"], 12);
+        assert_eq!(payload["timeNano"], 12_000_000_000u64);
     }
 
     #[test]

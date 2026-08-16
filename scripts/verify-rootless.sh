@@ -13,6 +13,18 @@ if [[ -f "$userns_path" ]]; then
   fi
 fi
 
+# The sysctl only expresses policy. Probe the namespace operation that the
+# rootless workload launcher actually needs so a host cannot pass diagnostics
+# while its user+mount namespace creation is denied by a container or LSM
+# boundary. This probe is side-effect free: it launches `true` and exits.
+if command -v unshare >/dev/null 2>&1 && unshare --user --mount --fork true >/dev/null 2>&1; then
+  echo "rootless.userns_mount=pass"
+else
+  echo "rootless.userns_mount=missing"
+  echo "warning: unprivileged user+mount namespace creation is unavailable" >&2
+  missing=1
+fi
+
 user=$(id -un)
 if grep -q "^${user}:" /etc/subuid 2>/dev/null; then
   echo "rootless.subuid=pass"

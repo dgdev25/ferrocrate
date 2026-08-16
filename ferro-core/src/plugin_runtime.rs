@@ -62,14 +62,15 @@ pub fn execute_plugin(
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
     verify_plugin_signature(manifest, trust_root)
         .map_err(|error| PluginExecutionError::Signature(error.to_string()))?;
-    let metadata = std::fs::metadata(&manifest.entrypoint)?;
-    if !metadata.is_file() {
+    let metadata = std::fs::symlink_metadata(&manifest.entrypoint)?;
+    if !metadata.file_type().is_file() {
         return Err(PluginExecutionError::Entrypoint);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
+        let mode = metadata.permissions().mode();
+        if mode & 0o111 == 0 || mode & 0o022 != 0 {
             return Err(PluginExecutionError::Entrypoint);
         }
     }
@@ -188,6 +189,35 @@ mod tests {
         assert!(matches!(
             execute_plugin(&manifest, &key.verifying_key(), &[], b""),
             Err(PluginExecutionError::OutputLimit)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_or_group_writable_entrypoints() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let target = script(&temp, "printf ok");
+        let link = temp.path().join("plugin-link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let manifest = signed_manifest(&link.display().to_string(), PluginLimits::default(), &key);
+        assert!(matches!(
+            execute_plugin(&manifest, &key.verifying_key(), &[], b""),
+            Err(PluginExecutionError::Entrypoint)
+        ));
+
+        let writable = temp.path().join("plugin-writable");
+        std::fs::copy(&target, &writable).expect("copy");
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o770))
+            .expect("writable mode");
+        let manifest = signed_manifest(
+            &writable.display().to_string(),
+            PluginLimits::default(),
+            &key,
+        );
+        assert!(matches!(
+            execute_plugin(&manifest, &key.verifying_key(), &[], b""),
+            Err(PluginExecutionError::Entrypoint)
         ));
     }
 }

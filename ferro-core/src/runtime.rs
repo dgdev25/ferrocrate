@@ -8535,6 +8535,15 @@ fn validate_security_ebpf_config(
             "security ebpf monitor event names must be ASCII components".to_string(),
         ));
     }
+    let mut normalized = BTreeSet::new();
+    if events
+        .iter()
+        .any(|event| !normalized.insert(event.to_ascii_lowercase()))
+    {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor event names must be unique".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -11356,6 +11365,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             &["execve/open".into()],
         )
         .is_err());
+        let duplicate = vec!["execve".to_string(), "EXECVE".to_string()];
+        let error = super::validate_security_ebpf_config(
+            "/usr/lib/ferrocrate/ferro-security.o",
+            "/sys/fs/bpf/ferrocrate-security-c1",
+            &duplicate,
+        )
+        .expect_err("case-insensitive duplicate events must be rejected");
+        assert!(error.to_string().contains("must be unique"));
     }
 
     #[test]

@@ -897,17 +897,9 @@ pub fn build_tracepoint_attach_cmd(pin_path: &str, category: &str, event: &str) 
 }
 
 pub fn install_security_monitor(config: &SecurityMonitorConfig) -> Result<Vec<String>, ExecError> {
-    let events = if config.events.is_empty() {
-        default_security_events()
-            .iter()
-            .map(|event| (*event).to_string())
-            .collect::<Vec<_>>()
-    } else {
-        config.events.clone()
-    };
+    let events = normalize_security_events(&config.events)?;
     let mut installed = Vec::new();
-    for event in events {
-        let normalized = sanitize_event(&event)?;
+    for normalized in events {
         let pin_path = format!("{}/{}", config.pin_root, normalized);
         let program = EbpfProgram {
             name: format!("ferro_security_{normalized}"),
@@ -931,6 +923,29 @@ pub fn install_security_monitor(config: &SecurityMonitorConfig) -> Result<Vec<St
         installed.push(normalized);
     }
     Ok(installed)
+}
+
+fn normalize_security_events(events: &[String]) -> Result<Vec<String>, ExecError> {
+    let source = if events.is_empty() {
+        default_security_events()
+            .iter()
+            .map(|event| (*event).to_string())
+            .collect::<Vec<_>>()
+    } else {
+        events.to_vec()
+    };
+    let mut normalized = Vec::with_capacity(source.len());
+    for event in source {
+        let event = sanitize_event(&event)?;
+        if normalized.iter().any(|existing| existing == &event) {
+            return Err(ExecError::CommandFailed {
+                cmd: format!("event={event}"),
+                stderr: "duplicate security monitor event".to_string(),
+            });
+        }
+        normalized.push(event);
+    }
+    Ok(normalized)
 }
 
 fn sanitize_event(event: &str) -> Result<String, ExecError> {
@@ -958,8 +973,8 @@ mod lifecycle_tests {
 
     use super::{
         build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
-        hex_bytes, EbpfError, EbpfNetwork, EbpfNetworkConfig, EGRESS_CLASSIFIER,
-        INGRESS_CLASSIFIER,
+        hex_bytes, normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
+        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -980,6 +995,21 @@ mod lifecycle_tests {
         policies: Vec<(PolicyKey, PolicyValue)>,
         rollback_count: usize,
         detach_count: usize,
+    }
+
+    #[test]
+    fn security_monitor_normalizes_before_execution_and_rejects_duplicates() {
+        let events = normalize_security_events(&[" Execve ".to_string(), "connect".to_string()])
+            .expect("valid events");
+        assert_eq!(events, vec!["execve", "connect"]);
+        let error = normalize_security_events(&["open".to_string(), "OPEN".to_string()])
+            .expect_err("duplicate normalized event");
+        assert!(error
+            .to_string()
+            .contains("duplicate security monitor event"));
+        let error = normalize_security_events(&["execve".to_string(), "bad/name".to_string()])
+            .expect_err("invalid later event");
+        assert!(error.to_string().contains("invalid security monitor event"));
     }
 
     struct FakeKernel {

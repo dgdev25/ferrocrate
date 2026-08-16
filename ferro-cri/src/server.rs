@@ -847,6 +847,7 @@ impl RuntimeService for CriRuntime {
             request.get_ref().container_id.as_str(),
         )?;
         let id = request.into_inner().container_id;
+        let cleanup_origin = identity.origin.clone();
         let record = {
             let containers = self
                 .containers
@@ -857,12 +858,28 @@ impl RuntimeService for CriRuntime {
                 .cloned()
                 .ok_or_else(|| Status::not_found("container not found"))?
         };
-        if record.runtime_id.is_some() {
+        if let Some(runtime_id) = record.runtime_id.as_deref() {
+            let runtime_dir = self.runtime_dir.clone();
+            let runtime_id = runtime_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let runtime = ferro_core::runtime::ContainerRuntime::new(&runtime_dir)
+                    .map_err(|error| error.to_string())?
+                    .with_request_origin(identity.origin);
+                let runtime_record = runtime
+                    .inspect(&runtime_id)
+                    .map_err(|error| error.to_string())?;
+                if runtime_record.status != "running" {
+                    runtime
+                        .start(&runtime_id)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok::<(), String>(())
+            })
+            .await
+            .map_err(|error| Status::internal(format!("start task failed: {error}")))?
+            .map_err(Status::internal)?;
             return Ok(Response::new(StartContainerResponse {}));
         }
-        let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
-            .map_err(|error| Status::internal(error.to_string()))?
-            .with_request_origin(identity.origin);
         let sandbox_uid = self
             .sandboxes
             .lock()
@@ -878,44 +895,70 @@ impl RuntimeService for CriRuntime {
         labels.insert("io.ferrocrate.cri-container-id".to_string(), id.clone());
         let mut annotations = std::collections::HashMap::new();
         annotations.insert("io.ferrocrate.cri-sandbox-uid".to_string(), sandbox_uid);
-        let started = runtime
-            .run(
-                &record.image,
-                &record.command,
-                &record.env,
-                &labels,
-                &annotations,
-                None,
-                Default::default(),
-                &[],
-                None,
-                &[],
-                &[],
-                false,
-                true,
-                None,
-                None,
-                Some(&record.name),
-                &[],
-                "none",
-                ferro_net::NetworkBackend::Iptables,
-                None,
-            )
-            .map_err(|error| Status::internal(error.to_string()))?;
-        let mut containers = self
-            .containers
-            .lock()
-            .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
-        let stored = containers
-            .get_mut(&id)
-            .ok_or_else(|| Status::not_found("container not found"))?;
+        let runtime_dir = self.runtime_dir.clone();
+        let started = tokio::task::spawn_blocking(move || {
+            let runtime = ferro_core::runtime::ContainerRuntime::new(&runtime_dir)
+                .map_err(|error| error.to_string())?
+                .with_request_origin(identity.origin);
+            runtime
+                .run(
+                    &record.image,
+                    &record.command,
+                    &record.env,
+                    &labels,
+                    &annotations,
+                    None,
+                    Default::default(),
+                    &[],
+                    None,
+                    &[],
+                    &[],
+                    false,
+                    true,
+                    None,
+                    None,
+                    Some(&record.name),
+                    &[],
+                    "none",
+                    ferro_net::NetworkBackend::Iptables,
+                    None,
+                )
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| Status::internal(format!("start task failed: {error}")))?
+        .map_err(Status::internal)?;
         let runtime_id = started.id;
-        stored.runtime_id = Some(runtime_id.clone());
-        if let Err(error) = persist_containers(&self.runtime_dir, &containers) {
-            if let Some(stored) = containers.get_mut(&id) {
-                stored.runtime_id = None;
+        let persist_result = {
+            let mut containers = self
+                .containers
+                .lock()
+                .map_err(|_| Status::internal("CRI container state lock poisoned"))?;
+            containers
+                .get_mut(&id)
+                .ok_or_else(|| Status::not_found("container not found"))?
+                .runtime_id = Some(runtime_id.clone());
+            let result = persist_containers(&self.runtime_dir, &containers);
+            if result.is_err() {
+                if let Some(stored) = containers.get_mut(&id) {
+                    stored.runtime_id = None;
+                }
             }
-            if let Err(cleanup) = runtime.remove(&runtime_id) {
+            result
+        };
+        if let Err(error) = persist_result {
+            let cleanup_runtime_dir = self.runtime_dir.clone();
+            let cleanup = tokio::task::spawn_blocking(move || {
+                let runtime = ferro_core::runtime::ContainerRuntime::new(&cleanup_runtime_dir)
+                    .map_err(|error| error.to_string())?
+                    .with_request_origin(cleanup_origin);
+                runtime
+                    .remove(&runtime_id)
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| Status::internal(format!("cleanup task failed: {error}")))?;
+            if let Err(cleanup) = cleanup {
                 return Err(Status::internal(format!(
                     "persist CRI container state: {error}; cleanup runtime effect: {cleanup}"
                 )));

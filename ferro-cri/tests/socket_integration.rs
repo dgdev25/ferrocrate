@@ -819,8 +819,15 @@ fn seed_runnable_fixture_image(runtime_dir: &Path) {
     header.set_size(busybox.len() as u64);
     header.set_mode(0o755);
     header.set_cksum();
-    tar.append(&header, Cursor::new(busybox))
+    tar.append(&header, Cursor::new(&busybox))
         .expect("append busybox");
+    let mut shell_header = Header::new_gnu();
+    shell_header.set_path("bin/sh").expect("layer shell path");
+    shell_header.set_size(busybox.len() as u64);
+    shell_header.set_mode(0o755);
+    shell_header.set_cksum();
+    tar.append(&shell_header, Cursor::new(&busybox))
+        .expect("append shell");
     tar.finish().expect("finish fixture layer");
     let layer = std::fs::read(&layer_path).expect("read fixture layer");
     let layer_digest = format!("sha256:{:x}", Sha256::digest(&layer));
@@ -1017,11 +1024,32 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
     );
     assert_eq!(stopped_status.reason, "exited");
     client
-        .remove_container(RemoveContainerRequest {
-            container_id: container,
+        .start_container(StartContainerRequest {
+            container_id: container.clone(),
         })
         .await
-        .expect("remove");
+        .expect("start stopped container");
+    let restarted_status = client
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("status after CRI start")
+        .into_inner()
+        .status
+        .expect("restarted status");
+    assert_eq!(
+        restarted_status.state,
+        ferro_cri::runtime::ContainerState::Running as i32
+    );
+    client
+        .stop_container(ferro_cri::runtime::StopContainerRequest {
+            container_id: container.clone(),
+            timeout: 5,
+        })
+        .await
+        .expect("stop after CRI restart");
     client
         .stop_pod_sandbox(StopPodSandboxRequest {
             pod_sandbox_id: sandbox.clone(),

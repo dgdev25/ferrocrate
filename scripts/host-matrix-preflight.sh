@@ -8,13 +8,13 @@ repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 output_file="${1:-}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
-value_or_missing() {
-  if [[ $# -eq 0 ]]; then
-    printf 'missing'
-  elif [[ -r "$1" ]]; then
-    tr '\n' ' ' <"$1" | sed 's/[[:space:]]*$//'
+version_line() {
+  local output
+  have "$1" || { printf 'missing'; return; }
+  if output=$("$@" 2>/dev/null); then
+    printf '%s' "$output" | head -1
   else
-    printf 'unreadable'
+    printf 'missing'
   fi
 }
 
@@ -45,15 +45,15 @@ lines=(
   "arch=$arch"
   "uid=$(id -u)"
   "cap_net_admin=$cap_net_admin"
-  "ip=$(have ip && ip -V 2>&1 || printf missing)"
-  "wg=$(have wg && wg --version 2>&1 || printf missing)"
-  "nft=$(have nft && nft --version 2>&1 || printf missing)"
-  "iptables=$(have iptables && iptables --version 2>&1 || printf missing)"
-  "tc=$(have tc && tc -V 2>&1 || printf missing)"
-  "resolvectl=$(have resolvectl && resolvectl --version 2>&1 || printf missing)"
-  "ping=$(have ping && ping -V 2>&1 | head -1 || printf missing)"
-  "cargo=$(have cargo && cargo --version 2>&1 || printf missing)"
-  "rustc=$(have rustc && rustc --version 2>&1 || printf missing)"
+  "ip=$(version_line ip -V)"
+  "wg=$(version_line wg --version)"
+  "nft=$(version_line nft --version)"
+  "iptables=$(version_line iptables --version)"
+  "tc=$(version_line tc -V)"
+  "resolvectl=$(version_line resolvectl --version)"
+  "ping=$(version_line ping -V)"
+  "cargo=$(version_line cargo --version)"
+  "rustc=$(version_line rustc --version)"
 )
 
 if [[ -n "$output_file" ]]; then

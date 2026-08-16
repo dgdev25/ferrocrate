@@ -91,6 +91,7 @@ pub fn build_ip_addr_add_ipv6_bridge_cmd(
         cidr.into(),
         "dev".into(),
         bridge.into(),
+        "nodad".into(),
     ])
 }
 
@@ -233,7 +234,16 @@ mod tests {
         );
         assert_eq!(
             build_ip_addr_add_ipv6_bridge_cmd("ferro0", "fd00::1/64").unwrap(),
-            vec!["ip", "-6", "addr", "add", "fd00::1/64", "dev", "ferro0"]
+            vec![
+                "ip",
+                "-6",
+                "addr",
+                "add",
+                "fd00::1/64",
+                "dev",
+                "ferro0",
+                "nodad"
+            ]
         );
         assert_eq!(
             build_ip_link_set_master_cmd("veth0", "ferro0").unwrap(),

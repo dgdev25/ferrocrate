@@ -6732,6 +6732,27 @@ struct DockerCreateSpec {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct DockerExecSpec {
+    container: String,
+    cmd: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct DockerExecCreateRequest {
+    #[serde(rename = "Cmd")]
+    cmd: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize, Default)]
+struct DockerExecStartRequest {
+    #[serde(rename = "Detach", default)]
+    detach: bool,
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Deserialize)]
 struct DockerNetworkCreateSpec {
     #[serde(rename = "Name")]
@@ -6759,9 +6780,18 @@ struct DockerIpamConfig {
 }
 
 #[cfg(target_os = "linux")]
+fn validate_docker_exec_command(cmd: &[String]) -> Result<(), String> {
+    if cmd.is_empty() || cmd.iter().any(|arg| arg.is_empty()) {
+        return Err("docker: exec Cmd must contain at least one non-empty argument".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
+    execs: Mutex<HashMap<String, DockerExecSpec>>,
     events: Mutex<DockerEventStore>,
 }
 
@@ -6796,6 +6826,7 @@ impl DockerCompatState {
         Ok(Self {
             next_id: AtomicU64::new(0),
             pending: Mutex::new(HashMap::new()),
+            execs: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
         })
     }
@@ -7379,6 +7410,55 @@ fn handle_docker_compat_connection(
                 }
                 let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
                 http_response(201, body.to_string().as_bytes(), "application/json")
+            }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/exec") => {
+                let container = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/exec");
+                let request: DockerExecCreateRequest = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("docker: invalid exec create payload: {error}"))?;
+                validate_docker_exec_command(&request.cmd)?;
+                runtime
+                    .inspect(container)
+                    .map_err(|error| error.to_string())?;
+                let id = format!("e{}", state.next_id.fetch_add(1, Ordering::SeqCst));
+                state
+                    .execs
+                    .lock()
+                    .map_err(|error| format!("docker: exec lock poisoned: {error}"))?
+                    .insert(
+                        id.clone(),
+                        DockerExecSpec {
+                            container: container.to_string(),
+                            cmd: request.cmd,
+                        },
+                    );
+                let body = serde_json::json!({"Id": id});
+                http_response(201, body.to_string().as_bytes(), "application/json")
+            }
+            ("POST", path) if path.starts_with("/exec/") && path.ends_with("/start") => {
+                let id = path.trim_start_matches("/exec/").trim_end_matches("/start");
+                let start: DockerExecStartRequest = if request.body.is_empty() {
+                    DockerExecStartRequest::default()
+                } else {
+                    serde_json::from_slice(&request.body)
+                        .map_err(|error| format!("docker: invalid exec start payload: {error}"))?
+                };
+                let spec = state
+                    .execs
+                    .lock()
+                    .map_err(|error| format!("docker: exec lock poisoned: {error}"))?
+                    .remove(id)
+                    .ok_or_else(|| format!("docker: exec not found: {id}"))?;
+                let result = runtime
+                    .exec(&spec.container, &spec.cmd)
+                    .map_err(|error| error.to_string())?;
+                if start.detach {
+                    http_response(200, &[], "application/vnd.docker.raw-stream")
+                } else {
+                    let output = format!("{}{}", result.stdout, result.stderr);
+                    http_response(200, output.as_bytes(), "application/vnd.docker.raw-stream")
+                }
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/rename") => {
                 let id = path
@@ -8799,11 +8879,11 @@ mod tests {
         parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
         parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, read_merkle_leaves,
         should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_image_prune_filters,
+        validate_build_platform, validate_docker_exec_command, validate_docker_image_prune_filters,
         validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
-        RvfCommands, VolumeCommands, WitnessCommands,
+        ContextCommands, DockerEvent, DockerEventStore, DockerExecCreateRequest, MigrateCommands,
+        NetworkCommands, RvfCommands, VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -10768,6 +10848,21 @@ volumes:
         let runtime = ContainerRuntime::new(temp.path()).unwrap();
         let error = docker_top_payload(&runtime, "missing").expect_err("unknown container");
         assert!(error.contains("not found") || error.contains("unknown"));
+    }
+
+    #[test]
+    fn docker_exec_create_payload_preserves_argv_and_rejects_empty_commands() {
+        let request: DockerExecCreateRequest =
+            serde_json::from_value(serde_json::json!({"Cmd": ["/bin/echo", "hello"]}))
+                .expect("exec request");
+        assert_eq!(request.cmd, vec!["/bin/echo", "hello"]);
+        let empty: DockerExecCreateRequest =
+            serde_json::from_value(serde_json::json!({"Cmd": []})).expect("empty request");
+        assert!(empty.cmd.is_empty());
+        assert!(validate_docker_exec_command(&request.cmd).is_ok());
+        assert!(validate_docker_exec_command(&empty.cmd).is_err());
+        let blank = vec!["".to_string()];
+        assert!(validate_docker_exec_command(&blank).is_err());
     }
 
     #[test]

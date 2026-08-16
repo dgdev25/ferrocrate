@@ -121,13 +121,24 @@ generate_checksums() {
 
   log_info "Generating checksums..."
 
-  # Generate SHA256 checksums
+  # Generate SHA256 checksums for payloads and detached signatures, excluding
+  # the checksum file itself so it is deterministic and never self-referential.
   cd "$artifact_dir"
 
+  local files=() file
+  for file in *; do
+    if [ -f "$file" ] && [ "$file" != "CHECKSUMS.txt" ]; then
+      files+=("$file")
+    fi
+  done
+  if [ "${#files[@]}" -eq 0 ]; then
+    log_error "No artifact payloads found in $artifact_dir"
+    return 1
+  fi
   if command -v sha256sum &> /dev/null; then
-    sha256sum * > "$checksum_file"
+    sha256sum "${files[@]}" > "$checksum_file"
   else
-    shasum -a 256 * > "$checksum_file"
+    shasum -a 256 "${files[@]}" > "$checksum_file"
   fi
 
   cd - > /dev/null
@@ -145,19 +156,25 @@ verify_signatures() {
   log_info "Verifying signatures..."
 
   cd "$artifact_dir"
-
+  local found=0 failed=0 sig_file binary
+  shopt -s nullglob
   for sig_file in *.asc; do
-    if [ -f "$sig_file" ]; then
-      binary="${sig_file%.asc}"
-      if gpg --verify "$sig_file" "$binary" 2>&1 | grep -q "Good signature"; then
-        log_info "✓ Signature valid: $sig_file"
-      else
-        log_error "✗ Signature invalid: $sig_file"
-      fi
+    found=1
+    binary="${sig_file%.asc}"
+    if gpg --verify "$sig_file" "$binary" >/dev/null 2>&1; then
+      log_info "✓ Signature valid: $sig_file"
+    else
+      log_error "✗ Signature invalid: $sig_file"
+      failed=1
     fi
   done
-
+  shopt -u nullglob
   cd - > /dev/null
+  if [ "$found" -eq 0 ]; then
+    log_error "No detached signatures found in $artifact_dir"
+    return 1
+  fi
+  return "$failed"
 }
 
 # Main flow
@@ -189,15 +206,14 @@ main() {
   key_id=$(get_gpg_key)
   verify_gpg_key "$key_id"
 
-  # Sign all binaries (except signatures and checksums)
+  # Sign every payload (except signatures and checksums). A signing failure is
+  # fatal; release automation must never publish a partially signed channel.
   cd "$artifact_dir"
   for file in *; do
-    if [ -f "$file" ] && [ ! "$file" = "CHECKSUMS.txt" ] && [ "${file}" != "${file%.asc}" ]; then
+    if [ ! -f "$file" ] || [ "$file" = "CHECKSUMS.txt" ] || [[ "$file" == *.asc ]]; then
       continue
     fi
-    if [ -f "$file" ] && [ ! "$file" = "CHECKSUMS.txt" ]; then
-      sign_binary "$file" "$key_id" || true
-    fi
+    sign_binary "$file" "$key_id"
   done
   cd - > /dev/null
 

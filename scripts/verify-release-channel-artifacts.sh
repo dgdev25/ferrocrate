@@ -103,6 +103,15 @@ main() {
     exit 1
   }
 
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$ARTIFACT_DIR" && sha256sum --ignore-missing -c "$(basename "$checksum_file")")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$ARTIFACT_DIR" && shasum -a 256 -c "$(basename "$checksum_file")")
+  else
+    echo "checksum verification requires sha256sum or shasum" >&2
+    exit 1
+  fi
+
   local entries
   entries="$(list_archive_entries "$archive_path")"
 

@@ -1539,14 +1539,7 @@ fn handle_doctor(
         #[cfg(target_os = "linux")]
         {
             let rootless = ferro_core::rootless::RootlessConfig::from_system();
-            let runtime_socket = std::env::var_os("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .map(|path| path.join("docker.sock"))
-                .filter(|path| path.exists())
-                .or_else(|| {
-                    let path = runtime_dir().join("docker.sock");
-                    path.exists().then_some(path)
-                });
+            let runtime_socket = discover_rootless_socket();
             let socket_message = runtime_socket.as_ref().map_or_else(
                 || "rootless Docker socket not discovered (set XDG_RUNTIME_DIR or use the configured daemon socket)".to_string(),
                 |path| format!("rootless Docker socket discovered at {}", path.display()),
@@ -1695,6 +1688,22 @@ fn handle_doctor(
     } else {
         Err("doctor detected compatibility issues".to_string())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn discover_rootless_socket() -> Option<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let mut candidates = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(runtime).join("docker.sock"));
+    }
+    candidates.push(runtime_dir().join("docker.sock"));
+    candidates.into_iter().find(|path| {
+        std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_socket())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -8067,13 +8076,14 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     use super::{
-        bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
-        docker_chunked_headers, docker_container_matches_filters, docker_event_payload,
-        docker_tail_logs, docker_top_payload, effective_readonly, handle_build, handle_containers,
-        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        bind_run_network, build_health_config, build_limits, desktop_forward_enabled,
+        discover_rootless_socket, dispatch, docker_chunked_headers,
+        docker_container_matches_filters, docker_event_payload, docker_tail_logs,
+        docker_top_payload, effective_readonly, handle_build, handle_containers, handle_context,
+        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
         parse_bind_mounts, parse_build_contexts, parse_capabilities, parse_docker_filters,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
@@ -8190,6 +8200,26 @@ mod tests {
                 assert_eq!(output, Some(std::path::PathBuf::from("report.json")));
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_socket_discovery_requires_an_actual_unix_socket() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let temp = tempfile::tempdir().expect("socket fixture");
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", temp.path()) };
+        let socket = temp.path().join("docker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert_eq!(discover_rootless_socket(), Some(socket.clone()));
+        drop(listener);
+        std::fs::remove_file(&socket).expect("remove socket");
+        std::fs::write(&socket, b"not a socket").expect("write decoy");
+        assert_ne!(discover_rootless_socket(), Some(socket));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
         }
     }
 

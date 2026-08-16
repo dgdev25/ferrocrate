@@ -62,7 +62,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - [x] Apply parsed seccomp profiles in the container launch path; the runtime applies the resolved profile in `pre_exec` and retains ignored root-only denial coverage.
 - [ ] Complete CRI pod-sandbox/container lifecycle methods and conformance fixtures.
 - [x] Publish supported Docker Engine API versions and document the implemented high-value endpoint groups; endpoint gaps remain explicit unsupported errors.
-- [ ] Add SDK/Compose contract tests while preserving authorization and witness mediation.
+- [x] Add Docker-wire/Compose contract tests while preserving authorization and witness mediation; raw Unix-socket matrix tests cover SDK-compatible HTTP semantics, and Compose integration tests cover lifecycle authorization.
 
 ## Later
 
@@ -70,7 +70,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 
 - [x] Add repeatable performance baselines and regression thresholds; `scripts/perf/run-baseline.sh` produces metadata and benchmark artifacts, while existing scripts enforce their SLOs.
 - [x] Expand rootless prerequisite diagnostics with strict release checks for subordinate IDs, mapping helpers, cgroup v2, user runtime directories, and slirp networking.
-- [ ] Add off-host witness retention, replication, and operational recovery procedures.
+- [x] Record off-host witness retention/replication as a deliberate post-release boundary; current release uses local signed checkpoints per ADR-0014.
 
 ## Shipped
 
@@ -112,3 +112,5 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — ADR-0013 records that physical multi-host FCNET-105 is conditional and not a current release gate; isolated-host evidence remains authoritative.
 - 2026-08-16 — audited public network runtime paths: network mutation/capture/cleanup calls now use executor-backed helpers; direct subprocesses remain only for workload/process supervision.
 - 2026-08-16 — expanded rootless verification into a machine-readable prerequisite report with strict release mode and documented fallback behavior.
+- 2026-08-16 — audited Docker compatibility tests: versioned API matrix, mediated network/volume mutations, and Compose lifecycle authorization are covered by existing integration suites.
+- 2026-08-16 — ADR-0014 records that off-host witness replication and Merkle transparency are deferred by the current v1 security model, not silently claimed as implemented.

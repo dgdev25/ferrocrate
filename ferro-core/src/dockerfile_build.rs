@@ -75,6 +75,7 @@ pub struct ImageBuildPlan {
     dockerfile_digest: [u8; 32],
     base_digests: Vec<(String, Option<String>)>,
     named_contexts: HashMap<String, PathBuf>,
+    stage_dependencies: Vec<Vec<usize>>,
     plan_digest: [u8; 32],
 }
 
@@ -87,6 +88,13 @@ impl ImageBuildPlan {
     }
     pub fn generation(&self) -> u64 {
         1
+    }
+
+    /// Return the zero-based stage dependencies used to construct each stage.
+    /// Independent stages have empty/disjoint dependency lists and can be
+    /// scheduled concurrently by a future graph executor.
+    pub fn stage_dependencies(&self) -> &[Vec<usize>] {
+        &self.stage_dependencies
     }
 }
 
@@ -130,15 +138,16 @@ pub fn prepare_dockerfile_build_with_contexts(
         named_contexts,
     )?;
     let canonical_tag = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+    let stage_dependencies = build_stage_dependency_graph(&stages, named_contexts)?;
     let mut base_digests = Vec::with_capacity(stages.len());
-    for stage in stages {
+    for stage in &stages {
         if stage.base.eq_ignore_ascii_case("scratch") {
-            base_digests.push((stage.base, None));
+            base_digests.push((stage.base.clone(), None));
         } else {
             let record = resolve_reference(store, &stage.base)?.ok_or_else(|| {
                 DockerfileBuildError::Invalid(format!("base image not found: {}", stage.base))
             })?;
-            base_digests.push((stage.base, Some(record.digest)));
+            base_digests.push((stage.base.clone(), Some(record.digest)));
         }
     }
     let dockerfile_digest: [u8; 32] = Sha256::digest(dockerfile.as_bytes()).into();
@@ -162,6 +171,13 @@ pub fn prepare_dockerfile_build_with_contexts(
         hash.update((digest.len() as u64).to_be_bytes());
         hash.update(digest.as_bytes());
     }
+    hash.update((stage_dependencies.len() as u64).to_be_bytes());
+    for dependencies in &stage_dependencies {
+        hash.update((dependencies.len() as u64).to_be_bytes());
+        for dependency in dependencies {
+            hash.update((*dependency as u64).to_be_bytes());
+        }
+    }
     Ok(ImageBuildPlan {
         dockerfile_path: dockerfile_path.to_path_buf(),
         runtime_dir: runtime_dir.to_path_buf(),
@@ -171,6 +187,7 @@ pub fn prepare_dockerfile_build_with_contexts(
         dockerfile_digest,
         base_digests,
         named_contexts: canonicalize_named_contexts(named_contexts)?,
+        stage_dependencies,
         plan_digest: hash.finalize().into(),
     })
 }
@@ -1353,6 +1370,60 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
     }
 
     Ok(stages)
+}
+
+fn build_stage_dependency_graph(
+    stages: &[StageSpec],
+    named_contexts: &HashMap<String, PathBuf>,
+) -> Result<Vec<Vec<usize>>, DockerfileBuildError> {
+    let mut names = HashMap::new();
+    for (index, stage) in stages.iter().enumerate() {
+        if let Some(name) = stage.name.as_deref() {
+            if names.insert(name.to_ascii_lowercase(), index).is_some() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "duplicate Dockerfile stage name: {name}"
+                )));
+            }
+        }
+    }
+
+    let mut graph = Vec::with_capacity(stages.len());
+    for (index, stage) in stages.iter().enumerate() {
+        let mut dependencies = stage
+            .copy_from
+            .iter()
+            .filter_map(|copy| {
+                if named_contexts.contains_key(&copy.from) {
+                    return None;
+                }
+                if let Ok(dependency) = copy.from.parse::<usize>() {
+                    Some(Ok(dependency))
+                } else {
+                    names
+                        .get(&copy.from.to_ascii_lowercase())
+                        .copied()
+                        .map(Ok)
+                        .or_else(|| {
+                            Some(Err(DockerfileBuildError::Invalid(format!(
+                                "unknown COPY --from source: {}",
+                                copy.from
+                            ))))
+                        })
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        for dependency in &dependencies {
+            if *dependency >= index {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "COPY --from stage {dependency} must reference an earlier stage"
+                )));
+            }
+        }
+        graph.push(dependencies);
+    }
+    Ok(graph)
 }
 
 fn parse_from(value: &str) -> Result<(String, Option<String>), DockerfileBuildError> {
@@ -2690,11 +2761,11 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cache_path, build_from_dockerfile_with_store_and_compression, dockerignore_matches,
-        export_build_cache, file_matches_digest, import_build_cache, load_build_cache,
-        parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, save_build_cache,
-        validate_mount_target, BuildCacheEntry,
+        build_cache_path, build_from_dockerfile_with_store_and_compression,
+        build_stage_dependency_graph, dockerignore_matches, export_build_cache,
+        file_matches_digest, import_build_cache, load_build_cache, parse_limit_value, parse_run,
+        parse_stages, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
+        prune_build_cache, save_build_cache, validate_mount_target, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -2728,6 +2799,7 @@ mod tests {
         .unwrap();
 
         assert_ne!(first.plan_digest(), second.plan_digest());
+        assert_eq!(first.stage_dependencies(), &[Vec::<usize>::new()]);
         assert_eq!(first.canonical_tag(), "registry-1.docker.io/local/app:test");
         assert!(store.list_references().unwrap().is_empty());
         assert!(!runtime.join("build-cache.json").exists());
@@ -3052,6 +3124,30 @@ mod tests {
             stage.entrypoint.clone().expect("entrypoint"),
             vec!["/bin/bash", "-lc", "echo bye"]
         );
+    }
+
+    #[test]
+    fn stage_dependency_graph_is_deterministic_and_rejects_forward_edges() {
+        let dockerfile = r#"
+        FROM scratch AS base
+        RUN echo base
+        FROM scratch AS independent
+        RUN echo independent
+        FROM scratch AS final
+        COPY --from=base /out /base
+        COPY --from=1 /out /independent
+        "#;
+        let stages = parse_stages(dockerfile).expect("stages parse");
+        let graph = build_stage_dependency_graph(&stages, &HashMap::new()).expect("graph");
+        assert_eq!(graph, vec![vec![], vec![], vec![0, 1]]);
+
+        let forward = parse_stages(
+            "FROM scratch AS first\nCOPY --from=second /x /x\nFROM scratch AS second\n",
+        )
+        .expect("forward stages parse");
+        let error = build_stage_dependency_graph(&forward, &HashMap::new())
+            .expect_err("forward stage edge must fail");
+        assert!(error.to_string().contains("earlier stage"));
     }
 
     #[test]

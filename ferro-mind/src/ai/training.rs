@@ -472,14 +472,20 @@ impl TrainingPipeline {
             fs::create_dir_all(&dir)?;
 
             let versions_file = dir.join("versions.json");
-            let temporary = dir.join("versions.json.tmp");
-            let file = File::create(&temporary)?;
-            let mut writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, versions)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            fs::rename(&temporary, &versions_file)?;
-            File::open(dir)?.sync_all()?;
+            let temporary = atomic_temp_path(&versions_file)?;
+            let result = (|| -> Result<(), TrainingError> {
+                let file = File::create(&temporary)?;
+                let mut writer = BufWriter::new(file);
+                serde_json::to_writer_pretty(&mut writer, versions)?;
+                writer.flush()?;
+                writer.get_ref().sync_all()?;
+                fs::rename(&temporary, &versions_file)?;
+                sync_parent(&versions_file)
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&temporary);
+            }
+            result?;
         }
         Ok(())
     }
@@ -514,8 +520,20 @@ impl TrainingPipeline {
             sample_counts.insert(model_type.to_string(), *count);
         }
         let state = OnlineLearningState { sample_counts };
-        let file = File::create(path)?;
-        serde_json::to_writer_pretty(BufWriter::new(file), &state)?;
+        let temporary = atomic_temp_path(&path)?;
+        let result = (|| -> Result<(), TrainingError> {
+            let file = File::create(&temporary)?;
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer_pretty(&mut writer, &state)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            fs::rename(&temporary, &path)?;
+            sync_parent(&path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
         Ok(())
     }
 

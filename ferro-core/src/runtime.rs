@@ -2774,24 +2774,6 @@ impl ContainerRuntime {
         self.phase_hook
             .reached("run", LifecyclePhasePoint::SpawnPrepared)?;
 
-        if use_slirp {
-            let api_socket = container_dir.join("slirp4netns.sock");
-            match start_slirp4netns(child_id, Some(&api_socket)) {
-                Ok((helper_pid, helper_start_time)) => {
-                    rollback.slirp_process = Some((helper_pid, helper_start_time));
-                    if let Err(error) = configure_slirp_host_forwards(&api_socket, &port_mappings) {
-                        let _ = kill_pid(child_id);
-                        rollback.rollback();
-                        return Err(error);
-                    }
-                }
-                Err(e) => {
-                    let _ = kill_pid(child_id);
-                    rollback.rollback();
-                    return Err(e);
-                }
-            }
-        }
         if security_ebpf_monitor_enabled() {
             if let Err(e) = setup_security_ebpf_monitor(&container_id) {
                 let _ = kill_pid(child_id);
@@ -2913,8 +2895,34 @@ impl ContainerRuntime {
         }
         self.phase_hook
             .reached("run", LifecyclePhasePoint::LaunchIdentityDurable)?;
+        // The launcher is held behind an ownership barrier until its durable
+        // record exists. Release it before attaching slirp4netns: attaching
+        // to the stopped pre-exec launcher targets the host namespace rather
+        // than the user/network namespace created by `unshare`.
         release_prepared_child(child_id)?;
-
+        if use_slirp {
+            let api_socket = container_dir.join("slirp4netns.sock");
+            match start_slirp4netns(child_id, Some(&api_socket)) {
+                Ok((helper_pid, helper_start_time)) => {
+                    rollback.slirp_process = Some((helper_pid, helper_start_time));
+                    if let Err(error) = configure_slirp_host_forwards(&api_socket, &port_mappings) {
+                        let _ = kill_pid(child_id);
+                        rollback.rollback();
+                        return Err(error);
+                    }
+                }
+                Err(e) => {
+                    let _ = kill_pid(child_id);
+                    rollback.rollback();
+                    return Err(e);
+                }
+            }
+        }
+        // The rootless wrapper deliberately stopped after namespace creation;
+        // let it exec the workload only after slirp setup is complete.
+        if use_slirp {
+            release_prepared_child(child_id)?;
+        }
         // Commit the creation - all resources are now tracked in the store
         rollback.commit();
 
@@ -4527,9 +4535,19 @@ fn build_command(
         // unprivileged caller. Pair it with a user namespace. Avoid invoking
         // setuid mapping helpers after no_new_privs is installed; callers
         // needing subordinate-ID mappings use the authenticated mapping path.
-        unshare_cmd.args(["--user", "--net", "--fork", "--"]);
-        unshare_cmd.arg(&cmd[0]);
-        unshare_cmd.args(&cmd[1..]);
+        unshare_cmd.args(["--user", "--net", "--"]);
+        // Keep the process stopped after `unshare` has created its network
+        // namespace. The parent attaches slirp4netns at this point, then
+        // releases the workload with a second SIGCONT. This avoids both the
+        // pre-exec host-namespace race and short-lived workloads exiting
+        // before networking is attached.
+        let script = if no_new_privs {
+            "kill -STOP $$; exec setpriv --no-new-privs -- \"$@\""
+        } else {
+            "kill -STOP $$; exec \"$@\""
+        };
+        unshare_cmd.args(["sh", "-c", script, "ferrocrate-rootless"]);
+        unshare_cmd.args(cmd);
         unshare_cmd
     } else if let Some(rootfs) = rootfs_dir {
         if running_as_root {
@@ -4668,7 +4686,7 @@ fn build_command(
                     )
                 })?;
             }
-            if no_new_privs {
+            if no_new_privs && !unshare_netns {
                 if let Err(err) = set_no_new_privileges() {
                     if err.raw_os_error() == Some(nix::libc::EINVAL)
                         || err.raw_os_error() == Some(nix::libc::EPERM)
@@ -7883,6 +7901,33 @@ fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), Run
 }
 
 fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), RuntimeError> {
+    let host_netns = fs::read_link("/proc/self/ns/net")?;
+    let target_netns = PathBuf::from(format!("/proc/{pid}/ns/net"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if fs::read_link(&target_netns)
+            .map(|namespace| namespace != host_netns)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        if !process_exists(pid) {
+            return Err(RuntimeError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "rootless workload exited before creating its network namespace",
+            )));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if fs::read_link(&target_netns)
+        .map(|namespace| namespace == host_netns)
+        .unwrap_or(true)
+    {
+        return Err(RuntimeError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "rootless workload did not enter its network namespace",
+        )));
+    }
     let tap_name = format!("tap{pid}");
     let tap_name = if tap_name.len() > 15 {
         tap_name[..15].to_string()
@@ -7944,23 +7989,16 @@ fn configure_slirp_host_forwards(
     if mappings.is_empty() {
         return Ok(());
     }
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut last_error = None;
-    while Instant::now() < deadline {
-        match UnixStream::connect(api_socket) {
-            Ok(_) => {
-                for mapping in mappings {
-                    let mut stream = UnixStream::connect(api_socket).map_err(|error| {
-                        RuntimeError::Network(format!(
-                            "slirp4netns API socket disappeared: {error}"
-                        ))
-                    })?;
-                    let request = build_hostfwd_request(
-                        mapping.host_port,
-                        mapping.container_port,
-                        &mapping.protocol,
-                    )
-                    .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    for mapping in mappings {
+        let request =
+            build_hostfwd_request(mapping.host_port, mapping.container_port, &mapping.protocol)
+                .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut last_error = None;
+        let mut configured = false;
+        while Instant::now() < deadline {
+            match UnixStream::connect(api_socket) {
+                Ok(mut stream) => {
                     stream.write_all(&request)?;
                     stream.shutdown(std::net::Shutdown::Write)?;
                     let mut response = Vec::new();
@@ -7985,19 +8023,23 @@ fn configure_slirp_host_forwards(
                             "slirp4netns host forwarding response omitted an id".to_string(),
                         ));
                     }
+                    configured = true;
+                    break;
                 }
-                return Ok(());
+                Err(error) => last_error = Some(error),
             }
-            Err(error) => last_error = Some(error),
+            thread::sleep(Duration::from_millis(25));
         }
-        thread::sleep(Duration::from_millis(25));
+        if !configured {
+            return Err(RuntimeError::Network(format!(
+                "slirp4netns API socket did not become ready: {}",
+                last_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "timeout".to_string())
+            )));
+        }
     }
-    Err(RuntimeError::Network(format!(
-        "slirp4netns API socket did not become ready: {}",
-        last_error
-            .map(|error| error.to_string())
-            .unwrap_or_else(|| "timeout".to_string())
-    )))
+    Ok(())
 }
 
 fn rootless_netns_enabled() -> bool {
@@ -11761,8 +11803,43 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             "unshare".to_string(),
             "--user".to_string(),
             "--net".to_string(),
-            "--fork".to_string(),
             "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            "kill -STOP $$; exec \"$@\"".to_string(),
+            "ferrocrate-rootless".to_string(),
+            "/bin/true".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn rootless_command_applies_no_new_privileges_inside_namespace() {
+        let command = super::build_command(
+            &["/bin/true".into()],
+            &[],
+            None,
+            true,
+            &[],
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .expect("rootless command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.ends_with(&[
+            "unshare".to_string(),
+            "--user".to_string(),
+            "--net".to_string(),
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            "kill -STOP $$; exec setpriv --no-new-privs -- \"$@\"".to_string(),
+            "ferrocrate-rootless".to_string(),
             "/bin/true".to_string(),
         ]));
     }

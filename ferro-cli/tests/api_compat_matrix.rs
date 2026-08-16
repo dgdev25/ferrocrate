@@ -131,6 +131,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/images/missing/tag?repo=example/tag&tag=v1",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/volumes",
         coverage: Coverage::Implemented,

@@ -28,7 +28,9 @@ use ferro_core::entitlements::{self, Entitlement, Feature};
 use ferro_core::image_fetch::resolve_layer_paths_with_store;
 use ferro_core::image_manifest::parse_image_manifest;
 use ferro_core::image_store::LocalImageStore;
-use ferro_core::image_tagging::{canonicalize_reference, resolve_reference};
+use ferro_core::image_tagging::{
+    canonicalize_reference, execute_image_tag_authorized, prepare_image_tag, resolve_reference,
+};
 use ferro_core::layer_compression::CompressionFormat;
 use ferro_core::registry::{parse_image_reference, RegistryClient};
 #[cfg(target_os = "linux")]
@@ -7026,6 +7028,22 @@ fn handle_docker_compat_connection(
                     "ferrocrateRemoved": removed,
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("POST", path) if path.starts_with("/images/") && path.ends_with("/tag") => {
+                let source = path.trim_start_matches("/images/").trim_end_matches("/tag");
+                let repo = query
+                    .get("repo")
+                    .ok_or_else(|| "docker: image tag requires repo".to_string())?;
+                let tag = query.get("tag").map(String::as_str).unwrap_or("latest");
+                let target = format!("{repo}:{tag}");
+                let plan = prepare_image_tag(&store, source, &target)
+                    .map_err(|error| error.to_string())?;
+                let permit = surface_authorization
+                    .authorize_image_tag_plan(&origin, &plan)
+                    .map_err(|error| error.to_string())?;
+                execute_image_tag_authorized(&store, plan, permit)
+                    .map_err(|error| error.to_string())?;
+                http_response(201, &[], "text/plain")
             }
             ("DELETE", path) if path.starts_with("/images/") => {
                 let reference = path.trim_start_matches("/images/");

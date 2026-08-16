@@ -7389,6 +7389,21 @@ fn handle_docker_compat_connection(
                     http_response(200, logs.as_bytes(), "text/plain")
                 }
             }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/attach");
+                // Docker's attach query flags are validated even though the
+                // local runtime currently exposes its persisted combined log
+                // stream as stdout. This avoids silently accepting malformed
+                // client requests while keeping the response non-hijacking.
+                for key in ["logs", "stream", "stdout", "stderr"] {
+                    let _ = parse_docker_bool_query(query.get(key), key)?;
+                }
+                let logs = runtime.logs(id).map_err(|err| err.to_string())?;
+                let output = docker_raw_stream(&logs, "");
+                http_response(200, &output, "application/vnd.docker.raw-stream")
+            }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/top") => {
                 let id = path
                     .trim_start_matches("/containers/")

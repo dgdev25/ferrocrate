@@ -4610,7 +4610,25 @@ fn supervise_child(
             recent_failures: restart_count,
             uptime_secs,
         };
-        let delay_secs = match adaptive_policy.decide(&adaptive_signal) {
+        let adaptive_decision = adaptive_policy.decide(&adaptive_signal);
+        if let Some(logger) = ferro_mind::ai::audit::AuditLogger::from_env() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let trace = ferro_mind::ai::explain::DecisionTrace::new(
+                format!("ai-restart-{container_id}-{ts}"),
+                format!("Adaptive restart policy evaluated container {container_id}"),
+            )
+            .with_model("adaptive-restart-policy", "runtime-v1")
+            .with_decision(format!("{adaptive_decision:?}"))
+            .with_evidence("container_id", container_id.clone())
+            .with_evidence("exit_code", exit_code.to_string())
+            .with_evidence("recent_failures", restart_count.to_string())
+            .with_evidence("uptime_secs", uptime_secs.to_string());
+            let _ = logger.log("ai_restart_decision", &trace);
+        }
+        let delay_secs = match adaptive_decision {
             ferro_mind::ai::restart::RestartDecision::RestartAfterDelay { delay_secs } => {
                 delay_secs
             }

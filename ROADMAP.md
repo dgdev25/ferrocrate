@@ -69,7 +69,7 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 ### 5. Release operations and scale
 
 - [x] Add repeatable performance baselines and regression thresholds; `scripts/perf/run-baseline.sh` produces metadata and benchmark artifacts, while existing scripts enforce their SLOs.
-- [ ] Expand rootless networking and supported-host prerequisites.
+- [x] Expand rootless prerequisite diagnostics with strict release checks for subordinate IDs, mapping helpers, cgroup v2, user runtime directories, and slirp networking.
 - [ ] Add off-host witness retention, replication, and operational recovery procedures.
 
 ## Shipped
@@ -111,3 +111,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — wired repeatable startup/OCI/rootless performance baselines into a manual artifact-upload workflow.
 - 2026-08-16 — ADR-0013 records that physical multi-host FCNET-105 is conditional and not a current release gate; isolated-host evidence remains authoritative.
 - 2026-08-16 — audited public network runtime paths: network mutation/capture/cleanup calls now use executor-backed helpers; direct subprocesses remain only for workload/process supervision.
+- 2026-08-16 — expanded rootless verification into a machine-readable prerequisite report with strict release mode and documented fallback behavior.

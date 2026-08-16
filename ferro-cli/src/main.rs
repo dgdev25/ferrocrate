@@ -6385,10 +6385,20 @@ impl DockerEventStore {
         let contents = std::fs::read_to_string(&self.path).unwrap_or_default();
         let since = query
             .get("since")
-            .and_then(|value| value.parse::<u64>().ok());
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| format!("event query parameter `since` is not a u64: {value}"))
+            })
+            .transpose()?;
         let until = query
             .get("until")
-            .and_then(|value| value.parse::<u64>().ok());
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| format!("event query parameter `until` is not a u64: {value}"))
+            })
+            .transpose()?;
         let event = query.get("event").or_else(|| query.get("action"));
         let kind = query.get("type");
         let resource = query.get("container").or_else(|| query.get("image"));
@@ -9605,6 +9615,18 @@ mod tests {
             .query(&HashMap::new())
             .expect_err("corrupt event records must fail closed");
         assert!(error.contains("malformed record"), "error={error}");
+    }
+
+    #[test]
+    fn docker_event_query_rejects_invalid_time_bounds() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        let mut query = HashMap::new();
+        query.insert("since".to_string(), "not-a-timestamp".to_string());
+        let error = store
+            .query(&query)
+            .expect_err("invalid since must fail closed");
+        assert!(error.contains("since"), "error={error}");
     }
 
     #[test]

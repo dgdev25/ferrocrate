@@ -51,7 +51,6 @@ use ferro_net::ebpf::{
     SecurityMonitorConfig, VerifiedPinnedNetwork, FERRO_NETWORK_ROOT,
 };
 use ferro_net::ebpf_abi::{EndpointKey, EndpointValue, PortKey, PortValue};
-use ferro_net::exec_cmd as net_exec_cmd;
 use ferro_net::netns;
 use ferro_net::portmap::{build_network_plan as build_portmap_plan, NetworkPlan};
 use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
@@ -59,6 +58,7 @@ use ferro_net::subnet::network_cidr_v4;
 use ferro_net::veth;
 use ferro_net::BackendProbe;
 pub use ferro_net::NetworkBackend;
+use ferro_net::{exec_cmd as net_exec_cmd, exec_cmd_capture as net_exec_cmd_capture};
 use ferro_net::{HostCapabilities, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use rand::Rng;
 use sha2::Digest;
@@ -6685,23 +6685,23 @@ fn capture_firewall_owned_state(
             owned
         }
         NetworkBackend::Nftables => {
-            let output = Command::new("nft")
-                .args(["list", "table", "ip", firewall_id])
-                .output()?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if stderr.contains("No such file or directory") || stderr.contains("does not exist")
+            let command = vec![
+                "nft".to_string(),
+                "list".to_string(),
+                "table".to_string(),
+                "ip".to_string(),
+                firewall_id.to_string(),
+            ];
+            match run_cmd_capture(&command) {
+                Ok(output) => output,
+                Err(error)
+                    if error.to_string().contains("No such file or directory")
+                        || error.to_string().contains("does not exist") =>
                 {
                     return Ok(None);
                 }
-                return Err(RuntimeError::Network(format!(
-                    "capture owned nftables table: {}",
-                    stderr.trim()
-                )));
+                Err(error) => return Err(error),
             }
-            String::from_utf8(output.stdout).map_err(|error| {
-                RuntimeError::Network(format!("owned nftables state is not UTF-8: {error}"))
-            })?
         }
         NetworkBackend::Ebpf => {
             return Err(RuntimeError::Network(
@@ -7913,21 +7913,11 @@ fn run_cmd_capture(args: &[String]) -> Result<String, RuntimeError> {
     if args.is_empty() {
         return Ok(String::new());
     }
-    let (bin, rest) = parse_cmd_args(args)?;
     let cmd_str = args.join(" ");
 
     log::debug!("[exec] {}", cmd_str);
 
-    let output = Command::new(bin).args(rest).output()?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Err(RuntimeError::Network(format!(
-        "{}: {}",
-        cmd_str,
-        stderr.trim()
-    )))
+    net_exec_cmd_capture(args).map_err(|error| RuntimeError::Network(error.to_string()))
 }
 
 /// Execute a command, allowing "already exists" errors (idempotent operations).
@@ -8356,14 +8346,7 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
         "dev".to_string(),
         link.to_string(),
     ];
-    let (bin, rest) = parse_cmd_args(&verify)?;
-    let output = Command::new(bin).args(rest).output()?;
-    if !output.status.success() {
-        return Err(RuntimeError::Network(
-            "failed to verify bandwidth limit".to_string(),
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_cmd_capture(&verify)?;
     if !stdout.contains("tbf") || !qdisc_reports_rate(&stdout, &rate) {
         return Err(RuntimeError::Network(format!(
             "bandwidth limit verification failed for {link}: expected tbf rate {rate}"

@@ -9472,8 +9472,11 @@ fn handle_docker_compat_connection(
                         .lock()
                         .map_err(|e| format!("lock poisoned: {e}"))?;
                     pending.remove(id)
-                }
-                .ok_or_else(|| format!("docker: unknown container {id}"))?;
+                };
+                let Some(spec) = spec else {
+                    runtime.start(id).map_err(|error| error.to_string())?;
+                    return Ok(http_response(204, &[], "text/plain"));
+                };
                 state.persist_pending()?;
                 let start_result = handle_run(
                     runtime_dir.as_ref(),

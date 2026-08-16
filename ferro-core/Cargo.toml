@@ -42,4 +42,3 @@ libseccomp = "0.3"
 [dev-dependencies]
 httptest = "0.16"
 tempfile = { workspace = true }
-sled = "0.34"

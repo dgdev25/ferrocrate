@@ -8065,16 +8065,21 @@ fn handle_docker_compat_connection(
                         &filters,
                     )
                     .then(|| {
+                        let ipv6_config = docker_network_ipv6_config(&record);
+                        let mut ipam_config = vec![serde_json::json!({
+                            "Subnet": record.subnet,
+                            "Gateway": record.gateway
+                        })];
+                        if let Some(config) = ipv6_config {
+                            ipam_config.push(config);
+                        }
                         serde_json::json!({
                             "Name": record.name,
                             "Id": record.name,
                             "Driver": record.driver,
                             "Scope": "local",
                             "IPAM": {
-                                "Config": [{
-                                    "Subnet": record.subnet,
-                                    "Gateway": record.gateway
-                                }]
+                                "Config": ipam_config
                             }
                         })
                     })
@@ -8095,10 +8100,19 @@ fn handle_docker_compat_connection(
                         .into_iter()
                         .find(|record| record.name == name)
                         .ok_or_else(|| format!("docker: network not found: {name}"))?;
+                    let ipv6_config = docker_network_ipv6_config(&record);
+                    let mut ipam_config = vec![serde_json::json!({
+                        "Subnet": record.subnet,
+                        "Gateway": record.gateway
+                    })];
+                    if let Some(config) = ipv6_config {
+                        ipam_config.push(config);
+                    }
                     let body = serde_json::json!({
                         "Name": record.name, "Id": record.name, "Driver": record.driver,
                         "Scope": "local",
-                        "IPAM": {"Config": [{"Subnet": record.subnet, "Gateway": record.gateway}]},
+                        "EnableIPv6": record.ipv6_cidr.is_some(),
+                        "IPAM": {"Config": ipam_config},
                         "Containers": {}
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
@@ -8847,6 +8861,21 @@ fn docker_network_matches_filters(
     name_matches && driver_matches && scope_matches && type_matches
 }
 
+#[cfg(target_os = "linux")]
+fn docker_network_ipv6_config(record: &NetworkRecord) -> Option<serde_json::Value> {
+    let (gateway, prefix) = record.ipv6_cidr.as_deref()?.split_once('/')?;
+    let gateway = gateway.parse::<std::net::Ipv6Addr>().ok()?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    if prefix > 128 {
+        return None;
+    }
+    let subnet = ipv6_network_addr(gateway, prefix);
+    Some(serde_json::json!({
+        "Subnet": format!("{subnet}/{prefix}"),
+        "Gateway": gateway.to_string(),
+    }))
+}
+
 fn validate_docker_network_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
     for key in filters.keys() {
         if !matches!(key.as_str(), "name" | "driver" | "scope" | "type") {
@@ -9508,21 +9537,21 @@ mod tests {
         docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_event_payload, docker_hijack_headers,
         docker_image_apply_time_bounds, docker_image_matches_filters,
-        docker_image_prune_matches_filters, docker_network_matches_filters,
-        docker_pending_matches_filters, docker_raw_stream, docker_tail_logs, docker_top_payload,
-        docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
-        handle_build, handle_containers, handle_context, handle_exec, handle_image_prune,
-        handle_images, handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report,
-        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
-        handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
-        host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
-        parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
-        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
-        read_http_request, read_merkle_leaves, should_desktop_forward, split_path_query,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_docker_container_name, validate_docker_exec_command,
+        docker_image_prune_matches_filters, docker_network_ipv6_config,
+        docker_network_matches_filters, docker_pending_matches_filters, docker_raw_stream,
+        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
+        ensure_context_routing_available, handle_build, handle_containers, handle_context,
+        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        parse_bind_mounts, parse_build_contexts, parse_build_secrets, parse_capabilities,
+        parse_docker_bool_query, parse_docker_create_spec, parse_docker_filters,
+        parse_docker_limit_query, parse_docker_network_create_spec, parse_driver_opts,
+        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
+        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request, read_merkle_leaves,
+        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
         AiCommands, Cli, Commands, ComposeCommands, ConfigCommands, ContextCommands,
@@ -10369,6 +10398,25 @@ volumes:
                 .and_then(|ipam| ipam.config.get(1))
                 .and_then(|config| config.subnet.as_deref()),
             Some("fd42:4242::/64")
+        );
+    }
+
+    #[test]
+    fn docker_network_ipv6_config_reconstructs_subnet_from_record_gateway() {
+        let record = super::create_network_record(
+            "dual-net",
+            Some("10.88.0.0/24"),
+            Some("10.88.0.1"),
+            Some("fd42:4242::/64"),
+            None,
+        )
+        .expect("dual-stack record");
+        assert_eq!(
+            docker_network_ipv6_config(&record),
+            Some(serde_json::json!({
+                "Subnet": "fd42:4242::/64",
+                "Gateway": "fd42:4242::1",
+            }))
         );
     }
 

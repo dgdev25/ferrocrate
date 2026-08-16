@@ -1500,6 +1500,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reopened_cri_status_projects_exited_runtime_record() {
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime = CriRuntime::with_runtime_dir(
+            Arc::clone(&store),
+            root.path(),
+            test_surface_authorization(),
+        );
+        let sandbox_id = "sandbox-reopen".to_string();
+        let container_id = "cri-container-reopen".to_string();
+        let runtime_id = "runtime-container-reopen".to_string();
+        runtime.sandboxes.lock().expect("sandbox lock").insert(
+            sandbox_id.clone(),
+            SandboxRecord {
+                id: sandbox_id.clone(),
+                name: "reopen".into(),
+                uid: "uid-reopen".into(),
+                namespace: "default".into(),
+                state: "ready".into(),
+                created_at_unix: 1,
+                network_mode: "none".into(),
+                netns_name: None,
+            },
+        );
+        persist_sandboxes(
+            root.path(),
+            &runtime.sandboxes.lock().expect("sandbox lock"),
+        )
+        .expect("persist sandbox");
+        runtime.containers.lock().expect("container lock").insert(
+            container_id.clone(),
+            ContainerSpecRecord {
+                id: container_id.clone(),
+                sandbox_id: sandbox_id.clone(),
+                name: "reopen".into(),
+                image: "example.invalid/reopen:latest".into(),
+                command: vec!["true".into()],
+                env: Vec::new(),
+                runtime_id: Some(runtime_id.clone()),
+                created_at_unix: 1,
+            },
+        );
+        persist_containers(
+            root.path(),
+            &runtime.containers.lock().expect("container lock"),
+        )
+        .expect("persist container");
+
+        let runtime_store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            root.path().join("containers.db"),
+        )
+        .expect("runtime store");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": runtime_id,
+                "pid": 0,
+                "image": "example.invalid/reopen:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited",
+                "last_exit_code": 17
+            }))
+            .expect("runtime record");
+        runtime_store.put(&record).expect("persist exited record");
+        drop(runtime);
+
+        let reopened =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        let status = reopened
+            .container_status(authenticated(ContainerStatusRequest {
+                container_id,
+                verbose: false,
+            }))
+            .await
+            .expect("reopened status")
+            .into_inner()
+            .status
+            .expect("status payload");
+        assert_eq!(status.state, ContainerState::Exited as i32);
+        assert_eq!(status.exit_code, 17);
+        assert_eq!(status.reason, "exited");
+    }
+
+    #[tokio::test]
     async fn version_returns_correct_runtime_info() {
         let runtime = create_test_runtime().await;
         let request = Request::new(VersionRequest::default());

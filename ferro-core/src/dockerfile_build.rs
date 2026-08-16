@@ -76,6 +76,7 @@ pub struct ImageBuildPlan {
     base_digests: Vec<(String, Option<String>)>,
     named_contexts: HashMap<String, PathBuf>,
     stage_dependencies: Vec<Vec<usize>>,
+    stage_batches: Vec<Vec<usize>>,
     plan_digest: [u8; 32],
 }
 
@@ -95,6 +96,12 @@ impl ImageBuildPlan {
     /// scheduled concurrently by a future graph executor.
     pub fn stage_dependencies(&self) -> &[Vec<usize>] {
         &self.stage_dependencies
+    }
+
+    /// Return deterministic topological batches. Stages in one batch depend
+    /// only on earlier batches and are candidates for concurrent execution.
+    pub fn stage_batches(&self) -> &[Vec<usize>] {
+        &self.stage_batches
     }
 }
 
@@ -139,6 +146,7 @@ pub fn prepare_dockerfile_build_with_contexts(
     )?;
     let canonical_tag = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
     let stage_dependencies = build_stage_dependency_graph(&stages, named_contexts)?;
+    let stage_batches = build_stage_execution_batches(&stage_dependencies)?;
     let mut base_digests = Vec::with_capacity(stages.len());
     for stage in &stages {
         if stage.base.eq_ignore_ascii_case("scratch") {
@@ -188,6 +196,7 @@ pub fn prepare_dockerfile_build_with_contexts(
         base_digests,
         named_contexts: canonicalize_named_contexts(named_contexts)?,
         stage_dependencies,
+        stage_batches,
         plan_digest: hash.finalize().into(),
     })
 }
@@ -1424,6 +1433,38 @@ fn build_stage_dependency_graph(
         graph.push(dependencies);
     }
     Ok(graph)
+}
+
+fn build_stage_execution_batches(
+    dependencies: &[Vec<usize>],
+) -> Result<Vec<Vec<usize>>, DockerfileBuildError> {
+    let stage_count = dependencies.len();
+    let mut completed = vec![false; stage_count];
+    let mut batches = Vec::new();
+    while completed.iter().any(|done| !done) {
+        let mut ready = dependencies
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !completed[*index])
+            .filter(|(_, required)| {
+                required
+                    .iter()
+                    .all(|dependency| *dependency < stage_count && completed[*dependency])
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        ready.sort_unstable();
+        if ready.is_empty() {
+            return Err(DockerfileBuildError::Invalid(
+                "Dockerfile stage dependency graph contains a cycle".to_string(),
+            ));
+        }
+        for index in &ready {
+            completed[*index] = true;
+        }
+        batches.push(ready);
+    }
+    Ok(batches)
 }
 
 fn parse_from(value: &str) -> Result<(String, Option<String>), DockerfileBuildError> {
@@ -2762,10 +2803,11 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         build_cache_path, build_from_dockerfile_with_store_and_compression,
-        build_stage_dependency_graph, dockerignore_matches, export_build_cache,
-        file_matches_digest, import_build_cache, load_build_cache, parse_limit_value, parse_run,
-        parse_stages, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
-        prune_build_cache, save_build_cache, validate_mount_target, BuildCacheEntry,
+        build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
+        export_build_cache, file_matches_digest, import_build_cache, load_build_cache,
+        parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, save_build_cache,
+        validate_mount_target, BuildCacheEntry,
     };
     use std::collections::HashMap;
 
@@ -3140,6 +3182,10 @@ mod tests {
         let stages = parse_stages(dockerfile).expect("stages parse");
         let graph = build_stage_dependency_graph(&stages, &HashMap::new()).expect("graph");
         assert_eq!(graph, vec![vec![], vec![], vec![0, 1]]);
+        assert_eq!(
+            build_stage_execution_batches(&graph).expect("batches"),
+            vec![vec![0, 1], vec![2]]
+        );
 
         let forward = parse_stages(
             "FROM scratch AS first\nCOPY --from=second /x /x\nFROM scratch AS second\n",
@@ -3148,6 +3194,7 @@ mod tests {
         let error = build_stage_dependency_graph(&forward, &HashMap::new())
             .expect_err("forward stage edge must fail");
         assert!(error.to_string().contains("earlier stage"));
+        assert!(build_stage_execution_batches(&[vec![1], vec![0]]).is_err());
     }
 
     #[test]

@@ -70,11 +70,27 @@ else
 fi
 
 prerequisite_failures=0
-for helper in newuidmap newgidmap slirp4netns; do
-  if command -v "$helper" >/dev/null 2>&1; then
-    echo "rootless.install.$helper=pass"
-  else
+check_helper() {
+  local helper="$1"
+  local path owner
+  path="$(command -v "$helper" || true)"
+  if [[ -z "$path" ]]; then
     echo "rootless.install.$helper=missing"
+    return 1
+  fi
+  if [[ -L "$path" || ! -f "$path" ]]; then
+    echo "rootless.install.$helper=unsafe-not-regular"
+    return 1
+  fi
+  owner="$(stat -c '%u' -- "$path" 2>/dev/null || true)"
+  if [[ "$owner" != "0" ]] || find "$path" -prune -perm /022 -print -quit | grep -q .; then
+    echo "rootless.install.$helper=unsafe-owner-or-mode"
+    return 1
+  fi
+  echo "rootless.install.$helper=pass"
+}
+for helper in newuidmap newgidmap slirp4netns; do
+  if ! check_helper "$helper"; then
     prerequisite_failures=1
   fi
 done

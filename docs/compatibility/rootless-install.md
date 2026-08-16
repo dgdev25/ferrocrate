@@ -4,7 +4,9 @@
 host helpers. It reports the prerequisites that determine whether a rootless
 deployment can be qualified:
 
-- `newuidmap`, `newgidmap`, and `slirp4netns` availability;
+- `newuidmap`, `newgidmap`, and `slirp4netns` availability. Each helper must
+  resolve to a regular, non-symlink executable owned by root and not writable
+  by group/other;
 - a subordinate-ID range for the invoking user in `/etc/subuid` and `/etc/subgid`;
 - a mounted cgroup-v2 hierarchy;
 - enabled user namespaces; and

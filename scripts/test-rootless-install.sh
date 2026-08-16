@@ -55,4 +55,18 @@ fi
 grep -q 'strict prerequisite check failed' "$tmp_home/strict.txt"
 test ! -e "$strict_home/config/systemd/user/ferrocrate.service"
 
+unsafe_bin="$tmp_home/unsafe-bin"
+mkdir -p "$unsafe_bin"
+for helper in newuidmap newgidmap slirp4netns; do
+  ln -s /bin/true "$unsafe_bin/$helper"
+done
+if PATH="$unsafe_bin:/usr/bin:/bin" HOME="$tmp_home" \
+  XDG_CONFIG_HOME="$tmp_home/config-unsafe" XDG_RUNTIME_DIR="$runtime_dir" \
+  "$installer" --binary /bin/true --socket "$runtime_dir/unsafe.sock" --strict --dry-run \
+  >"$tmp_home/unsafe-helper.txt" 2>&1; then
+  echo "unsafe helper prerequisite unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -q 'unsafe-not-regular' "$tmp_home/unsafe-helper.txt"
+
 echo "rootless installer regression checks passed"

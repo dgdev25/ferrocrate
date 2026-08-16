@@ -4,13 +4,15 @@ set -euo pipefail
 CHANNEL="${CHANNEL:-}"
 VERSION="${VERSION:-}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-dist/release}"
+REQUIRE_SIGNATURES=0
 
 usage() {
   cat <<USAGE
-Usage: verify-release-channel-artifacts.sh --channel <public|paid> --version <tag> [--artifact-dir <path>]
+Usage: verify-release-channel-artifacts.sh --channel <public|paid> --version <tag> [--artifact-dir <path>] [--require-signatures]
 
 Checks:
   - Expected checksum file exists and contains the packaged archive
+  - --require-signatures additionally verifies a detached GPG signature for the archive
   - Public channel archive contains CLI but not desktop binary
   - Paid channel archive contains both CLI and desktop binaries
 USAGE
@@ -37,6 +39,10 @@ parse_args() {
       --artifact-dir)
         ARTIFACT_DIR="${2:-}"
         shift 2
+        ;;
+      --require-signatures)
+        REQUIRE_SIGNATURES=1
+        shift
         ;;
       -h|--help)
         usage
@@ -120,6 +126,21 @@ main() {
     exit 1
   fi
 
+  if ((REQUIRE_SIGNATURES)); then
+    command -v gpg >/dev/null 2>&1 || {
+      echo "--require-signatures needs gpg" >&2
+      exit 1
+    }
+    [[ -f "${archive_path}.asc" ]] || {
+      echo "missing detached signature: ${archive_path}.asc" >&2
+      exit 1
+    }
+    gpg --verify "${archive_path}.asc" "$archive_path" >/dev/null || {
+      echo "detached signature verification failed: ${archive_path}.asc" >&2
+      exit 1
+    }
+  fi
+
   local entries
   entries="$(list_archive_entries "$archive_path")"
 
@@ -140,7 +161,7 @@ main() {
     }
   fi
 
-  echo "release artifact verification passed (channel=${CHANNEL}, version=${VERSION})"
+  echo "release artifact verification passed (channel=${CHANNEL}, version=${VERSION}, signatures=${REQUIRE_SIGNATURES})"
 }
 
 main "$@"

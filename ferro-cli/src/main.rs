@@ -6587,6 +6587,7 @@ fn handle_docker_compat_connection(
     let mut event_request: Option<(String, String)> = None;
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
+    let mut stats_follow: Option<String> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -6732,21 +6733,13 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stats");
                 let stats = runtime.stats(id).map_err(|err| err.to_string())?;
-                let body = serde_json::json!({
-                    "memory_stats": {
-                        "usage": stats.memory_current,
-                        "limit": stats.memory_max
-                    },
-                    "pids_stats": {
-                        "current": stats.pids_current
-                    },
-                    "cpu_stats": {
-                        "cpu_usage": {
-                            "total_usage": stats.cpu_usage_usec
-                        }
-                    }
-                });
-                http_response(200, body.to_string().as_bytes(), "application/json")
+                if query.get("stream").is_some_and(|value| value == "1") {
+                    stats_follow = Some(id.to_string());
+                    docker_chunked_headers(200, "application/json")
+                } else {
+                    let body = docker_stats_payload(&stats);
+                    http_response(200, body.to_string().as_bytes(), "application/json")
+                }
             }
             ("POST", "/containers/create") => {
                 let name = query.get("name").cloned();
@@ -7196,6 +7189,12 @@ fn handle_docker_compat_connection(
         stream_docker_logs(&mut stream, &follow_runtime, &id, tail.as_deref())?;
         return Ok(());
     }
+    if let Some(id) = stats_follow {
+        let follow_runtime =
+            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        stream_docker_stats(&mut stream, &follow_runtime, &id)?;
+        return Ok(());
+    }
     if let Some((method, path)) = event_request {
         let status = response
             .get(..)
@@ -7583,6 +7582,32 @@ fn stream_docker_logs(
         }
         stream.flush().map_err(|error| error.to_string())?;
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_stats_payload(stats: &ferro_core::cgroups::CgroupStats) -> serde_json::Value {
+    serde_json::json!({
+        "memory_stats": {"usage": stats.memory_current, "limit": stats.memory_max},
+        "pids_stats": {"current": stats.pids_current},
+        "cpu_stats": {"cpu_usage": {"total_usage": stats.cpu_usage_usec}}
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn stream_docker_stats(
+    stream: &mut UnixStream,
+    runtime: &ContainerRuntime,
+    id: &str,
+) -> Result<(), String> {
+    loop {
+        let stats = runtime.stats(id).map_err(|error| error.to_string())?;
+        let mut body =
+            serde_json::to_vec(&docker_stats_payload(&stats)).map_err(|error| error.to_string())?;
+        body.push(b'\n');
+        write_chunk(stream, &body)?;
+        stream.flush().map_err(|error| error.to_string())?;
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
 

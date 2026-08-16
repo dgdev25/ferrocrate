@@ -6662,7 +6662,19 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/containers/json") => {
-                let records = runtime.list().map_err(|err| err.to_string())?;
+                let all = query
+                    .get("all")
+                    .is_some_and(|value| matches!(value.as_str(), "1" | "true"));
+                let limit = query
+                    .get("limit")
+                    .and_then(|value| value.parse::<usize>().ok());
+                let mut records = runtime.list().map_err(|err| err.to_string())?;
+                if !all {
+                    records.retain(|record| matches!(record.status.as_str(), "running" | "paused"));
+                }
+                if let Some(limit) = limit {
+                    records.truncate(limit);
+                }
                 let entries: Vec<serde_json::Value> = records
                     .iter()
                     .map(|record| {

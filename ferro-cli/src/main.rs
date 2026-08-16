@@ -7364,10 +7364,17 @@ fn docker_event_kind(method: &str, path: &str) -> Option<(&'static str, String)>
 #[cfg(target_os = "linux")]
 fn docker_event_resource(path: &str) -> Option<String> {
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
-    segments
+    let resource = segments
         .windows(2)
         .find(|pair| matches!(pair[0], "containers" | "images" | "networks" | "volumes"))
-        .map(|pair| pair[1].to_string())
+        .map(|pair| pair[1])?;
+    if matches!(
+        resource,
+        "create" | "prune" | "json" | "list" | "build" | "pull" | "push"
+    ) {
+        return None;
+    }
+    Some(resource.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -9535,8 +9542,8 @@ mod tests {
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
         context_endpoint_available, desktop_forward_enabled, discover_rootless_socket, dispatch,
         docker_chunked_headers, docker_container_apply_time_bounds,
-        docker_container_matches_filters, docker_event_payload, docker_hijack_headers,
-        docker_image_apply_time_bounds, docker_image_matches_filters,
+        docker_container_matches_filters, docker_event_payload, docker_event_resource,
+        docker_hijack_headers, docker_image_apply_time_bounds, docker_image_matches_filters,
         docker_image_prune_matches_filters, docker_network_ipv6_config,
         docker_network_matches_filters, docker_pending_matches_filters, docker_raw_stream,
         docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
@@ -11444,6 +11451,20 @@ volumes:
         let mut scope_query = HashMap::new();
         scope_query.insert("scope".to_string(), "swarm".to_string());
         assert!(reopened.query(&scope_query).unwrap().is_empty());
+    }
+
+    #[test]
+    fn docker_event_collection_routes_do_not_fake_resource_ids() {
+        assert_eq!(docker_event_resource("/containers/create"), None);
+        assert_eq!(docker_event_resource("/networks/prune"), None);
+        assert_eq!(
+            docker_event_resource("/images/i1/tag"),
+            Some("i1".to_string())
+        );
+        assert_eq!(
+            docker_event_resource("/volumes/volume-a"),
+            Some("volume-a".to_string())
+        );
     }
 
     #[test]

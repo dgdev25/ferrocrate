@@ -11264,6 +11264,51 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     }
 
     #[test]
+    fn apparmor_strict_mode_fails_closed_when_tools_are_missing() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("FERROCRATE_APPARMOR", "1");
+            std::env::remove_var("FERROCRATE_MAC_PERMISSIVE");
+            std::env::set_var("PATH", "");
+        }
+        let root = tempfile::tempdir().expect("runtime dir");
+        let error = super::apply_apparmor_if_enabled(root.path(), "strict-mac", &["true".into()])
+            .expect_err("strict AppArmor must fail without tools");
+        assert!(error.to_string().contains("apparmor_parser"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_APPARMOR");
+            if let Some(path) = previous_path {
+                std::env::set_var("PATH", path);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[test]
+    fn selinux_strict_mode_fails_closed_when_runcon_is_missing() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("FERROCRATE_SELINUX", "1");
+            std::env::remove_var("FERROCRATE_MAC_PERMISSIVE");
+            std::env::set_var("PATH", "");
+        }
+        let error = super::apply_selinux_if_enabled(&["true".into()])
+            .expect_err("strict SELinux must fail without runcon");
+        assert!(error.to_string().contains("runcon"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_SELINUX");
+            if let Some(path) = previous_path {
+                std::env::set_var("PATH", path);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[test]
     fn selinux_type_validation_rejects_invalid_chars() {
         let err = super::validate_selinux_type("container_t;bad").expect_err("invalid type");
         assert!(err.to_string().contains("invalid characters"));

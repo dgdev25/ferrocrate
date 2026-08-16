@@ -113,6 +113,7 @@ struct CreationRollback {
     journal: NetworkMutationJournal,
     cgroup_name: Option<String>,
     cgroup_root: PathBuf,
+    slirp_process: Option<(u32, u64)>,
     committed: bool,
     operation_id: Option<[u8; 16]>,
     planned_resources: BTreeMap<String, String>,
@@ -403,6 +404,7 @@ impl CreationRollback {
             journal: NetworkMutationJournal::default(),
             cgroup_name: None,
             cgroup_root,
+            slirp_process: None,
             committed: false,
             operation_id: creation_provenance.creator_operation_id,
             planned_resources: Default::default(),
@@ -454,6 +456,7 @@ impl CreationRollback {
             journal: NetworkMutationJournal::default(),
             cgroup_name: pending.cgroup_name,
             cgroup_root,
+            slirp_process: None,
             committed: false,
             operation_id: pending.operation_id,
             planned_resources: pending.planned_resources,
@@ -723,6 +726,13 @@ impl CreationRollback {
 
     /// Explicitly roll back all tracked resources.
     fn rollback(&mut self) {
+        if let Some((pid, start_time)) = self.slirp_process.take() {
+            if process_start_time_for_pid(pid) == Some(start_time) {
+                if let Err(error) = kill_pid(pid) {
+                    log::warn!("[rollback] failed to stop slirp4netns helper {pid}: {error}");
+                }
+            }
+        }
         let typed_cleanup_failure = self.cleanup_typed_resources();
         let kernel_ops = Arc::clone(&self.kernel_ops);
         let test_network_cleanup = kernel_ops.cleanup_test_network(self);
@@ -2746,11 +2756,28 @@ impl ContainerRuntime {
             .reached("run", LifecyclePhasePoint::SpawnPrepared)?;
 
         if use_slirp {
-            if let Err(e) = start_slirp4netns(child_id) {
-                // Kill the process and roll back
-                let _ = kill_pid(child_id);
-                rollback.rollback();
-                return Err(e);
+            match start_slirp4netns(child_id) {
+                Ok(helper) => {
+                    if let Some(start_time) = process_start_time_for_pid(helper.id()) {
+                        rollback.slirp_process = Some((helper.id(), start_time));
+                    } else {
+                        let _ = kill_pid(helper.id());
+                        let _ = kill_pid(child_id);
+                        rollback.rollback();
+                        return Err(RuntimeError::Io(std::io::Error::other(
+                            "slirp4netns helper has no stable process start time",
+                        )));
+                    }
+                    // Dropping the handle intentionally leaves the helper
+                    // attached to the container netns; rollback retains an
+                    // exact PID/start-time identity for cleanup on failure.
+                    drop(helper);
+                }
+                Err(e) => {
+                    let _ = kill_pid(child_id);
+                    rollback.rollback();
+                    return Err(e);
+                }
             }
         }
         if security_ebpf_monitor_enabled() {
@@ -7711,7 +7738,7 @@ fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), Run
     Ok(())
 }
 
-fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
+fn start_slirp4netns(pid: u32) -> Result<Child, RuntimeError> {
     let tap_name = format!("tap{pid}");
     let tap_name = if tap_name.len() > 15 {
         tap_name[..15].to_string()
@@ -7732,15 +7759,23 @@ fn start_slirp4netns(pid: u32) -> Result<(), RuntimeError> {
         }
     };
     if cmd.is_empty() {
-        return Ok(());
+        return Err(RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "slirp4netns command is empty",
+        )));
     }
     let (bin, rest) = parse_cmd_args(&cmd)?;
-    Command::new(bin)
+    let mut child = Command::new(bin)
         .args(rest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    Ok(())
+    if let Some(status) = child.try_wait()? {
+        return Err(RuntimeError::Io(std::io::Error::other(format!(
+            "slirp4netns exited before setup completed: {status}"
+        ))));
+    }
+    Ok(child)
 }
 
 fn rootless_netns_enabled() -> bool {

@@ -129,7 +129,7 @@ PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
 - [ ] Optimize image extraction, network setup, memory overhead, and parallel operations against those baselines.
 - [ ] Add sustained-load tests (100+ containers), resource exhaustion, daemon crash, OOM, interrupted network, disk-full, and kernel-effect fault matrices; `scripts/reliability-matrix.sh` now aggregates those suites plus a dedicated 100-process lifecycle stress case, while container-scale sustained load and host-kernel chaos remain open.
 - [ ] Verify AI-disabled graceful degradation and ensure AI monitoring overhead stays within the published budget.
-- [ ] Add backup/restore, upgrade/downgrade, disaster-recovery, and capacity-planning tests and operator runbooks. Manager SQLite restore now has executable integrity/epoch/credential-rotation tests and an operator runbook in `docs/operations/disaster-recovery.md`; cross-host failover, retention, capacity alarms, and fault-injection qualification remain open.
+- [ ] Add backup/restore, upgrade/downgrade, disaster-recovery, and capacity-planning tests and operator runbooks. Manager SQLite restore now has executable integrity/epoch/credential-rotation tests; `scripts/capacity-plan.sh` provides an atomic, fixtureable CPU/memory/PID/disk planning gate with regression coverage in `scripts/test-capacity-plan.sh`; cross-host failover, retention, capacity alarms, and fault-injection qualification remain open.
 
 ### 9. AI runtime completion (practical scope)
 

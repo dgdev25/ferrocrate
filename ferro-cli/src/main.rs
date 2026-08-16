@@ -4147,7 +4147,11 @@ fn parse_ipv6_cidr(cidr: &str) -> Result<(std::net::Ipv6Addr, u8), String> {
 }
 
 fn ipv6_network_addr(addr: std::net::Ipv6Addr, prefix: u8) -> std::net::Ipv6Addr {
-    let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
     std::net::Ipv6Addr::from(u128::from(addr) & mask)
 }
 
@@ -4230,7 +4234,9 @@ fn create_network_record(
                 None => default_ipv6_gateway(addr, prefix),
             };
             if !ipv6_in_subnet(gateway, addr, prefix) {
-                return Err(format!("network: IPv6 gateway {gateway} is outside subnet {addr}/{prefix}"));
+                return Err(format!(
+                    "network: IPv6 gateway {gateway} is outside subnet {addr}/{prefix}"
+                ));
             }
             Some(format!("{gateway}/{prefix}"))
         }
@@ -4332,11 +4338,12 @@ fn handle_network_authorized(
         cli_network_kernel().as_ref(),
     )
     .map_err(|error| format!("network recovery failed: {error}"))?;
-    if let Some(entry) = recovery
-        .entries
-        .iter()
-        .find(|entry| matches!(entry.verdict, crate::network_lifecycle::NetworkRecoveryVerdict::Quarantined))
-    {
+    if let Some(entry) = recovery.entries.iter().find(|entry| {
+        matches!(
+            entry.verdict,
+            crate::network_lifecycle::NetworkRecoveryVerdict::Quarantined
+        )
+    }) {
         return Err(format!(
             "network recovery quarantined {}: {}",
             entry.network,
@@ -4467,8 +4474,10 @@ impl crate::network_lifecycle::NetworkKernel for CliKernelProxy {
     fn observe_bridge(
         &self,
         name: &str,
-    ) -> Result<Option<crate::network_lifecycle::BridgeIdentity>, crate::network_lifecycle::NetworkKernelError>
-    {
+    ) -> Result<
+        Option<crate::network_lifecycle::BridgeIdentity>,
+        crate::network_lifecycle::NetworkKernelError,
+    > {
         crate::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.observe_bridge(name))
     }
 }
@@ -4478,7 +4487,8 @@ fn execute_network_create(
     record: &NetworkRecord,
     permit: SurfacePermit,
 ) -> Result<(), String> {
-    let create = NetworkCreateRecord::from_record(record.clone()).map_err(|error| error.to_string())?;
+    let create =
+        NetworkCreateRecord::from_record(record.clone()).map_err(|error| error.to_string())?;
     crate::network_lifecycle::create_authorized(
         runtime_dir,
         &create,
@@ -4504,9 +4514,7 @@ fn execute_network_remove(
     {
         Some(identity) => identity,
         None => {
-            permit
-                .finish(false)
-                .map_err(|error| error.to_string())?;
+            permit.finish(false).map_err(|error| error.to_string())?;
             return Err(format!(
                 "network: missing committed bridge identity for {}",
                 record.name
@@ -6854,9 +6862,9 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     use super::{
-        build_health_config, build_limits, desktop_forward_enabled, dispatch, effective_readonly,
-        handle_build, handle_containers, handle_exec, handle_image_prune, handle_images,
-        bind_run_network, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
+        bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
+        effective_readonly, handle_build, handle_containers, handle_exec, handle_image_prune,
+        handle_images, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
         handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
         handle_stop, handle_unpause, handle_volume, normalize_docker_api_path, parse_bind_mounts,
         parse_capabilities, parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
@@ -7361,20 +7369,21 @@ mod tests {
     #[test]
     fn bind_run_network_named_keeps_bridge_mode_and_logical_association() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let record = super::create_network_record(
-            "app-net",
-            Some("10.88.0.0/24"),
-            None,
-            None,
-            None,
-        )
-            .expect("record");
+        let record =
+            super::create_network_record("app-net", Some("10.88.0.0/24"), None, None, None)
+                .expect("record");
         super::save_networks(temp.path(), &[record.clone()]).expect("save");
         let binding = bind_run_network(temp.path(), "app-net", None, None).expect("bind");
         assert_eq!(binding.mode, "bridge");
         assert_eq!(binding.association.as_deref(), Some("app-net"));
-        assert_eq!(binding.bridge_name.as_deref(), Some(record.bridge_name.as_str()));
-        assert_eq!(binding.bridge_cidr.as_deref(), Some(record.bridge_cidr.as_str()));
+        assert_eq!(
+            binding.bridge_name.as_deref(),
+            Some(record.bridge_name.as_str())
+        );
+        assert_eq!(
+            binding.bridge_cidr.as_deref(),
+            Some(record.bridge_cidr.as_str())
+        );
     }
 
     #[test]
@@ -7555,9 +7564,7 @@ mod tests {
 
     fn configured_cli_runtime(mode: &str) -> tempfile::TempDir {
         use ed25519_dalek::SigningKey;
-        use ferro_core::authorization::admission::{
-            AdmissionArtifact, AdmissionSnapshotManifest,
-        };
+        use ferro_core::authorization::admission::{AdmissionArtifact, AdmissionSnapshotManifest};
         use ferro_core::witness::{
             Checkpoint, CheckpointKind, FlushedHead, Invocation, JournalConfig, JournalMode,
             PrincipalSummary, ResourceSummary, WitnessAction, WitnessJournal, WitnessOutcome,
@@ -7578,7 +7585,12 @@ mod tests {
         std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o700))
             .expect("protect authorization directory");
         let journal_id = [0x44u8; 16];
-        let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
         let protected = |path: &std::path::Path, bytes: &[u8]| {
             std::fs::write(path, bytes).expect("write protected fixture");
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -7588,7 +7600,10 @@ mod tests {
             &auth.join("active-policy.toml"),
             format!("schema_version = 1\ngeneration = 1\nmode = \"{mode}\"\n").as_bytes(),
         );
-        protected(&auth.join("journal-id"), format!("{}\n", hex(&journal_id)).as_bytes());
+        protected(
+            &auth.join("journal-id"),
+            format!("{}\n", hex(&journal_id)).as_bytes(),
+        );
 
         let key = SigningKey::from_bytes(&[0x54; 32]);
         let now = std::time::SystemTime::now()
@@ -7878,10 +7893,7 @@ mod tests {
             &authorization,
         )
         .expect_err("OutcomeUnknown/pending lifecycle must block replacement");
-        assert!(
-            !replacement_err.is_empty(),
-            "replacement must fail closed"
-        );
+        assert!(!replacement_err.is_empty(), "replacement must fail closed");
         assert_eq!(
             super::network_kernel_effect_count(),
             effects_before_replacement,
@@ -7900,9 +7912,7 @@ mod tests {
             crate::network_lifecycle::NetworkLifecyclePhase::IdentityObserved
         );
         assert!(
-            super::load_networks(temp.path())
-                .expect("load")
-                .is_empty(),
+            super::load_networks(temp.path()).expect("load").is_empty(),
             "blocked replacement must not publish a store record"
         );
 
@@ -7931,7 +7941,10 @@ mod tests {
         let reconciled = authorization
             .reconcile_pending(|pending| (*pending.recipe().observation_digest(), true))
             .expect("reconcile OutcomeUnknown surface op");
-        assert_eq!(reconciled, 1, "exactly one OutcomeUnknown surface op recovered");
+        assert_eq!(
+            reconciled, 1,
+            "exactly one OutcomeUnknown surface op recovered"
+        );
 
         let effects_before_duplicate = super::network_kernel_effect_count();
         let after_recovery = handle_network(
@@ -8064,20 +8077,21 @@ mod tests {
         )
         .expect("container store");
         for (id, status) in [("stopped-assoc", "stopped"), ("exited-assoc", "exited")] {
-            let mut record = serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
-                serde_json::json!({
-                    "id": id,
-                    "pid": 0,
-                    "image": "example.invalid/app:latest",
-                    "command": ["true"],
-                    "created_at_unix": 1,
-                    "stdout_path": "",
-                    "stderr_path": "",
-                    "status": status,
-                    "network_name": "assoc-net"
-                }),
-            )
-            .expect("container record");
+            let mut record =
+                serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
+                    serde_json::json!({
+                        "id": id,
+                        "pid": 0,
+                        "image": "example.invalid/app:latest",
+                        "command": ["true"],
+                        "created_at_unix": 1,
+                        "stdout_path": "",
+                        "stderr_path": "",
+                        "status": status,
+                        "network_name": "assoc-net"
+                    }),
+                )
+                .expect("container record");
             record.status = status.to_string();
             store.put(&record).expect("put associated container");
         }

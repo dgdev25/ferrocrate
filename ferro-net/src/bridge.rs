@@ -315,18 +315,15 @@ pub fn observe_bridge_identity(name: &str) -> Result<Option<BridgeObservation>, 
     if trimmed.is_empty() || trimmed == "null" {
         return Ok(None);
     }
-    let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
-        ExecError::CommandFailed {
+    let parsed: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| ExecError::CommandFailed {
             cmd: "parse `ip -j` output".to_string(),
             stderr: e.to_string(),
-        }
-    })?;
-    let entries = parsed
-        .as_array()
-        .ok_or_else(|| ExecError::CommandFailed {
-            cmd: "expected array from `ip -j`".to_string(),
-            stderr: String::new(),
         })?;
+    let entries = parsed.as_array().ok_or_else(|| ExecError::CommandFailed {
+        cmd: "expected array from `ip -j`".to_string(),
+        stderr: String::new(),
+    })?;
     if entries.is_empty() {
         return Ok(None);
     }

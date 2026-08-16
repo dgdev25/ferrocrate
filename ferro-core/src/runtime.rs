@@ -6971,7 +6971,8 @@ fn cleanup_network_resources(
         (None, None) => {}
         (Some(backend), Some(ownership)) => {
             validate_network_ownership(container_id, backend, ownership)?;
-            let namespace_verified = verify_container_kernel_ownership(netns_name, ownership, false)?;
+            let namespace_verified =
+                verify_container_kernel_ownership(netns_name, ownership, false)?;
             match backend {
                 NetworkBackend::Ebpf => {
                     if Path::new(ownership.ebpf_pin_path.as_deref().unwrap_or_default()).exists() {

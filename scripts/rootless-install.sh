@@ -8,23 +8,26 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--dry-run]
+Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--upgrade] [--dry-run]
 
 Installs ~/.local/bin/ferrocrate and a systemd user unit. --enable starts the
-unit immediately when systemd --user is available. Use --dry-run to inspect
-the plan without writing files.
+unit immediately when systemd --user is available. --upgrade atomically replaces
+an existing per-user binary and unit. Use --dry-run to inspect the plan without
+writing files.
 EOF
 }
 
 binary=""
 socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ferrocrate.sock"
 enable=0
+upgrade=0
 dry_run=0
 while (($#)); do
   case "$1" in
     --binary) binary="${2:?missing path after --binary}"; shift 2 ;;
     --socket) socket="${2:?missing path after --socket}"; shift 2 ;;
     --enable) enable=1; shift ;;
+    --upgrade) upgrade=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -53,6 +56,11 @@ echo "rootless.install.user=$user"
 echo "rootless.install.uid=$uid"
 echo "rootless.install.binary=$binary"
 echo "rootless.install.socket=$socket"
+if ((upgrade)); then
+  echo "rootless.install.mode=upgrade"
+else
+  echo "rootless.install.mode=install"
+fi
 
 for helper in newuidmap newgidmap slirp4netns; do
   if command -v "$helper" >/dev/null 2>&1; then
@@ -84,8 +92,18 @@ if ((dry_run)); then
   exit 0
 fi
 
-install -D -m 0755 "$binary" "$HOME/.local/bin/ferrocrate"
-install -D -m 0644 <(printf '%s' "$unit_content") "$unit_path"
+install -d -m 0755 "$HOME/.local/bin" "$unit_dir"
+binary_tmp="$(mktemp "$HOME/.local/bin/.ferrocrate.new.XXXXXX")"
+unit_tmp="$(mktemp "$unit_dir/.ferrocrate.service.new.XXXXXX")"
+cleanup() {
+  rm -f -- "$binary_tmp" "$unit_tmp"
+}
+trap cleanup EXIT
+install -m 0755 "$binary" "$binary_tmp"
+install -m 0644 <(printf '%s' "$unit_content") "$unit_tmp"
+mv -f -- "$binary_tmp" "$HOME/.local/bin/ferrocrate"
+mv -f -- "$unit_tmp" "$unit_path"
+trap - EXIT
 echo "rootless.install.binary_path=$HOME/.local/bin/ferrocrate"
 echo "rootless.install.unit_path=$unit_path"
 

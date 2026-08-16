@@ -24,7 +24,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Model types that can be trained
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -331,6 +331,42 @@ fn artifact_sha256(path: &Path) -> Result<String, TrainingError> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+fn atomic_temp_path(path: &Path) -> Result<PathBuf, TrainingError> {
+    let parent = path.parent().ok_or_else(|| {
+        TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        ))
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no file name",
+        ))
+    })?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(parent.join(format!(
+        ".{}.tmp.{}.{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        nanos
+    )))
+}
+
+fn sync_parent(path: &Path) -> Result<(), TrainingError> {
+    let parent = path.parent().ok_or_else(|| {
+        TrainingError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        ))
+    })?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 /// Model training pipeline
 pub struct TrainingPipeline {
     config: TrainingConfig,
@@ -532,7 +568,9 @@ impl TrainingPipeline {
             .join(model_type.to_string())
             .join(format!("model_v{}.bin", version));
 
-        // Save model (placeholder - actual serialization depends on model type)
+        // Publish the self-describing artifact atomically before its digest is
+        // recorded in version metadata. A torn artifact must never become the
+        // active model after a crash.
         self.save_model(&model_path, model_type, &trained)?;
 
         if let Some(previous) = self
@@ -658,8 +696,20 @@ impl TrainingPipeline {
             "artifact": model.artifact,
         });
 
-        let file = File::create(path)?;
-        serde_json::to_writer(file, &metadata)?;
+        let temporary = atomic_temp_path(path)?;
+        let result = (|| -> Result<(), TrainingError> {
+            let file = File::create(&temporary)?;
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, &metadata)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            fs::rename(&temporary, path)?;
+            sync_parent(path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
 
         Ok(())
     }
@@ -1297,7 +1347,17 @@ pub fn handle_import_command(
     if let Some(parent) = model_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(input, &model_path)?;
+    let temporary = atomic_temp_path(&model_path)?;
+    let result = (|| -> Result<(), TrainingError> {
+        fs::copy(input, &temporary)?;
+        File::open(&temporary)?.sync_all()?;
+        fs::rename(&temporary, &model_path)?;
+        sync_parent(&model_path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
 
     if let Some(versions) = pipeline.versions.get_mut(&model_type) {
         for v in versions.iter_mut() {

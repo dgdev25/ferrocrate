@@ -4170,6 +4170,138 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Ok(())
     };
     let result = match command {
+        Commands::Run {
+            image,
+            name,
+            network,
+            network_backend,
+            bind_mounts,
+            tmpfs_mounts,
+            read_only_rootfs,
+            read_write_rootfs: _,
+            no_new_privs,
+            profile,
+            env,
+            labels,
+            annotations,
+            user,
+            workdir,
+            entrypoint,
+            publish,
+            volumes,
+            cap_add,
+            health_cmd,
+            health_interval,
+            health_timeout,
+            health_retries,
+            health_start_period,
+            restart_policy,
+            rm,
+            bridge_cidr,
+            bridge_name,
+            net_limit,
+            memory_max,
+            cpu_quota,
+            cpu_period,
+            pids_max,
+            ai_model,
+            cmd,
+        } => (|| -> Result<(), String> {
+            let unsupported = [
+                (
+                    *network_backend != "ebpf",
+                    "--network-backend (remote Docker uses the daemon backend)",
+                ),
+                (!tmpfs_mounts.is_empty(), "--tmpfs"),
+                (*read_only_rootfs, "--read-only"),
+                (*no_new_privs, "--no-new-privileges"),
+                (*profile != "dev", "--profile"),
+                (!annotations.is_empty(), "--annotation"),
+                (!cap_add.is_empty(), "--cap-add"),
+                (
+                    health_cmd.is_some()
+                        || health_interval.is_some()
+                        || health_timeout.is_some()
+                        || health_retries.is_some()
+                        || health_start_period.is_some(),
+                    "--health-*",
+                ),
+                (*restart_policy != "no", "--restart"),
+                (*rm, "--rm"),
+                (bridge_cidr.is_some(), "--bridge-cidr"),
+                (bridge_name.is_some(), "--bridge-name"),
+                (net_limit.is_some(), "--net-limit"),
+                (memory_max.is_some(), "--memory-max"),
+                (cpu_quota.is_some(), "--cpu-quota"),
+                (cpu_period.is_some(), "--cpu-period"),
+                (pids_max.is_some(), "--pids-max"),
+                (ai_model.is_some(), "--ai-model"),
+            ];
+            if let Some((_, option)) = unsupported.into_iter().find(|(enabled, _)| *enabled) {
+                return Err(format!(
+                    "remote run: {option} is not representable by the Docker transport"
+                ));
+            }
+            let network_mode = match network.as_str() {
+                "bridge" | "host" | "none" => network.as_str(),
+                other => {
+                    return Err(format!(
+                    "remote run: network mode {other} is not representable by the Docker transport"
+                ))
+                }
+            };
+            let env = parse_env_entries(env)?;
+            let labels = parse_key_values("run: label", labels)?;
+            let entrypoint = entrypoint.as_deref().map(parse_entrypoint).transpose()?;
+            let mappings = parse_publish(publish)?;
+            let mut port_bindings = serde_json::Map::new();
+            for mapping in mappings {
+                let key = format!("{}/{}", mapping.container_port, mapping.protocol);
+                let bindings = port_bindings
+                    .entry(key)
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                let bindings = bindings.as_array_mut().ok_or_else(|| {
+                    "remote run: internal port-binding payload is not an array".to_string()
+                })?;
+                bindings.push(serde_json::json!({
+                    "HostPort": mapping.host_port.to_string(),
+                }));
+            }
+            let mut binds = bind_mounts.clone();
+            binds.extend(volumes.iter().cloned());
+            let payload = serde_json::json!({
+                "Image": image,
+                "Cmd": cmd,
+                "Env": env,
+                "Entrypoint": entrypoint,
+                "WorkingDir": workdir,
+                "User": user,
+                "Labels": labels,
+                "HostConfig": {
+                    "Binds": binds,
+                    "PortBindings": port_bindings,
+                    "NetworkMode": network_mode,
+                },
+            });
+            let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
+            let create_path = match name {
+                Some(name) => format!(
+                    "/containers/create?name={}",
+                    percent_encode_path_component(name)
+                ),
+                None => "/containers/create".to_string(),
+            };
+            let created = request_with_body("POST", create_path, Some(payload))?;
+            let created: serde_json::Value = serde_json::from_slice(&created)
+                .map_err(|error| format!("remote run create returned invalid JSON: {error}"))?;
+            let id = created
+                .get("Id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "remote run create response omitted Id".to_string())?;
+            request("POST", format!("/containers/{id}/start"))?;
+            println!("run: id={id}");
+            Ok(())
+        })(),
         Commands::Images { format } => {
             request("GET", "/images/json".to_string()).and_then(|body| print_json(body, format))
         }
@@ -10355,7 +10487,7 @@ mod tests {
     use super::{
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
         context_endpoint_available, decode_docker_raw_stream, desktop_forward_enabled,
-        discover_rootless_socket, dispatch, docker_chunked_headers,
+        discover_rootless_socket, dispatch, dispatch_remote_context, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
         docker_event_resource, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
@@ -10394,7 +10526,7 @@ mod tests {
     use ferro_core::runtime::{ContainerRuntime, NetworkBackend};
     use ferro_core::volume_store::LocalVolumeStore;
     use std::io::Write;
-    use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::os::unix::net::{UnixListener, UnixStream as StdUnixStream};
     use std::path::PathBuf;
 
     #[test]
@@ -13036,6 +13168,104 @@ volumes:
         assert_eq!(status, 200);
         assert_eq!(body, b"[]");
         assert_eq!(percent_encode_path_component("web/name"), "web%2Fname");
+    }
+
+    #[test]
+    fn remote_run_rejects_local_only_options_before_connecting() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("remote run config");
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+        }
+        handle_context(ContextCommands::Create {
+            name: "remote".to_string(),
+            endpoint: "unix:///tmp/remote-run.sock".to_string(),
+        })
+        .expect("create context");
+        handle_context(ContextCommands::Use {
+            name: "remote".to_string(),
+        })
+        .expect("select context");
+        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine", "--rm"])
+            .expect("parse run")
+            .command;
+        let result = dispatch_remote_context(&command)
+            .expect("remote context should claim run")
+            .expect_err("local-only option must be rejected");
+        assert!(result.contains("--rm"), "error={result}");
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
+    }
+
+    #[test]
+    fn remote_run_sends_docker_create_then_start() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("remote run config");
+        let socket = temp.path().join("remote-run.sock");
+        let listener = UnixListener::bind(&socket).expect("bind remote run socket");
+        let worker = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in [
+                b"HTTP/1.1 201 Created\r\nContent-Length: 34\r\nConnection: close\r\n\r\n{\"Id\":\"remote-id\",\"Warnings\":null}".as_slice(),
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept remote run request");
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).expect("read remote run request");
+                requests.push(request);
+                stream.write_all(response).expect("write remote run response");
+            }
+            requests
+        });
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+        }
+        handle_context(ContextCommands::Create {
+            name: "remote".to_string(),
+            endpoint: format!("unix://{}", socket.display()),
+        })
+        .expect("create context");
+        handle_context(ContextCommands::Use {
+            name: "remote".to_string(),
+        })
+        .expect("select context");
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "alpine:latest",
+            "--name",
+            "web/name",
+            "--env",
+            "MODE=test",
+            "--label",
+            "tier=frontend",
+            "--publish",
+            "8080:80/tcp",
+            "echo",
+            "ready",
+        ])
+        .expect("parse run")
+        .command;
+        dispatch_remote_context(&command)
+            .expect("remote context should claim run")
+            .expect("remote run should succeed");
+        let requests = worker.join().expect("remote run worker");
+        let create = String::from_utf8_lossy(&requests[0]);
+        assert!(create.contains("POST /containers/create?name=web%2Fname"));
+        assert!(create.contains("\"Image\":\"alpine:latest\""));
+        assert!(create.contains("\"NetworkMode\":\"bridge\""));
+        assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
+        assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
     }
 
     #[test]

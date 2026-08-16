@@ -1,14 +1,17 @@
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
 use thiserror::Error;
 
 const VOLUME_INDEX_TREE: &str = "volume_index";
+const VOLUME_SQLITE_FILE: &str = "volumes.sqlite";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VolumeRecord {
@@ -24,7 +27,11 @@ pub struct VolumeRecord {
 #[derive(Debug, Error)]
 pub enum VolumeStoreError {
     #[error("failed to open volume store: {0}")]
-    Open(#[from] sled::Error),
+    Open(#[from] rusqlite::Error),
+    #[error("failed to lock volume store: {0}")]
+    Lock(String),
+    #[error("failed to read legacy volume store: {0}")]
+    Legacy(#[from] sled::Error),
     #[error("failed to encode volume record: {0}")]
     Encode(#[from] serde_json::Error),
     #[error("failed to decode volume record: {0}")]
@@ -133,18 +140,74 @@ impl VolumeDriverRegistry {
 }
 
 pub struct LocalVolumeStore {
-    db: sled::Db,
+    db: Mutex<Connection>,
     root: PathBuf,
     drivers: VolumeDriverRegistry,
+}
+
+fn volume_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VolumeRecord> {
+    let options: String = row.get(3)?;
+    let driver_opts = serde_json::from_str(&options).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let created_at_unix: i64 = row.get(4)?;
+    Ok(VolumeRecord {
+        name: row.get(0)?,
+        path: row.get(1)?,
+        driver: row.get(2)?,
+        driver_opts,
+        created_at_unix: created_at_unix.max(0) as u64,
+    })
+}
+
+fn migrate_legacy_sled(root: &Path, db: &Connection) -> Result<(), VolumeStoreError> {
+    let legacy_path = root.join("volumes.db");
+    let marker = root.join("volumes.sqlite.migrated");
+    if !legacy_path.exists() || marker.exists() {
+        return Ok(());
+    }
+    let legacy = sled::open(&legacy_path)?;
+    let tree = legacy.open_tree(VOLUME_INDEX_TREE)?;
+    for entry in &tree {
+        let (_, value) = entry?;
+        let record =
+            serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
+        db.execute(
+            "INSERT OR IGNORE INTO volumes
+             (name, path, driver, driver_opts, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                record.name,
+                record.path,
+                record.driver,
+                serde_json::to_string(&record.driver_opts)?,
+                record.created_at_unix as i64
+            ],
+        )?;
+    }
+    db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+    fs::write(&marker, b"volume-store-migration-v1\n")?;
+    Ok(())
 }
 
 impl LocalVolumeStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, VolumeStoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
-        let db = sled::open(root.join("volumes.db"))?;
+        let db_path = root.join(VOLUME_SQLITE_FILE);
+        let connection = Connection::open(&db_path)?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS volumes (
+                name TEXT PRIMARY KEY NOT NULL,
+                path TEXT NOT NULL,
+                driver TEXT NOT NULL,
+                driver_opts TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL
+            )",
+        )?;
+        migrate_legacy_sled(&root, &connection)?;
         Ok(Self {
-            db,
+            db: Mutex::new(connection),
             root,
             drivers: VolumeDriverRegistry::new(),
         })
@@ -199,8 +262,16 @@ impl LocalVolumeStore {
         driver_opts: BTreeMap<String, String>,
     ) -> Result<VolumeRecord, VolumeStoreError> {
         validate_volume_name(name)?;
-        let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
-        if tree.get(name.as_bytes())?.is_some() {
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM volumes WHERE name = ?1)",
+            params![name],
+            |row| row.get(0),
+        )?;
+        if exists {
             return Err(VolumeStoreError::Exists(name.to_string()));
         }
         let driver_impl = self
@@ -215,9 +286,18 @@ impl LocalVolumeStore {
             driver_opts,
             created_at_unix: now_unix(),
         };
-        let encoded = serde_json::to_vec(&record)?;
-        tree.insert(name.as_bytes(), encoded)?;
-        tree.flush()?;
+        let driver_opts = serde_json::to_string(&record.driver_opts)?;
+        db.execute(
+            "INSERT INTO volumes (name, path, driver, driver_opts, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                record.name,
+                record.path,
+                record.driver,
+                driver_opts,
+                record.created_at_unix as i64
+            ],
+        )?;
         Ok(record)
     }
 
@@ -259,35 +339,43 @@ impl LocalVolumeStore {
     }
 
     pub fn list(&self) -> Result<Vec<VolumeRecord>, VolumeStoreError> {
-        let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
+        let mut statement = db.prepare(
+            "SELECT name, path, driver, driver_opts, created_at_unix
+             FROM volumes ORDER BY name",
+        )?;
         let mut out = Vec::new();
-        for entry in &tree {
-            let (_, value) = entry?;
-            let record =
-                serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
-            out.push(record);
+        let rows = statement.query_map([], volume_record_from_row)?;
+        for row in rows {
+            out.push(row?);
         }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
 
     pub fn get(&self, name: &str) -> Result<Option<VolumeRecord>, VolumeStoreError> {
-        let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
-        let Some(value) = tree.get(name.as_bytes())? else {
-            return Ok(None);
-        };
-        let record =
-            serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
-        Ok(Some(record))
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
+        match db.query_row(
+            "SELECT name, path, driver, driver_opts, created_at_unix
+             FROM volumes WHERE name = ?1",
+            params![name],
+            volume_record_from_row,
+        ) {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {
-        let tree = self.db.open_tree(VOLUME_INDEX_TREE)?;
-        let Some(value) = tree.get(name.as_bytes())? else {
+        let Some(record) = self.get(name)? else {
             return Ok(false);
         };
-        let record =
-            serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
         if let Some(driver) = self.drivers.get(&record.driver) {
             driver.remove(&self.root, &record)?;
         } else {
@@ -296,8 +384,11 @@ impl LocalVolumeStore {
                 fs::remove_dir_all(volume_dir)?;
             }
         }
-        tree.remove(name.as_bytes())?;
-        tree.flush()?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
+        db.execute("DELETE FROM volumes WHERE name = ?1", params![name])?;
         Ok(true)
     }
 
@@ -416,7 +507,7 @@ fn default_driver() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalVolumeStore, VolumeStoreError};
+    use super::{LocalVolumeStore, VolumeRecord, VolumeStoreError};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -489,5 +580,33 @@ mod tests {
         )
         .expect("read");
         assert_eq!(restored, "hi");
+    }
+
+    #[test]
+    fn migrates_legacy_sled_records_and_keeps_rollback_copy() {
+        let temp = tempfile::tempdir().expect("volume store");
+        let legacy = sled::open(temp.path().join("volumes.db")).expect("legacy db");
+        let tree = legacy.open_tree(super::VOLUME_INDEX_TREE).expect("tree");
+        let record = VolumeRecord {
+            name: "legacy".to_string(),
+            path: temp.path().join("legacy").display().to_string(),
+            driver: "local".to_string(),
+            driver_opts: BTreeMap::new(),
+            created_at_unix: 42,
+        };
+        tree.insert(
+            record.name.as_bytes(),
+            serde_json::to_vec(&record).expect("encode"),
+        )
+        .expect("insert");
+        tree.flush().expect("flush");
+        drop(tree);
+        drop(legacy);
+
+        let store = LocalVolumeStore::open(temp.path()).expect("migrate");
+        assert_eq!(store.get("legacy").unwrap().unwrap(), record);
+        assert!(temp.path().join("volumes.sqlite").is_file());
+        assert!(temp.path().join("volumes.sqlite.migrated").is_file());
+        assert!(temp.path().join("volumes.db").is_dir());
     }
 }

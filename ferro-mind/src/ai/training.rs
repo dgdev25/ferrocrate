@@ -1886,6 +1886,22 @@ pub mod quantize {
         pub training_vectors: usize,
         /// Vector dimensionality.
         pub dim: usize,
+        /// Bytes in the original f32 vectors.
+        pub original_bytes: usize,
+        /// Bytes in the quantized representation.
+        pub encoded_bytes: usize,
+        /// Maximum absolute reconstruction error across the training set.
+        pub max_abs_error: f32,
+    }
+
+    impl QuantSummary {
+        /// Compression ratio of the measured encoded vectors.
+        pub fn compression_ratio(&self) -> f32 {
+            if self.encoded_bytes == 0 {
+                return 0.0;
+            }
+            self.original_bytes as f32 / self.encoded_bytes as f32
+        }
     }
 
     /// Train a scalar quantizer over a slice of f32 vectors.
@@ -1907,14 +1923,37 @@ pub mod quantize {
         if dim == 0 {
             return Err("cannot train quantizer: zero-dimensional vectors".to_string());
         }
+        if vectors.iter().any(|vector| vector.len() != dim) {
+            return Err("cannot train quantizer: vector dimensions differ".to_string());
+        }
 
         let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
         let quantizer = ScalarQuantizer::train(&refs);
+        let original_bytes = vectors
+            .len()
+            .checked_mul(dim)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "quantizer input size overflows usize".to_string())?;
+        let mut encoded_bytes = 0usize;
+        let mut max_abs_error = 0.0f32;
+        for vector in vectors {
+            let encoded = quantizer.encode_vec(vector);
+            encoded_bytes = encoded_bytes
+                .checked_add(encoded.len())
+                .ok_or_else(|| "quantizer encoded size overflows usize".to_string())?;
+            let decoded = quantizer.decode_vec(&encoded);
+            for (original, reconstructed) in vector.iter().zip(decoded.iter()) {
+                max_abs_error = max_abs_error.max((original - reconstructed).abs());
+            }
+        }
 
         Ok(QuantSummary {
             training_vectors: vectors.len(),
             dim,
             quantizer,
+            original_bytes,
+            encoded_bytes,
+            max_abs_error,
         })
     }
 
@@ -1931,6 +1970,8 @@ pub mod quantize {
             let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
             assert_eq!(summary.training_vectors, 20);
             assert_eq!(summary.dim, 8);
+            assert!(summary.compression_ratio() >= 3.0);
+            assert!(summary.max_abs_error < 0.05);
 
             // Verify encode/decode roundtrip is within 4x quantization error.
             let encoded = summary.quantizer.encode_vec(&vectors[0]);
@@ -1944,6 +1985,13 @@ pub mod quantize {
         fn train_quantizer_rejects_empty() {
             let err = train_quantizer(&[], Method::Scalar8bit).unwrap_err();
             assert!(err.contains("no vectors provided"));
+        }
+
+        #[test]
+        fn train_quantizer_rejects_mismatched_dimensions() {
+            let err =
+                train_quantizer(&[vec![1.0, 2.0], vec![3.0]], Method::Scalar8bit).unwrap_err();
+            assert!(err.contains("dimensions differ"));
         }
     }
 }

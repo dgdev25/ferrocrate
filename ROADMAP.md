@@ -154,7 +154,7 @@ container/runtime release. *Size:* XXL. *Source:* `docs/RVF_INTEGRATION_PLAN.md`
 
 - [ ] Upgrade and consolidate RVF dependencies and remove thin wrappers only after compatibility review.
 - [ ] Decide whether replacing core CAS/signing primitives is worth the migration risk; if yes, implement versioned migration and rollback.
-- [ ] Add quantization and compression with measured size/accuracy gates.
+- [ ] Add quantization and compression with measured size/accuracy gates; the RVF scalar quantizer now reports measured original/encoded bytes, compression ratio, and maximum reconstruction error with dimension validation and regression gates, while persistent RVF-store compression integration remains open.
 - [ ] Define and implement an opt-in `.rvf` image manifest, build format, launcher, and OCI interoperability.
 - [ ] Add optional cognitive-container policy: authority-to-seccomp mapping, token budgets, metered model proxy, and coherence pre-run gates.
 

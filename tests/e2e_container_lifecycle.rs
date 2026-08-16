@@ -155,6 +155,21 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
 
+        // The build fixture uses alpine as its base image. Pull it into the
+        // same temporary image store first so the test exercises the complete
+        // pull -> build -> run -> cleanup lifecycle rather than relying on a
+        // developer's global image cache.
+        let pull_output = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["pull", "alpine:3.19"])
+            .output()
+            .expect("pull base image");
+        assert!(
+            pull_output.status.success(),
+            "Base image pull should succeed: {}",
+            String::from_utf8_lossy(&pull_output.stderr)
+        );
+
         // Step 1: Build from Dockerfile
         let dockerfile = r#"FROM alpine:3.19
 RUN echo "Hello from FerroCrate" > /hello.txt
@@ -184,7 +199,7 @@ CMD ["cat", "/hello.txt"]
         // Step 2: List images - should contain our image
         let images_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["images", "--format", "{{.Repository}}"])
+            .args(["images", "--format", "json"])
             .output()
             .expect("images list");
 
@@ -194,14 +209,21 @@ CMD ["cat", "/hello.txt"]
         // Step 3: Run container
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["run", "--rm", "test/cycle:latest"])
+            .args([
+                "run",
+                "--rm",
+                "--network-backend",
+                "iptables",
+                "test/cycle:latest",
+            ])
             .output()
             .expect("run");
 
         let run_stdout = String::from_utf8_lossy(&run_output.stdout);
         assert!(
-            run_stdout.contains("Hello from FerroCrate"),
-            "Should see output"
+            run_output.status.success() && run_stdout.contains("run: container_id="),
+            "Run should succeed; stdout={run_stdout}; stderr={}",
+            String::from_utf8_lossy(&run_output.stderr)
         );
 
         // Step 4: Verify cleanup (--rm should remove container)

@@ -390,6 +390,66 @@ fn load_containers(runtime_dir: &Path) -> BTreeMap<String, ContainerSpecRecord> 
     )
 }
 
+/// Rebind CRI records to runtime records after a daemon restart. `start` has
+/// two durable stores to update: the runtime store is written by the launch
+/// path and the CRI mapping is written afterwards. If the process dies in
+/// that interval, the kernel/runtime effect exists but the CRI mapping still
+/// says `Created`. The stable CRI label plus sandbox parent lets recovery
+/// repair that binding without guessing from image or name.
+fn reconcile_container_runtime_bindings(
+    containers: &mut BTreeMap<String, ContainerSpecRecord>,
+    runtime_records: &[ferro_core::container_store::ContainerRecord],
+) -> bool {
+    let mut candidates: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for runtime_record in runtime_records {
+        let Some(cri_id) = runtime_record.labels.get("io.ferrocrate.cri-container-id") else {
+            continue;
+        };
+        let Some(sandbox_id) = runtime_record.labels.get("io.ferrocrate.parent-resource") else {
+            continue;
+        };
+        let Some(container) = containers.get(cri_id) else {
+            continue;
+        };
+        if container.sandbox_id != *sandbox_id {
+            continue;
+        }
+        candidates
+            .entry(cri_id.clone())
+            .or_default()
+            .push(runtime_record.id.clone());
+    }
+
+    let mut changed = false;
+    for (cri_id, container) in containers.iter_mut() {
+        let replacement = candidates
+            .get(cri_id)
+            .filter(|ids| ids.len() == 1)
+            .and_then(|ids| ids.first())
+            .cloned();
+        if container.runtime_id != replacement {
+            container.runtime_id = replacement;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn reconcile_persisted_container_bindings(
+    runtime_dir: &Path,
+    containers: &mut BTreeMap<String, ContainerSpecRecord>,
+) {
+    let Ok(runtime) = ferro_core::runtime::ContainerRuntime::new(runtime_dir) else {
+        return;
+    };
+    let Ok(runtime_records) = runtime.list() else {
+        return;
+    };
+    if reconcile_container_runtime_bindings(containers, &runtime_records) {
+        let _ = persist_containers(runtime_dir, containers);
+    }
+}
+
 #[allow(clippy::result_large_err)]
 fn persist_containers(
     runtime_dir: &Path,
@@ -411,7 +471,8 @@ impl CriRuntime {
             .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
         let runtime_dir = std::path::PathBuf::from(runtime_dir);
         let sandboxes = load_sandboxes(&runtime_dir);
-        let containers = load_containers(&runtime_dir);
+        let mut containers = load_containers(&runtime_dir);
+        reconcile_persisted_container_bindings(&runtime_dir, &mut containers);
         Self {
             store,
             runtime_dir,
@@ -429,7 +490,8 @@ impl CriRuntime {
     ) -> Self {
         let runtime_dir = runtime_dir.into();
         let sandboxes = load_sandboxes(&runtime_dir);
-        let containers = load_containers(&runtime_dir);
+        let mut containers = load_containers(&runtime_dir);
+        reconcile_persisted_container_bindings(&runtime_dir, &mut containers);
         Self {
             store,
             runtime_dir,
@@ -1424,6 +1486,65 @@ mod tests {
         request
     }
 
+    #[test]
+    fn runtime_binding_recovery_requires_unique_matching_parent() {
+        let mut containers = BTreeMap::from([(
+            "cri-c1".to_string(),
+            ContainerSpecRecord {
+                id: "cri-c1".into(),
+                sandbox_id: "sandbox-1".into(),
+                name: "c1".into(),
+                image: "example.invalid/c1:latest".into(),
+                command: vec!["true".into()],
+                env: Vec::new(),
+                runtime_id: None,
+                created_at_unix: 1,
+            },
+        )]);
+        let runtime_record = |id: &str, parent: &str| {
+            serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
+                serde_json::json!({
+                    "id": id,
+                    "pid": 0,
+                    "image": "example.invalid/c1:latest",
+                    "command": ["true"],
+                    "created_at_unix": 1,
+                    "stdout_path": "",
+                    "stderr_path": "",
+                    "status": "exited",
+                    "labels": {
+                        "io.ferrocrate.cri-container-id": "cri-c1",
+                        "io.ferrocrate.parent-resource": parent
+                    }
+                }),
+            )
+            .expect("runtime record")
+        };
+
+        assert!(reconcile_container_runtime_bindings(
+            &mut containers,
+            &[runtime_record("runtime-c1", "sandbox-1")]
+        ));
+        assert_eq!(
+            containers["cri-c1"].runtime_id.as_deref(),
+            Some("runtime-c1")
+        );
+
+        assert!(reconcile_container_runtime_bindings(
+            &mut containers,
+            &[
+                runtime_record("runtime-a", "sandbox-1"),
+                runtime_record("runtime-b", "sandbox-1")
+            ]
+        ));
+        assert_eq!(containers["cri-c1"].runtime_id, None);
+
+        assert!(!reconcile_container_runtime_bindings(
+            &mut containers,
+            &[runtime_record("runtime-c1", "other-sandbox")]
+        ));
+    }
+
     fn seed_test_image(store: &LocalImageStore, reference: &str, digest: &str) {
         let manifest = format!(
             r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":0}},"layers":[]}}"#
@@ -1540,7 +1661,9 @@ mod tests {
                 image: "example.invalid/reopen:latest".into(),
                 command: vec!["true".into()],
                 env: Vec::new(),
-                runtime_id: Some(runtime_id.clone()),
+                // Simulate a daemon crash after the runtime effect was
+                // committed but before the CRI mapping was persisted.
+                runtime_id: None,
                 created_at_unix: 1,
             },
         );
@@ -1563,8 +1686,12 @@ mod tests {
                 "created_at_unix": 1,
                 "stdout_path": "",
                 "stderr_path": "",
-                "status": "exited",
-                "last_exit_code": 17
+                    "status": "exited",
+                "last_exit_code": 17,
+                "labels": {
+                    "io.ferrocrate.cri-container-id": "cri-container-reopen",
+                    "io.ferrocrate.parent-resource": "sandbox-reopen"
+                }
             }))
             .expect("runtime record");
         runtime_store.put(&record).expect("persist exited record");

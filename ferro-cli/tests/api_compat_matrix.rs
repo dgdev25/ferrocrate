@@ -345,4 +345,11 @@ fn docker_create_identity_is_inspectable_before_start() {
     assert_eq!(inspect["Id"], id);
     assert_eq!(inspect["Name"], "/created-before-start");
     assert_eq!(inspect["State"]["Status"], "created");
+
+    let (status, body) = harness.request("GET", "/containers/json?all=1", "");
+    assert_eq!(status, 200, "list response: {body}");
+    let listed = serde_json::from_str::<serde_json::Value>(&body).expect("list JSON");
+    assert!(listed
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["Id"] == id)));
 }

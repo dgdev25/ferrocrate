@@ -7516,10 +7516,7 @@ fn handle_docker_compat_connection(
                         .cmp(&left.created_at_unix)
                         .then_with(|| right.id.cmp(&left.id))
                 });
-                if let Some(limit) = limit {
-                    records.truncate(limit);
-                }
-                let entries: Vec<serde_json::Value> = records
+                let mut entries: Vec<serde_json::Value> = records
                     .iter()
                     .map(|record| {
                         let name = record.name.clone().unwrap_or_else(|| record.id.clone());
@@ -7534,6 +7531,27 @@ fn handle_docker_compat_connection(
                         })
                     })
                     .collect();
+                if all {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    for (id, spec) in pending.iter() {
+                        let name = spec.name.as_deref().unwrap_or(id);
+                        entries.push(serde_json::json!({
+                            "Id": id,
+                            "Image": spec.image,
+                            "Command": spec.cmd.join(" "),
+                            "Created": 0,
+                            "State": "created",
+                            "Status": "created",
+                            "Names": [format!("/{name}")],
+                        }));
+                    }
+                }
+                if let Some(limit) = limit {
+                    entries.truncate(limit);
+                }
                 let json = serde_json::to_string(&entries)
                     .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
                 http_response(200, json.as_bytes(), "application/json")

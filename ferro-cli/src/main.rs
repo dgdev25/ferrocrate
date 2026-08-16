@@ -6583,6 +6583,7 @@ fn handle_docker_compat_connection(
 ) -> Result<(), String> {
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let mut event_request: Option<(String, String)> = None;
+    let mut event_follow_query: Option<HashMap<String, String>> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -6615,7 +6616,12 @@ fn handle_docker_compat_connection(
                     .map(|event| serde_json::to_string(&event).unwrap_or_default())
                     .collect::<Vec<_>>()
                     .join("\n");
-                http_response(200, body.as_bytes(), "application/x-ndjson")
+                if query.get("follow").is_some_and(|value| value == "1") {
+                    event_follow_query = Some(query.clone());
+                    docker_chunked_headers(200, "application/x-ndjson")
+                } else {
+                    http_response(200, body.as_bytes(), "application/x-ndjson")
+                }
             }
             ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
             ("GET", "/version") => {
@@ -7029,6 +7035,10 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some(query) = event_follow_query {
+        stream_docker_events(&mut stream, &state, &query)?;
+        return Ok(());
+    }
     if let Some((method, path)) = event_request {
         let status = response
             .get(..)
@@ -7343,6 +7353,52 @@ fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
+    let status_line = match status {
+        200 => "200 OK",
+        400 => "400 Bad Request",
+        404 => "404 Not Found",
+        _ => "200 OK",
+    };
+    format!(
+        "HTTP/1.1 {status_line}\r\nTransfer-Encoding: chunked\r\nContent-Type: {content_type}\r\nConnection: keep-alive\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn stream_docker_events(
+    stream: &mut UnixStream,
+    state: &DockerCompatState,
+    query: &HashMap<String, String>,
+) -> Result<(), String> {
+    let mut cursor: Option<u64> = None;
+    loop {
+        let events = state
+            .events
+            .lock()
+            .map_err(|error| format!("docker: event store lock poisoned: {error}"))?
+            .query(query)?;
+        for event in events {
+            if cursor.is_some_and(|seen| event.id <= seen) {
+                continue;
+            }
+            cursor = Some(event.id);
+            let body = serde_json::to_vec(&docker_event_payload(&event))
+                .map_err(|error| format!("docker: event serialization failed: {error}"))?;
+            let chunk = format!("{:x}\r\n", body.len());
+            stream
+                .write_all(chunk.as_bytes())
+                .and_then(|_| stream.write_all(&body))
+                .and_then(|_| stream.write_all(b"\r\n"))
+                .map_err(|error| error.to_string())?;
+        }
+        stream.flush().map_err(|error| error.to_string())?;
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn split_path_query(path: &str) -> (String, HashMap<String, String>) {
     let mut query_map = HashMap::new();
     let mut parts = path.splitn(2, '?');
@@ -7395,11 +7451,11 @@ mod tests {
 
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
-        docker_event_payload, docker_tail_logs, effective_readonly, handle_build,
-        handle_containers, handle_context, handle_exec, handle_image_prune, handle_images,
-        handle_inspect, handle_kill, handle_logs, handle_network, handle_pause, handle_pull,
-        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
+        docker_chunked_headers, docker_event_payload, docker_tail_logs, effective_readonly,
+        handle_build, handle_containers, handle_context, handle_exec, handle_image_prune,
+        handle_images, handle_inspect, handle_kill, handle_logs, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, normalize_docker_api_path,
         parse_bind_mounts, parse_capabilities, parse_driver_opts, parse_env_entries,
         parse_key_values, parse_publish, parse_restart_policy, parse_tmpfs_mounts,
         read_docker_request_after_auth, read_http_request, should_desktop_forward,
@@ -9017,6 +9073,15 @@ mod tests {
         assert_eq!(docker_tail_logs("one\ntwo\n", Some("0")).unwrap(), "");
         assert_eq!(docker_tail_logs("one\n", Some("all")).unwrap(), "one\n");
         assert!(docker_tail_logs("one\n", Some("nope")).is_err());
+    }
+
+    #[test]
+    fn docker_event_follow_uses_chunked_keep_alive_headers() {
+        let headers = String::from_utf8(docker_chunked_headers(200, "application/x-ndjson"))
+            .expect("headers are utf8");
+        assert!(headers.contains("Transfer-Encoding: chunked"));
+        assert!(headers.contains("Connection: keep-alive"));
+        assert!(headers.ends_with("\r\n\r\n"));
     }
 
     #[test]

@@ -17,6 +17,11 @@ echo "[release] validating security enforcement tests"
 cargo test -p ferro-core --test security_tests --offline -- --nocapture
 bash scripts/verify-mac-policy.sh target/release-readiness/mac-policy.txt
 
+echo "[release] recording rootless prerequisite diagnostics"
+mkdir -p target/release-readiness
+FERROCRATE_ROOTLESS_STRICT=0 bash scripts/verify-rootless.sh \
+  >target/release-readiness/rootless-prerequisites.txt 2>&1 || true
+
 echo "[release] collecting compatibility evidence"
 bash scripts/compat-evidence.sh
 

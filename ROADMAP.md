@@ -105,7 +105,7 @@ contexts, support boundaries, and upgrades are not yet a complete rootless produ
 - [ ] Ship rootless installer and upgrade flows for subordinate IDs, mapping helpers, cgroup delegation, user services, and slirp networking.
 - [ ] Add rootless contexts, socket discovery, diagnostics, logs, and explicit unsupported-feature messaging.
 - [ ] Qualify rootless CRI, Compose, volumes, networking, image signing, and resource limits.
-- [ ] Add rootless release evidence to CI/manual host gates and document operator recovery.
+- [ ] Add rootless release evidence to CI/manual host gates and document operator recovery; the release gate now archives prerequisite diagnostics, including explicit missing-helper results, but full rootless qualification remains open.
 
 ### 7. Events, logs, and extension contracts
 

@@ -40,7 +40,7 @@ else
   docker_api_skip_reason="linux_only_daemon_compat_tests"
 fi
 seccomp_security_status="$(run_check seccomp_security cargo test -p ferro-core --test security_tests -- --nocapture)"
-oci_smoke_status="$(run_check oci_smoke bash scripts/perf/oci-compat.sh)"
+oci_smoke_status="$(run_check oci_conformance bash scripts/oci-conformance.sh)"
 if [[ "$os_name" == "Linux" ]]; then
   dockerfile_build_status="$(run_check dockerfile_build cargo test -p ferro-cli --test dockerfile_parity_integration -- --nocapture)"
 else

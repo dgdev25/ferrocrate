@@ -75,7 +75,7 @@ Docker Engine, and release claims are still marked partial or rework-needed.
 *Size:* XL. *Sources:* COMPAT-01–06, IMG-06, Docker compatibility docs,
 `docs/PROJECT_COMPLETION_PLAN.md`.
 
-- [ ] Establish OCI Image, Runtime, and Distribution conformance suites beyond the current basic validation scripts.
+- [ ] Establish full OCI Image, Runtime, and Distribution conformance suites beyond the current basic validation scripts; the repeatable repository fixture gate now runs all three smoke paths via `scripts/oci-conformance.sh`, but upstream corpus coverage remains open.
 - [ ] Close Dockerfile parity gaps: complete directive/flag coverage, build isolation, secrets/SSH/cache mounts, named contexts, platform targets, and deterministic errors.
 - [x] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
 - [ ] Complete high-value Docker container, image, network, volume, streaming, wait, and event endpoints while preserving authorization and witness receipts.

@@ -59,7 +59,7 @@ use ferro_net::subnet::network_cidr_v4;
 use ferro_net::veth;
 use ferro_net::BackendProbe;
 pub use ferro_net::NetworkBackend;
-use ferro_net::{WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
+use ferro_net::{HostCapabilities, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use rand::Rng;
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -8280,7 +8280,11 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
     if limit.trim().is_empty() {
         return Ok(());
     }
-    if !command_available("tc") {
+    let capabilities = HostCapabilities::probe();
+    capabilities
+        .require_network_mutation()
+        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    if !capabilities.tc {
         return Err(RuntimeError::Network(
             "bandwidth limit requires tc command".to_string(),
         ));
@@ -8317,12 +8321,21 @@ fn apply_bandwidth_limit(link: &str, limit: &str) -> Result<(), RuntimeError> {
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.contains("tbf") {
+    if !stdout.contains("tbf") || !qdisc_reports_rate(&stdout, &rate) {
         return Err(RuntimeError::Network(format!(
-            "bandwidth limit verification failed for {link}"
+            "bandwidth limit verification failed for {link}: expected tbf rate {rate}"
         )));
     }
     Ok(())
+}
+
+fn qdisc_reports_rate(output: &str, expected_rate: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|window| window == ["rate", expected_rate])
+    })
 }
 
 fn validate_bandwidth_limit(limit: &str) -> Result<String, RuntimeError> {
@@ -11018,6 +11031,17 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(err.to_string().contains("positive integer"));
         let err = super::validate_bandwidth_limit("100").expect_err("missing unit");
         assert!(err.to_string().contains("must end with"));
+    }
+
+    #[test]
+    fn qdisc_readback_requires_the_requested_rate() {
+        let output = "qdisc tbf 1: root refcnt 2 rate 100mbit burst 32Kb lat 400.0ms";
+        assert!(super::qdisc_reports_rate(output, "100mbit"));
+        assert!(!super::qdisc_reports_rate(output, "1gbit"));
+        assert!(!super::qdisc_reports_rate(
+            "qdisc pfifo_fast 0: root",
+            "100mbit"
+        ));
     }
 
     #[test]

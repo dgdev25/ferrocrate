@@ -2,7 +2,7 @@
 
 <!-- Maintained as the strategic follow-on to the FCNET ticket plan. -->
 
-**Maturity:** feature-complete core with production-hardening gaps · **Last updated:** 2026-08-16 · HEAD `d283473`
+**Maturity:** feature-complete core with production-hardening gaps · **Last updated:** 2026-08-16 · HEAD `WORKTREE`
 
 This roadmap separates the completed FCNET lifecycle work from the remaining
 host qualification and execution-layer work. The authoritative ticket detail
@@ -31,12 +31,12 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 - [x] Define one capability-aware execution boundary for privileged network mutations.
 - [x] Implement bridge execution with exact CIDR read-back verification and rollback on mismatch.
 - [x] Extend read-back verification and rollback coverage to WireGuard route installation and interface teardown.
-- [ ] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
+- [x] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
 - [x] Implement atomic DNS resolver publication with fsync and exact read-back.
 - [ ] Implement hosts-file and MTU behavior with explicit unsupported-capability errors.
 - [x] Add exact post-effect read-back to direct iptables/nftables rule application and deletion.
-- [ ] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
-- [ ] Implement `tc` bandwidth limits with read-back and recovery tests.
+- [x] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
+- [x] Implement `tc` bandwidth limits with capability admission and exact rate read-back; privileged recovery coverage remains in the host matrix.
 - [ ] Migrate public runtime paths from direct shelling-out to the execution boundary.
 
 ## Next
@@ -98,3 +98,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — WireGuard apply now verifies expected IPv4/IPv6 routes and removal verifies interface absence.
 - 2026-08-16 — added atomic DNS resolver publication with symlink refusal, fsync, and exact read-back coverage.
 - 2026-08-16 — firewall rule application/deletion now verifies exact iptables presence or nftables handles after each mutation.
+- 2026-08-16 — traffic-control mutation now requires the shared host capability gate and verifies the requested TBF rate exactly; the existing runtime port-map/eBPF paths are recorded as the production integration boundary.

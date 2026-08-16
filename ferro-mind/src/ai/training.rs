@@ -254,6 +254,9 @@ pub enum TrainingError {
 
     #[error("Parse error: {0}")]
     ParseError(String),
+
+    #[error("training sample exceeds the {0}-byte limit")]
+    SampleTooLarge(usize),
 }
 
 impl From<String> for TrainingError {
@@ -792,14 +795,41 @@ impl TrainingPipeline {
         model_type: ModelType,
         sample: &[u8],
     ) -> Result<(), TrainingError> {
+        const MAX_SAMPLE_BYTES: usize = 1 << 20;
+        if sample.len() > MAX_SAMPLE_BYTES {
+            return Err(TrainingError::SampleTooLarge(MAX_SAMPLE_BYTES));
+        }
+        // Validate the concrete schema before the sample can become durable;
+        // arbitrary JSON must not enter an online-learning corpus.
+        match model_type {
+            ModelType::ResourcePredictor => {
+                Self::parse_samples::<ResourceSample>(&[sample.to_vec()])?;
+            }
+            ModelType::AnomalyDetector => {
+                Self::parse_samples::<AnomalySample>(&[sample.to_vec()])?;
+            }
+            ModelType::RestartPolicy => {
+                Self::parse_samples::<RestartSample>(&[sample.to_vec()])?;
+            }
+        };
         let data_dir = self.config.data_dir.join(model_type.to_string());
         fs::create_dir_all(&data_dir)?;
 
-        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        let filename = format!("sample_{}.json", timestamp);
+        let digest = format!("{:x}", Sha256::digest(sample));
+        let filename = format!("sample_{digest}.json");
         let path = data_dir.join(filename);
-
-        fs::write(&path, sample)?;
+        if !path.exists() {
+            let temporary = data_dir.join(format!(".{digest}.tmp"));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            use std::io::Write as _;
+            file.write_all(sample)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)?;
+            File::open(&data_dir)?.sync_all()?;
+        }
         if self.is_online_learning() && self.config.online_learning {
             let _ = self.run_online_learning_cycle()?;
         }
@@ -1870,6 +1900,68 @@ mod tests {
         assert!(pipeline.is_online_learning());
         pipeline.stop_online_learning();
         assert!(!pipeline.is_online_learning());
+    }
+
+    #[test]
+    fn training_samples_are_schema_validated_content_addressed_and_deduplicated() {
+        let (_temp, config) = setup_test_env();
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let sample_dir = config.data_dir.join("resource-predictor");
+        fs::remove_dir_all(&sample_dir).expect("clear fixture samples");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        let sample = serde_json::json!({
+            "cpu_percent": 12.5,
+            "memory_bytes": 4096,
+            "pids_count": 3,
+            "timestamp_secs": 1_700_000_000u64
+        });
+        let bytes = sample.to_string().into_bytes();
+        pipeline
+            .record_sample(ModelType::ResourcePredictor, &bytes)
+            .expect("record sample");
+        pipeline
+            .record_sample(ModelType::ResourcePredictor, &bytes)
+            .expect("duplicate sample is idempotent");
+        let entries = fs::read_dir(&sample_dir)
+            .expect("sample directory")
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0]
+            .file_name()
+            .to_string_lossy()
+            .starts_with("sample_"));
+
+        let error = pipeline
+            .record_sample(ModelType::ResourcePredictor, br#"{"not":"a sample"}"#)
+            .expect_err("invalid sample schema must fail closed");
+        assert!(matches!(error, TrainingError::ParseError(_)));
+    }
+
+    #[test]
+    fn training_samples_reject_oversized_payloads_before_writing() {
+        let (_temp, config) = setup_test_env();
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let sample_dir = config.data_dir.join("resource-predictor");
+        fs::remove_dir_all(&sample_dir).expect("clear fixture samples");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        let mut sample = serde_json::json!({
+            "cpu_percent": 1.0,
+            "memory_bytes": 1,
+            "pids_count": 1,
+            "timestamp_secs": 1
+        })
+        .to_string()
+        .into_bytes();
+        sample.resize((1 << 20) + 1, b'x');
+        let error = pipeline
+            .record_sample(ModelType::ResourcePredictor, &sample)
+            .expect_err("oversized sample must fail closed");
+        assert!(matches!(error, TrainingError::SampleTooLarge(size) if size == (1 << 20)));
+        assert_eq!(
+            fs::read_dir(&sample_dir).expect("sample directory").count(),
+            0
+        );
     }
 
     #[test]

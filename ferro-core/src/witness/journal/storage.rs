@@ -48,7 +48,6 @@ impl SqliteJournalStore {
     /// Copy a legacy sled tree set into SQLite in one durable transaction.
     /// The ready marker is created only after SQLite commits, so an interrupted
     /// copy can be retried without treating a partial database as authoritative.
-    #[cfg(test)]
     pub(super) fn migrate_from_sled(
         sled_path: &Path,
         sqlite_path: &Path,
@@ -174,13 +173,101 @@ impl SqliteTransaction<'_> {
     }
 }
 
-pub(super) fn transaction_error(
-    error: sled::transaction::TransactionError<JournalError>,
-) -> JournalError {
-    authorization_metrics().record(AuthorizationMetric::Journal(JournalMetric::AppendFailure));
-    match error {
-        sled::transaction::TransactionError::Abort(error) => error,
-        sled::transaction::TransactionError::Storage(error) => JournalError::Storage(error),
+#[derive(Clone)]
+pub(super) struct JournalTree {
+    store: SqliteJournalStore,
+    name: &'static str,
+}
+
+impl JournalTree {
+    pub(super) fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, JournalError> {
+        self.store.get(self.name, key.as_ref())
+    }
+
+    pub(super) fn insert(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) -> Result<Option<Vec<u8>>, JournalError> {
+        let previous = self.get(key.as_ref())?;
+        self.store.put(self.name, key.as_ref(), value.as_ref())?;
+        Ok(previous)
+    }
+
+    pub(super) fn remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, JournalError> {
+        let previous = self.get(key.as_ref())?;
+        self.store.remove(self.name, key.as_ref())?;
+        Ok(previous)
+    }
+
+    pub(super) fn contains_key(&self, key: impl AsRef<[u8]>) -> Result<bool, JournalError> {
+        Ok(self.get(key)?.is_some())
+    }
+
+    pub(super) fn iter(&self) -> JournalTreeIter {
+        JournalTreeIter {
+            entries: Some(self.store.scan(self.name)),
+        }
+    }
+
+    pub(super) fn len(&self) -> Result<usize, JournalError> {
+        Ok(self.store.scan(self.name)?.len())
+    }
+
+    pub(super) fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+pub(super) struct JournalTreeIter {
+    entries: Option<Result<Vec<(Vec<u8>, Vec<u8>)>, JournalError>>,
+}
+
+impl Iterator for JournalTreeIter {
+    type Item = Result<(Vec<u8>, Vec<u8>), JournalError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.entries.as_mut()? {
+            Ok(entries) if entries.is_empty() => {
+                self.entries = None;
+                None
+            }
+            Ok(entries) => Some(Ok(entries.remove(0))),
+            Err(_) => match self.entries.take() {
+                Some(Err(error)) => Some(Err(error)),
+                _ => None,
+            },
+        }
+    }
+}
+
+pub(super) struct JournalDb {
+    store: SqliteJournalStore,
+}
+
+impl JournalDb {
+    pub(super) fn open(path: &Path) -> Result<Self, JournalError> {
+        Ok(Self {
+            store: SqliteJournalStore::open(path)?,
+        })
+    }
+
+    pub(super) fn open_tree(&self, name: &'static str) -> JournalTree {
+        JournalTree {
+            store: self.store.clone(),
+            name,
+        }
+    }
+
+    pub(super) fn transaction<T>(
+        &self,
+        callback: impl for<'tx> FnOnce(&SqliteTransaction<'tx>) -> Result<T, JournalError>,
+    ) -> Result<T, JournalError> {
+        self.store.transaction(callback)
+    }
+
+    pub(super) fn flush(&self) -> Result<(), JournalError> {
+        Ok(())
     }
 }
 
@@ -232,8 +319,12 @@ impl WitnessJournal {
             .get(super::HEAD_HASH)?
             .ok_or(JournalError::Corrupt)?;
         Ok((
-            u64::from_be_bytes(seq.as_ref().try_into().map_err(|_| JournalError::Corrupt)?),
-            hash.as_ref()
+            u64::from_be_bytes(
+                seq.as_slice()
+                    .try_into()
+                    .map_err(|_| JournalError::Corrupt)?,
+            ),
+            hash.as_slice()
                 .try_into()
                 .map_err(|_| JournalError::Corrupt)?,
         ))

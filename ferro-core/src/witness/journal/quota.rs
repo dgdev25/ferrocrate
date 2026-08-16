@@ -2,7 +2,6 @@ use super::{
     FaultPoint, FlushBoundary, JournalError, WitnessJournal, AUTOMATION_STOPPED, RESERVE,
     RESERVE_INFLIGHT,
 };
-use sled::transaction::Transactional;
 use std::io::Write;
 use std::sync::atomic::Ordering;
 
@@ -13,11 +12,11 @@ impl WitnessJournal {
         }
         let used = self.records.iter().try_fold(0_u64, |sum, entry| {
             let (_, bytes) = entry?;
-            Ok::<_, sled::Error>(sum.saturating_add(bytes.len() as u64))
+            Ok::<_, JournalError>(sum.saturating_add(bytes.len() as u64))
         })?;
         let sealed = self.sealed_segments.iter().try_fold(0_u64, |sum, entry| {
             let (_, value) = entry?;
-            Ok::<_, sled::Error>(sum.saturating_add(value.len() as u64))
+            Ok::<_, JournalError>(sum.saturating_add(value.len() as u64))
         })?;
         let user_limit = self
             .max_bytes
@@ -60,7 +59,7 @@ impl WitnessJournal {
             .ok_or(JournalError::AutomationStopped)?;
         let remaining = u64::from_be_bytes(
             remaining
-                .as_ref()
+                .as_slice()
                 .try_into()
                 .map_err(|_| JournalError::AutomationStopped)?,
         );
@@ -152,7 +151,7 @@ impl WitnessJournal {
             .ok_or(JournalError::Corrupt)?;
         let next = u64::from_be_bytes(
             current
-                .as_ref()
+                .as_slice()
                 .try_into()
                 .map_err(|_| JournalError::Corrupt)?,
         )
@@ -160,7 +159,7 @@ impl WitnessJournal {
         .ok_or(JournalError::Corrupt)?;
         let current_id = u64::from_be_bytes(
             current
-                .as_ref()
+                .as_slice()
                 .try_into()
                 .map_err(|_| JournalError::Corrupt)?,
         );
@@ -174,32 +173,39 @@ impl WitnessJournal {
             blob.extend_from_slice(&(value.len() as u32).to_be_bytes());
             blob.extend_from_slice(value);
         }
-        (
-            &self.records,
-            &self.segments,
-            &self.sealed_segments,
-            &self.meta,
-        )
-            .transaction(|(records, segments, sealed, meta)| {
-                if segments.get(next.to_be_bytes())?.is_some() {
-                    return Err(sled::transaction::ConflictableTransactionError::Abort(
-                        JournalError::Corrupt,
-                    ));
-                }
-                if sealed.get(current_id.to_be_bytes())?.is_some() {
-                    return Err(sled::transaction::ConflictableTransactionError::Abort(
-                        JournalError::Corrupt,
-                    ));
-                }
-                sealed.insert(&current_id.to_be_bytes(), blob.as_slice())?;
-                for (key, _) in &entries {
-                    records.remove(key.as_ref())?;
-                }
-                segments.insert(&next.to_be_bytes(), handoff.as_slice())?;
-                meta.insert(super::CURRENT_SEGMENT, &next.to_be_bytes())?;
-                Ok(())
-            })
-            .map_err(super::transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction
+                .get(self.segments.name(), &next.to_be_bytes())?
+                .is_some()
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction
+                .get(self.sealed_segments.name(), &current_id.to_be_bytes())?
+                .is_some()
+            {
+                return Err(JournalError::Corrupt);
+            }
+            transaction.put(
+                self.sealed_segments.name(),
+                &current_id.to_be_bytes(),
+                blob.as_slice(),
+            )?;
+            for (key, _) in &entries {
+                transaction.remove(self.records.name(), key.as_ref())?;
+            }
+            transaction.put(
+                self.segments.name(),
+                &next.to_be_bytes(),
+                handoff.as_slice(),
+            )?;
+            transaction.put(
+                self.meta.name(),
+                super::CURRENT_SEGMENT,
+                &next.to_be_bytes(),
+            )?;
+            Ok(())
+        })?;
         self.db.flush()?;
         Ok(())
     }

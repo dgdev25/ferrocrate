@@ -71,6 +71,14 @@ fn rejects_v1_storage_instead_of_silently_opening_an_unreadable_journal() {
 }
 
 #[test]
+fn fresh_journal_uses_sqlite_without_creating_a_runtime_sled_store() {
+    let dir = tempdir().unwrap();
+    let _journal = WitnessJournal::open(config(dir.path())).unwrap();
+    assert!(dir.path().join("witness.sqlite3").is_file());
+    assert!(!dir.path().join("witness.sled").exists());
+}
+
+#[test]
 fn checkpoint_publication_never_relabels_a_mismatched_epoch() {
     let dir = tempdir().unwrap();
     let journal = WitnessJournal::open(config(dir.path())).unwrap();

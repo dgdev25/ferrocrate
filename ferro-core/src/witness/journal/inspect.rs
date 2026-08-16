@@ -21,19 +21,23 @@ impl WitnessJournal {
         }
         sizes.push(self.records.iter().try_fold(0_u64, |sum, entry| {
             let (_, value) = entry?;
-            Ok::<_, sled::Error>(sum + value.len() as u64)
+            Ok::<_, JournalError>(sum + value.len() as u64)
         })?);
         Ok(sizes)
     }
     pub fn segment_count(&self) -> Result<usize, JournalError> {
-        Ok(self.segments.len())
+        self.segments.len()
     }
     pub fn pending(&self) -> Result<Vec<PendingOperation>, JournalError> {
         self.pending
             .iter()
             .map(|entry| {
                 let (key, value) = entry?;
-                let id = OperationId(key.as_ref().try_into().map_err(|_| JournalError::Corrupt)?);
+                let id = OperationId(
+                    key.as_slice()
+                        .try_into()
+                        .map_err(|_| JournalError::Corrupt)?,
+                );
                 let (execution_generation, recipe) =
                     RecoveryRecipe::decode(&value).ok_or(JournalError::Corrupt)?;
                 Ok(PendingOperation {

@@ -1,7 +1,6 @@
 use super::{
     state::{OperationState, ALLOWED, COMPLETE, UNKNOWN},
-    transaction_error, FlushBoundary, JournalError, WitnessJournal, HEAD_HASH, HEAD_SEQUENCE,
-    RESERVE,
+    FlushBoundary, JournalError, WitnessJournal, HEAD_HASH, HEAD_SEQUENCE, RESERVE,
 };
 use crate::witness::{encode_record, hash_record, OperationId, WitnessRecord, WitnessStage};
 use crate::witness::{
@@ -9,7 +8,6 @@ use crate::witness::{
     RecoveryRecipe, ResourceSummary, WitnessAction, WitnessOutcome, WitnessResourceKind,
 };
 use sha2::{Digest, Sha256};
-use sled::transaction::{ConflictableTransactionError, Transactional};
 use std::sync::atomic::Ordering;
 
 impl WitnessJournal {
@@ -110,24 +108,25 @@ impl WitnessJournal {
         state.unknown_event_id = record.event_id;
         state.pending_generation += 1;
         let state = state.encode();
-        (&self.records, &self.operations, &self.meta, &self.events)
-            .transaction(|(records, operations, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if events.get(record.event_id)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&seq_key, bytes.as_ref())?;
-                events.insert(&record.event_id, &seq_key)?;
-                operations.insert(&id.0, state.as_slice())?;
-                meta.insert(HEAD_SEQUENCE, &seq_key)?;
-                meta.insert(HEAD_HASH, &next_hash)?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction
+                .get(self.events.name(), &record.event_id)?
+                .is_some()
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &seq_key, bytes.as_ref())?;
+            transaction.put(self.events.name(), &record.event_id, &seq_key)?;
+            transaction.put(self.operations.name(), &id.0, state.as_slice())?;
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &next_hash)?;
+            Ok(())
+        })?;
         self.flush(FlushBoundary::Outcome, id)?;
         crate::observability::authorization_metrics().record(
             crate::observability::AuthorizationMetric::Recovery(
@@ -185,32 +184,27 @@ impl WitnessJournal {
         terminal.state = COMPLETE;
         terminal.pending_generation += 1;
         let terminal = terminal.encode();
-        (
-            &self.records,
-            &self.operations,
-            &self.pending,
-            &self.meta,
-            &self.events,
-        )
-            .transaction(|(records, operations, pending, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if events.get(record.event_id)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&seq_key, bytes.as_ref())?;
-                events.insert(&record.event_id, &seq_key)?;
-                operations.insert(&id.0, terminal.as_slice())?;
-                pending.remove(&id.0)?;
-                meta.insert(HEAD_SEQUENCE, &seq_key)?;
-                meta.insert(HEAD_HASH, &next_hash)?;
-                meta.insert(RESERVE, &reserve_after.to_be_bytes())?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction
+                .get(self.events.name(), &record.event_id)?
+                .is_some()
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &seq_key, bytes.as_ref())?;
+            transaction.put(self.events.name(), &record.event_id, &seq_key)?;
+            transaction.put(self.operations.name(), &id.0, terminal.as_slice())?;
+            transaction.remove(self.pending.name(), &id.0)?;
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &next_hash)?;
+            transaction.put(self.meta.name(), RESERVE, &reserve_after.to_be_bytes())?;
+            Ok(())
+        })?;
         if self.flush(FlushBoundary::Outcome, id).is_err() {
             self.stop_automation();
             return Err(JournalError::AutomationStopped);

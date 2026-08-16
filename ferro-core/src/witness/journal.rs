@@ -3,7 +3,6 @@ use super::{
     WitnessOutcome, WitnessRecord, WitnessStage,
 };
 use sha2::Digest;
-use sled::transaction::{ConflictableTransactionError, Transactional};
 mod inspect;
 mod quota;
 mod reconcile;
@@ -20,7 +19,7 @@ use std::{
         Mutex,
     },
 };
-use storage::{lock_journal, path_entry_exists, transaction_error};
+use storage::{lock_journal, path_entry_exists, JournalDb, JournalTree, SqliteJournalStore};
 pub use types::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
     JournalMode, RecoveryClassification,
@@ -61,14 +60,14 @@ fn checkpoint_lock_hook() {
 
 pub struct WitnessJournal {
     root: PathBuf,
-    db: sled::Db,
-    records: sled::Tree,
-    operations: sled::Tree,
-    events: sled::Tree,
-    pending: sled::Tree,
-    meta: sled::Tree,
-    segments: sled::Tree,
-    sealed_segments: sled::Tree,
+    db: JournalDb,
+    records: JournalTree,
+    operations: JournalTree,
+    events: JournalTree,
+    pending: JournalTree,
+    meta: JournalTree,
+    segments: JournalTree,
+    sealed_segments: JournalTree,
     journal_id: [u8; 16],
     epoch: AtomicU64,
     max_bytes: u64,
@@ -175,23 +174,24 @@ impl WitnessJournal {
         let next_hash = hash_record(&bytes);
         let seq_key = record.sequence.to_be_bytes();
         let expected_head = sequence.to_be_bytes();
-        (&self.records, &self.meta, &self.events)
-            .transaction(|(records, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if events.get(record.event_id)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&seq_key, bytes.as_ref())?;
-                events.insert(&record.event_id, &seq_key)?;
-                meta.insert(HEAD_SEQUENCE, &seq_key)?;
-                meta.insert(HEAD_HASH, &next_hash)?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction
+                .get(self.events.name(), &record.event_id)?
+                .is_some()
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &seq_key, bytes.as_ref())?;
+            transaction.put(self.events.name(), &record.event_id, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &next_hash)?;
+            Ok(())
+        })?;
         self.flush(FlushBoundary::Outcome, OperationId(record.request_id))?;
         self.update_read_mirror_best_effort();
         Ok(())
@@ -206,7 +206,9 @@ impl WitnessJournal {
     ) -> Result<Self, JournalError> {
         fs::create_dir_all(&config.root)?;
         let lock = lock_journal(&config.root, config.journal_id)?;
-        let db = sled::open(config.root.join("witness.sled"))?;
+        let legacy_path = config.root.join("witness.sled");
+        let sqlite_path = config.root.join("witness.sqlite3");
+        let ready_marker = config.root.join("witness.sqlite3.ready");
         const V1_TREES: [&[u8]; 7] = [
             b"witness-records-v1",
             b"witness-operations-v1",
@@ -216,22 +218,41 @@ impl WitnessJournal {
             b"witness-segments-v1",
             b"witness-sealed-segments-v1",
         ];
-        if db
-            .tree_names()
-            .iter()
-            .any(|name| V1_TREES.contains(&name.as_ref()))
-        {
-            return Err(JournalError::UnsupportedVersion);
+        if legacy_path.exists() && !sqlite_path.exists() {
+            let legacy = sled::open(&legacy_path)?;
+            if legacy
+                .tree_names()
+                .iter()
+                .any(|name| V1_TREES.contains(&name.as_ref()))
+            {
+                return Err(JournalError::UnsupportedVersion);
+            }
+            drop(legacy);
+            SqliteJournalStore::migrate_from_sled(
+                &legacy_path,
+                &sqlite_path,
+                &ready_marker,
+                &[
+                    "witness-records-v2",
+                    "witness-operations-v2",
+                    "witness-events-v2",
+                    "witness-pending-v2",
+                    "witness-meta-v2",
+                    "witness-segments-v2",
+                    "witness-sealed-segments-v2",
+                ],
+            )?;
         }
+        let db = JournalDb::open(&sqlite_path)?;
         let journal = Self {
             root: config.root.clone(),
-            records: db.open_tree("witness-records-v2")?,
-            operations: db.open_tree("witness-operations-v2")?,
-            events: db.open_tree("witness-events-v2")?,
-            pending: db.open_tree("witness-pending-v2")?,
-            meta: db.open_tree("witness-meta-v2")?,
-            segments: db.open_tree("witness-segments-v2")?,
-            sealed_segments: db.open_tree("witness-sealed-segments-v2")?,
+            records: db.open_tree("witness-records-v2"),
+            operations: db.open_tree("witness-operations-v2"),
+            events: db.open_tree("witness-events-v2"),
+            pending: db.open_tree("witness-pending-v2"),
+            meta: db.open_tree("witness-meta-v2"),
+            segments: db.open_tree("witness-segments-v2"),
+            sealed_segments: db.open_tree("witness-sealed-segments-v2"),
             db,
             journal_id: config.journal_id,
             epoch: AtomicU64::new(1),
@@ -272,7 +293,7 @@ impl WitnessJournal {
             let epoch = self.meta.get(EPOCH)?.ok_or(JournalError::Corrupt)?;
             let epoch = u64::from_be_bytes(
                 epoch
-                    .as_ref()
+                    .as_slice()
                     .try_into()
                     .map_err(|_| JournalError::Corrupt)?,
             );
@@ -286,20 +307,23 @@ impl WitnessJournal {
                 .ok_or(JournalError::AutomationStopped)?;
             let stored_reserve = u64::from_be_bytes(
                 stored_reserve
-                    .as_ref()
+                    .as_slice()
                     .try_into()
                     .map_err(|_| JournalError::AutomationStopped)?,
             );
             let total = self.meta.get(RESERVE_TOTAL)?.ok_or(JournalError::Corrupt)?;
             let total = u64::from_be_bytes(
                 total
-                    .as_ref()
+                    .as_slice()
                     .try_into()
                     .map_err(|_| JournalError::Corrupt)?,
             );
             let max = self.meta.get(MAX_BYTES)?.ok_or(JournalError::Corrupt)?;
-            let max =
-                u64::from_be_bytes(max.as_ref().try_into().map_err(|_| JournalError::Corrupt)?);
+            let max = u64::from_be_bytes(
+                max.as_slice()
+                    .try_into()
+                    .map_err(|_| JournalError::Corrupt)?,
+            );
             if total != self.reserve_total || max != self.max_bytes {
                 return Err(JournalError::Corrupt);
             }
@@ -388,36 +412,29 @@ impl WitnessJournal {
         let expected_head = sequence.to_be_bytes();
         let pending_value = recipe.encode(generation);
         let operation = OperationState::received(&record, generation).encode();
-        (
-            &self.records,
-            &self.operations,
-            &self.pending,
-            &self.meta,
-            &self.events,
-        )
-            .transaction(|(records, operations, pending, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if operations.get(id.0)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateOperation,
-                    ));
-                }
-                if events.get(record.event_id)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&seq_key, bytes.as_ref())?;
-                events.insert(&record.event_id, &seq_key)?;
-                operations.insert(&id.0, operation.as_slice())?;
-                pending.insert(&id.0, &pending_value[..])?;
-                meta.insert(HEAD_SEQUENCE, &seq_key)?;
-                meta.insert(HEAD_HASH, &next_hash)?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction.get(self.operations.name(), &id.0)?.is_some() {
+                return Err(JournalError::DuplicateOperation);
+            }
+            if transaction
+                .get(self.events.name(), &record.event_id)?
+                .is_some()
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &seq_key, bytes.as_ref())?;
+            transaction.put(self.events.name(), &record.event_id, &seq_key)?;
+            transaction.put(self.operations.name(), &id.0, operation.as_slice())?;
+            transaction.put(self.pending.name(), &id.0, &pending_value[..])?;
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &next_hash)?;
+            Ok(())
+        })?;
         self.flush(FlushBoundary::Received, id)?;
         crate::observability::authorization_metrics()
             .record(crate::observability::AuthorizationMetric::PendingIntent);
@@ -522,36 +539,32 @@ impl WitnessJournal {
         terminal.state = COMPLETE;
         terminal.pending_generation += 1;
         let terminal_state = terminal.encode();
-        (
-            &self.records,
-            &self.operations,
-            &self.pending,
-            &self.meta,
-            &self.events,
-        )
-            .transaction(|(records, operations, pending, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if events.get(decision.event_id)?.is_some()
-                    || events.get(denied.event_id)?.is_some()
-                    || decision.event_id == denied.event_id
-                {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&first_key, decision_bytes.as_ref())?;
-                records.insert(&terminal_key, denied_bytes.as_ref())?;
-                events.insert(&decision.event_id, &first_key)?;
-                events.insert(&denied.event_id, &terminal_key)?;
-                operations.insert(&id.0, terminal_state.as_slice())?;
-                pending.remove(&id.0)?;
-                meta.insert(HEAD_SEQUENCE, &terminal_key)?;
-                meta.insert(HEAD_HASH, &terminal_hash)?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction
+                .get(self.events.name(), &decision.event_id)?
+                .is_some()
+                || transaction
+                    .get(self.events.name(), &denied.event_id)?
+                    .is_some()
+                || decision.event_id == denied.event_id
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &first_key, decision_bytes.as_ref())?;
+            transaction.put(self.records.name(), &terminal_key, denied_bytes.as_ref())?;
+            transaction.put(self.events.name(), &decision.event_id, &first_key)?;
+            transaction.put(self.events.name(), &denied.event_id, &terminal_key)?;
+            transaction.put(self.operations.name(), &id.0, terminal_state.as_slice())?;
+            transaction.remove(self.pending.name(), &id.0)?;
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &terminal_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &terminal_hash)?;
+            Ok(())
+        })?;
         self.flush(FlushBoundary::Decision, id)?;
         self.update_read_mirror_best_effort();
         self.post_ack_rotation();
@@ -608,43 +621,36 @@ impl WitnessJournal {
         let next_hash = hash_record(&bytes);
         let seq_key = record.sequence.to_be_bytes();
         let expected_head = sequence.to_be_bytes();
-        (
-            &self.records,
-            &self.operations,
-            &self.pending,
-            &self.meta,
-            &self.events,
-        )
-            .transaction(|(records, operations, pending, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if pending.get(id.0)?.is_none() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::AlreadyComplete,
-                    ));
-                }
-                if events.get(record.event_id)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&seq_key, bytes.as_ref())?;
-                events.insert(&record.event_id, &seq_key)?;
-                let mut terminal = state.clone();
-                let unknown = record.outcome == super::WitnessOutcome::OutcomeUnknown;
-                terminal.state = if unknown { UNKNOWN } else { COMPLETE };
-                terminal.unknown_event_id = if unknown { record.event_id } else { [0; 16] };
-                terminal.pending_generation += 1;
-                operations.insert(&id.0, terminal.encode())?;
-                if !unknown {
-                    pending.remove(&id.0)?;
-                }
-                meta.insert(HEAD_SEQUENCE, &seq_key)?;
-                meta.insert(HEAD_HASH, &next_hash)?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction.get(self.pending.name(), &id.0)?.is_none() {
+                return Err(JournalError::AlreadyComplete);
+            }
+            if transaction
+                .get(self.events.name(), &record.event_id)?
+                .is_some()
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &seq_key, bytes.as_ref())?;
+            transaction.put(self.events.name(), &record.event_id, &seq_key)?;
+            let mut terminal = state.clone();
+            let unknown = record.outcome == super::WitnessOutcome::OutcomeUnknown;
+            terminal.state = if unknown { UNKNOWN } else { COMPLETE };
+            terminal.unknown_event_id = if unknown { record.event_id } else { [0; 16] };
+            terminal.pending_generation += 1;
+            transaction.put(self.operations.name(), &id.0, &terminal.encode())?;
+            if !unknown {
+                transaction.remove(self.pending.name(), &id.0)?;
+            }
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &next_hash)?;
+            Ok(())
+        })?;
         if forced_unknown {
             self.update_read_mirror_best_effort();
             Err(JournalError::Indeterminate { operation_id: id })
@@ -682,24 +688,25 @@ impl WitnessJournal {
         let operation = state.encode();
         let seq_key = record.sequence.to_be_bytes();
         let expected_head = sequence.to_be_bytes();
-        (&self.records, &self.operations, &self.meta, &self.events)
-            .transaction(|(records, operations, meta, events)| {
-                if meta.get(HEAD_SEQUENCE)?.as_deref() != Some(expected_head.as_slice()) {
-                    return Err(ConflictableTransactionError::Abort(JournalError::Corrupt));
-                }
-                if events.get(record.event_id)?.is_some() {
-                    return Err(ConflictableTransactionError::Abort(
-                        JournalError::DuplicateEvent,
-                    ));
-                }
-                records.insert(&seq_key, bytes.as_ref())?;
-                events.insert(&record.event_id, &seq_key)?;
-                operations.insert(&id.0, operation.as_slice())?;
-                meta.insert(HEAD_SEQUENCE, &seq_key)?;
-                meta.insert(HEAD_HASH, &next_hash)?;
-                Ok(())
-            })
-            .map_err(transaction_error)?;
+        self.db.transaction(|transaction| {
+            if transaction.get(self.meta.name(), HEAD_SEQUENCE)?.as_deref()
+                != Some(expected_head.as_slice())
+            {
+                return Err(JournalError::Corrupt);
+            }
+            if transaction
+                .get(self.events.name(), &record.event_id)?
+                .is_some()
+            {
+                return Err(JournalError::DuplicateEvent);
+            }
+            transaction.put(self.records.name(), &seq_key, bytes.as_ref())?;
+            transaction.put(self.events.name(), &record.event_id, &seq_key)?;
+            transaction.put(self.operations.name(), &id.0, operation.as_slice())?;
+            transaction.put(self.meta.name(), HEAD_SEQUENCE, &seq_key)?;
+            transaction.put(self.meta.name(), HEAD_HASH, &next_hash)?;
+            Ok(())
+        })?;
         Ok(next_hash)
     }
 

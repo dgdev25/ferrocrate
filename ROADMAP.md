@@ -4,7 +4,7 @@
      forward work is sourced from the PRD-backed roadmap, completion plan,
      security audit, RVF plan, platform plan, and compatibility contracts. -->
 
-**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `68a7601`
+**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `30694fa`
 
 ## How to use this roadmap
 
@@ -64,7 +64,7 @@ reduction remain open. *Size:* L–XL. *Sources:* SEC-03/08/09,
 - [ ] Finish eBPF syscall/security monitoring with a production execution path, capability admission, event schema, bounded buffering, and fallback diagnostics; bounded configuration admission, explicit bpftool checks, tracepoint verification, and fail-loud fallback diagnostics are now documented in `docs/security/ebpf-monitoring.md`, while kernel event delivery qualification remains open.
 - [ ] Complete the remaining runtime shell-out audit; the current production inventory and justified exceptions are documented in `docs/security/shell-out-audit.md`, and WireGuard plus eBPF/tc probes now use the shared typed executor, while kernel qualification and workload-helper review remain open.
 - [x] Formally time-box `RUSTSEC-2025-0141` (`bincode` via `ruvector-core`) in the risk-acceptance register, with dependency-path evidence and a 2026-09-30 revalidation deadline; replacement remains future work.
-- [ ] Replace the remaining `sled` backends to remove `RUSTSEC-2025-0057` (`fxhash`) and `RUSTSEC-2024-0384` (`instant`), including migration and backward-compatibility tests. Volume, image, CRI replay, and Compose replay stores now use SQLite with tested legacy-sled imports and retained rollback copies; container stores now have a transactional SQLite snapshot exporter, but sled remains active and witness/container cutover remains to migrate.
+- [ ] Replace the remaining `sled` backends to remove `RUSTSEC-2025-0057` (`fxhash`) and `RUSTSEC-2024-0384` (`instant`), including migration and backward-compatibility tests. Volume, image, CRI replay, and Compose replay stores now use SQLite with tested legacy-sled imports and retained rollback copies; container stores now have conflict-safe transactional SQLite snapshot export/import with round-trip and conflict tests, but sled remains active and witness/container cutover remains to migrate.
 - [ ] Complete remaining PAL/security-audit continuation runs, triage new findings, and merge accepted remediations into this roadmap.
 - [ ] Run adversarial checks for symlink/path traversal, descriptor substitution, namespace identity, profile parsing, and fail-closed authorization on every new execution surface.
 

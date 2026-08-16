@@ -15,15 +15,19 @@ use crate::layer_compression::{
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
+#[cfg(unix)]
+use nix::mount::{mount, MsFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::io;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
@@ -316,7 +320,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         .map(|info| info.digest.clone().unwrap_or_else(|| "scratch".to_string()))
         .collect::<Vec<_>>();
     let mut cache = load_build_cache(runtime_dir)?;
-    if !has_secret_mounts(&stages) {
+    if !has_sensitive_mounts(&stages) {
         if let Some(entry) = cache.get(&cache_key).cloned() {
             if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
                 return Err(DockerfileBuildError::Invalid(
@@ -490,7 +494,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
 
             write_config(runtime_dir, &config_digest, config_bytes)?;
 
-            if !has_secret_mounts(&stages) {
+            if !has_sensitive_mounts(&stages) {
                 cache.insert(
                     cache_key.clone(),
                     BuildCacheEntry {
@@ -1443,6 +1447,7 @@ struct RunSpec {
     _shell: bool,
     cache_mounts: Vec<CacheMount>,
     secret_mounts: Vec<SecretMount>,
+    ssh_mounts: Vec<SshMount>,
 }
 
 #[derive(Debug, Clone)]
@@ -1453,6 +1458,12 @@ struct CacheMount {
 
 #[derive(Debug, Clone)]
 struct SecretMount {
+    target: String,
+    id: String,
+}
+
+#[derive(Debug, Clone)]
+struct SshMount {
     target: String,
     id: String,
 }
@@ -1515,6 +1526,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     let mut tokens = trimmed.split_whitespace().collect::<Vec<_>>();
     let mut cache_mounts = Vec::new();
     let mut secret_mounts = Vec::new();
+    let mut ssh_mounts = Vec::new();
     while tokens
         .first()
         .is_some_and(|token| token.starts_with("--mount="))
@@ -1561,9 +1573,20 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 });
             }
             Some("ssh") => {
-                return Err(DockerfileBuildError::Unsupported(
-                    "RUN --mount=type=ssh is not supported".to_string(),
-                ))
+                let id = validate_secret_id(id.unwrap_or("default"))?;
+                let target = target
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("/run/buildkit/ssh_agent.{id}"));
+                let target = validate_cache_target(&target)?;
+                if ssh_mounts
+                    .iter()
+                    .any(|mount: &SshMount| mount.target == target)
+                {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "duplicate SSH mount target: {target}"
+                    )));
+                }
+                ssh_mounts.push(SshMount { target, id });
             }
             Some(other) => {
                 return Err(DockerfileBuildError::Unsupported(format!(
@@ -1579,7 +1602,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     }
     let command = tokens.join(" ");
     if command.starts_with('[') {
-        if !cache_mounts.is_empty() || !secret_mounts.is_empty() {
+        if !cache_mounts.is_empty() || !secret_mounts.is_empty() || !ssh_mounts.is_empty() {
             return Err(DockerfileBuildError::Unsupported(
                 "cache mounts require shell-form RUN".to_string(),
             ));
@@ -1590,6 +1613,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
             _shell: false,
             cache_mounts,
             secret_mounts,
+            ssh_mounts,
         });
     }
     if shell.is_empty() {
@@ -1604,6 +1628,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         _shell: true,
         cache_mounts,
         secret_mounts,
+        ssh_mounts,
     })
 }
 
@@ -1645,10 +1670,13 @@ fn validate_secret_id(id: &str) -> Result<String, DockerfileBuildError> {
     Ok(id.to_string())
 }
 
-fn has_secret_mounts(stages: &[StageSpec]) -> bool {
-    stages
-        .iter()
-        .any(|stage| stage.run.iter().any(|run| !run.secret_mounts.is_empty()))
+fn has_sensitive_mounts(stages: &[StageSpec]) -> bool {
+    stages.iter().any(|stage| {
+        stage
+            .run
+            .iter()
+            .any(|run| !run.secret_mounts.is_empty() || !run.ssh_mounts.is_empty())
+    })
 }
 
 fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
@@ -1773,6 +1801,81 @@ fn run_stage_commands(
         let seccomp = seccomp_profile.clone();
         let limits = build_limits.clone();
         let child_limits = limits.clone();
+        let ssh_socket = std::env::var_os("FERROCRATE_BUILD_SSH_AUTH_SOCK")
+            .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
+            .map(PathBuf::from);
+        let mut ssh_specs = Vec::new();
+        let mut ssh_sources = HashSet::new();
+        for mount_spec in &run.ssh_mounts {
+            // The current executor exposes one authorized host agent socket;
+            // retain the parsed identity for Dockerfile/API compatibility.
+            let _ = mount_spec.id.as_str();
+            let source = ssh_socket.clone().ok_or_else(|| {
+                DockerfileBuildError::Invalid(
+                    "SSH mount requires FERROCRATE_BUILD_SSH_AUTH_SOCK or SSH_AUTH_SOCK"
+                        .to_string(),
+                )
+            })?;
+            let metadata = fs::symlink_metadata(&source).map_err(|err| {
+                DockerfileBuildError::Invalid(format!(
+                    "SSH agent socket {} cannot be inspected: {err}",
+                    source.display()
+                ))
+            })?;
+            if !source.is_absolute() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "SSH agent source must be an absolute path: {}",
+                    source.display()
+                )));
+            }
+            #[cfg(unix)]
+            if !metadata.file_type().is_socket() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "SSH agent source is not a Unix socket: {}",
+                    source.display()
+                )));
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                return Err(DockerfileBuildError::Unsupported(
+                    "RUN --mount=type=ssh requires a Unix host".to_string(),
+                ));
+            }
+            let target = validate_mount_target(&rootfs, &mount_spec.target, "ssh")?;
+            if !ssh_sources.insert(target.clone()) {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "duplicate SSH mount target: {}",
+                    mount_spec.target
+                )));
+            }
+            ssh_specs.push((source, target));
+        }
+        let mut ssh_mounted = Vec::new();
+        for (index, (source, target)) in ssh_specs.iter().enumerate() {
+            let backup = rootfs.join(format!(".ferrocrate-ssh-backup-{index}"));
+            let existed = target.exists();
+            if existed {
+                if target.is_dir() {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "SSH mount target is a directory: {}",
+                        target.display()
+                    )));
+                }
+                fs::rename(target, &backup)?;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::File::create(target)?;
+            #[cfg(unix)]
+            fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+            ssh_mounted.push((source.clone(), target.clone(), backup, existed));
+        }
+        let ssh_for_child = ssh_mounted
+            .iter()
+            .map(|(source, target, _, _)| (source.clone(), target.clone()))
+            .collect::<Vec<_>>();
         // SAFETY: pre_exec runs in the child process between fork and exec to install
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
@@ -1797,6 +1900,17 @@ fn run_stage_commands(
                             format!("build pre_exec map user namespace: {err}"),
                         )
                     })?;
+                }
+                #[cfg(unix)]
+                for (source, target) in &ssh_for_child {
+                    mount(
+                        Some(source),
+                        target,
+                        Some("bind"),
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    )
+                    .map_err(|err| io::Error::other(format!("build pre_exec mount SSH agent: {err}")))?;
                 }
                 enter_build_rootfs(&command_rootfs, workdir.as_deref()).map_err(|err| {
                     io::Error::new(err.kind(), format!("build pre_exec enter rootfs: {err}"))
@@ -1912,6 +2026,12 @@ fn run_stage_commands(
                         fs::rename(backup, target)?;
                     }
                 }
+                for (_source, target, backup, existed) in ssh_mounted.iter().rev() {
+                    let _ = fs::remove_file(target);
+                    if *existed {
+                        fs::rename(backup, target)?;
+                    }
+                }
                 return Err(err.into());
             }
         };
@@ -1957,6 +2077,12 @@ fn run_stage_commands(
                 }
                 let _ = fs::remove_dir_all(&target);
             }
+            if existed {
+                fs::rename(backup, target)?;
+            }
+        }
+        for (_source, target, backup, existed) in ssh_mounted.into_iter().rev() {
+            let _ = fs::remove_file(&target);
             if existed {
                 fs::rename(backup, target)?;
             }
@@ -2729,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn run_mount_secret_is_supported_and_ssh_remains_fail_closed() {
+    fn run_mount_secret_and_ssh_are_parsed_with_safe_defaults() {
         let run = parse_run(
             "--mount=type=secret,id=token echo value",
             &["/bin/sh".into(), "-c".into()],
@@ -2737,14 +2863,27 @@ mod tests {
         .expect("secret mount parses");
         assert_eq!(run.secret_mounts[0].id, "token");
         assert_eq!(run.secret_mounts[0].target, "/run/secrets/token");
-        let error = parse_run(
+        let ssh = parse_run(
             "--mount=type=ssh echo value",
             &["/bin/sh".into(), "-c".into()],
         )
-        .expect_err("ssh mount must remain unsupported");
-        assert!(error.to_string().contains("not supported"));
+        .expect("ssh mount parses");
+        assert_eq!(ssh.ssh_mounts[0].id, "default");
+        assert_eq!(ssh.ssh_mounts[0].target, "/run/buildkit/ssh_agent.default");
         assert!(parse_run(
             "--mount=type=secret,id=bad/slash echo value",
+            &["/bin/sh".into(), "-c".into()]
+        )
+        .is_err());
+        for invalid in [
+            "--mount=type=ssh,id=bad/slash echo value",
+            "--mount=type=ssh,target=relative.sock echo value",
+            "--mount=type=ssh,target=/run/agent.sock --mount=type=ssh,target=/run/agent.sock echo value",
+        ] {
+            assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
+        }
+        assert!(parse_run(
+            "--mount=type=ssh [\"/bin/sh\",\"-c\",\"echo value\"]",
             &["/bin/sh".into(), "-c".into()]
         )
         .is_err());

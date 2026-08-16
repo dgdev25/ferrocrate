@@ -807,8 +807,18 @@ fn save_build_cache(
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec(cache).map_err(|err| io::Error::other(err.to_string()))?;
-    let temporary = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let mut file = File::create(&temporary)?;
+    let temporary = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     fs::rename(temporary, &path)?;
@@ -856,8 +866,18 @@ pub fn export_build_cache(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary = destination.with_extension(format!("tmp.{}", std::process::id()));
-    let mut file = File::create(&temporary)?;
+    let temporary = destination.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     fs::rename(temporary, destination)?;

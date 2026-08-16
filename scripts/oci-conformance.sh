@@ -24,6 +24,7 @@ run_case() {
 
 status=0
 run_case image bash scripts/perf/oci-compat.sh || status=1
+run_case fixtures cargo test -p ferro-core --test image_operations fixture_manifest_and_index_match_oci_media_types -- --exact || status=1
 run_case runtime bash scripts/perf/oci-runtime-compat.sh || status=1
 run_case distribution bash scripts/perf/oci-distribution-compat.sh || status=1
 

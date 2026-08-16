@@ -13,6 +13,18 @@ use httptest::responders::status_code;
 use httptest::{Expectation, Server};
 
 #[test]
+fn fixture_manifest_and_index_match_oci_media_types() {
+    let manifest = include_str!("../../tests/fixtures/oci/manifest.json");
+    let parsed = parse_image_manifest(manifest).expect("OCI fixture manifest should validate");
+    assert_eq!(parsed.layers.len(), 1);
+
+    let index = include_str!("../../tests/fixtures/oci/index.json");
+    let parsed = ferro_core::image_manifest::parse_image_index(index)
+        .expect("OCI fixture index should validate");
+    assert_eq!(parsed.manifests.len(), 2);
+}
+
+#[test]
 fn integration_pull_store_and_tag_image() {
     let server = Server::run();
     let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;

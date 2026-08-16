@@ -3,7 +3,7 @@
 This directory contains cross-crate integration tests and fixtures for FerroCrate.
 
 ## Structure
-- `fixtures/oci/` : Minimal OCI image fixtures (manifest/config) for parser tests
+- `fixtures/oci/` : OCI image manifest, multi-platform index, and config fixtures for parser tests
 - `harness.md` : Shared conventions and guidelines
 
 ## Running Tests

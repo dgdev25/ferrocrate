@@ -6417,9 +6417,16 @@ impl DockerEventStore {
         let filter_images = filter_values("image");
         let filter_networks = filter_values("network");
         let filter_volumes = filter_values("volume");
-        contents
+        let parsed_events = contents
             .lines()
-            .filter_map(|line| serde_json::from_str::<DockerEvent>(line).ok())
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<DockerEvent>(line)
+                    .map_err(|error| format!("event journal contains malformed record: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        parsed_events
+            .into_iter()
             .filter(|item| since.is_none_or(|value| item.time >= value))
             .filter(|item| until.is_none_or(|value| item.time <= value))
             .filter(|item| event.is_none_or(|value| item.action == *value))
@@ -9587,6 +9594,17 @@ mod tests {
             .query(&query)
             .expect_err("malformed event filters must fail");
         assert!(error.contains("must be an array"), "error={error}");
+    }
+
+    #[test]
+    fn docker_event_query_rejects_corrupt_journal_records() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        std::fs::write(temp.path().join("events.jsonl"), b"not-json\n").expect("corrupt journal");
+        let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        let error = store
+            .query(&HashMap::new())
+            .expect_err("corrupt event records must fail closed");
+        assert!(error.contains("malformed record"), "error={error}");
     }
 
     #[test]

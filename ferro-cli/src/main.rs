@@ -4065,6 +4065,14 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/containers/{}", percent_encode_path_component(container)),
         )
         .map(|_| ()),
+        Commands::Network {
+            command: NetworkCommands::Ls,
+        } => request("GET", "/networks".to_string())
+            .and_then(|body| print_json(body, "json")),
+        Commands::Volume {
+            command: VolumeCommands::Ls,
+        } => request("GET", "/volumes".to_string())
+            .and_then(|body| print_json(body, "json")),
         _ => {
             Err("selected remote context has no transport mapping for this command yet".to_string())
         }

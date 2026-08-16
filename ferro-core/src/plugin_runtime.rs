@@ -4,7 +4,9 @@
 //! detached signature before launching the declared executable, bounds the
 //! wall-clock lifetime and captured output, and kills timed-out children. A
 //! deployment that needs memory/PID isolation must additionally place the
-//! process in a dedicated cgroup/sandbox before calling this API.
+//! applies the manifest's address-space limit through the host's `prlimit`
+//! helper where available. Process-count limits and descendant-wide
+//! isolation still require a dedicated cgroup/sandbox at deployment time.
 
 use crate::plugin_contract::{verify_plugin_signature, PluginManifest};
 use ed25519_dalek::VerifyingKey;
@@ -30,6 +32,8 @@ pub enum PluginExecutionError {
     Entrypoint,
     #[error("plugin execution io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("plugin resource limits are unavailable: {0}")]
+    ResourceLimits(String),
     #[error("plugin output exceeded the declared limit")]
     OutputLimit,
 }
@@ -47,6 +51,47 @@ fn spawn_reader<R: Read + Send + 'static>(
     limit: u64,
 ) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
     thread::spawn(move || read_bounded(reader, limit))
+}
+
+fn plugin_command(
+    manifest: &PluginManifest,
+    args: &[String],
+) -> Result<Command, PluginExecutionError> {
+    #[cfg(unix)]
+    {
+        // `pre_exec` cannot be used here because ferrocrate forbids unsafe
+        // code. util-linux's prlimit provides an RLIMIT_AS boundary without
+        // shell interpretation or interpolation. RLIMIT_NPROC is per-user on
+        // Linux (not per-plugin), so it cannot safely represent the manifest's
+        // process budget; deployment cgroups enforce that budget instead.
+        let probe = Command::new("prlimit").arg("--version").output();
+        match probe {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                return Err(PluginExecutionError::ResourceLimits(format!(
+                    "prlimit exited with {}",
+                    output.status
+                )));
+            }
+            Err(error) => {
+                return Err(PluginExecutionError::ResourceLimits(error.to_string()));
+            }
+        }
+        let mut command = Command::new("prlimit");
+        command
+            .arg(format!("--as={}", manifest.limits.memory_bytes))
+            .arg("--")
+            .arg(&manifest.entrypoint)
+            .args(args);
+        return Ok(command);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut command = Command::new(&manifest.entrypoint);
+        command.args(args);
+        Ok(command)
+    }
 }
 
 /// Verify and execute a plugin entrypoint with bounded timeout and output.
@@ -75,8 +120,7 @@ pub fn execute_plugin(
         }
     }
 
-    let mut child = Command::new(&manifest.entrypoint)
-        .args(args)
+    let mut child = plugin_command(manifest, args)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -190,6 +234,23 @@ mod tests {
             execute_plugin(&manifest, &key.verifying_key(), &[], b""),
             Err(PluginExecutionError::OutputLimit)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applies_declared_address_space_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[6u8; 32]);
+        let mut limits = PluginLimits::default();
+        limits.memory_bytes = 64 * 1024 * 1024;
+        let manifest = signed_manifest(&script(&temp, "ulimit -v"), limits, &key);
+        let result =
+            execute_plugin(&manifest, &key.verifying_key(), &[], b"").expect("limited plugin");
+        let virtual_memory_kib: u64 = String::from_utf8_lossy(&result.stdout)
+            .trim()
+            .parse()
+            .expect("ulimit output");
+        assert!(virtual_memory_kib <= 65_536);
     }
 
     #[cfg(unix)]

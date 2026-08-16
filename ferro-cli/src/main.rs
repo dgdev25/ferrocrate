@@ -6907,6 +6907,28 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_string(&entries).map_err(|err| err.to_string())?;
                 http_response(200, body.as_bytes(), "application/json")
             }
+            ("GET", path) if path.starts_with("/networks/") => {
+                let name = path.trim_start_matches("/networks/");
+                if name == "bridge" {
+                    let body = serde_json::json!({
+                        "Name": "bridge", "Id": "bridge", "Driver": "bridge",
+                        "Scope": "local", "IPAM": {"Config": []}, "Containers": {}
+                    });
+                    http_response(200, body.to_string().as_bytes(), "application/json")
+                } else {
+                    let record = load_networks(runtime_dir.as_ref())?
+                        .into_iter()
+                        .find(|record| record.name == name)
+                        .ok_or_else(|| format!("docker: network not found: {name}"))?;
+                    let body = serde_json::json!({
+                        "Name": record.name, "Id": record.name, "Driver": record.driver,
+                        "Scope": "local",
+                        "IPAM": {"Config": [{"Subnet": record.subnet, "Gateway": record.gateway}]},
+                        "Containers": {}
+                    });
+                    http_response(200, body.to_string().as_bytes(), "application/json")
+                }
+            }
             ("POST", "/networks/create") => {
                 let spec = parse_docker_network_create_spec(&request.body)?;
                 if spec.driver.as_deref().unwrap_or("bridge") != "bridge" {
@@ -7060,6 +7082,40 @@ fn handle_docker_compat_connection(
                     .map_err(|error| error.to_string())?;
                 execute_volume_remove(&volume_store, name, proof)?;
                 http_response(204, &[], "text/plain")
+            }
+            ("GET", "/volumes") => {
+                let volumes = volume_store
+                    .list()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .map(|record| {
+                        serde_json::json!({
+                            "Name": record.name,
+                            "Driver": record.driver,
+                            "Mountpoint": record.path,
+                            "CreatedAt": record.created_at_unix.to_string(),
+                            "Status": serde_json::Value::Null,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let body = serde_json::json!({"Volumes": volumes, "Warnings": []});
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/volumes/") => {
+                let name = path.trim_start_matches("/volumes/");
+                let record = volume_store
+                    .get(name)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("docker: volume not found: {name}"))?;
+                let body = serde_json::json!({
+                    "Name": record.name,
+                    "Driver": record.driver,
+                    "Mountpoint": record.path,
+                    "CreatedAt": record.created_at_unix.to_string(),
+                    "Status": serde_json::Value::Null,
+                    "UsageData": serde_json::Value::Null,
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
             }
             _ => docker_error_response(404, "not found"),
         };

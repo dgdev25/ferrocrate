@@ -55,7 +55,7 @@ use ferro_net::ebpf::{
 use ferro_net::ebpf_abi::{EndpointKey, EndpointValue, PortKey, PortValue};
 use ferro_net::netns;
 use ferro_net::portmap::{build_network_plan as build_portmap_plan, NetworkPlan};
-use ferro_net::rootless::{build_slirp4netns_cmd, RootlessNetConfig};
+use ferro_net::rootless::{build_hostfwd_request, build_slirp4netns_cmd, RootlessNetConfig};
 use ferro_net::subnet::network_cidr_v4;
 use ferro_net::veth;
 use ferro_net::BackendProbe;
@@ -76,6 +76,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -2774,9 +2775,15 @@ impl ContainerRuntime {
             .reached("run", LifecyclePhasePoint::SpawnPrepared)?;
 
         if use_slirp {
-            match start_slirp4netns(child_id) {
+            let api_socket = container_dir.join("slirp4netns.sock");
+            match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
                     rollback.slirp_process = Some((helper_pid, helper_start_time));
+                    if let Err(error) = configure_slirp_host_forwards(&api_socket, &port_mappings) {
+                        let _ = kill_pid(child_id);
+                        rollback.rollback();
+                        return Err(error);
+                    }
                 }
                 Err(e) => {
                     let _ = kill_pid(child_id);
@@ -5354,11 +5361,7 @@ fn setup_network(
 
     let is_root = nix::unistd::Uid::effective().is_root();
     if !is_root {
-        validate_rootless_bridge_network(
-            rootless_netns_enabled(),
-            !port_mappings.is_empty(),
-            network_backend,
-        )?;
+        validate_rootless_bridge_network(rootless_netns_enabled(), port_mappings, network_backend)?;
         // The unshared child network namespace is connected by slirp4netns
         // after spawn. No privileged bridge, veth, firewall, or namespace
         // mutation may be attempted in the rootless path.
@@ -6838,7 +6841,7 @@ fn ensure_bridge_backend_root(
 
 fn validate_rootless_bridge_network(
     enabled: bool,
-    has_port_mappings: bool,
+    port_mappings: &[PortMappingRecord],
     requested_backend: NetworkBackend,
 ) -> Result<(), RuntimeError> {
     if !enabled {
@@ -6846,10 +6849,20 @@ fn validate_rootless_bridge_network(
             "rootless bridge networking is disabled; set FERROCRATE_ROOTLESS_NETNS=1 to use slirp4netns (requested backend {requested_backend})"
         )));
     }
-    if has_port_mappings {
-        return Err(RuntimeError::Network(
-            "rootless slirp4netns networking does not support host port mappings yet".to_string(),
-        ));
+    for mapping in port_mappings {
+        if mapping.host_port == 0 || mapping.container_port == 0 {
+            return Err(RuntimeError::Network(
+                "rootless host and container ports must be non-zero".to_string(),
+            ));
+        }
+        if !mapping.protocol.eq_ignore_ascii_case("tcp")
+            && !mapping.protocol.eq_ignore_ascii_case("udp")
+        {
+            return Err(RuntimeError::Network(format!(
+                "rootless slirp4netns supports only TCP and UDP port mappings, got {}",
+                mapping.protocol
+            )));
+        }
     }
     Ok(())
 }
@@ -7869,7 +7882,7 @@ fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), Run
     Ok(())
 }
 
-fn start_slirp4netns(pid: u32) -> Result<(u32, u64), RuntimeError> {
+fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), RuntimeError> {
     let tap_name = format!("tap{pid}");
     let tap_name = if tap_name.len() > 15 {
         tap_name[..15].to_string()
@@ -7882,6 +7895,7 @@ fn start_slirp4netns(pid: u32) -> Result<(u32, u64), RuntimeError> {
         enable_ipv6: std::env::var("FERROCRATE_ROOTLESS_IPV6")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false),
+        api_socket: api_socket.map(|path| path.display().to_string()),
     };
     let cmd = match build_slirp4netns_cmd(pid, &config) {
         Ok(c) => c,
@@ -7921,6 +7935,69 @@ fn start_slirp4netns(pid: u32) -> Result<(u32, u64), RuntimeError> {
         let _ = child.wait();
     });
     Ok((helper_pid, helper_start_time))
+}
+
+fn configure_slirp_host_forwards(
+    api_socket: &Path,
+    mappings: &[PortMappingRecord],
+) -> Result<(), RuntimeError> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        match UnixStream::connect(api_socket) {
+            Ok(_) => {
+                for mapping in mappings {
+                    let mut stream = UnixStream::connect(api_socket).map_err(|error| {
+                        RuntimeError::Network(format!(
+                            "slirp4netns API socket disappeared: {error}"
+                        ))
+                    })?;
+                    let request = build_hostfwd_request(
+                        mapping.host_port,
+                        mapping.container_port,
+                        &mapping.protocol,
+                    )
+                    .map_err(|error| RuntimeError::Network(error.to_string()))?;
+                    stream.write_all(&request)?;
+                    stream.shutdown(std::net::Shutdown::Write)?;
+                    let mut response = Vec::new();
+                    stream.read_to_end(&mut response)?;
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&response).map_err(|error| {
+                            RuntimeError::Network(format!(
+                                "invalid slirp4netns API response: {error}"
+                            ))
+                        })?;
+                    if let Some(error) = value.get("error") {
+                        return Err(RuntimeError::Network(format!(
+                            "slirp4netns failed to add host forwarding: {error}"
+                        )));
+                    }
+                    if value
+                        .get("return")
+                        .and_then(|result| result.get("id"))
+                        .is_none()
+                    {
+                        return Err(RuntimeError::Network(
+                            "slirp4netns host forwarding response omitted an id".to_string(),
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(RuntimeError::Network(format!(
+        "slirp4netns API socket did not become ready: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "timeout".to_string())
+    )))
 }
 
 fn rootless_netns_enabled() -> bool {
@@ -11636,23 +11713,28 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn rootless_bridge_requires_explicit_slirp_enablement() {
-        let err = super::validate_rootless_bridge_network(false, false, NetworkBackend::Iptables)
+        let err = super::validate_rootless_bridge_network(false, &[], NetworkBackend::Iptables)
             .expect_err("rootless networking must be opt-in");
         assert!(err.to_string().contains("FERROCRATE_ROOTLESS_NETNS=1"));
     }
 
     #[test]
-    fn rootless_bridge_rejects_unimplemented_host_port_mapping() {
-        let err = super::validate_rootless_bridge_network(true, true, NetworkBackend::Iptables)
-            .expect_err("slirp port forwarding must fail closed until implemented");
-        assert!(err
-            .to_string()
-            .contains("does not support host port mappings"));
+    fn rootless_bridge_accepts_supported_host_port_mapping() {
+        super::validate_rootless_bridge_network(
+            true,
+            &[PortMappingRecord {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".into(),
+            }],
+            NetworkBackend::Iptables,
+        )
+        .expect("supported slirp forwarding should be admitted");
     }
 
     #[test]
     fn rootless_bridge_accepts_slirp_without_privileged_mutations() {
-        super::validate_rootless_bridge_network(true, false, NetworkBackend::Nftables)
+        super::validate_rootless_bridge_network(true, &[], NetworkBackend::Nftables)
             .expect("enabled slirp bridge should be admitted");
     }
 

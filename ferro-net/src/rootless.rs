@@ -1,10 +1,12 @@
 use crate::validate::{validate_cidr, validate_interface_name};
+use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootlessNetConfig {
     pub tap_name: String,
     pub cidr: String,
     pub enable_ipv6: bool,
+    pub api_socket: Option<String>,
 }
 
 impl RootlessNetConfig {
@@ -35,12 +37,46 @@ pub fn build_slirp4netns_cmd(pid: u32, config: &RootlessNetConfig) -> Result<Vec
         },
         "--cidr".to_string(),
         config.cidr.clone(),
+        config
+            .api_socket
+            .as_ref()
+            .map(|socket| format!("--api-socket={socket}"))
+            .unwrap_or_default(),
         pid.to_string(),
         config.tap_name.clone(),
     ]
     .into_iter()
     .filter(|argument| !argument.is_empty())
     .collect())
+}
+
+/// Build one slirp4netns API request for an IPv4 host-port forward.
+/// slirp4netns exposes this API over the Unix socket supplied at startup.
+pub fn build_hostfwd_request(
+    host_port: u16,
+    container_port: u16,
+    protocol: &str,
+) -> Result<Vec<u8>, String> {
+    if host_port == 0 || container_port == 0 {
+        return Err("host and container ports must be non-zero".to_string());
+    }
+    let protocol = protocol.to_ascii_lowercase();
+    if protocol != "tcp" && protocol != "udp" {
+        return Err(format!(
+            "unsupported rootless port mapping protocol: {protocol}"
+        ));
+    }
+    serde_json::to_vec(&json!({
+        "execute": "add_hostfwd",
+        "arguments": {
+            "proto": protocol,
+            "host_addr": "0.0.0.0",
+            "host_port": host_port,
+            "guest_addr": "10.0.2.100",
+            "guest_port": container_port,
+        }
+    }))
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -53,6 +89,7 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: false,
+            api_socket: None,
         };
         let cmd = build_slirp4netns_cmd(1234, &config).unwrap();
         assert_eq!(
@@ -75,6 +112,7 @@ mod tests {
             tap_name: "tap-long-name1".to_string(),
             cidr: "192.168.0.0/16".to_string(),
             enable_ipv6: false,
+            api_socket: None,
         };
         let cmd = build_slirp4netns_cmd(9999, &config).unwrap();
         assert_eq!(
@@ -97,6 +135,7 @@ mod tests {
             tap_name: "tap@0".to_string(), // Invalid character
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: false,
+            api_socket: None,
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
     }
@@ -107,6 +146,7 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "invalid-cidr".to_string(), // Invalid CIDR
             enable_ipv6: false,
+            api_socket: None,
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
     }
@@ -117,8 +157,37 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: true,
+            api_socket: None,
         };
         let command = build_slirp4netns_cmd(1234, &config).unwrap();
         assert!(command.iter().any(|argument| argument == "--enable-ipv6"));
+    }
+
+    #[test]
+    fn adds_api_socket_to_command() {
+        let config = RootlessNetConfig {
+            tap_name: "tap0".to_string(),
+            cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: false,
+            api_socket: Some("/run/ferro/slirp.sock".to_string()),
+        };
+        let command = build_slirp4netns_cmd(1234, &config).unwrap();
+        assert!(command
+            .iter()
+            .any(|argument| argument == "--api-socket=/run/ferro/slirp.sock"));
+    }
+
+    #[test]
+    fn builds_tcp_host_forward_request() {
+        let request = super::build_hostfwd_request(8080, 80, "TCP").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&request).unwrap();
+        assert_eq!(value["execute"], "add_hostfwd");
+        assert_eq!(value["arguments"]["proto"], "tcp");
+        assert_eq!(value["arguments"]["guest_addr"], "10.0.2.100");
+    }
+
+    #[test]
+    fn rejects_unsupported_host_forward_protocol() {
+        assert!(super::build_hostfwd_request(8080, 80, "sctp").is_err());
     }
 }

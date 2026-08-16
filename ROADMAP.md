@@ -46,7 +46,7 @@ compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
 `docs/compatibility/cri.md`, `docs/compatibility/cri-conformance.md`.
 
 - [ ] Attach each pod sandbox to an authorized, durable network namespace and reconcile its network state on restart.
-- [x] Qualify Create/Start/Stop/RemoveContainer, ContainerStatus, and ExecSync with a real OCI image/rootfs, including exit code and stdout behavior; timeout/cancellation and broader image corpus remain open.
+- [x] Qualify Create/Start/Stop/RemoveContainer, ContainerStatus, and ExecSync with a real OCI image/rootfs, including exit code, stdout, and deadline behavior; broader image corpus and cancellation remain open.
 - [ ] Bind pod/container identity, sandbox, image digest, command, and resource state into the common authorization proof and witness lifecycle.
 - [x] Add UDS conformance fixtures for the exposed lifecycle path; malformed requests, deadlines, retries, and full method idempotency remain in the qualification expansion.
 - [ ] Add kubelet/containerd compatibility fixtures and publish the supported CRI method/version/error matrix.

@@ -80,7 +80,7 @@ Docker Engine, and release claims are still marked partial or rework-needed.
 - [x] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
 - [ ] Complete high-value Docker container, image, network, volume, streaming, wait, and event endpoints while preserving authorization and witness receipts.
 - [x] Run the current Docker API matrix and Compose contract suites against the public Unix socket, including versioned paths and explicit unsupported endpoint errors; retries and streaming expansion remain in the endpoint completion work.
-- [ ] Add release gates for clean builds, cross-target artifacts (x86_64/aarch64/riscv64), checksums/signatures, upgrade/rollback, and reproducible metadata.
+- [x] Add a repeatable release-readiness gate for host evidence, Docker/CRI/security contracts, and compatibility evidence; cross-target artifacts, checksums/signatures, upgrade/rollback, and reproducible metadata remain open.
 - [ ] Reconcile README and PRD status claims with evidence; remove stale “in progress” or “done” statements after each qualification gate.
 
 ## Next

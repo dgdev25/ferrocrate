@@ -1,0 +1,25 @@
+name: Release readiness
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install compatibility tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables nftables wireguard-tools iputils-ping
+      - name: Run release readiness gate
+        run: bash scripts/verify-release-readiness.sh
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-readiness-evidence
+          path: target/compat/

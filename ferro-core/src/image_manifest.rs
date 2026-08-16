@@ -33,6 +33,8 @@ pub enum ImageManifestParseError {
     InvalidDescriptorDigest(String),
     #[error("invalid descriptor size: {0}")]
     InvalidDescriptorSize(i64),
+    #[error("invalid platform descriptor: {0}")]
+    InvalidPlatform(String),
 }
 
 /// Parse an OCI Image Spec v1.1 manifest document and validate core media types.
@@ -149,9 +151,45 @@ impl ImageIndex {
                     descriptor.media_type.clone(),
                 ));
             }
+            if let Some(platform) = &descriptor.platform {
+                validate_platform(platform)?;
+            }
         }
         Ok(())
     }
+}
+
+fn validate_platform(platform: &Platform) -> Result<(), ImageManifestParseError> {
+    if platform.os.trim().is_empty() {
+        return Err(ImageManifestParseError::InvalidPlatform(
+            "os must not be empty".to_string(),
+        ));
+    }
+    if platform.architecture.trim().is_empty() {
+        return Err(ImageManifestParseError::InvalidPlatform(
+            "architecture must not be empty".to_string(),
+        ));
+    }
+    if platform.os_version.as_deref().is_some_and(str::is_empty) {
+        return Err(ImageManifestParseError::InvalidPlatform(
+            "osVersion must not be empty".to_string(),
+        ));
+    }
+    if platform.variant.as_deref().is_some_and(str::is_empty) {
+        return Err(ImageManifestParseError::InvalidPlatform(
+            "variant must not be empty".to_string(),
+        ));
+    }
+    if platform
+        .os_features
+        .iter()
+        .any(|feature| feature.trim().is_empty())
+    {
+        return Err(ImageManifestParseError::InvalidPlatform(
+            "osFeatures must not contain empty values".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_descriptor(descriptor: &Descriptor) -> Result<(), ImageManifestParseError> {
@@ -334,5 +372,23 @@ mod tests {
         "#;
         let err = parse_image_index(index).expect_err("invalid index descriptor type");
         assert!(err.to_string().contains("unsupported manifest mediaType"));
+    }
+
+    #[test]
+    fn rejects_index_with_empty_platform_fields() {
+        let index = r#"
+        {
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.oci.image.index.v1+json",
+          "manifests": [{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "size": 1234,
+            "platform": {"architecture": "", "os": "linux"}
+          }]
+        }
+        "#;
+        let err = parse_image_index(index).expect_err("empty architecture must be rejected");
+        assert!(err.to_string().contains("architecture must not be empty"));
     }
 }

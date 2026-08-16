@@ -1,6 +1,6 @@
 use super::{FaultPoint, FlushBoundary, JournalError, WitnessJournal};
 use crate::observability::{authorization_metrics, AuthorizationMetric, JournalMetric};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::sync::{Arc, Mutex};
 use std::{
     fs::{File, OpenOptions},
@@ -127,7 +127,7 @@ impl SqliteJournalStore {
         callback: impl for<'tx> FnOnce(&SqliteTransaction<'tx>) -> Result<T, JournalError>,
     ) -> Result<T, JournalError> {
         let mut connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let context = SqliteTransaction { transaction };
         match callback(&context) {
             Ok(value) => {

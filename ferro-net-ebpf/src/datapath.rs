@@ -2,8 +2,8 @@
 
 #[cfg(not(target_arch = "bpf"))]
 use crate::packet::{
-    rewrite_ethernet_destination, rewrite_ipv4_destination, rewrite_ipv4_source,
-    rewrite_transport_port, PacketError, PortField,
+    rewrite_ethernet_destination, rewrite_ethernet_source, rewrite_ipv4_destination,
+    rewrite_ipv4_source, rewrite_transport_port, PacketError, PortField,
 };
 
 pub const IP_PROTOCOL_TCP: u8 = 6;
@@ -421,16 +421,45 @@ pub fn decide_ingress<S: DatapathState>(
 ) -> Result<Decision, DecisionError> {
     enforce_policy(packet, Direction::Ingress, state)?;
     let mut decision = Decision::pass(packet);
+    let mut reverse_conntrack = false;
 
     if let Some(target) = state.conntrack(FlowKey::from_packet(packet)) {
         if !valid_target(target.address, target.port) {
             return Err(DecisionError::InvalidTranslation);
+        }
+        // A packet redirected to the host (loopback or the external
+        // interface) traverses that interface's ingress classifier again.
+        // Once its destination already equals the conntrack target it has
+        // been translated by an earlier classifier and must not be rewritten
+        // or redirected a second time.
+        if packet.destination
+            == (Socket {
+                address: target.address,
+                port: target.port,
+            })
+        {
+            return Ok(decision);
         }
         decision.destination = Socket {
             address: target.address,
             port: target.port,
         };
         decision.translation = Translation::Destination;
+        reverse_conntrack = true;
+    } else if state.endpoint(packet.source.address).is_some()
+        && state.external_network().is_some_and(|external| {
+            packet.destination.address[0] == 127 || packet.destination.address == external.address
+        })
+        && state
+            .published_port(packet.protocol, packet.destination.port)
+            .is_some()
+    {
+        // Reverse DNAT packets are redirected to loopback or the external
+        // interface after their destination is rewritten. They traverse the
+        // ingress classifier on that target interface once more; an endpoint
+        // source plus a host destination/ published port identifies that
+        // already-translated pass and prevents a DNAT loop.
+        return Ok(decision);
     } else if let Some(target) = state.published_port(packet.protocol, packet.destination.port) {
         if !valid_target(target.address, target.port) {
             return Err(DecisionError::InvalidTranslation);
@@ -463,6 +492,30 @@ pub fn decide_ingress<S: DatapathState>(
             Ok(decision)
         }
         Some(_) => Err(DecisionError::EndpointMissing),
+        None if reverse_conntrack => {
+            let external = state
+                .external_network()
+                .ok_or(DecisionError::EndpointMissing)?;
+            if decision.destination.address[0] == 127 {
+                if external.loopback_ifindex == 0 {
+                    return Err(DecisionError::EndpointMissing);
+                }
+                decision.action = Action::Redirect;
+                decision.ifindex = Some(external.loopback_ifindex);
+                decision.destination_mac = None;
+                Ok(decision)
+            } else if decision.destination.address == external.address
+                && external.ifindex != 0
+                && external.next_hop_mac != [0; 6]
+            {
+                decision.action = Action::Redirect;
+                decision.ifindex = Some(external.ifindex);
+                decision.destination_mac = Some(external.next_hop_mac);
+                Ok(decision)
+            } else {
+                Err(DecisionError::EndpointMissing)
+            }
+        }
         None if decision.translation != Translation::None => Err(DecisionError::EndpointMissing),
         None => Ok(decision),
     }
@@ -563,6 +616,9 @@ pub fn apply_decision(
     }
     if let Some(mac) = decision.destination_mac {
         rewrite_ethernet_destination(bytes, mac)?;
+        if bytes.get(6..12) == Some(&[0; 6]) {
+            rewrite_ethernet_source(bytes, crate::packet::SYNTHETIC_REDIRECT_SOURCE_MAC)?;
+        }
     }
     Ok(())
 }

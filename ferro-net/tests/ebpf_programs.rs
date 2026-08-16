@@ -645,6 +645,24 @@ fn checked_destination_mac_mutation_rejects_malformed_packets_without_changes() 
 }
 
 #[test]
+fn loopback_redirect_synthesizes_a_bridge_source_mac_for_zero_source_frames() {
+    let internal = [10, 44, 1, 2];
+    let outbound = tcp_packet(internal, 32_000, [192, 0, 2, 10], 443);
+    let state = FixtureState::with_external_endpoint(internal);
+    let decision = decide_egress(&outbound, &state).unwrap();
+    let mut frame = frame_for(&outbound, b"loopback", false);
+    frame[6..12].fill(0);
+
+    apply_decision(&mut frame, &outbound, &decision).unwrap();
+
+    assert_eq!(
+        &frame[6..12],
+        &packet::SYNTHETIC_REDIRECT_SOURCE_MAC,
+        "a zero-source loopback frame cannot traverse the bridge"
+    );
+}
+
+#[test]
 fn helper_result_controls_outcome_and_nat_counters() {
     let internal = [10, 44, 1, 2];
     let outbound = tcp_packet(internal, 32_000, [192, 0, 2, 10], 443);
@@ -774,6 +792,65 @@ fn localhost_published_port_response_returns_through_loopback() {
         "localhost response must use loopback"
     );
     assert_eq!(egress.destination_mac, None);
+}
+
+#[test]
+fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
+    let localhost = [127, 0, 0, 1];
+    let endpoint_address = [10, 44, 1, 2];
+    let request = tcp_packet(localhost, 51_000, localhost, 8080);
+    let mut state = FixtureState {
+        external: Some(ExternalNetwork {
+            address: [203, 0, 113, 8],
+            ifindex: 9,
+            loopback_ifindex: 1,
+            next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            snat_port_start: 55_000,
+            snat_port_end: 55_031,
+            snat_range_reserved: true,
+        }),
+        ..FixtureState::default()
+    };
+    state.ports.push((
+        (request.protocol, 8080),
+        PortTarget {
+            address: endpoint_address,
+            port: 80,
+        },
+    ));
+    state.endpoints.push((
+        endpoint_address,
+        Endpoint {
+            ifindex: 17,
+            mac: [2, 0, 0, 0, 0, 17],
+            flags: 0,
+        },
+    ));
+
+    let ingress = decide_ingress(&request, &state).unwrap();
+    let reverse = ingress.reverse_conntrack.expect("reverse DNAT record");
+    state.insert_existing(reverse.key, reverse.target);
+
+    let response = tcp_packet(endpoint_address, 80, localhost, 51_000);
+    let redirected = decide_ingress(&response, &state).unwrap();
+    assert_eq!(
+        redirected.destination,
+        Socket {
+            address: localhost,
+            port: 8080,
+        }
+    );
+    assert_eq!(redirected.translation, Translation::Destination);
+    assert_eq!(redirected.action, Action::Redirect);
+    assert_eq!(redirected.ifindex, Some(1));
+    assert_eq!(redirected.destination_mac, None);
+
+    // The redirected packet re-enters loopback ingress with its translated
+    // tuple. It must pass without a second DNAT/redirect loop.
+    let translated = tcp_packet(endpoint_address, 80, localhost, 8080);
+    let passed = decide_ingress(&translated, &state).unwrap();
+    assert_eq!(passed.action, Action::Pass);
+    assert_eq!(passed.translation, Translation::None);
 }
 
 #[test]

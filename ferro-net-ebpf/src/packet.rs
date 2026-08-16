@@ -5,6 +5,12 @@ const UDP_HEADER_LEN: usize = 8;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const IP_PROTOCOL_TCP: u8 = 6;
 const IP_PROTOCOL_UDP: u8 = 17;
+// Loopback-originated packets have no real Ethernet source address. A
+// redirect from loopback to a bridge/veth must synthesize a stable local
+// unicast source or the bridge rejects the frame before it reaches the
+// container endpoint.
+#[allow(dead_code)]
+pub const SYNTHETIC_REDIRECT_SOURCE_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketError {
@@ -77,7 +83,10 @@ where
     F: FnMut(usize) -> Result<u8, PacketError>,
 {
     if ethernet {
-        require_bytes(packet_len, 0, ETHERNET_HEADER_LEN)?;
+        // Classify a short Ethernet frame as truncated before inspecting its
+        // type. This keeps malformed partial IPv4 frames fail-closed and
+        // deterministic instead of reporting an unrelated network type.
+        require_bytes(packet_len, 0, ETHERNET_HEADER_LEN + IPV4_HEADER_LEN)?;
         if read_be_u16(&mut read_byte, ipv4_offset - 2)? != ETHERTYPE_IPV4 {
             return Err(PacketError::UnsupportedNetwork);
         }
@@ -154,6 +163,15 @@ pub fn rewrite_ethernet_destination(
     parse_packet_bytes(packet)?;
     let destination = packet.get_mut(..6).ok_or(PacketError::Truncated)?;
     destination.copy_from_slice(&destination_mac);
+    Ok(())
+}
+
+#[allow(dead_code)]
+#[cfg(not(target_arch = "bpf"))]
+pub fn rewrite_ethernet_source(packet: &mut [u8], source_mac: [u8; 6]) -> Result<(), PacketError> {
+    parse_packet_bytes(packet)?;
+    let source = packet.get_mut(6..12).ok_or(PacketError::Truncated)?;
+    source.copy_from_slice(&source_mac);
     Ok(())
 }
 
@@ -292,7 +310,9 @@ pub fn rewrite_transport_port(
 
 #[cfg(target_arch = "bpf")]
 mod tc {
-    use super::{parse_with_link, PacketError, PacketView, ETHERTYPE_IPV4};
+    use super::{
+        parse_with_link, PacketError, PacketView, ETHERTYPE_IPV4, SYNTHETIC_REDIRECT_SOURCE_MAC,
+    };
     use crate::datapath::{Decision, Packet, Translation};
     use aya_ebpf::programs::TcContext;
     use core::mem;
@@ -413,6 +433,23 @@ mod tc {
                 ] {
                     ctx.store(offset, &value, 0)
                         .map_err(|_| PacketError::Truncated)?;
+                }
+                let mut source_is_zero = true;
+                let mut offset = 6;
+                while offset < 12 {
+                    if ctx.load::<u8>(offset).map_err(|_| PacketError::Truncated)? != 0 {
+                        source_is_zero = false;
+                    }
+                    offset += 1;
+                }
+                if source_is_zero {
+                    let mut offset = 6;
+                    while offset < 12 {
+                        let value = SYNTHETIC_REDIRECT_SOURCE_MAC[offset - 6];
+                        ctx.store(offset, &value, 0)
+                            .map_err(|_| PacketError::Truncated)?;
+                        offset += 1;
+                    }
                 }
             }
         }

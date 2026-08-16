@@ -216,6 +216,9 @@ pub enum Commands {
         /// Bind a named Dockerfile build context (`name=path`); repeatable.
         #[arg(long = "build-context")]
         build_context: Vec<String>,
+        /// Provide a Dockerfile secret (`id=NAME,src=PATH`); repeatable.
+        #[arg(long = "secret")]
+        secret: Vec<String>,
     },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2259,6 +2262,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_from,
                 cache_to,
                 build_context,
+                secret,
             } => handle_build(
                 &image_store,
                 &runtime
@@ -2275,6 +2279,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_from.as_deref(),
                 cache_to.as_deref(),
                 &build_context,
+                &secret,
             ),
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
@@ -3907,11 +3912,16 @@ fn handle_build(
     cache_from: Option<&str>,
     cache_to: Option<&str>,
     build_context: &[String],
+    secrets: &[String],
 ) -> Result<(), String> {
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
     let named_contexts = parse_build_contexts(build_context)?;
+    let secrets = parse_build_secrets(secrets)?;
+    if ferrofile.is_some() && !secrets.is_empty() {
+        return Err("build: --secret is only supported with Dockerfiles".to_string());
+    }
     if let Some(source) = cache_from {
         ferro_core::dockerfile_build::import_build_cache(&runtime_dir, Path::new(source))
             .map_err(|error| format!("build: cache-from failed: {error}"))?;
@@ -3931,9 +3941,10 @@ fn handle_build(
         let permit = authorization
             .authorize_image_build_plan(origin, &plan)
             .map_err(|error| error.to_string())?;
-        let r =
-            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
-                .map_err(|error| error.to_string())?;
+        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized_with_secrets(
+            plan, store, permit, &secrets,
+        )
+        .map_err(|error| error.to_string())?;
         let desc = format!("ferrofile={}", ferrofile_path);
         (r, desc)
     } else {
@@ -3960,9 +3971,10 @@ fn handle_build(
         let permit = authorization
             .authorize_image_build_plan(origin, &plan)
             .map_err(|error| error.to_string())?;
-        let r =
-            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
-                .map_err(|error| error.to_string())?;
+        let r = ferro_core::dockerfile_build::execute_dockerfile_build_authorized_with_secrets(
+            plan, store, permit, &secrets,
+        )
+        .map_err(|error| error.to_string())?;
         let desc = format!("dockerfile={}", dockerfile_path.display());
         (r, desc)
     };
@@ -4095,6 +4107,53 @@ fn parse_build_contexts(values: &[String]) -> Result<HashMap<String, PathBuf>, S
         }
     }
     Ok(contexts)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_build_secrets(values: &[String]) -> Result<HashMap<String, PathBuf>, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let mut secrets = HashMap::new();
+    for value in values {
+        let mut id = None;
+        let mut source = None;
+        for option in value.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .ok_or_else(|| "secret must use id=NAME,src=PATH".to_string())?;
+            match key {
+                "id" => id = Some(value.to_string()),
+                "src" | "source" => source = Some(value.to_string()),
+                _ => return Err(format!("secret option is unsupported: {key}")),
+            }
+        }
+        let id = id.ok_or_else(|| "secret requires id=NAME".to_string())?;
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(format!("secret id is invalid: {id}"));
+        }
+        let source = source.ok_or_else(|| format!("secret {id} requires src=PATH"))?;
+        let source = Path::new(&source);
+        let source = if source.is_absolute() {
+            source.to_path_buf()
+        } else {
+            cwd.join(source)
+        };
+        let metadata = std::fs::symlink_metadata(&source)
+            .map_err(|error| format!("secret {id} cannot be read: {error}"))?;
+        if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+            return Err(format!(
+                "secret {id} must be a regular file no larger than 1 MiB"
+            ));
+        }
+        if secrets.insert(id.clone(), source).is_some() {
+            return Err(format!("duplicate secret id: {id}"));
+        }
+    }
+    Ok(secrets)
 }
 
 #[cfg(target_os = "linux")]
@@ -8443,12 +8502,12 @@ mod tests {
         handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report, handle_network,
         handle_pause, handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run,
         handle_stats, handle_stop, handle_unpause, handle_volume, host_build_arch,
-        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_capabilities,
-        parse_docker_bool_query, parse_docker_filters, parse_docker_limit_query, parse_driver_opts,
-        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, read_docker_request_after_auth, read_http_request,
-        should_desktop_forward, split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_image_prune_filters,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
+        parse_capabilities, parse_docker_bool_query, parse_docker_filters,
+        parse_docker_limit_query, parse_driver_opts, parse_env_entries, parse_key_values,
+        parse_publish, parse_restart_policy, parse_tmpfs_mounts, read_docker_request_after_auth,
+        read_http_request, should_desktop_forward, split_path_query, structured_desktop_error,
+        top_level_command_name, validate_build_platform, validate_docker_image_prune_filters,
         validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
@@ -8682,6 +8741,7 @@ volumes:
                 cache_from,
                 cache_to,
                 build_context,
+                secret,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
@@ -8693,6 +8753,7 @@ volumes:
                 assert!(cache_from.is_none());
                 assert!(cache_to.is_none());
                 assert!(build_context.is_empty());
+                assert!(secret.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -8710,6 +8771,22 @@ volumes:
         assert!(parse_build_contexts(&[
             format!("assets={}", path.display()),
             format!("assets={}", path.display()),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn parses_build_secrets_without_following_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("token");
+        std::fs::write(&path, b"secret-value").unwrap();
+        let values = vec![format!("id=token,src={}", path.display())];
+        let parsed = parse_build_secrets(&values).unwrap();
+        assert_eq!(parsed.get("token"), Some(&path));
+        assert!(parse_build_secrets(&["id=token".to_string()]).is_err());
+        assert!(parse_build_secrets(&[
+            "id=token,src=missing".to_string(),
+            "id=token,src=missing".to_string()
         ])
         .is_err());
     }
@@ -10077,6 +10154,7 @@ volumes:
             None,
             None,
             &[],
+            &[],
         )
         .expect_err("dockerfile should be read");
         assert!(
@@ -10105,6 +10183,7 @@ volumes:
             None,
             None,
             None,
+            &[],
             &[],
         )
         .expect_err("invalid tag");

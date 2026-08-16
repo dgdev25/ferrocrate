@@ -24,6 +24,8 @@ use std::fs;
 use std::io;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -264,6 +266,28 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
     authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
     named_contexts: &HashMap<String, PathBuf>,
 ) -> Result<BuildResult, DockerfileBuildError> {
+    build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        authority,
+        named_contexts,
+        &HashMap::new(),
+    )
+}
+
+pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    named_contexts: &HashMap<String, PathBuf>,
+    secrets: &HashMap<String, PathBuf>,
+) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
@@ -292,36 +316,39 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
         .map(|info| info.digest.clone().unwrap_or_else(|| "scratch".to_string()))
         .collect::<Vec<_>>();
     let mut cache = load_build_cache(runtime_dir)?;
-    if let Some(entry) = cache.get(&cache_key).cloned() {
-        if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
-            return Err(DockerfileBuildError::Invalid(
-                "build cache provenance key mismatch".to_string(),
-            ));
-        }
-        if (!entry.context_digest.is_empty() && entry.context_digest != context_hash)
-            || (!entry.dockerfile_digest.is_empty() && entry.dockerfile_digest != dockerfile_digest)
-            || (!entry.base_digests.is_empty() && entry.base_digests != base_digests)
-        {
-            return Err(DockerfileBuildError::Invalid(
-                "build cache source provenance mismatch".to_string(),
-            ));
-        }
-        let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
-        let config_path = config_path(runtime_dir, &entry.config_digest);
-        if layer_path.exists() && config_path.exists() {
-            let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
-            store.put_reference(
-                authority,
-                &reference,
-                &entry.config_digest,
-                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-                &entry.manifest_json,
-            )?;
-            return Ok(BuildResult {
-                reference,
-                layer_digest: entry.layer_digest,
-                config_digest: entry.config_digest,
-            });
+    if !has_secret_mounts(&stages) {
+        if let Some(entry) = cache.get(&cache_key).cloned() {
+            if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
+                return Err(DockerfileBuildError::Invalid(
+                    "build cache provenance key mismatch".to_string(),
+                ));
+            }
+            if (!entry.context_digest.is_empty() && entry.context_digest != context_hash)
+                || (!entry.dockerfile_digest.is_empty()
+                    && entry.dockerfile_digest != dockerfile_digest)
+                || (!entry.base_digests.is_empty() && entry.base_digests != base_digests)
+            {
+                return Err(DockerfileBuildError::Invalid(
+                    "build cache source provenance mismatch".to_string(),
+                ));
+            }
+            let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
+            let config_path = config_path(runtime_dir, &entry.config_digest);
+            if layer_path.exists() && config_path.exists() {
+                let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+                store.put_reference(
+                    authority,
+                    &reference,
+                    &entry.config_digest,
+                    OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                    &entry.manifest_json,
+                )?;
+                return Ok(BuildResult {
+                    reference,
+                    layer_digest: entry.layer_digest,
+                    config_digest: entry.config_digest,
+                });
+            }
         }
     }
     let mut stage_roots: Vec<PathBuf> = Vec::new();
@@ -391,6 +418,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
                 stage.workdir.as_deref(),
                 stage.user.as_deref(),
                 &runtime_dir.join("build").join("cache"),
+                secrets,
             )?;
             let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
             layer_bytes = rebuilt;
@@ -462,26 +490,28 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
 
             write_config(runtime_dir, &config_digest, config_bytes)?;
 
-            cache.insert(
-                cache_key.clone(),
-                BuildCacheEntry {
-                    cache_key: cache_key.clone(),
-                    created_at_unix: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    context_digest: context_hash.clone(),
-                    dockerfile_digest: dockerfile_digest.clone(),
-                    base_digests: base_digests.clone(),
-                    layer_digest: layer_digest.clone(),
-                    layer_size,
-                    layer_media_type,
-                    config_digest: config_digest.clone(),
-                    config_json: config_json.clone(),
-                    manifest_json: manifest_json.clone(),
-                },
-            );
-            save_build_cache(runtime_dir, &cache)?;
+            if !has_secret_mounts(&stages) {
+                cache.insert(
+                    cache_key.clone(),
+                    BuildCacheEntry {
+                        cache_key: cache_key.clone(),
+                        created_at_unix: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        context_digest: context_hash.clone(),
+                        dockerfile_digest: dockerfile_digest.clone(),
+                        base_digests: base_digests.clone(),
+                        layer_digest: layer_digest.clone(),
+                        layer_size,
+                        layer_media_type,
+                        config_digest: config_digest.clone(),
+                        config_json: config_json.clone(),
+                        manifest_json: manifest_json.clone(),
+                    },
+                );
+                save_build_cache(runtime_dir, &cache)?;
+            }
 
             final_result = Some(BuildResult {
                 reference,
@@ -498,6 +528,15 @@ pub fn execute_dockerfile_build_authorized(
     plan: ImageBuildPlan,
     store: &LocalImageStore,
     permit: crate::authorization::surface::SurfacePermit,
+) -> Result<BuildResult, DockerfileBuildError> {
+    execute_dockerfile_build_authorized_with_secrets(plan, store, permit, &HashMap::new())
+}
+
+pub fn execute_dockerfile_build_authorized_with_secrets(
+    plan: ImageBuildPlan,
+    store: &LocalImageStore,
+    permit: crate::authorization::surface::SurfacePermit,
+    secrets: &HashMap<String, PathBuf>,
 ) -> Result<BuildResult, DockerfileBuildError> {
     crate::authorization::surface::SurfaceAuthorization::validate_execution(
         &permit,
@@ -536,7 +575,7 @@ pub fn execute_dockerfile_build_authorized(
         ));
     }
     let authority = permit.mutation_authority();
-    match build_from_dockerfile_with_store_and_compression_with_contexts(
+    match build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
@@ -544,6 +583,7 @@ pub fn execute_dockerfile_build_authorized(
         store,
         &authority,
         &plan.named_contexts,
+        secrets,
     ) {
         Ok(result) => {
             permit
@@ -1402,10 +1442,17 @@ struct RunSpec {
     args: Vec<String>,
     _shell: bool,
     cache_mounts: Vec<CacheMount>,
+    secret_mounts: Vec<SecretMount>,
 }
 
 #[derive(Debug, Clone)]
 struct CacheMount {
+    target: String,
+    id: String,
+}
+
+#[derive(Debug, Clone)]
+struct SecretMount {
     target: String,
     id: String,
 }
@@ -1467,6 +1514,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     let trimmed = raw.trim();
     let mut tokens = trimmed.split_whitespace().collect::<Vec<_>>();
     let mut cache_mounts = Vec::new();
+    let mut secret_mounts = Vec::new();
     while tokens
         .first()
         .is_some_and(|token| token.starts_with("--mount="))
@@ -1481,7 +1529,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 "type" => kind = Some(value),
                 "target" | "dst" | "destination" => target = Some(value),
                 "id" => id = Some(value),
-                "ro" | "readonly" | "sharing" => {}
+                "ro" | "readonly" | "sharing" | "required" => {}
                 _ => {
                     return Err(DockerfileBuildError::Unsupported(format!(
                         "RUN --mount option is not supported: {key}"
@@ -1499,11 +1547,23 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 let id = validate_cache_id(id)?;
                 cache_mounts.push(CacheMount { target, id });
             }
-            Some("secret") | Some("ssh") => {
-                return Err(DockerfileBuildError::Unsupported(format!(
-                    "RUN --mount=type={} is not supported",
-                    kind.unwrap()
-                )))
+            Some("secret") => {
+                let id = id.ok_or_else(|| {
+                    DockerfileBuildError::Invalid("secret mount requires id".to_string())
+                })?;
+                let id = validate_secret_id(&id)?;
+                let target = target
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("/run/secrets/{id}"));
+                secret_mounts.push(SecretMount {
+                    target: validate_cache_target(&target)?,
+                    id,
+                });
+            }
+            Some("ssh") => {
+                return Err(DockerfileBuildError::Unsupported(
+                    "RUN --mount=type=ssh is not supported".to_string(),
+                ))
             }
             Some(other) => {
                 return Err(DockerfileBuildError::Unsupported(format!(
@@ -1519,7 +1579,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     }
     let command = tokens.join(" ");
     if command.starts_with('[') {
-        if !cache_mounts.is_empty() {
+        if !cache_mounts.is_empty() || !secret_mounts.is_empty() {
             return Err(DockerfileBuildError::Unsupported(
                 "cache mounts require shell-form RUN".to_string(),
             ));
@@ -1529,6 +1589,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
             args,
             _shell: false,
             cache_mounts,
+            secret_mounts,
         });
     }
     if shell.is_empty() {
@@ -1542,6 +1603,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         args,
         _shell: true,
         cache_mounts,
+        secret_mounts,
     })
 }
 
@@ -1567,6 +1629,26 @@ fn validate_cache_id(id: &str) -> Result<String, DockerfileBuildError> {
         ));
     }
     Ok(id.to_string())
+}
+
+fn validate_secret_id(id: &str) -> Result<String, DockerfileBuildError> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "secret mount id contains invalid characters".to_string(),
+        ));
+    }
+    Ok(id.to_string())
+}
+
+fn has_secret_mounts(stages: &[StageSpec]) -> bool {
+    stages
+        .iter()
+        .any(|stage| stage.run.iter().any(|run| !run.secret_mounts.is_empty()))
 }
 
 fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
@@ -1658,6 +1740,7 @@ fn run_stage_commands(
     workdir: Option<&str>,
     user: Option<&str>,
     cache_root: &Path,
+    secrets: &HashMap<String, PathBuf>,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
     let build_limits = load_build_limits()?;
@@ -1759,6 +1842,23 @@ fn run_stage_commands(
             });
         }
 
+        for mount in &run.secret_mounts {
+            let source = secrets.get(&mount.id).ok_or_else(|| {
+                DockerfileBuildError::Invalid(format!(
+                    "secret mount source was not provided for id {}",
+                    mount.id
+                ))
+            })?;
+            let metadata = fs::symlink_metadata(source).map_err(|err| {
+                DockerfileBuildError::Invalid(format!("secret {} cannot be read: {err}", mount.id))
+            })?;
+            if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "secret {} must be a regular file no larger than 1 MiB",
+                    mount.id
+                )));
+            }
+        }
         let mut mounted = Vec::new();
         for (index, mount) in run.cache_mounts.iter().enumerate() {
             let target = rootfs.join(mount.target.trim_start_matches('/'));
@@ -1774,9 +1874,38 @@ fn run_stage_commands(
             copy_path_recursive(&cache, &target)?;
             mounted.push((target, backup, cache, existed));
         }
+        let mut secret_mounted = Vec::new();
+        for (index, mount) in run.secret_mounts.iter().enumerate() {
+            let source = secrets.get(&mount.id).expect("secret source prevalidated");
+            let target = rootfs.join(mount.target.trim_start_matches('/'));
+            let backup = rootfs.join(format!(".ferrocrate-secret-backup-{index}"));
+            let existed = target.exists();
+            if existed {
+                if target.is_dir() {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "secret mount target is a directory: {}",
+                        mount.target
+                    )));
+                }
+                fs::rename(&target, &backup)?;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(source, &target)?;
+            #[cfg(unix)]
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o400))?;
+            secret_mounted.push((target, backup, existed));
+        }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => {
+                for (target, backup, existed) in secret_mounted.iter().rev() {
+                    let _ = fs::remove_file(target);
+                    if *existed {
+                        fs::rename(backup, target)?;
+                    }
+                }
                 for (target, backup, _cache, existed) in mounted.iter().rev() {
                     let _ = fs::remove_dir_all(&target);
                     if *existed {
@@ -1809,6 +1938,16 @@ fn run_stage_commands(
             thread::sleep(Duration::from_millis(20));
         };
         let mut cleanup_error = None;
+        for (target, backup, existed) in secret_mounted.into_iter().rev() {
+            if target.exists() {
+                if let Err(err) = fs::remove_file(&target) {
+                    cleanup_error.get_or_insert(err.into());
+                }
+            }
+            if existed {
+                fs::rename(backup, target)?;
+            }
+        }
         for (target, backup, cache, existed) in mounted.into_iter().rev() {
             if target.exists() {
                 if let Err(err) = reject_cache_symlinks(&target) {
@@ -2558,15 +2697,25 @@ mod tests {
     }
 
     #[test]
-    fn run_mount_features_fail_closed_until_secret_handling_exists() {
-        for mount_type in ["secret", "ssh"] {
-            let error = parse_run(
-                &format!("--mount=type={mount_type} echo value"),
-                &["/bin/sh".into(), "-c".into()],
-            )
-            .expect_err("unsupported mount must not be executed");
-            assert!(error.to_string().contains("not supported"));
-        }
+    fn run_mount_secret_is_supported_and_ssh_remains_fail_closed() {
+        let run = parse_run(
+            "--mount=type=secret,id=token echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("secret mount parses");
+        assert_eq!(run.secret_mounts[0].id, "token");
+        assert_eq!(run.secret_mounts[0].target, "/run/secrets/token");
+        let error = parse_run(
+            "--mount=type=ssh echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("ssh mount must remain unsupported");
+        assert!(error.to_string().contains("not supported"));
+        assert!(parse_run(
+            "--mount=type=secret,id=bad/slash echo value",
+            &["/bin/sh".into(), "-c".into()]
+        )
+        .is_err());
     }
 
     #[test]

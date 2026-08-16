@@ -2643,6 +2643,7 @@ impl ContainerRuntime {
             Some(rootfs_dir.clone()),
             no_new_privs,
             restart_policy.clone(),
+            ai_config.is_some(),
             capabilities.to_vec(),
             resolved_workdir.as_deref(),
             resolved_user.as_deref(),
@@ -3224,6 +3225,7 @@ impl ContainerRuntime {
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
             record.restart_policy.clone(),
+            record.ai_runtime.is_some(),
             parse_capabilities(&record.capabilities),
             record.workdir.as_deref(),
             record.user.as_deref(),
@@ -4134,6 +4136,7 @@ fn spawn_process_with_logs(
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
     restart_policy: RestartPolicy,
+    ai_enabled: bool,
     capabilities: Vec<caps::Capability>,
     workdir: Option<&str>,
     user: Option<&str>,
@@ -4180,6 +4183,7 @@ fn spawn_process_with_logs(
             rootfs_dir,
             no_new_privs,
             restart_policy,
+            ai_enabled,
             caps_for_restart,
             workdir,
             user,
@@ -4579,6 +4583,7 @@ fn supervise_child(
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
     restart_policy: RestartPolicy,
+    ai_enabled: bool,
     capabilities: Vec<caps::Capability>,
     workdir: Option<String>,
     user: Option<String>,
@@ -4598,45 +4603,46 @@ fn supervise_child(
         };
 
         let uptime_secs = container_start_time.elapsed().as_secs();
-        adaptive_policy.record_restart(exit_code, uptime_secs);
+        if ai_enabled {
+            adaptive_policy.record_restart(exit_code, uptime_secs);
+        }
 
         if !should_restart(&restart_policy, &current_status, exit_code) {
             break;
         }
 
-        // Get adaptive delay (respects learned patterns)
-        let adaptive_signal = ferro_mind::ai::restart::RestartSignal {
-            exit_code,
-            recent_failures: restart_count,
-            uptime_secs,
+        // Get adaptive delay only when explicitly enabled for this container.
+        // The ordinary restart policy remains the source of truth otherwise.
+        let adaptive_decision = if ai_enabled {
+            let adaptive_signal = ferro_mind::ai::restart::RestartSignal {
+                exit_code,
+                recent_failures: restart_count,
+                uptime_secs,
+            };
+            let decision = adaptive_policy.decide(&adaptive_signal);
+            if let Some(logger) = ferro_mind::ai::audit::AuditLogger::from_env() {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let trace = ferro_mind::ai::explain::DecisionTrace::new(
+                    format!("ai-restart-{container_id}-{ts}"),
+                    format!("Adaptive restart policy evaluated container {container_id}"),
+                )
+                .with_model("adaptive-restart-policy", "runtime-v1")
+                .with_decision(format!("{decision:?}"))
+                .with_evidence("container_id", container_id.clone())
+                .with_evidence("exit_code", exit_code.to_string())
+                .with_evidence("recent_failures", restart_count.to_string())
+                .with_evidence("uptime_secs", uptime_secs.to_string());
+                let _ = logger.log("ai_restart_decision", &trace);
+            }
+            Some(decision)
+        } else {
+            None
         };
-        let adaptive_decision = adaptive_policy.decide(&adaptive_signal);
-        if let Some(logger) = ferro_mind::ai::audit::AuditLogger::from_env() {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let trace = ferro_mind::ai::explain::DecisionTrace::new(
-                format!("ai-restart-{container_id}-{ts}"),
-                format!("Adaptive restart policy evaluated container {container_id}"),
-            )
-            .with_model("adaptive-restart-policy", "runtime-v1")
-            .with_decision(format!("{adaptive_decision:?}"))
-            .with_evidence("container_id", container_id.clone())
-            .with_evidence("exit_code", exit_code.to_string())
-            .with_evidence("recent_failures", restart_count.to_string())
-            .with_evidence("uptime_secs", uptime_secs.to_string());
-            let _ = logger.log("ai_restart_decision", &trace);
-        }
-        let delay_secs = match adaptive_decision {
-            ferro_mind::ai::restart::RestartDecision::RestartAfterDelay { delay_secs } => {
-                delay_secs
-            }
-            ferro_mind::ai::restart::RestartDecision::DoNotRestart => {
-                // Adaptive policy says don't restart, but honor the existing policy too
-                1 // Fall back to minimum delay; should_restart check above already handles the quit case
-            }
-            ferro_mind::ai::restart::RestartDecision::Restart => 1,
+        let Some(delay_secs) = adaptive_restart_delay(adaptive_decision) else {
+            break;
         };
         thread::sleep(Duration::from_secs(delay_secs.max(1)));
         let command = match build_command(
@@ -4672,7 +4678,9 @@ fn supervise_child(
         child = new_child;
         _pidfd = new_pidfd;
         container_start_time = std::time::Instant::now();
-        adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
+        if ai_enabled {
+            adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
+        }
         restart_count += 1;
     }
 }
@@ -8571,6 +8579,18 @@ fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool 
     }
 }
 
+fn adaptive_restart_delay(
+    decision: Option<ferro_mind::ai::restart::RestartDecision>,
+) -> Option<u64> {
+    match decision {
+        None | Some(ferro_mind::ai::restart::RestartDecision::Restart) => Some(1),
+        Some(ferro_mind::ai::restart::RestartDecision::RestartAfterDelay { delay_secs }) => {
+            Some(delay_secs)
+        }
+        Some(ferro_mind::ai::restart::RestartDecision::DoNotRestart) => None,
+    }
+}
+
 fn update_pid_status(
     db: &sled::Db,
     id: &str,
@@ -9040,9 +9060,9 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::{
-        associated_network_name, BindMount, ContainerRuntime, KernelResourceOps,
-        LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend, NoopLifecyclePhaseHook,
-        ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
+        adaptive_restart_delay, associated_network_name, BindMount, ContainerRuntime,
+        KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
+        NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -9065,6 +9085,25 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex};
+
+    #[test]
+    fn adaptive_restart_decision_can_stop_restart_loop() {
+        use ferro_mind::ai::restart::RestartDecision;
+
+        assert_eq!(adaptive_restart_delay(None), Some(1));
+        assert_eq!(
+            adaptive_restart_delay(Some(RestartDecision::Restart)),
+            Some(1)
+        );
+        assert_eq!(
+            adaptive_restart_delay(Some(RestartDecision::RestartAfterDelay { delay_secs: 7 })),
+            Some(7)
+        );
+        assert_eq!(
+            adaptive_restart_delay(Some(RestartDecision::DoNotRestart)),
+            None
+        );
+    }
 
     #[test]
     fn associated_network_name_persists_logical_name_without_changing_mode() {

@@ -137,7 +137,7 @@ PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
 partial, disconnected, or placeholder-backed. *Size:* XL. *Sources:* AI-01–06,
 AI-08/09/11/12; `docs/RVF_INTEGRATION_PLAN.md`.
 
-- [ ] Wire anomaly detection, adaptive restart, and resource prediction outcomes into the runtime lifecycle with durable per-container persistence. Anomaly and predictive-OOM decisions now persist explainability records to the runtime JSONL audit stream when AI is enabled; adaptive restart and lifecycle action integration remain open.
+- [ ] Wire anomaly detection, adaptive restart, and resource prediction outcomes into the runtime lifecycle with durable per-container persistence. Anomaly and predictive-OOM decisions now persist explainability records to the runtime JSONL audit stream when AI is enabled; adaptive restart now honors an AI `DoNotRestart` decision and is disabled when no AI runtime configuration is present, while broader lifecycle action persistence remains open.
 - [x] Remove the placeholder WASM inference success path: the legacy `noop` engine now fails closed with an explicit unsupported-mode error; the validated `linear` engine remains available, while a true sandboxed WASM runtime remains out of scope until separately adopted.
 - [ ] Implement real model/version routing, training-data collection, online-learning safeguards, and rollback gates.
 - [ ] Populate explainability traces with decision inputs, model/version, confidence, and resulting action; anomaly, predictive-OOM, and adaptive-restart traces now persist structured model/version and decision fields alongside bounded evidence, while broader AI behavior coverage remains open.

@@ -2,9 +2,9 @@ use crate::ai::config::AiConfig;
 use crate::ai::explain::DecisionTrace;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,31 @@ fn audit_write_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(unix)]
+fn acquire_process_lock(path: &Path) -> Result<Option<File>, AuditError> {
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    // SAFETY: `lock` is an open regular file and remains alive until the
+    // caller finishes its append, so the kernel releases the advisory lock
+    // only after the complete record has been written and synced.
+    let result =
+        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+    if result != 0 {
+        return Err(AuditError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(Some(lock))
+}
+
+#[cfg(not(unix))]
+fn acquire_process_lock(_path: &Path) -> Result<Option<File>, AuditError> {
+    Ok(None)
+}
+
 impl AuditLogger {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -48,6 +73,7 @@ impl AuditLogger {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let _process_lock = acquire_process_lock(&self.path)?;
         let entry = DecisionAuditEntry {
             schema_version: "v2",
             ts_unix: now_unix(),

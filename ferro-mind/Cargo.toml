@@ -7,6 +7,7 @@ edition = "2021"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+libc = "0.2"
 
 # rUv ecosystem integration (Task 3.3)
 # Uses ruvector-core for lightweight HashEmbedding by default

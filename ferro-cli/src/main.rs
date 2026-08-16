@@ -7175,7 +7175,12 @@ impl DockerEventStore {
         let event = query.get("event").or_else(|| query.get("action"));
         let kind = query.get("type");
         let scope = query.get("scope");
-        let resource = query.get("container").or_else(|| query.get("image"));
+        let direct_resources = [
+            ("container", "container"),
+            ("image", "image"),
+            ("network", "network"),
+            ("volume", "volume"),
+        ];
         let filters = query
             .get("filters")
             .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
@@ -7218,7 +7223,22 @@ impl DockerEventStore {
             .filter(|item| event.is_none_or(|value| item.action == *value))
             .filter(|item| kind.is_none_or(|value| item.event_type == *value))
             .filter(|item| scope.is_none_or(|value| item.scope == *value))
-            .filter(|item| resource.is_none_or(|value| item.resource.as_deref() == Some(value)))
+            .filter(|item| {
+                let mut had_filter = false;
+                let matches =
+                    direct_resources
+                        .iter()
+                        .fold(false, |matches, (query_key, event_type)| {
+                            let Some(value) = query.get(*query_key) else {
+                                return matches;
+                            };
+                            had_filter = true;
+                            matches
+                                || (item.event_type == *event_type
+                                    && item.resource.as_deref() == Some(value.as_str()))
+                        });
+                !had_filter || matches
+            })
             .filter(|item| {
                 filter_events
                     .as_ref()
@@ -11722,6 +11742,24 @@ volumes:
             r#"{"label":["path=/containers/c1/stop"]}"#.to_string(),
         );
         assert!(store.query(&query).unwrap().is_empty());
+    }
+
+    #[test]
+    fn docker_event_query_supports_network_and_volume_resource_filters() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store.append("POST", "/networks/mesh/connect", 200).unwrap();
+        store.append("POST", "/volumes/data/prune", 200).unwrap();
+
+        let mut query = HashMap::new();
+        query.insert("network".to_string(), "mesh".to_string());
+        assert_eq!(store.query(&query).unwrap().len(), 1);
+        assert_eq!(store.query(&query).unwrap()[0].event_type, "network");
+
+        query.clear();
+        query.insert("volume".to_string(), "data".to_string());
+        assert_eq!(store.query(&query).unwrap().len(), 1);
+        assert_eq!(store.query(&query).unwrap()[0].event_type, "volume");
     }
 
     #[test]

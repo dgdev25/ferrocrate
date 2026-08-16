@@ -18,6 +18,8 @@ pub mod validate;
 pub mod veth;
 pub mod wireguard;
 
+pub use dns::{render_resolv_conf, write_resolv_conf, DnsConfig, DnsError};
+
 // Re-export executor types
 pub use executor::{exec_cmd, exec_cmd_capture, ExecError, HostCapabilities, Transaction};
 

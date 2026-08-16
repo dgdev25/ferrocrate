@@ -3354,6 +3354,7 @@ fn handle_context(command: ContextCommands) -> Result<(), String> {
                 "Name": name,
                 "Current": config.current_context.as_deref() == Some(name.as_str()),
                 "Endpoint": context.endpoint,
+                "Available": context_endpoint_available(&context.endpoint),
             });
             println!(
                 "{}",
@@ -3416,6 +3417,24 @@ fn validate_context_endpoint(endpoint: &str) -> Result<(), String> {
         return Err("context endpoint must use an absolute Unix socket path".to_string());
     }
     Ok(())
+}
+
+fn context_endpoint_available(endpoint: &str) -> bool {
+    let Some(path) = endpoint.strip_prefix("unix://") else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        return std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_socket())
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
@@ -8230,8 +8249,8 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     use super::{
-        bind_run_network, build_health_config, build_limits, desktop_forward_enabled,
-        discover_rootless_socket, dispatch, docker_chunked_headers,
+        bind_run_network, build_health_config, build_limits, context_endpoint_available,
+        desktop_forward_enabled, discover_rootless_socket, dispatch, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
         docker_image_apply_time_bounds, docker_image_matches_filters, docker_tail_logs,
         docker_top_payload, effective_readonly, handle_build, handle_containers, handle_context,
@@ -10265,6 +10284,26 @@ volumes:
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_endpoint_availability_requires_a_real_unix_socket() {
+        let temp = tempfile::tempdir().expect("context socket fixture");
+        let socket = temp.path().join("ferrocrate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert!(context_endpoint_available(&format!(
+            "unix://{}",
+            socket.display()
+        )));
+        drop(listener);
+        std::fs::remove_file(&socket).expect("remove socket");
+        std::fs::write(&socket, b"decoy").expect("write decoy");
+        assert!(!context_endpoint_available(&format!(
+            "unix://{}",
+            socket.display()
+        )));
+        assert!(!context_endpoint_available("tcp://127.0.0.1:2375"));
     }
 
     #[test]

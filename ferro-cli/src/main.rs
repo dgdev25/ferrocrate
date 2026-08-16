@@ -6750,6 +6750,8 @@ struct DockerExecCreateRequest {
 struct DockerExecStartRequest {
     #[serde(rename = "Detach", default)]
     detach: bool,
+    #[serde(rename = "Tty", default)]
+    tty: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -7463,9 +7465,12 @@ fn handle_docker_compat_connection(
                     .map_err(|error| error.to_string())?;
                 if start.detach {
                     http_response(200, &[], "application/vnd.docker.raw-stream")
-                } else {
+                } else if start.tty {
                     let output = format!("{}{}", result.stdout, result.stderr);
                     http_response(200, output.as_bytes(), "application/vnd.docker.raw-stream")
+                } else {
+                    let output = docker_raw_stream(&result.stdout, &result.stderr);
+                    http_response(200, &output, "application/vnd.docker.raw-stream")
                 }
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/rename") => {
@@ -8667,6 +8672,21 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_raw_stream(stdout: &str, stderr: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(stdout.len() + stderr.len() + 16);
+    for (stream, payload) in [(1u8, stdout.as_bytes()), (2u8, stderr.as_bytes())] {
+        if payload.is_empty() {
+            continue;
+        }
+        output.push(stream);
+        output.extend_from_slice(&[0, 0, 0]);
+        output.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        output.extend_from_slice(payload);
+    }
+    output
+}
+
+#[cfg(target_os = "linux")]
 fn stream_docker_events(
     stream: &mut UnixStream,
     state: &DockerCompatState,
@@ -8876,7 +8896,7 @@ mod tests {
         docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_event_payload, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_network_matches_filters, docker_tail_logs, docker_top_payload,
+        docker_network_matches_filters, docker_raw_stream, docker_tail_logs, docker_top_payload,
         docker_volume_matches_filters, effective_readonly, handle_build, handle_containers,
         handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
         handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
@@ -10871,6 +10891,18 @@ volumes:
         assert!(validate_docker_exec_command(&empty.cmd).is_err());
         let blank = vec!["".to_string()];
         assert!(validate_docker_exec_command(&blank).is_err());
+    }
+
+    #[test]
+    fn docker_exec_raw_stream_frames_stdout_and_stderr() {
+        let stream = docker_raw_stream("out\n", "err\n");
+        assert_eq!(stream[0], 1);
+        assert_eq!(u32::from_be_bytes(stream[4..8].try_into().unwrap()), 4);
+        assert_eq!(&stream[8..12], b"out\n");
+        assert_eq!(stream[12], 2);
+        assert_eq!(u32::from_be_bytes(stream[16..20].try_into().unwrap()), 4);
+        assert_eq!(&stream[20..24], b"err\n");
+        assert!(docker_raw_stream("", "").is_empty());
     }
 
     #[test]

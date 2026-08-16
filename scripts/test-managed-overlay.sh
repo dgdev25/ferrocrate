@@ -27,9 +27,15 @@ if [[ "$(id -u)" != "0" ]]; then
   exit 1
 fi
 
+: "${FERROCRATE_NETD_WG_PRIVATE_KEY_PATH:?FERROCRATE_NETD_WG_PRIVATE_KEY_PATH is required}"
+
+# This is deliberately separate from the deterministic netd tests above: it
+# creates two real network namespaces and WireGuard interfaces, then proves
+# encrypted packet flow and handshakes in both directions.
+bash scripts/test-managed-overlay-kernel.sh
+
 : "${FERRO_EBPF_TEST_INTERFACE:?FERRO_EBPF_TEST_INTERFACE is required}"
 : "${FERRO_EBPF_TEST_IFINDEX:?FERRO_EBPF_TEST_IFINDEX is required}"
-: "${FERROCRATE_NETD_WG_PRIVATE_KEY_PATH:?FERROCRATE_NETD_WG_PRIVATE_KEY_PATH is required}"
 
 bash scripts/test-ebpf-networking.sh
 echo "privileged managed-overlay prerequisites validated; two-host traffic qualification must be run with the deployment harness"

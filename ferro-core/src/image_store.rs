@@ -1,12 +1,14 @@
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sled::transaction::Transactional;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const IMAGE_INDEX_TREE: &str = "image_index";
 const IMAGE_DIGEST_TREE: &str = "image_digest_index";
+const IMAGE_SQLITE_SUFFIX: &str = "sqlite";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageRecord {
@@ -41,7 +43,13 @@ impl ImageReferenceWritePlan {
 #[derive(Debug, Error)]
 pub enum ImageStoreError {
     #[error("failed to open image store: {0}")]
-    Open(#[from] sled::Error),
+    Open(#[from] rusqlite::Error),
+    #[error("failed to lock image store: {0}")]
+    Lock(String),
+    #[error("failed to read legacy image store: {0}")]
+    Legacy(#[from] sled::Error),
+    #[error("image store io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("failed to encode image record: {0}")]
     Encode(#[from] serde_json::Error),
     #[error("failed to decode image record: {0}")]
@@ -52,13 +60,106 @@ pub enum ImageStoreError {
 
 #[derive(Clone)]
 pub struct LocalImageStore {
-    db: sled::Db,
+    db: Arc<Mutex<Connection>>,
+}
+
+fn image_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
+    Ok(ImageRecord {
+        reference: row.get(0)?,
+        digest: row.get(1)?,
+        manifest_media_type: row.get(2)?,
+        manifest_json: row.get(3)?,
+        created_at_unix: (row.get::<_, i64>(4)?).max(0) as u64,
+    })
+}
+
+fn migrate_legacy_sled(path: &Path, db: &Connection) -> Result<(), ImageStoreError> {
+    let marker = PathBuf::from(format!(
+        "{}.{}.migrated",
+        path.display(),
+        IMAGE_SQLITE_SUFFIX
+    ));
+    if marker.exists() || !path.join("conf").exists() {
+        return Ok(());
+    }
+    let legacy = sled::open(path)?;
+    let references = legacy.open_tree(IMAGE_INDEX_TREE)?;
+    for entry in &references {
+        let (_, value) = entry?;
+        let record =
+            serde_json::from_slice::<ImageRecord>(&value).map_err(ImageStoreError::Decode)?;
+        insert_image_record(db, &record)?;
+    }
+    let digests = legacy.open_tree(IMAGE_DIGEST_TREE)?;
+    for entry in &digests {
+        let (_, value) = entry?;
+        let record =
+            serde_json::from_slice::<ImageRecord>(&value).map_err(ImageStoreError::Decode)?;
+        insert_image_digest(db, &record)?;
+    }
+    db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+    std::fs::write(marker, b"image-store-migration-v1\n")?;
+    Ok(())
+}
+
+fn insert_image_record(db: &Connection, record: &ImageRecord) -> Result<(), ImageStoreError> {
+    db.execute(
+        "INSERT OR IGNORE INTO image_references
+         (reference, digest, manifest_media_type, manifest_json, created_at_unix)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            record.reference,
+            record.digest,
+            record.manifest_media_type,
+            record.manifest_json,
+            record.created_at_unix as i64
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_image_digest(db: &Connection, record: &ImageRecord) -> Result<(), ImageStoreError> {
+    db.execute(
+        "INSERT OR IGNORE INTO image_digests
+         (digest, reference, manifest_media_type, manifest_json, created_at_unix)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            record.digest,
+            record.reference,
+            record.manifest_media_type,
+            record.manifest_json,
+            record.created_at_unix as i64
+        ],
+    )?;
+    Ok(())
 }
 
 impl LocalImageStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ImageStoreError> {
-        let db = sled::open(path)?;
-        Ok(Self { db })
+        let legacy_path = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&legacy_path)?;
+        let db_path = PathBuf::from(format!("{}.{}", legacy_path.display(), IMAGE_SQLITE_SUFFIX));
+        let db = Connection::open(db_path)?;
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS image_references (
+                reference TEXT PRIMARY KEY NOT NULL,
+                digest TEXT NOT NULL,
+                manifest_media_type TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS image_digests (
+                digest TEXT PRIMARY KEY NOT NULL,
+                reference TEXT NOT NULL,
+                manifest_media_type TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL
+            );",
+        )?;
+        migrate_legacy_sled(&legacy_path, &db)?;
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+        })
     }
 
     pub(crate) fn put_reference(
@@ -69,7 +170,6 @@ impl LocalImageStore {
         manifest_media_type: &str,
         manifest_json: &str,
     ) -> Result<(), ImageStoreError> {
-        let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
         let record = ImageRecord {
             reference: reference.to_string(),
             digest: digest.to_string(),
@@ -78,23 +178,41 @@ impl LocalImageStore {
             created_at_unix: now_unix(),
         };
 
-        let encoded = serde_json::to_vec(&record)?;
-        let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
-        let digest_encoded = serde_json::to_vec(&record)?;
-        (&tree, &digest_tree)
-            .transaction(|(references, digests)| {
-                references.insert(reference.as_bytes(), encoded.as_slice())?;
-                digests.insert(digest.as_bytes(), digest_encoded.as_slice())?;
-                Ok::<_, sled::transaction::ConflictableTransactionError<()>>(())
-            })
-            .map_err(|error| match error {
-                sled::transaction::TransactionError::Abort(()) => {
-                    ImageStoreError::Authorization("image publication aborted".into())
-                }
-                sled::transaction::TransactionError::Storage(error) => ImageStoreError::Open(error),
-            })?;
-        tree.flush()?;
-        digest_tree.flush()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        let transaction = db.transaction()?;
+        transaction.execute(
+            "INSERT INTO image_references
+             (reference, digest, manifest_media_type, manifest_json, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(reference) DO UPDATE SET
+               digest = excluded.digest,
+               manifest_media_type = excluded.manifest_media_type,
+               manifest_json = excluded.manifest_json,
+               created_at_unix = excluded.created_at_unix",
+            params![
+                record.reference,
+                record.digest,
+                record.manifest_media_type,
+                record.manifest_json,
+                record.created_at_unix as i64
+            ],
+        )?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO image_digests
+             (digest, reference, manifest_media_type, manifest_json, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                record.digest,
+                record.reference,
+                record.manifest_media_type,
+                record.manifest_json,
+                record.created_at_unix as i64
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -179,34 +297,45 @@ impl LocalImageStore {
         &self,
         reference: &str,
     ) -> Result<Option<ImageRecord>, ImageStoreError> {
-        let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
-
-        let maybe_record = tree.get(reference.as_bytes())?;
-        let exact = maybe_record
-            .map(|bytes| {
-                serde_json::from_slice::<ImageRecord>(&bytes).map_err(ImageStoreError::Decode)
-            })
-            .transpose()?;
-        if exact.is_some() {
-            return Ok(exact);
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        match db.query_row(
+            "SELECT reference, digest, manifest_media_type, manifest_json, created_at_unix
+             FROM image_references WHERE reference = ?1",
+            params![reference],
+            image_record_from_row,
+        ) {
+            Ok(record) => return Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(error.into()),
         }
         let requested_digest = reference.rsplit_once('@').map(|(_, digest)| digest);
         if let Some(digest) = requested_digest {
-            let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
-            if let Some(bytes) = digest_tree.get(digest.as_bytes())? {
-                return serde_json::from_slice::<ImageRecord>(&bytes)
-                    .map(Some)
-                    .map_err(ImageStoreError::Decode);
+            match db.query_row(
+                "SELECT reference, digest, manifest_media_type, manifest_json, created_at_unix
+                 FROM image_digests WHERE digest = ?1",
+                params![digest],
+                image_record_from_row,
+            ) {
+                Ok(record) => return Ok(Some(record)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(None)
     }
 
     fn remove_reference(&self, reference: &str) -> Result<bool, ImageStoreError> {
-        let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
-        let removed = tree.remove(reference.as_bytes())?.is_some();
-        tree.flush()?;
-        Ok(removed)
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        Ok(db.execute(
+            "DELETE FROM image_references WHERE reference = ?1",
+            params![reference],
+        )? > 0)
     }
 
     pub fn remove_reference_authorized(
@@ -245,17 +374,18 @@ impl LocalImageStore {
     }
 
     pub fn list_references(&self) -> Result<Vec<ImageRecord>, ImageStoreError> {
-        let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        let mut statement = db.prepare(
+            "SELECT reference, digest, manifest_media_type, manifest_json, created_at_unix
+             FROM image_references ORDER BY reference",
+        )?;
         let mut out = Vec::new();
-
-        for item in &tree {
-            let (_, value) = item?;
-            let decoded =
-                serde_json::from_slice::<ImageRecord>(&value).map_err(ImageStoreError::Decode)?;
-            out.push(decoded);
+        for item in statement.query_map([], image_record_from_row)? {
+            out.push(item?);
         }
-
-        out.sort_by(|a, b| a.reference.cmp(&b.reference));
         Ok(out)
     }
 
@@ -263,22 +393,14 @@ impl LocalImageStore {
         &self,
         _authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
     ) -> Result<usize, ImageStoreError> {
-        let tree = self.db.open_tree(IMAGE_INDEX_TREE)?;
-        let keys: Vec<Vec<u8>> = tree
-            .iter()
-            .keys()
-            .map(|key| key.map(|val| val.to_vec()))
-            .collect::<Result<_, _>>()?;
-        let mut removed = 0;
-        for key in keys {
-            if tree.remove(key)?.is_some() {
-                removed += 1;
-            }
-        }
-        tree.flush()?;
-        let digest_tree = self.db.open_tree(IMAGE_DIGEST_TREE)?;
-        digest_tree.clear()?;
-        digest_tree.flush()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        let transaction = db.transaction()?;
+        let removed = transaction.execute("DELETE FROM image_references", [])?;
+        transaction.execute("DELETE FROM image_digests", [])?;
+        transaction.commit()?;
         Ok(removed)
     }
 
@@ -515,5 +637,51 @@ mod tests {
         assert_eq!(removed, 2);
         let listed = store.list_references().expect("list");
         assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn migrates_legacy_sled_image_indexes_and_keeps_rollback_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = sled::open(temp.path()).unwrap();
+        let record = super::ImageRecord {
+            reference: "repo/app:legacy".to_string(),
+            digest: format!("sha256:{}", "d".repeat(64)),
+            manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 7,
+        };
+        legacy
+            .open_tree(super::IMAGE_INDEX_TREE)
+            .unwrap()
+            .insert(
+                record.reference.as_bytes(),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+        legacy
+            .open_tree(super::IMAGE_DIGEST_TREE)
+            .unwrap()
+            .insert(
+                record.digest.as_bytes(),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+        legacy.flush().unwrap();
+        drop(legacy);
+
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        assert_eq!(
+            store.resolve_reference(&record.reference).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            store
+                .resolve_reference(&format!("repo/app@{}", record.digest))
+                .unwrap(),
+            Some(record)
+        );
+        assert!(temp.path().with_extension("sqlite").is_file());
+        assert!(temp.path().with_extension("sqlite.migrated").is_file());
+        assert!(temp.path().join("conf").is_file());
     }
 }

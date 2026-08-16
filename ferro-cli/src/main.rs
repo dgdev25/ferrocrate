@@ -383,6 +383,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
+    },
     Doctor {
         #[arg(long, default_value_t = false)]
         fix: bool,
@@ -739,6 +743,25 @@ pub enum AiCommunityCommands {
 pub enum ConfigCommands {
     Set { key: String, value: String },
     Get { key: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContextCommands {
+    Create {
+        name: String,
+        #[arg(long)]
+        endpoint: String,
+    },
+    Inspect {
+        name: Option<String>,
+    },
+    List,
+    Use {
+        name: String,
+    },
+    Rm {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2354,6 +2377,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 json,
             } => handle_doctor(fix, bootstrap, dry_run, confirm, json),
             Commands::Config { command } => handle_config(command),
+            Commands::Context { command } => handle_context(command),
             Commands::AiAudit {
                 action,
                 summary,
@@ -2434,6 +2458,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 json,
             } => handle_doctor(fix, bootstrap, dry_run, confirm, json),
             Commands::Config { command } => handle_config(command),
+            Commands::Context { command } => handle_context(command),
             Commands::AiAudit {
                 action,
                 summary,
@@ -3212,6 +3237,106 @@ fn handle_config(command: ConfigCommands) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliContext {
+    endpoint: String,
+}
+
+fn handle_context(command: ContextCommands) -> Result<(), String> {
+    let mut config = load_cli_config()?;
+    match command {
+        ContextCommands::Create { name, endpoint } => {
+            validate_context_name(&name)?;
+            validate_context_endpoint(&endpoint)?;
+            if config.contexts.contains_key(&name) {
+                return Err(format!("context create: context already exists: {name}"));
+            }
+            config
+                .contexts
+                .insert(name.clone(), CliContext { endpoint });
+            if config.current_context.is_none() {
+                config.current_context = Some(name.clone());
+            }
+            save_cli_config(&config)?;
+            println!("{name}");
+            Ok(())
+        }
+        ContextCommands::Inspect { name } => {
+            let selected = name.or_else(|| config.current_context.clone());
+            let Some(name) = selected else {
+                return Err("context inspect: no context selected".to_string());
+            };
+            let Some(context) = config.contexts.get(&name) else {
+                return Err(format!("context inspect: context not found: {name}"));
+            };
+            let payload = serde_json::json!({
+                "Name": name,
+                "Current": config.current_context.as_deref() == Some(name.as_str()),
+                "Endpoint": context.endpoint,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
+            );
+            Ok(())
+        }
+        ContextCommands::List => {
+            for (name, context) in &config.contexts {
+                let marker = if config.current_context.as_deref() == Some(name.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                println!("{marker} {name}\t{}", context.endpoint);
+            }
+            Ok(())
+        }
+        ContextCommands::Use { name } => {
+            if !config.contexts.contains_key(&name) {
+                return Err(format!("context use: context not found: {name}"));
+            }
+            config.current_context = Some(name.clone());
+            save_cli_config(&config)?;
+            println!("{name}");
+            Ok(())
+        }
+        ContextCommands::Rm { name } => {
+            if config.contexts.remove(&name).is_none() {
+                return Err(format!("context rm: context not found: {name}"));
+            }
+            if config.current_context.as_deref() == Some(name.as_str()) {
+                config.current_context = config.contexts.keys().next().cloned();
+            }
+            save_cli_config(&config)?;
+            Ok(())
+        }
+    }
+}
+
+fn validate_context_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(
+            "context name must be 1-64 ASCII letters, digits, '-', '_', or '.'".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_context_endpoint(endpoint: &str) -> Result<(), String> {
+    let path = endpoint
+        .strip_prefix("unix://")
+        .ok_or_else(|| "context endpoint must use unix:///absolute/socket/path".to_string())?;
+    if !Path::new(path).is_absolute() || path.contains('\0') {
+        return Err("context endpoint must use an absolute Unix socket path".to_string());
+    }
+    Ok(())
+}
+
 fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
     match command {
         EntitlementCommands::Status { json } => {
@@ -3285,6 +3410,10 @@ fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CliConfig {
     ai_backend: Option<String>,
+    #[serde(default)]
+    contexts: BTreeMap<String, CliContext>,
+    #[serde(default)]
+    current_context: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -7164,8 +7293,8 @@ mod tests {
 
     use super::{
         bind_run_network, build_health_config, build_limits, desktop_forward_enabled, dispatch,
-        docker_event_payload, effective_readonly, handle_build, handle_containers, handle_exec,
-        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        docker_event_payload, effective_readonly, handle_build, handle_containers, handle_context,
+        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
         handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
         handle_rmi, handle_run, handle_stats, handle_stop, handle_unpause, handle_volume,
         host_build_arch, normalize_docker_api_path, parse_bind_mounts, parse_capabilities,
@@ -7174,7 +7303,7 @@ mod tests {
         read_http_request, should_desktop_forward, structured_desktop_error,
         top_level_command_name, validate_build_platform, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
+        ContextCommands, DockerEvent, DockerEventStore, NetworkCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8755,6 +8884,46 @@ mod tests {
         assert_eq!(payload["Actor"]["ID"], "abc123");
         assert_eq!(payload["time"], 12);
         assert_eq!(payload["timeNano"], 12_000_000_000u64);
+    }
+
+    #[test]
+    fn context_lifecycle_persists_selected_endpoint() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("context config");
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+        }
+
+        handle_context(ContextCommands::Create {
+            name: "rootless".to_string(),
+            endpoint: "unix:///run/user/1000/ferrocrate.sock".to_string(),
+        })
+        .expect("create context");
+        handle_context(ContextCommands::Use {
+            name: "rootless".to_string(),
+        })
+        .expect("select context");
+        let config = super::load_cli_config().expect("load config");
+        assert_eq!(config.current_context.as_deref(), Some("rootless"));
+        assert_eq!(
+            config.contexts["rootless"].endpoint,
+            "unix:///run/user/1000/ferrocrate.sock"
+        );
+        assert!(handle_context(ContextCommands::Create {
+            name: "bad/name".to_string(),
+            endpoint: "unix:///tmp/socket".to_string(),
+        })
+        .is_err());
+        handle_context(ContextCommands::Rm {
+            name: "rootless".to_string(),
+        })
+        .expect("remove context");
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
     }
 
     #[test]

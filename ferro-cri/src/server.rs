@@ -462,6 +462,18 @@ fn persist_containers(
         .map_err(|error| Status::internal(format!("persist CRI container state: {error}")))
 }
 
+/// Test-only crash injection for proving recovery across the two-store CRI
+/// start boundary. It is enabled only for the explicit qualification fixture;
+/// ordinary daemon environments cannot trigger it accidentally.
+fn maybe_crash_at_start_boundary(point: &str) {
+    if std::env::var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE").as_deref()
+        == Ok("cri-fault-injection")
+        && std::env::var("FERROCRATE_CRI_TEST_CRASH_POINT").as_deref() == Ok(point)
+    {
+        std::process::abort();
+    }
+}
+
 impl std::fmt::Debug for CriRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CriRuntime").finish_non_exhaustive()
@@ -928,6 +940,7 @@ impl RuntimeService for CriRuntime {
         .await
         .map_err(|error| Status::internal(format!("start task failed: {error}")))?
         .map_err(Status::internal)?;
+        maybe_crash_at_start_boundary("after-runtime-effect");
         let runtime_id = started.id;
         let persist_result = {
             let mut containers = self
@@ -965,6 +978,7 @@ impl RuntimeService for CriRuntime {
             }
             return Err(error);
         }
+        maybe_crash_at_start_boundary("after-cri-publication");
         Ok(Response::new(StartContainerResponse {}))
     }
 

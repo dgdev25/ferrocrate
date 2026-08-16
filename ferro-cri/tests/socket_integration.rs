@@ -807,6 +807,116 @@ async fn cri_process_kill_operation_matrix_reopens_each_durable_transition() {
     let _ = daemon.wait();
 }
 
+#[tokio::test]
+#[ignore = "Requires rootful OCI execution"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_start_recovery_rebinds_runtime_after_mid_operation_crash() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
+        .unwrap_or(true)
+    {
+        eprintln!("skipping CRI crash recovery fixture: root is required");
+        return;
+    }
+
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    seed_runnable_fixture_image(runtime.path());
+    let socket = runtime.path().join("cri-start-crash.sock");
+    unsafe {
+        std::env::set_var(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "cri-fault-injection",
+        );
+        std::env::set_var("FERROCRATE_CRI_TEST_CRASH_POINT", "after-runtime-effect");
+    }
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "crash-pod".into(),
+                    uid: "crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox,
+            config: Some(ContainerConfig {
+                metadata_name: "crash-container".into(),
+                image: "fixture:latest".into(),
+                command: vec!["/bin/busybox".into(), "sleep".into(), "30".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("container")
+        .into_inner()
+        .container_id;
+
+    let _ = client
+        .start_container(StartContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect_err("fault injection must terminate the daemon before publication");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon.try_wait().expect("poll CRI daemon").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(daemon.try_wait().expect("wait for CRI crash").is_some());
+    unsafe {
+        std::env::remove_var("FERROCRATE_CRI_TEST_CRASH_POINT");
+    }
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = recovered
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("recovered status")
+        .into_inner()
+        .status
+        .expect("recovered container");
+    assert_eq!(status.id, container);
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Exited as i32
+    );
+
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    unsafe {
+        std::env::remove_var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE");
+    }
+}
+
 fn seed_runnable_fixture_image(runtime_dir: &Path) {
     let store = ferro_core::image_store::LocalImageStore::open(runtime_dir.join("images"))
         .expect("open image store");

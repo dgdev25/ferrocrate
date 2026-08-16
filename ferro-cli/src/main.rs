@@ -220,6 +220,11 @@ pub enum Commands {
         #[arg(long = "secret")]
         secret: Vec<String>,
     },
+    /// Inspect or extract an opt-in native RVF image.
+    Rvf {
+        #[command(subcommand)]
+        command: RvfCommands,
+    },
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
@@ -429,6 +434,18 @@ pub enum Commands {
         #[command(subcommand)]
         target: MigrateCommands,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RvfCommands {
+    /// Validate an RVF image and print its manifest and segment inventory.
+    Inspect {
+        image: PathBuf,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    /// Validate an RVF image and atomically export its OCI layer blob.
+    Extract { image: PathBuf, output: PathBuf },
 }
 
 #[cfg(target_os = "linux")]
@@ -2122,6 +2139,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
     {
         return handle_ai_audit(action, summary, evidence);
     }
+    if let Commands::Rvf { ref command } = command {
+        return dispatch_rvf(command);
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -2429,6 +2449,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 evidence,
             } => handle_ai_audit(&action, &summary, &evidence),
             Commands::Migrate { target } => handle_migrate(target),
+            Commands::Rvf { .. } => {
+                unreachable!("RVF commands are dispatched before runtime setup")
+            }
         }
     }
 
@@ -2510,6 +2533,62 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 evidence,
             } => handle_ai_audit(&action, &summary, &evidence),
             _ => Err("This command is not supported on this platform".to_string()),
+        }
+    }
+}
+
+fn dispatch_rvf(command: &RvfCommands) -> Result<(), String> {
+    match command {
+        RvfCommands::Inspect { image, format } => {
+            let parsed = ferro_core::rvf_image::read_rvf_image(image)
+                .map_err(|error| format!("rvf inspect: {error}"))?;
+            let segments = parsed
+                .segments
+                .iter()
+                .map(|segment| {
+                    serde_json::json!({
+                        "type": segment.seg_type,
+                        "size": segment.payload.len(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let payload = serde_json::json!({
+                "path": image,
+                "manifest": parsed.manifest.clone(),
+                "segments": segments,
+            });
+            if format == "json" {
+                let text = serde_json::to_string_pretty(&payload)
+                    .map_err(|error| format!("rvf inspect: {error}"))?;
+                println!("{text}");
+            } else {
+                println!("rvf: {}", image.display());
+                println!(
+                    "  name={} tag={}",
+                    payload["manifest"]["name"], payload["manifest"]["tag"]
+                );
+                println!("  layer_digest={}", payload["manifest"]["layer_digest"]);
+                println!("  layer_size={}", payload["manifest"]["layer_size"]);
+                println!("  segments={}", parsed.segments.len());
+                for segment in parsed.segments {
+                    println!(
+                        "    type=0x{:02x} size={}",
+                        segment.seg_type,
+                        segment.payload.len()
+                    );
+                }
+            }
+            Ok(())
+        }
+        RvfCommands::Extract { image, output } => {
+            let bytes = ferro_core::rvf_image::extract_layer(image, output)
+                .map_err(|error| format!("rvf extract: {error}"))?;
+            println!(
+                "rvf: extracted validated OCI layer {} bytes -> {}",
+                bytes,
+                output.display()
+            );
+            Ok(())
         }
     }
 }
@@ -8593,7 +8672,7 @@ mod tests {
         validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
         validate_network_mode, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerEvent, DockerEventStore, MigrateCommands, NetworkCommands,
-        VolumeCommands,
+        RvfCommands, VolumeCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -8609,6 +8688,7 @@ mod tests {
     use ferro_core::volume_store::LocalVolumeStore;
     use std::io::Write;
     use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::path::PathBuf;
 
     #[test]
     fn parses_run_command() {
@@ -8836,6 +8916,38 @@ volumes:
                 assert!(cache_to.is_none());
                 assert!(build_context.is_empty());
                 assert!(secret.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rvf_inspect_and_extract_commands() {
+        let inspect = Cli::parse_from([
+            "ferrocrate",
+            "rvf",
+            "inspect",
+            "image.rvf",
+            "--format",
+            "json",
+        ]);
+        match inspect.command {
+            Commands::Rvf {
+                command: RvfCommands::Inspect { image, format },
+            } => {
+                assert_eq!(image, PathBuf::from("image.rvf"));
+                assert_eq!(format, "json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let extract = Cli::parse_from(["ferrocrate", "rvf", "extract", "image.rvf", "layer.tar"]);
+        match extract.command {
+            Commands::Rvf {
+                command: RvfCommands::Extract { image, output },
+            } => {
+                assert_eq!(image, PathBuf::from("image.rvf"));
+                assert_eq!(output, PathBuf::from("layer.tar"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

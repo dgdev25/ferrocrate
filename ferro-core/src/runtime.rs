@@ -3183,6 +3183,7 @@ impl ContainerRuntime {
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         stop_pid(record.pid, timeout)?;
         cleanup_security_ebpf_monitor(&record.id)?;
+        cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         self.persist_effect_status(proof, intent, id, "running", "stopped")?;
         let _ = log_event(
             &self.runtime_dir,
@@ -3220,6 +3221,7 @@ impl ContainerRuntime {
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         kill_pid(record.pid)?;
         cleanup_security_ebpf_monitor(&record.id)?;
+        cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         self.persist_effect_status(proof, intent, id, "running", "killed")?;
         let _ = log_event(
             &self.runtime_dir,
@@ -3402,6 +3404,7 @@ impl ContainerRuntime {
         if stop_existing {
             stop_pid(record.pid, timeout)?;
             cleanup_security_ebpf_monitor(&record.id)?;
+            cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         }
         self.phase_hook.reached(
             if stop_existing { "restart" } else { "start" },
@@ -3566,6 +3569,7 @@ impl ContainerRuntime {
             )));
         }
         cleanup_security_ebpf_monitor(&record.id)?;
+        cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         let records = self.store.list()?;
         cleanup_network(Some((_proof, intent)), &record, &records)?;
         let container_dir = self.runtime_dir.join("containers").join(id);
@@ -8098,6 +8102,44 @@ fn apply_apparmor_if_enabled(
     ];
     wrapped.extend(cmd.iter().cloned());
     Ok(wrapped)
+}
+
+fn cleanup_apparmor_profile(runtime_dir: &Path, container_id: &str) -> Result<(), RuntimeError> {
+    if !apparmor_enabled() {
+        return Ok(());
+    }
+    let profile_path = runtime_dir
+        .join("security")
+        .join("apparmor")
+        .join(format!("ferrocrate-{container_id}.profile"));
+    if !profile_path.exists() {
+        return Ok(());
+    }
+    if !command_available("apparmor_parser") {
+        mac_enforcement_result(
+            "apparmor",
+            "apparmor_parser is required to unload an enabled profile",
+        )?;
+        return Ok(());
+    }
+    let output = execute_with_timeout(
+        "apparmor_parser",
+        &["-R", &profile_path.to_string_lossy()],
+        Duration::from_secs(10),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        mac_enforcement_result(
+            "apparmor",
+            &format!("failed to unload profile: {}", stderr.trim()),
+        )?;
+    }
+    fs::remove_file(&profile_path).map_err(|error| {
+        RuntimeError::InvalidState(format!(
+            "failed to remove AppArmor profile {}: {error}",
+            profile_path.display()
+        ))
+    })
 }
 
 fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError> {

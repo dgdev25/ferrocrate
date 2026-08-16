@@ -4208,6 +4208,50 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         })(),
         Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
             .and_then(|body| print_json(body, format)),
+        Commands::Exec { container, cmd } => (|| -> Result<(), String> {
+            if cmd.is_empty() {
+                return Err("exec: command is required".to_string());
+            }
+            let payload = serde_json::json!({
+                "Cmd": cmd,
+                "AttachStdout": true,
+                "AttachStderr": true,
+                "Tty": false,
+            });
+            let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
+            let create_body = request_with_body(
+                "POST",
+                format!(
+                    "/containers/{}/exec",
+                    percent_encode_path_component(container)
+                ),
+                Some(payload),
+            )?;
+            let create: serde_json::Value = serde_json::from_slice(&create_body)
+                .map_err(|error| format!("remote exec create returned invalid JSON: {error}"))?;
+            let id = create
+                .get("Id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "remote exec create response omitted Id".to_string())?;
+            let start = serde_json::to_vec(&serde_json::json!({
+                "Detach": false,
+                "Tty": false,
+            }))
+            .map_err(|error| error.to_string())?;
+            let raw = request_with_body(
+                "POST",
+                format!("/exec/{}/start", percent_encode_path_component(id)),
+                Some(start),
+            )?;
+            let (stdout, stderr) = decode_docker_raw_stream(&raw)?;
+            if !stdout.is_empty() {
+                print!("{}", String::from_utf8_lossy(&stdout));
+            }
+            if !stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&stderr));
+            }
+            Ok(())
+        })(),
         Commands::Inspect { container, format } => request(
             "GET",
             format!(
@@ -4395,6 +4439,44 @@ fn percent_encode_path_component(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn decode_docker_raw_stream(raw: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let mut offset = 0usize;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    while offset < raw.len() {
+        if raw.len().saturating_sub(offset) < 8 {
+            return Err("remote exec returned a truncated Docker stream header".to_string());
+        }
+        let stream = raw[offset];
+        if stream != 1 && stream != 2 {
+            return Err(format!(
+                "remote exec returned an invalid stream id {stream}"
+            ));
+        }
+        let size = u32::from_be_bytes([
+            raw[offset + 4],
+            raw[offset + 5],
+            raw[offset + 6],
+            raw[offset + 7],
+        ]) as usize;
+        offset += 8;
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| "remote exec stream frame is too large".to_string())?;
+        if end > raw.len() {
+            return Err("remote exec returned a truncated Docker stream frame".to_string());
+        }
+        match stream {
+            1 => stdout.extend_from_slice(&raw[offset..end]),
+            2 => stderr.extend_from_slice(&raw[offset..end]),
+            _ => unreachable!(),
+        }
+        offset = end;
+    }
+    Ok((stdout, stderr))
 }
 
 fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
@@ -10241,18 +10323,18 @@ mod tests {
 
     use super::{
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
-        context_endpoint_available, desktop_forward_enabled, discover_rootless_socket, dispatch,
-        docker_chunked_headers, docker_container_apply_time_bounds,
-        docker_container_matches_filters, docker_event_payload, docker_event_resource,
-        docker_hijack_headers, docker_image_apply_time_bounds, docker_image_matches_filters,
-        docker_image_prune_matches_filters, docker_network_ipv6_config,
-        docker_network_matches_filters, docker_pending_matches_filters, docker_raw_stream,
-        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
-        ensure_context_routing_available, handle_build, handle_containers, handle_context,
-        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_unpause, handle_volume, host_build_arch, import_rvf_image_at,
+        context_endpoint_available, decode_docker_raw_stream, desktop_forward_enabled,
+        discover_rootless_socket, dispatch, docker_chunked_headers,
+        docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
+        docker_event_resource, docker_hijack_headers, docker_image_apply_time_bounds,
+        docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_matches_filters,
+        docker_raw_stream, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
+        effective_readonly, ensure_context_routing_available, handle_build, handle_containers,
+        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
+        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
+        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
+        handle_stop, handle_unpause, handle_volume, host_build_arch, import_rvf_image_at,
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
         parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
@@ -12923,6 +13005,15 @@ volumes:
         assert_eq!(status, 200);
         assert_eq!(body, b"[]");
         assert_eq!(percent_encode_path_component("web/name"), "web%2Fname");
+    }
+
+    #[test]
+    fn remote_exec_raw_stream_decoder_separates_stdout_and_stderr() {
+        let raw = docker_raw_stream("out\n", "err\n");
+        let (stdout, stderr) = decode_docker_raw_stream(&raw).expect("decode stream");
+        assert_eq!(stdout, b"out\n");
+        assert_eq!(stderr, b"err\n");
+        assert!(decode_docker_raw_stream(&raw[..7]).is_err());
     }
 
     #[cfg(unix)]

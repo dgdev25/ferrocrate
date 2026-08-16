@@ -1,5 +1,6 @@
 #![cfg_attr(not(target_arch = "bpf"), allow(dead_code))]
 
+#[cfg(not(target_arch = "bpf"))]
 use crate::packet::{
     rewrite_ethernet_destination, rewrite_ipv4_destination, rewrite_ipv4_source,
     rewrite_transport_port, PacketError, PortField,
@@ -535,6 +536,7 @@ pub fn decide_egress<S: DatapathState>(
     Ok(decision)
 }
 
+#[cfg(not(target_arch = "bpf"))]
 pub fn apply_decision(
     bytes: &mut [u8],
     packet: &Packet,

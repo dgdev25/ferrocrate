@@ -22,6 +22,7 @@ pub enum TransportProtocol {
     Udp,
 }
 
+#[cfg(not(target_arch = "bpf"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PortField {
     Source,
@@ -58,6 +59,7 @@ where
     Ok(u16::from_be_bytes([high, low]))
 }
 
+#[cfg(not(target_arch = "bpf"))]
 fn parse_with<F>(packet_len: usize, read_byte: F) -> Result<PacketView, PacketError>
 where
     F: FnMut(usize) -> Result<u8, PacketError>,
@@ -136,6 +138,7 @@ where
     })
 }
 
+#[cfg(not(target_arch = "bpf"))]
 pub fn parse_packet_bytes(packet: &[u8]) -> Result<PacketView, PacketError> {
     parse_with(packet.len(), |offset| {
         packet.get(offset).copied().ok_or(PacketError::Truncated)
@@ -143,6 +146,7 @@ pub fn parse_packet_bytes(packet: &[u8]) -> Result<PacketView, PacketError> {
 }
 
 #[allow(dead_code)]
+#[cfg(not(target_arch = "bpf"))]
 pub fn rewrite_ethernet_destination(
     packet: &mut [u8],
     destination_mac: [u8; 6],
@@ -177,6 +181,7 @@ pub fn update_transport_checksum(checksum: u16, old: [u8; 4], new: [u8; 4]) -> u
     update_ipv4_checksum(checksum, old, new)
 }
 
+#[cfg(not(target_arch = "bpf"))]
 fn read_slice_u16(packet: &[u8], offset: usize) -> Result<u16, PacketError> {
     let bytes = packet
         .get(offset..checked_end(offset, 2)?)
@@ -184,6 +189,7 @@ fn read_slice_u16(packet: &[u8], offset: usize) -> Result<u16, PacketError> {
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
+#[cfg(not(target_arch = "bpf"))]
 fn write_slice_u16(packet: &mut [u8], offset: usize, value: u16) -> Result<(), PacketError> {
     let end = checked_end(offset, 2)?;
     let bytes = packet.get_mut(offset..end).ok_or(PacketError::Truncated)?;
@@ -191,6 +197,7 @@ fn write_slice_u16(packet: &mut [u8], offset: usize, value: u16) -> Result<(), P
     Ok(())
 }
 
+#[cfg(not(target_arch = "bpf"))]
 fn transport_checksum_offset(view: PacketView) -> usize {
     view.transport_offset
         + match view.transport {
@@ -207,6 +214,7 @@ fn normalize_udp_checksum(protocol: TransportProtocol, checksum: u16) -> u16 {
     }
 }
 
+#[cfg(not(target_arch = "bpf"))]
 fn rewrite_ipv4_address(
     packet: &mut [u8],
     address_offset: usize,
@@ -241,6 +249,7 @@ fn rewrite_ipv4_address(
     write_slice_u16(packet, transport_checksum_offset, new_transport_checksum)
 }
 
+#[cfg(not(target_arch = "bpf"))]
 pub fn rewrite_ipv4_destination(
     packet: &mut [u8],
     new_address: [u8; 4],
@@ -248,10 +257,12 @@ pub fn rewrite_ipv4_destination(
     rewrite_ipv4_address(packet, 16, new_address)
 }
 
+#[cfg(not(target_arch = "bpf"))]
 pub fn rewrite_ipv4_source(packet: &mut [u8], new_address: [u8; 4]) -> Result<(), PacketError> {
     rewrite_ipv4_address(packet, 12, new_address)
 }
 
+#[cfg(not(target_arch = "bpf"))]
 pub fn rewrite_transport_port(
     packet: &mut [u8],
     field: PortField,

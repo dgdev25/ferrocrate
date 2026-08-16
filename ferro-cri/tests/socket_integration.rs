@@ -689,6 +689,33 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         })
         .await
         .expect("start container");
+
+    // Exercise the daemon restart boundary while the workload is live. The
+    // replacement server must recover the SQLite-backed CRI metadata and
+    // report the same container identity/state before any new RPC is issued.
+    server.abort();
+    let _ = server.await;
+    let socket_for_restart = socket.clone();
+    let restarted_server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_restart).await;
+    });
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let recovered = client
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("status after daemon restart")
+        .into_inner()
+        .status
+        .expect("recovered status");
+    assert_eq!(recovered.id, container);
+    assert_eq!(
+        recovered.state,
+        ferro_cri::runtime::ContainerState::Running as i32
+    );
     let exec = client
         .exec_sync(ferro_cri::runtime::ExecSyncRequest {
             container_id: container.clone(),
@@ -749,8 +776,8 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         })
         .await
         .expect("remove sandbox");
-    server.abort();
-    let _ = server.await;
+    restarted_server.abort();
+    let _ = restarted_server.await;
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }

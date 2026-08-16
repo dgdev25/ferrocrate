@@ -107,6 +107,8 @@ pub struct TrainingConfig {
     pub max_versions: usize,
     /// Minimum samples required for training
     pub min_samples: usize,
+    /// Maximum relative loss regression accepted when activating a candidate.
+    pub max_loss_regression: f32,
 }
 
 impl Default for TrainingConfig {
@@ -124,6 +126,7 @@ impl Default for TrainingConfig {
             online_interval: Duration::from_secs(300), // 5 minutes
             max_versions: 10,
             min_samples: 100,
+            max_loss_regression: 0.25,
         }
     }
 }
@@ -254,6 +257,9 @@ pub enum TrainingError {
 
     #[error("Parse error: {0}")]
     ParseError(String),
+
+    #[error("model loss regression exceeds activation gate: previous={previous:.6}, candidate={candidate:.6}")]
+    LossRegression { previous: f32, candidate: f32 },
 
     #[error("training sample exceeds the {0}-byte limit")]
     SampleTooLarge(usize),
@@ -510,6 +516,20 @@ impl TrainingPipeline {
 
         // Save model (placeholder - actual serialization depends on model type)
         self.save_model(&model_path, model_type, &trained)?;
+
+        if let Some(previous) = self
+            .get_active_version(model_type)
+            .and_then(|version| version.loss)
+        {
+            let allowed = previous * (1.0 + self.config.max_loss_regression.max(0.0));
+            if trained.loss > allowed {
+                let _ = fs::remove_file(&model_path);
+                return Err(TrainingError::LossRegression {
+                    previous,
+                    candidate: trained.loss,
+                });
+            }
+        }
 
         // Update version history
         let model_version = ModelVersion {
@@ -1575,6 +1595,7 @@ mod tests {
             online_interval: Duration::from_secs(60),
             max_versions: 5,
             min_samples: 3, // Low for testing
+            max_loss_regression: 0.25,
         };
 
         // Create sample data
@@ -1831,6 +1852,73 @@ mod tests {
 
         let r2 = pipeline.train(ModelType::ResourcePredictor).unwrap();
         assert_eq!(r2.version, 2);
+    }
+
+    #[test]
+    fn loss_regression_gate_keeps_previous_active_version() {
+        let _guard = AI_ENV_LOCK.lock().expect("AI env lock");
+        let (_temp, mut config) = setup_test_env();
+        config.max_loss_regression = 0.0;
+        let previous_ai = std::env::var("FERROCRATE_AI").ok();
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+        }
+        let sample_dir = config.data_dir.join("resource-predictor");
+        fs::remove_dir_all(&sample_dir).expect("clear fixture samples");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let stable = serde_json::json!({
+            "cpu_percent": 10.0,
+            "memory_bytes": 1024,
+            "pids_count": 2,
+            "timestamp_secs": 1
+        });
+        for timestamp in 1..=3 {
+            let mut sample = stable.clone();
+            sample["timestamp_secs"] = serde_json::json!(timestamp);
+            pipeline
+                .record_sample(ModelType::ResourcePredictor, sample.to_string().as_bytes())
+                .expect("stable sample");
+        }
+        pipeline
+            .train(ModelType::ResourcePredictor)
+            .expect("first model");
+        assert_eq!(
+            pipeline
+                .get_active_version(ModelType::ResourcePredictor)
+                .expect("active model")
+                .version,
+            1
+        );
+
+        fs::remove_dir_all(&sample_dir).expect("replace corpus");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        for (index, cpu) in [0.0, 50.0, 100.0].into_iter().enumerate() {
+            let sample = serde_json::json!({
+                "cpu_percent": cpu,
+                "memory_bytes": 1024 + index as u64,
+                "pids_count": 2 + index as u64,
+                "timestamp_secs": 2 + index as u64
+            });
+            pipeline
+                .record_sample(ModelType::ResourcePredictor, sample.to_string().as_bytes())
+                .expect("regression sample");
+        }
+        let error = pipeline
+            .train(ModelType::ResourcePredictor)
+            .expect_err("loss regression must not activate");
+        assert!(matches!(error, TrainingError::LossRegression { .. }));
+        assert_eq!(
+            pipeline
+                .get_active_version(ModelType::ResourcePredictor)
+                .expect("previous model remains active")
+                .version,
+            1
+        );
+        match previous_ai {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
     }
 
     #[test]

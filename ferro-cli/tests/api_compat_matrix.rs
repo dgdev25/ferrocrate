@@ -240,6 +240,8 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
 
     let (status, body) = harness.request("GET", "/events?type=volume&event=create", "");
     assert_eq!(status, 200, "events response: {body}");
-    assert!(body.contains("\"event_type\":\"volume\""), "{body}");
-    assert!(body.contains("\"action\":\"create\""), "{body}");
+    assert!(body.contains("\"Type\":\"volume\""), "{body}");
+    assert!(body.contains("\"Action\":\"create\""), "{body}");
+    assert!(body.contains("\"Actor\":"), "{body}");
+    assert!(body.contains("\"timeNano\":"), "{body}");
 }

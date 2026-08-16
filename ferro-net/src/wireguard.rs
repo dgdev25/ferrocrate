@@ -150,7 +150,9 @@ impl WireGuardManager {
                 }),
             };
         }
-        self.inspect(config)
+        let snapshot = self.inspect(config)?;
+        self.verify_routes(config)?;
+        Ok(snapshot)
     }
 
     pub fn inspect(
@@ -177,6 +179,36 @@ impl WireGuardManager {
             .map_err(|error| WireGuardError::InvalidInterface(error.to_string()))?;
         if self.run_status(&["ip", "link", "show", "dev", &config.name])? {
             self.run(&["ip", "link", "delete", &config.name])?;
+        }
+        if self.run_status(&["ip", "link", "show", "dev", &config.name])? {
+            return Err(WireGuardError::Command(format!(
+                "WireGuard interface {} remained after deletion",
+                config.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn verify_routes(&self, config: &WireGuardInterfaceConfig) -> Result<(), WireGuardError> {
+        let route_v4 = self.run(&["ip", "route", "show", "dev", &config.name])?;
+        let route_v6 = self.run(&["ip", "-6", "route", "show", "dev", &config.name])?;
+        for address in &config.addresses {
+            let route = format!("{}/{}", address.network(), address.prefix_len());
+            let output = if address.addr().is_ipv4() {
+                &route_v4
+            } else {
+                &route_v6
+            };
+            if !output.lines().any(|line| {
+                line.split_whitespace()
+                    .next()
+                    .is_some_and(|destination| destination == route)
+            }) {
+                return Err(WireGuardError::Command(format!(
+                    "route read-back missing {route} on {}",
+                    config.name
+                )));
+            }
         }
         Ok(())
     }

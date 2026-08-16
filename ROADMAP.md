@@ -30,7 +30,8 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 
 - [x] Define one capability-aware execution boundary for privileged network mutations.
 - [x] Implement bridge execution with exact CIDR read-back verification and rollback on mismatch.
-- [ ] Extend read-back verification and rollback coverage to route, DNS, firewall, and traffic-control mutations.
+- [x] Extend read-back verification and rollback coverage to WireGuard route installation and interface teardown.
+- [ ] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
 - [ ] Implement DNS/hosts and MTU behavior with explicit unsupported-capability errors.
 - [ ] Implement nftables/iptables port mapping and eBPF fallback with provenance and cleanup.
 - [ ] Implement `tc` bandwidth limits with read-back and recovery tests.
@@ -92,3 +93,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — added `HostCapabilities` admission to the shared executor and wired bridge mutations to fail closed before effects when Linux/root/CAP_NET_ADMIN/iproute2 are unavailable.
 - 2026-08-16 — corrected tool capability detection to resolve binaries through `PATH`, avoiding false negatives from nonstandard `ip --version` exit codes.
 - 2026-08-16 — bridge execution now verifies post-effect identity/CIDRs and rolls back on read-back mismatch; the full matrix runner was rerun green.
+- 2026-08-16 — WireGuard apply now verifies expected IPv4/IPv6 routes and removal verifies interface absence.

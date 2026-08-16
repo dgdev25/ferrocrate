@@ -1,116 +1,238 @@
-# FerroCrate Roadmap
+# FerroCrate Comprehensive Remaining Work Roadmap
 
-<!-- Maintained as the strategic follow-on to the FCNET ticket plan. -->
+<!-- Single consolidated backlog. Historical completion is preserved below; all
+     forward work is sourced from the PRD-backed roadmap, completion plan,
+     security audit, RVF plan, platform plan, and compatibility contracts. -->
 
-**Maturity:** feature-complete core with production-hardening gaps · **Last updated:** 2026-08-16 · HEAD `WORKTREE`
+**Maturity:** mature core with a broad, partially production-qualified platform · **Last updated:** 2026-08-16 · HEAD `7f36ac6`
 
-This roadmap separates the completed FCNET lifecycle work from the remaining
-host qualification and execution-layer work. The authoritative ticket detail
-remains in `docs/superpowers/plans/2026-08-15-p0-network-execution-tickets.md`.
+## How to use this roadmap
+
+This is the one forward-looking backlog for the repository. `Now` contains
+release blockers and qualification gaps. `Next` contains the next product and
+platform capabilities after those gates. `Later` contains strategic work that
+is real but not required for the current release. Small tactical defects belong
+in an audit or issue, not as new roadmap epics.
+
+Evidence sources: `docs/ROADMAP.md`, `docs/PROJECT_COMPLETION_PLAN.md`,
+`docs/REMEDIATION-PLAN.md`, `docs/SECAUDIT_TASKLIST.md`,
+`docs/RVF_INTEGRATION_PLAN.md`, `docs/macos-windows-support-plan.md`,
+`docs/monetization-implementation-plan.md`, `README.md`, CRI/Docker
+compatibility contracts, and accepted ADRs 0013–0014.
 
 ## Now
 
-### 1. Supported-host network qualification matrix
+### 1. Production network and host qualification
 
-*Why now:* bridge and IPv6 lifecycle evidence exists on one Linux host, while
-`docs/ROADMAP.md` still identifies kernel/distribution coverage as the release
-gap. **Size:** L. *Source:* NET-01/04/05/06/07/08/09/10 status table and FCNET-103/104/105 evidence.
+*Why now:* the implementation is executor-backed and green on one privileged
+Ubuntu row, but the supported-host claim, broader kernel coverage, and some
+network/security qualification gates remain open. *Size:* XL. *Sources:* NET-01,
+NET-04–10; SEC-08/09; `docs/compatibility`; host-matrix evidence.
 
-- [x] Define the supported distribution/kernel capability matrix and required tools.
-- [x] Add a non-destructive preflight that records distro, kernel, capabilities, WireGuard, iproute2, nftables/iptables, DNS, MTU, and traffic-control support.
-- [x] Parameterize the privileged bridge/IPv6, managed-overlay, and teardown harnesses by matrix row.
-- [x] Run and archive one green evidence bundle for the first supported row, including cleanup verification.
-- [x] Add a CI/manual gate that rejects a claimed supported row without its evidence bundle.
+- [ ] Define the release support matrix (distribution, kernel, architecture, rootful/rootless, required tools, unsupported combinations).
+- [ ] Run and archive bridge, custom-network, IPv4/IPv6, DNS/hosts, firewall/port-map, MTU, `tc`, WireGuard, teardown, and recovery on every supported row.
+- [ ] Qualify rootless networking, volumes, image pulls, and CRI constraints on each supported row; record strict prerequisite failures.
+- [ ] Complete successful kernel-backed eBPF monitoring qualification; retain explicit iptables/nftables fallback and provenance when eBPF is unavailable.
+- [ ] Complete encrypted managed-overlay packet-flow qualification across the supported host matrix; preserve stale-revision, rollback, recovery, and key-rotation evidence.
+- [ ] Decide and, only if operationally required, run FCNET-105 across physically separate machines with clock, MTU, route, endpoint, topology, and key-ID evidence (ADR-0013 currently defers this).
+- [ ] Keep every network mutation, attach/detach, firewall change, and cleanup under the executor plus authorization/grant/witness protocol.
+- [ ] Publish a release troubleshooting and recovery runbook for capability denial, partial effects, quarantine, and operator repair.
 
-### 2. Production `ferro-net` execution layers
+### 2. CRI production qualification
 
-*Why now:* the current networking table still records command-builder stubs for
-custom bridges, DNS, firewall/port mapping, eBPF fallback, and bandwidth
-limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08, NET-10.
+*Why now:* the lifecycle RPCs and durable state exist, but successful image/rootfs
+execution, sandbox networking, restart recovery, cancellation, and kubelet-level
+compatibility are not yet qualified. *Size:* XL. *Sources:* COMPAT-09,
+`docs/compatibility/cri.md`, `docs/compatibility/cri-conformance.md`.
 
-- [x] Define one capability-aware execution boundary for privileged network mutations.
-- [x] Implement bridge execution with exact CIDR read-back verification and rollback on mismatch.
-- [x] Extend read-back verification and rollback coverage to WireGuard route installation and interface teardown.
-- [x] Extend read-back verification and rollback coverage to DNS, firewall, and traffic-control mutations.
-- [x] Implement atomic DNS resolver publication with fsync and exact read-back.
-- [x] Implement configurable veth MTU behavior (`FERROCRATE_VETH_MTU`) with range validation and exact `ip -j` read-back.
-- [x] Publish container hosts files atomically with symlink refusal and exact read-back.
-- [x] Add exact post-effect read-back to direct iptables/nftables rule application and deletion.
-- [x] Implement port-mapping integration and eBPF fallback with provenance and cleanup.
-- [x] Implement `tc` bandwidth limits with capability admission and exact rate read-back; privileged recovery coverage remains in the host matrix.
-- [x] Migrate public network runtime paths from direct shelling-out to the execution boundary; mutation, capture, and idempotent cleanup route through `ferro-net` executor APIs.
+- [ ] Attach each pod sandbox to an authorized, durable network namespace and reconcile its network state on restart.
+- [ ] Qualify Create/Start/Stop/RemoveContainer, ContainerStatus, and ExecSync with a real OCI image/rootfs, including exit codes, stdout/stderr, timeout, and cancellation behavior.
+- [ ] Bind pod/container identity, sandbox, image digest, command, and resource state into the common authorization proof and witness lifecycle.
+- [ ] Add UDS conformance fixtures for all exposed RuntimeService and ImageService methods, malformed requests, deadlines, retries, and idempotency.
+- [ ] Add kubelet/containerd compatibility fixtures and publish the supported CRI method/version/error matrix.
+- [ ] Test durable sandbox/container recovery after process termination at each intent/effect/store boundary.
+- [ ] Update the PRD-backed compatibility table when each method is actually qualified; do not claim kubelet compatibility prematurely.
+
+### 3. Security enforcement and dependency hygiene
+
+*Why now:* core authorization and seccomp enforcement are implemented, while MAC
+policy coverage, runtime monitoring, dependency advisories, and complete shell-out
+reduction remain open. *Size:* L–XL. *Sources:* SEC-03/08/09,
+`docs/SECAUDIT_TASKLIST.md`, `docs/REMEDIATION-PLAN.md`.
+
+- [ ] Implement and qualify AppArmor and SELinux profile selection, loading, denial reporting, rootless behavior, and policy rollback.
+- [ ] Finish eBPF syscall/security monitoring with a production execution path, capability admission, event schema, bounded buffering, and fallback diagnostics.
+- [ ] Complete the remaining runtime shell-out audit; route network and other privileged mutations through typed executor boundaries or document each justified exception.
+- [ ] Resolve or formally time-box `RUSTSEC-2025-0141` (`bincode` via `ruvector-core`) with isolation, upgrade, or replacement evidence.
+- [ ] Replace the `sled` backend to remove `RUSTSEC-2025-0057` (`fxhash`) and `RUSTSEC-2024-0384` (`instant`), including migration and backward-compatibility tests.
+- [ ] Complete remaining PAL/security-audit continuation runs, triage new findings, and merge accepted remediations into this roadmap.
+- [ ] Run adversarial checks for symlink/path traversal, descriptor substitution, namespace identity, profile parsing, and fail-closed authorization on every new execution surface.
+
+### 4. Compatibility and release qualification
+
+*Why now:* the implementation has broad feature coverage, but OCI, Dockerfile,
+Docker Engine, and release claims are still marked partial or rework-needed.
+*Size:* XL. *Sources:* COMPAT-01–06, IMG-06, Docker compatibility docs,
+`docs/PROJECT_COMPLETION_PLAN.md`.
+
+- [ ] Establish OCI Image, Runtime, and Distribution conformance suites beyond the current basic validation scripts.
+- [ ] Close Dockerfile parity gaps: complete directive/flag coverage, build isolation, secrets/SSH/cache mounts, named contexts, platform targets, and deterministic errors.
+- [ ] Define supported Docker Engine API versions and negotiation behavior; publish the endpoint/status/error matrix from the actual socket implementation.
+- [ ] Complete high-value Docker container, image, network, volume, streaming, wait, and event endpoints while preserving authorization and witness receipts.
+- [ ] Run Docker SDK and Compose contract suites against the public Unix socket, including retries, streaming, error shapes, and version negotiation.
+- [ ] Add release gates for clean builds, cross-target artifacts (x86_64/aarch64/riscv64), checksums/signatures, upgrade/rollback, and reproducible metadata.
+- [ ] Reconcile README and PRD status claims with evidence; remove stale “in progress” or “done” statements after each qualification gate.
 
 ## Next
 
-### 3. Physically separate-host FCNET-105 qualification
+### 5. BuildKit-class image build and distribution
 
-*Why now:* FCNET-105 is qualified across isolated namespaces; operational
-deployment may require independent machines and a transport-aware test harness.
-**Size:** L. *Source:* FCNET-105 follow-on note in `docs/ROADMAP.md`.
+*Why next:* Dockerfile/build support works for common cases but is explicitly
+below full parity; secure cache and multi-platform workflows are adoption gaps.
+*Size:* XL. *Sources:* IMG-06, COMPAT-06, Docker competitive-gap sequence.
 
-- [x] Decide whether physical multi-host coverage is a release requirement: it is not required for the current release; see ADR-0013.
-- [x] Record the operational prerequisites that would reopen physical qualification (endpoints, clock, MTU, routes, topology, and key IDs).
-- [x] Preserve the existing authenticated isolated-host packet-flow, stale-revision, rollback, recovery, and key-rotation evidence as the current release gate.
-- [x] Record the evidence boundary: isolated-host logs are archived; physical-host topology and private key material are intentionally not claimed.
+- [ ] Model builds as a content-addressed dependency graph with parallel independent stages.
+- [ ] Add deterministic cache keys, cache import/export, remote/registry cache, pruning, and cache provenance.
+- [ ] Add secrets, SSH mounts, cache mounts, named contexts, multi-platform output, and strict secret non-disclosure in logs/witnesses/cache metadata.
+- [ ] Add build cancellation, resource limits, retries, resumability, and authorization-bound source/context/image identities.
 
-### 4. Security and API parity hardening
+### 6. Rootless productization and operational lifecycle
 
-*Why now:* the broader roadmap identifies seccomp application, CRI methods, and
-Docker API coverage as independent partial areas. **Size:** XL. *Source:*
-`docs/ROADMAP.md` SEC-02, COMPAT-09, and Docker compatibility checklist.
+*Why next:* prerequisite diagnostics exist, but installation, service management,
+contexts, support boundaries, and upgrades are not yet a complete rootless product.
+*Size:* L. *Sources:* rootless verification, README, Docker rootless parity sequence.
 
-- [x] Apply parsed seccomp profiles in the container launch path; the runtime applies the resolved profile in `pre_exec` and retains ignored root-only denial coverage.
-- [x] Complete CRI pod-sandbox/container lifecycle methods and conformance fixtures; authorized durable state and lifecycle error-path fixtures are covered, while kernel sandbox networking and full kubelet qualification remain explicit follow-on work.
-- [x] Publish supported Docker Engine API versions and document the implemented high-value endpoint groups; endpoint gaps remain explicit unsupported errors.
-- [x] Add Docker-wire/Compose contract tests while preserving authorization and witness mediation; raw Unix-socket matrix tests cover SDK-compatible HTTP semantics, and Compose integration tests cover lifecycle authorization.
+- [ ] Ship rootless installer and upgrade flows for subordinate IDs, mapping helpers, cgroup delegation, user services, and slirp networking.
+- [ ] Add rootless contexts, socket discovery, diagnostics, logs, and explicit unsupported-feature messaging.
+- [ ] Qualify rootless CRI, Compose, volumes, networking, image signing, and resource limits.
+- [ ] Add rootless release evidence to CI/manual host gates and document operator recovery.
+
+### 7. Events, logs, and extension contracts
+
+*Why next:* operators and integrations need durable lifecycle events and safe
+provider extensions before ecosystem expansion. *Size:* L–XL. *Sources:* Docker
+competitive-gap sequence; existing observability and authorization surfaces.
+
+- [ ] Provide a durable, filterable event stream distinct from the witness journal.
+- [ ] Define versioned log-driver, volume-driver, network-driver, and plugin contracts with capability declarations.
+- [ ] Add plugin identity, signature/permission, lifecycle, retry, isolation, and resource limits.
+- [ ] Make every plugin mutation a delegated child of a parent authorization decision with durable intent and cleanup provenance.
+- [ ] Add SDK fixtures and compatibility documentation for extension lifecycle and failure behavior.
+
+### 8. Performance, reliability, and scale hard gates
+
+*Why next:* benchmark scripts exist, but optimization, sustained-load, chaos, and
+reliability acceptance thresholds are not yet demonstrated. *Size:* L–XL. *Sources:*
+PERF-01–08, REL-02, `docs/PROJECT_COMPLETION_PLAN.md`.
+
+- [ ] Establish baselines and enforce thresholds for startup, warm start, pull, build, idle RSS, per-container overhead, binary size, and AI latency.
+- [ ] Optimize image extraction, network setup, memory overhead, and parallel operations against those baselines.
+- [ ] Add sustained-load tests (100+ containers), resource exhaustion, daemon crash, OOM, interrupted network, disk-full, and kernel-effect fault matrices.
+- [ ] Verify AI-disabled graceful degradation and ensure AI monitoring overhead stays within the published budget.
+- [ ] Add backup/restore, upgrade/downgrade, disaster-recovery, and capacity-planning tests and operator runbooks.
+
+### 9. AI runtime completion (practical scope)
+
+*Why next:* ferro-mind has useful local components, but several PRD claims remain
+partial, disconnected, or placeholder-backed. *Size:* XL. *Sources:* AI-01–06,
+AI-08/09/11/12; `docs/RVF_INTEGRATION_PLAN.md`.
+
+- [ ] Wire anomaly detection, adaptive restart, and resource prediction outcomes into the runtime lifecycle with durable per-container persistence.
+- [ ] Replace placeholder WASM inference with a validated engine or explicitly remove the unsupported mode.
+- [ ] Implement real model/version routing, training-data collection, online-learning safeguards, and rollback gates.
+- [ ] Populate explainability traces with decision inputs, model/version, confidence, and resulting action.
+- [ ] Replace brute-force vector paths where scale requires it; benchmark HNSW/index behavior and persistence.
+- [ ] Implement or explicitly defer GPU/VRAM discovery and scheduling with truthful CLI/API behavior.
+- [ ] Add end-to-end AI behavior tests and an AI overhead benchmark; keep `FERROCRATE_AI=0` fully functional.
 
 ## Later
 
-### 5. Release operations and scale
+### 10. RVF integration and native cognitive images
 
-- [x] Add repeatable performance baselines and regression thresholds; `scripts/perf/run-baseline.sh` produces metadata and benchmark artifacts, while existing scripts enforce their SLOs.
-- [x] Expand rootless prerequisite diagnostics with strict release checks for subordinate IDs, mapping helpers, cgroup v2, user runtime directories, and slirp networking.
-- [x] Record off-host witness retention/replication as a deliberate post-release boundary; current release uses local signed checkpoints per ADR-0014.
+*Why later:* these are strategic differentiators and do not block the current
+container/runtime release. *Size:* XXL. *Source:* `docs/RVF_INTEGRATION_PLAN.md`.
 
-## Shipped
+- [ ] Upgrade and consolidate RVF dependencies and remove thin wrappers only after compatibility review.
+- [ ] Decide whether replacing core CAS/signing primitives is worth the migration risk; if yes, implement versioned migration and rollback.
+- [ ] Add quantization and compression with measured size/accuracy gates.
+- [ ] Define and implement an opt-in `.rvf` image manifest, build format, launcher, and OCI interoperability.
+- [ ] Add optional cognitive-container policy: authority-to-seccomp mapping, token budgets, metered model proxy, and coherence pre-run gates.
+
+### 11. Multi-host orchestration
+
+*Why later:* orchestration depends on qualified networking, CRI, events, plugins,
+and durable cluster-state semantics. *Size:* XXL. *Source:* Docker competitive-gap
+sequence and FCNET-105 decisions.
+
+- [ ] Choose a narrow secure controller model versus Swarm-compatible services.
+- [ ] Implement node identity/lifecycle, desired state, scheduling, placement constraints, service discovery, health reconciliation, and rolling updates.
+- [ ] Bind every reconciliation mutation to revision floors, delegated authority, durable intent, outcomes, and replay-safe recovery.
+- [ ] Qualify independent-machine network paths only when the operational decision reopens ADR-0013.
+
+### 12. Off-host witness transparency and portable delegation
+
+*Why later:* ADR-0014 deliberately defers this beyond the current v1 local signed
+checkpoint model. *Size:* XL. *Source:* ADR-0014 and witness foundation plan.
+
+- [ ] Add independently replicated/off-host checkpoint retention and export.
+- [ ] Add Merkle inclusion/consistency proofs and external verifier tooling.
+- [ ] Add attenuated, revocable delegated credentials within the existing action/resource vocabulary.
+- [ ] Define key compromise, revocation, verifier-fleet rollout, and continuity procedures.
+
+### 13. macOS, Windows, and desktop distribution
+
+*Why later:* host-native support requires VM/WSL layers, packaging, file sharing,
+networking, and release operations that are separate from the Linux runtime.
+*Size:* XXL. *Source:* `docs/macos-windows-support-plan.md`.
+
+- [ ] Deliver first-class Windows WSL2 host proxy and VM runtime image.
+- [ ] Deliver macOS VM runtime, file sharing, networking, and lifecycle integration.
+- [ ] Deliver Windows Hyper-V integration where WSL2 is insufficient.
+- [ ] Complete desktop packaging, signing, paid/free channel behavior, upgrade, diagnostics, and cross-platform tests.
+
+### 14. Commercial entitlements and paid distribution
+
+*Why later:* monetization infrastructure exists but still has Phase 3 operational
+work and must not weaken the local authorization boundary. *Size:* L–XL.
+*Source:* `docs/monetization-implementation-plan.md`.
+
+- [ ] Complete entitlement issuance/rotation/revocation and offline/grace-period policy.
+- [ ] Harden gateway authentication, webhook/replay handling, audit events, and customer isolation.
+- [ ] Integrate entitlement checks with paid artifact channels, desktop installers, and upgrade rollback.
+- [ ] Add billing/entitlement failure tests that preserve free-tier operation and fail closed only for paid features.
+
+### 15. Documentation, release, and ecosystem completion
+
+*Why later:* documentation should follow stable behavior, but the final release
+corpus is a real deliverable rather than an implicit cleanup task. *Size:* L.
+*Sources:* legacy roadmap Phase 7, README, release scripts.
+
+- [ ] Publish production deployment, high-availability, backup/DR, monitoring, alerting, capacity, security, troubleshooting, FAQ, and glossary guides.
+- [ ] Publish CLI, Docker API, Compose, CRI, networking, rootless, plugin, and migration references.
+- [ ] Automate semantic versioning, changelog/release notes, signed artifacts, package repositories, and upgrade guides.
+- [ ] Add ecosystem examples, compatibility fixtures, support policy, and a public evidence index for every advertised platform.
+
+## Explicitly deferred decisions (not silently missing)
+
+- Physical multi-host FCNET-105 is not a current release gate; reopen only through ADR-0013.
+- Off-host witness retention, Merkle transparency, and portable credentials are not v1 requirements; reopen through ADR-0014.
+- Swarm cloning, desktop marketplace work, and blind endpoint counting remain lower priority until their prerequisite contracts are stable.
+- Any item marked “Done” in historical records is not repeated as forward work unless its evidence is explicitly marked partial or rework-needed above.
+
+## Shipped history
 
 - [x] FCNET-101 durable named-network lifecycle — completed 2026-08-16.
 - [x] FCNET-102 authorized CLI/Docker network mediation — completed 2026-08-16.
 - [x] FCNET-103 privileged single-host bridge qualification — completed 2026-08-16.
 - [x] FCNET-104 IPv6 named-network lifecycle — completed 2026-08-16.
 - [x] FCNET-105 authenticated isolated-host managed-overlay qualification — completed 2026-08-16.
-
-### Current matrix row
-
-- Ubuntu 26.04 LTS · Linux 7.0.0-29-generic · x86_64
-- Privileged capability row: `CAP_NET_ADMIN=yes`; iproute2 6.19.0, WireGuard tools 1.0.20250521, nftables 1.1.6, iptables 1.8.11, tc 6.19.0, systemd-resolved 259.5, iputils 20250605.
-- Evidence: `docs/evidence/host-matrix/ubuntu-26.04-kernel-7.0.0-29/preflight.txt` and `bridge-ipv6-lifecycle.log`.
-- The row is reproducible with `sudo env ... bash scripts/run-host-matrix-row.sh ubuntu-26.04-kernel-7.0.0-29`, which also runs the managed-overlay kernel and authenticated manager→agent→netd gates.
-- The privileged bridge/IPv6 lifecycle gate passed after adding `nodad` to the production IPv6 bridge-address command; this is a kernel portability fix, not a test-only workaround.
-- [x] First-row supporting checks pass for read-only MTU, nftables/iptables, `tc`, DNS resolver, and WireGuard availability (`supporting-checks.txt`).
+- [x] Shared capability-aware network execution boundary, exact read-back, rollback, DNS/hosts atomic publication, veth MTU, firewall/tc verification, and executor-backed cleanup.
+- [x] Host-matrix preflight/evidence gate and first Ubuntu 26.04/kernel 7.0 evidence bundle.
+- [x] Seccomp application in the launch `pre_exec` path and rootless prerequisite diagnostics.
+- [x] Durable authorized CRI sandbox/container lifecycle RPCs plus lifecycle conformance fixture.
+- [x] Docker API compatibility declaration and Docker-wire/Compose authorization contract coverage.
+- [x] Performance baseline harness, physical-host decision ADR, and off-host witness deferral ADR.
 
 ## Update log
 
-- 2026-08-16 `d283473` — created the follow-on qualification, execution-layer, multi-host, and parity roadmap; started host-matrix preflight.
-- 2026-08-16 — qualified the first Ubuntu 26.04/kernel 7.0 matrix row and fixed IPv6 DAD portability with `nodad`.
-- 2026-08-16 — added `HostCapabilities` admission to the shared executor and wired bridge mutations to fail closed before effects when Linux/root/CAP_NET_ADMIN/iproute2 are unavailable.
-- 2026-08-16 — corrected tool capability detection to resolve binaries through `PATH`, avoiding false negatives from nonstandard `ip --version` exit codes.
-- 2026-08-16 — bridge execution now verifies post-effect identity/CIDRs and rolls back on read-back mismatch; the full matrix runner was rerun green.
-- 2026-08-16 — WireGuard apply now verifies expected IPv4/IPv6 routes and removal verifies interface absence.
-- 2026-08-16 — added atomic DNS resolver publication with symlink refusal, fsync, and exact read-back coverage.
-- 2026-08-16 — firewall rule application/deletion now verifies exact iptables presence or nftables handles after each mutation.
-- 2026-08-16 — traffic-control mutation now requires the shared host capability gate and verifies the requested TBF rate exactly; the existing runtime port-map/eBPF paths are recorded as the production integration boundary.
-- 2026-08-16 — container hosts publication now uses an atomic, symlink-safe, fsynced write with exact read-back; resolver publication uses the shared atomic DNS writer.
-- 2026-08-16 — nftables and traffic-control read-back now use the shared `ferro-net` command-capture executor instead of runtime-local subprocess handling.
-- 2026-08-16 — bridge-mode veth creation accepts a validated `FERROCRATE_VETH_MTU` and fails closed when kernel read-back does not report the requested MTU.
-- 2026-08-16 — idempotent network cleanup now routes through `ferro-net`’s executor, centralizing subprocess errors and safe missing-resource handling.
-- 2026-08-16 — added a CI/manual host-matrix evidence gate that rejects qualified rows with missing or mismatched evidence artifacts.
-- 2026-08-16 — audited seccomp wiring: resolved profiles are applied in the container launch `pre_exec` path; roadmap status corrected from stale unchecked state.
-- 2026-08-16 — published the Docker API compatibility declaration for advertised versions, endpoint groups, and authorization behavior.
-- 2026-08-16 — published the CRI method matrix and conformance fixture; authorized durable pod/container lifecycle RPCs are now exposed, with kernel sandbox networking and full kubelet qualification explicitly left as follow-on work.
-- 2026-08-16 — wired repeatable startup/OCI/rootless performance baselines into a manual artifact-upload workflow.
-- 2026-08-16 — ADR-0013 records that physical multi-host FCNET-105 is conditional and not a current release gate; isolated-host evidence remains authoritative.
-- 2026-08-16 — audited public network runtime paths: network mutation/capture/cleanup calls now use executor-backed helpers; direct subprocesses remain only for workload/process supervision.
-- 2026-08-16 — expanded rootless verification into a machine-readable prerequisite report with strict release mode and documented fallback behavior.
-- 2026-08-16 — audited Docker compatibility tests: versioned API matrix, mediated network/volume mutations, and Compose lifecycle authorization are covered by existing integration suites.
-- 2026-08-16 — ADR-0014 records that off-host witness replication and Merkle transparency are deferred by the current v1 security model, not silently claimed as implemented.
+- 2026-08-16 `7f36ac6` — consolidated all remaining work from the active roadmap, PRD-backed partials, security audit, RVF plan, platform plan, monetization plan, and compatibility contracts into this single Now/Next/Later backlog.

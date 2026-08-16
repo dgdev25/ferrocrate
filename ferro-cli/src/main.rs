@@ -3650,23 +3650,28 @@ fn handle_run(
     if !publish.is_empty() && effective_network != "bridge" {
         return Err("run: publish requires --network bridge".to_string());
     }
-    // Provide a clear error when a user accidentally passes a .rvf file to `run`.
-    if ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
-        return Err(format!(
-            "run: '{}' is an RVF image file. \
-             Use `ferrocrate build --image-format oci` to convert it to an OCI image first, \
-             or wait for native RVF runtime support.",
-            image
-        ));
+    if !ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
+        parse_image_reference(image).map_err(|error| error.to_string())?;
     }
-    parse_image_reference(image).map_err(|error| error.to_string())?;
     let origin = runtime
         .request_origin()
         .ok_or_else(|| "run: authenticated request origin unavailable".to_string())?;
     let surface_authorization = runtime
         .surface_authorization()
         .map_err(|error| error.to_string())?;
-    ensure_image_present(store, image, &origin, &surface_authorization)?;
+    let effective_image = if ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
+        let parsed = ferro_core::rvf_image::read_rvf_image(Path::new(image))
+            .map_err(|error| format!("run: RVF validation failed: {error}"))?;
+        let reference =
+            canonicalize_reference(&format!("{}:{}", parsed.manifest.name, parsed.manifest.tag))
+                .map_err(|error| format!("run: RVF reference is invalid: {error}"))?;
+        import_rvf_image_at(Path::new(image), Some(&reference), runtime_dir)?;
+        reference
+    } else {
+        image.to_string()
+    };
+    parse_image_reference(&effective_image).map_err(|error| error.to_string())?;
+    ensure_image_present(store, &effective_image, &origin, &surface_authorization)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
     let volume_mounts =
@@ -3720,7 +3725,7 @@ fn handle_run(
             runtime.run_with_store_with_id(
                 container_id.to_string(),
                 store,
-                image,
+                &effective_image,
                 &effective_cmd,
                 &env,
                 &labels,
@@ -3745,7 +3750,7 @@ fn handle_run(
         } else {
             runtime.run_with_store(
                 store,
-                image,
+                &effective_image,
                 &effective_cmd,
                 &env,
                 &labels,
@@ -13075,10 +13080,14 @@ volumes:
     struct TestRuntimeDir {
         original: Option<String>,
         _dir: tempfile::TempDir,
+        _guard: std::sync::MutexGuard<'static, ()>,
     }
 
     impl TestRuntimeDir {
         fn new() -> Self {
+            let guard = ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().expect("tempdir");
             let original = std::env::var("FERROCRATE_RUNTIME_DIR").ok();
             unsafe {
@@ -13087,6 +13096,7 @@ volumes:
             Self {
                 original,
                 _dir: dir,
+                _guard: guard,
             }
         }
     }

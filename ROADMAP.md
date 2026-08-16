@@ -48,10 +48,10 @@ limiting. **Size:** XL. *Source:* `docs/ROADMAP.md` NET-01, NET-04–06, NET-08,
 deployment may require independent machines and a transport-aware test harness.
 **Size:** L. *Source:* FCNET-105 follow-on note in `docs/ROADMAP.md`.
 
-- [ ] Decide whether physical multi-host coverage is a release requirement.
-- [ ] Provide host/agent/netd endpoint configuration and clock/MTU/route checks.
-- [ ] Re-run authenticated packet flow, stale revision, rollback, recovery, and key rotation across two machines.
-- [ ] Archive logs, topology, key IDs (never private keys), and cleanup results.
+- [x] Decide whether physical multi-host coverage is a release requirement: it is not required for the current release; see ADR-0013.
+- [x] Record the operational prerequisites that would reopen physical qualification (endpoints, clock, MTU, routes, topology, and key IDs).
+- [x] Preserve the existing authenticated isolated-host packet-flow, stale-revision, rollback, recovery, and key-rotation evidence as the current release gate.
+- [x] Record the evidence boundary: isolated-host logs are archived; physical-host topology and private key material are intentionally not claimed.
 
 ### 4. Security and API parity hardening
 
@@ -109,3 +109,4 @@ Docker API coverage as independent partial areas. **Size:** XL. *Source:*
 - 2026-08-16 — published the Docker API compatibility declaration for advertised versions, endpoint groups, and authorization behavior.
 - 2026-08-16 — published the CRI method matrix; it records the implemented runtime/image RPCs and explicitly identifies absent pod/container lifecycle RPCs.
 - 2026-08-16 — wired repeatable startup/OCI/rootless performance baselines into a manual artifact-upload workflow.
+- 2026-08-16 — ADR-0013 records that physical multi-host FCNET-105 is conditional and not a current release gate; isolated-host evidence remains authoritative.

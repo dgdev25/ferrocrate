@@ -58,7 +58,10 @@ use ferro_net::subnet::network_cidr_v4;
 use ferro_net::veth;
 use ferro_net::BackendProbe;
 pub use ferro_net::NetworkBackend;
-use ferro_net::{exec_cmd as net_exec_cmd, exec_cmd_capture as net_exec_cmd_capture};
+use ferro_net::{
+    exec_cmd as net_exec_cmd, exec_cmd_allow_missing as net_exec_cmd_allow_missing,
+    exec_cmd_capture as net_exec_cmd_capture,
+};
 use ferro_net::{HostCapabilities, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 use rand::Rng;
 use sha2::Digest;
@@ -7967,28 +7970,7 @@ fn run_cmd_allow_missing(args: &[String]) -> Result<(), RuntimeError> {
     if args.is_empty() {
         return Ok(());
     }
-    let (bin, rest) = parse_cmd_args(args)?;
-    let output = Command::new(bin).args(rest).output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if [
-        "No such file or directory",
-        "No such table",
-        "No such file",
-        "Cannot find device",
-        "Cannot find qdisc",
-        "Cannot find filter",
-        "does a matching rule exist",
-        "No chain/target/match by that name",
-    ]
-    .iter()
-    .any(|message| stderr.contains(message))
-    {
-        return Ok(());
-    }
-    Err(RuntimeError::Network(format!("{bin}: {}", stderr.trim())))
+    net_exec_cmd_allow_missing(args).map_err(|error| RuntimeError::Network(error.to_string()))
 }
 
 struct BridgeConfig {

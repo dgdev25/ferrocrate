@@ -155,6 +155,33 @@ pub fn exec_cmd_capture(args: &[String]) -> Result<String, ExecError> {
     }
 }
 
+/// Execute a command while treating absence of an already-owned resource as success.
+pub fn exec_cmd_allow_missing(args: &[String]) -> Result<(), ExecError> {
+    match exec_cmd(args) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let ExecError::CommandFailed { stderr, .. } = &error else {
+                return Err(error);
+            };
+            let removable = [
+                "No such file or directory",
+                "No such table",
+                "No such file",
+                "Cannot find device",
+                "Cannot find qdisc",
+                "Cannot find filter",
+                "does a matching rule exist",
+                "No chain/target/match by that name",
+            ];
+            if removable.iter().any(|message| stderr.contains(message)) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 /// A sequence of commands that can be rolled back if any fails.
 ///
 /// Each forward command has an associated rollback command.

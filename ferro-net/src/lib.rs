@@ -21,7 +21,9 @@ pub mod wireguard;
 pub use dns::{render_resolv_conf, write_resolv_conf, DnsConfig, DnsError};
 
 // Re-export executor types
-pub use executor::{exec_cmd, exec_cmd_capture, ExecError, HostCapabilities, Transaction};
+pub use executor::{
+    exec_cmd, exec_cmd_allow_missing, exec_cmd_capture, ExecError, HostCapabilities, Transaction,
+};
 
 // Re-export backend selection types
 pub use backend::{BackendError, BackendProbe, NetworkBackend};

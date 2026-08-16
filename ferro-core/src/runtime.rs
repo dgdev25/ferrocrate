@@ -2757,21 +2757,8 @@ impl ContainerRuntime {
 
         if use_slirp {
             match start_slirp4netns(child_id) {
-                Ok(helper) => {
-                    if let Some(start_time) = process_start_time_for_pid(helper.id()) {
-                        rollback.slirp_process = Some((helper.id(), start_time));
-                    } else {
-                        let _ = kill_pid(helper.id());
-                        let _ = kill_pid(child_id);
-                        rollback.rollback();
-                        return Err(RuntimeError::Io(std::io::Error::other(
-                            "slirp4netns helper has no stable process start time",
-                        )));
-                    }
-                    // Dropping the handle intentionally leaves the helper
-                    // attached to the container netns; rollback retains an
-                    // exact PID/start-time identity for cleanup on failure.
-                    drop(helper);
+                Ok((helper_pid, helper_start_time)) => {
+                    rollback.slirp_process = Some((helper_pid, helper_start_time));
                 }
                 Err(e) => {
                     let _ = kill_pid(child_id);
@@ -7738,7 +7725,7 @@ fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), Run
     Ok(())
 }
 
-fn start_slirp4netns(pid: u32) -> Result<Child, RuntimeError> {
+fn start_slirp4netns(pid: u32) -> Result<(u32, u64), RuntimeError> {
     let tap_name = format!("tap{pid}");
     let tap_name = if tap_name.len() > 15 {
         tap_name[..15].to_string()
@@ -7775,7 +7762,16 @@ fn start_slirp4netns(pid: u32) -> Result<Child, RuntimeError> {
             "slirp4netns exited before setup completed: {status}"
         ))));
     }
-    Ok(child)
+    let helper_pid = child.id();
+    let helper_start_time = process_start_time_for_pid(helper_pid).ok_or_else(|| {
+        RuntimeError::Io(std::io::Error::other(
+            "slirp4netns helper has no stable process start time",
+        ))
+    })?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok((helper_pid, helper_start_time))
 }
 
 fn rootless_netns_enabled() -> bool {

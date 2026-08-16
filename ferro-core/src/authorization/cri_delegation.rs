@@ -1,6 +1,9 @@
 //! Trusted verification boundary for bounded CRI delegation capabilities.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rusqlite::{params, Connection};
@@ -318,6 +321,7 @@ pub struct CriDelegationVerifier {
     replay: Mutex<Connection>,
 }
 
+#[cfg(feature = "legacy-sled-importers")]
 fn migrate_legacy_replay(path: &Path, sqlite: &Connection) -> Result<(), DelegationError> {
     let marker = format!("{}.sqlite.migrated", path.display());
     if std::path::Path::new(&marker).exists() || !path.join("conf").exists() {
@@ -367,8 +371,12 @@ impl CriDelegationVerifier {
             .collect();
         let legacy_path = replay_path.as_ref().to_path_buf();
         std::fs::create_dir_all(&legacy_path).map_err(|_| DelegationError::ReplayStore)?;
-        let sqlite_path = format!("{}.sqlite", legacy_path.display());
-        let replay = Connection::open(sqlite_path).map_err(|_| DelegationError::ReplayStore)?;
+        let sqlite_path = PathBuf::from(format!("{}.sqlite", legacy_path.display()));
+        if !sqlite_path.exists() && legacy_path.join("conf").exists() {
+            #[cfg(not(feature = "legacy-sled-importers"))]
+            return Err(DelegationError::ReplayMigrationRequired);
+        }
+        let replay = Connection::open(&sqlite_path).map_err(|_| DelegationError::ReplayStore)?;
         replay
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS delegation_replay (
@@ -376,6 +384,7 @@ impl CriDelegationVerifier {
                 )",
             )
             .map_err(|_| DelegationError::ReplayStore)?;
+        #[cfg(feature = "legacy-sled-importers")]
         migrate_legacy_replay(&legacy_path, &replay)?;
         Ok(Self {
             keys,
@@ -462,13 +471,18 @@ pub enum DelegationError {
     Replay,
     #[error("durable delegation replay store failed")]
     ReplayStore,
+    #[error("legacy delegation replay detected; reopen with the `legacy-sled-importers` feature")]
+    ReplayMigrationRequired,
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "legacy-sled-importers")]
     use super::migrate_legacy_replay;
+    #[cfg(feature = "legacy-sled-importers")]
     use rusqlite::Connection;
 
+    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn legacy_replay_keys_migrate_idempotently() {
         let temp = tempfile::tempdir().expect("replay directory");
@@ -496,5 +510,23 @@ mod tests {
             std::path::PathBuf::from(format!("{}.sqlite.migrated", temp.path().display()))
                 .is_file()
         );
+    }
+
+    #[cfg(not(feature = "legacy-sled-importers"))]
+    #[test]
+    fn default_open_rejects_legacy_replay_directory() {
+        let temp = tempfile::tempdir().expect("replay directory");
+        std::fs::create_dir(temp.path().join("conf")).expect("legacy marker");
+        let error = match super::CriDelegationVerifier::open(
+            Vec::new(),
+            "audience",
+            "boot",
+            [0; 32],
+            temp.path(),
+        ) {
+            Ok(_) => panic!("legacy boundary"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy-sled-importers"));
     }
 }

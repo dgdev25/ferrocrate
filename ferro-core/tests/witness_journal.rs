@@ -93,6 +93,16 @@ fn sqlite_ready_marker_without_database_fails_closed() {
 }
 
 #[test]
+fn truncated_sqlite_ready_marker_fails_closed() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("witness.sqlite3.ready"), b"witness-sqlite").unwrap();
+    assert!(matches!(
+        WitnessJournal::open(config(dir.path())),
+        Err(JournalError::Corrupt)
+    ));
+}
+
+#[test]
 fn checkpoint_publication_never_relabels_a_mismatched_epoch() {
     let dir = tempdir().unwrap();
     let journal = WitnessJournal::open(config(dir.path())).unwrap();

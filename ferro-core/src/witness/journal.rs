@@ -221,6 +221,11 @@ impl WitnessJournal {
         if ready_marker.exists() && !sqlite_path.exists() {
             return Err(JournalError::Corrupt);
         }
+        if ready_marker.exists()
+            && std::fs::read(&ready_marker).ok().as_deref() != Some(b"witness-sqlite-ready-v1")
+        {
+            return Err(JournalError::Corrupt);
+        }
         if legacy_path.exists() && (!sqlite_path.exists() || !ready_marker.exists()) {
             let legacy = sled::open(&legacy_path)?;
             if legacy

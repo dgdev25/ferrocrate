@@ -55,7 +55,13 @@ impl SqliteJournalStore {
         trees: &[&str],
     ) -> Result<(), JournalError> {
         if ready_marker.exists() {
-            return Ok(());
+            return if std::fs::read(ready_marker).ok().as_deref()
+                == Some(b"witness-sqlite-ready-v1")
+            {
+                Ok(())
+            } else {
+                Err(JournalError::Corrupt)
+            };
         }
         let legacy = sled::open(sled_path)?;
         let store = Self::open(sqlite_path)?;
@@ -69,12 +75,20 @@ impl SqliteJournalStore {
             }
             Ok(())
         })?;
+        let temporary = ready_marker.with_extension("ready.tmp");
         let mut marker = OpenOptions::new()
             .write(true)
-            .create_new(true)
-            .open(ready_marker)?;
+            .create(true)
+            .truncate(true)
+            .open(&temporary)?;
         marker.write_all(b"witness-sqlite-ready-v1")?;
         marker.sync_all()?;
+        std::fs::rename(&temporary, ready_marker)?;
+        if let Some(parent) = ready_marker.parent() {
+            if let Ok(directory) = File::open(parent) {
+                let _ = directory.sync_all();
+            }
+        }
         Ok(())
     }
 

@@ -502,7 +502,10 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             })
             .collect::<Vec<_>>();
         let names_snapshot = stage_names.clone();
-        let can_parallel = batch.len() > 1 && batch.iter().all(|idx| stages[*idx].run.is_empty());
+        // Each stage has an isolated rootfs and stage-scoped RUN cache. The
+        // unique build-directory allocator and content-addressed blob writer
+        // make independent stages safe to execute concurrently.
+        let can_parallel = batch.len() > 1;
         let outputs = if can_parallel {
             std::thread::scope(|scope| {
                 let handles = batch
@@ -2887,12 +2890,23 @@ fn create_build_dir(_runtime_dir: &Path, name: &str) -> Result<PathBuf, Dockerfi
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let candidate = root.join(format!("{}-{}-{}", name, std::process::id(), nanos));
-    if candidate.exists() {
-        let _ = fs::remove_dir_all(&candidate);
+    for attempt in 0..16u32 {
+        let candidate = root.join(format!(
+            "{}-{}-{}-{}",
+            name,
+            std::process::id(),
+            nanos,
+            attempt
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
     }
-    fs::create_dir_all(&candidate)?;
-    Ok(candidate)
+    Err(DockerfileBuildError::Invalid(
+        "could not allocate a unique build directory".to_string(),
+    ))
 }
 
 fn copy_context_dir(

@@ -6,6 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -22,6 +23,11 @@ pub struct AuditLogger {
     path: PathBuf,
 }
 
+fn audit_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 impl AuditLogger {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -36,6 +42,9 @@ impl AuditLogger {
     }
 
     pub fn log(&self, action: impl Into<String>, trace: &DecisionTrace) -> Result<(), AuditError> {
+        let _guard = audit_write_lock()
+            .lock()
+            .map_err(|_| std::io::Error::other("AI audit log lock poisoned"))?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -67,6 +76,9 @@ impl AuditLogger {
         bytes.push(b'\n');
         file.write_all(&bytes)?;
         file.sync_data()?;
+        if let Some(parent) = self.path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 }
@@ -143,5 +155,40 @@ mod tests {
         assert_eq!(entry["model"], "test-model");
         assert_eq!(entry["model_version"], "v1");
         assert_eq!(entry["decision"], "observe");
+    }
+
+    #[test]
+    fn concurrent_container_decisions_remain_line_delimited_and_durable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ai-audit.jsonl");
+        let logger = std::sync::Arc::new(AuditLogger::new(&path));
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let logger = logger.clone();
+            workers.push(std::thread::spawn(move || {
+                let trace = DecisionTrace::new(
+                    format!("trace-{index}"),
+                    format!("container decision {index}"),
+                )
+                .with_evidence("container_id", format!("container-{index}"));
+                logger.log("ai_restart_decision", &trace).expect("log");
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+
+        let contents = std::fs::read_to_string(&path).expect("read audit log");
+        let entries = contents
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSON line"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 8);
+        assert!(entries.iter().all(|entry| entry["schema_version"] == "v2"));
+        assert!(entries.iter().all(|entry| {
+            entry["evidence"]["container_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("container-"))
+        }));
     }
 }

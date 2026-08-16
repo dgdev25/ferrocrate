@@ -40,6 +40,8 @@ use ferro_core::runtime::ContainerRuntime;
 use ferro_core::runtime::NetworkBackend;
 #[cfg(target_os = "linux")]
 use ferro_core::volume_store::LocalVolumeStore;
+#[cfg(target_os = "linux")]
+use ferro_core::witness::{decode_record, WitnessReader};
 use ferro_mind::ai::agents::{orchestrate_task, OrchestrateRequest};
 use ferro_mind::ai::audit::AuditLogger;
 use ferro_mind::ai::explain::DecisionTrace;
@@ -531,6 +533,17 @@ pub enum WitnessCommands {
         proof: PathBuf,
         #[arg(long, default_value = "inclusion", value_parser = validate_merkle_proof_kind)]
         kind: String,
+    },
+    /// Export a bounded, canonical witness snapshot for independent retention.
+    Export {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_id: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 100_000)]
+        max_records: usize,
     },
 }
 
@@ -2018,9 +2031,75 @@ fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(),
             }
             Ok(format!("witness merkle verification=passed kind={kind}"))
         }
+        WitnessCommands::Export {
+            journal,
+            journal_id,
+            output,
+            max_records,
+        } => export_witness_snapshot(journal, journal_id, output, *max_records),
     }?;
     println!("{output}");
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn export_witness_snapshot(
+    journal: &Path,
+    journal_id: &str,
+    output: &Path,
+    max_records: usize,
+) -> Result<String, String> {
+    if max_records == 0 || max_records > 1_000_000 {
+        return Err("witness export max-records must be between 1 and 1000000".into());
+    }
+    let id = decode_witness_hex::<16>(journal_id)?;
+    let mut reader =
+        WitnessReader::open_read_only(journal, id).map_err(|error| error.to_string())?;
+    let mut records = Vec::new();
+    while let Some(bytes) = reader.next_record().map_err(|error| error.to_string())? {
+        if records.len() >= max_records {
+            return Err(format!(
+                "witness export exceeds max-records ({max_records})"
+            ));
+        }
+        let record = decode_record(&bytes).map_err(|error| error.to_string())?;
+        records.push(serde_json::json!({
+            "epoch": record.epoch(),
+            "sequence": record.sequence(),
+            "record_hash": encode_hex(&record.record_hash()),
+            "canonical_record_hex": encode_hex(&bytes),
+        }));
+    }
+    reader.finish().map_err(|error| error.to_string())?;
+    let document = serde_json::json!({
+        "schema": 1,
+        "journal_id": journal_id,
+        "record_count": records.len(),
+        "records": records,
+    });
+    let bytes = serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
+    ferro_core::fs_atomic::write_atomic(output, &bytes).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "witness export: wrote {} records to {}",
+        document["record_count"],
+        output.display()
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn decode_witness_hex<const N: usize>(value: &str) -> Result<[u8; N], String> {
+    if value.len() != N * 2 {
+        return Err(format!(
+            "witness export journal-id must contain {} hex bytes",
+            N
+        ));
+    }
+    let mut out = [0_u8; N];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "witness export journal-id is not hexadecimal".to_string())?;
+    }
+    Ok(out)
 }
 
 #[cfg(target_os = "linux")]
@@ -2283,7 +2362,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     command @ (WitnessCommands::Show { .. }
                     | WitnessCommands::Verify { .. }
                     | WitnessCommands::MerkleRoot { .. }
-                    | WitnessCommands::MerkleVerify { .. }),
+                    | WitnessCommands::MerkleVerify { .. }
+                    | WitnessCommands::Export { .. }),
             } => return dispatch_witness(command, &runtime_dir),
             Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
             _ => {}

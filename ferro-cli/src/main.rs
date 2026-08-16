@@ -7016,6 +7016,32 @@ fn handle_docker_compat_connection(
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
+            ("GET", path) if path.starts_with("/images/") && path.ends_with("/history") => {
+                let name = path
+                    .trim_start_matches("/images/")
+                    .trim_end_matches("/history");
+                let reference = resolve_reference(&store, name)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let manifest = parse_image_manifest(&reference.manifest_json)
+                    .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
+                let history = manifest
+                    .layers
+                    .into_iter()
+                    .map(|layer| {
+                        serde_json::json!({
+                            "Id": layer.digest,
+                            "Created": reference.created_at_unix,
+                            "CreatedBy": "",
+                            "Tags": serde_json::Value::Null,
+                            "Size": layer.size,
+                            "Comment": "",
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let body = serde_json::to_string(&history).map_err(|error| error.to_string())?;
+                http_response(200, body.as_bytes(), "application/json")
+            }
             ("POST", "/images/create") => {
                 let from_image = query
                     .get("fromImage")

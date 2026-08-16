@@ -139,6 +139,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/images/missing/history",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/volumes",
         coverage: Coverage::Implemented,
         expected_status: 200,

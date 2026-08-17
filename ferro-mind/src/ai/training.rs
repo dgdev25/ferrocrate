@@ -944,6 +944,31 @@ impl TrainingPipeline {
         Ok(routed)
     }
 
+    /// Persist an operator signature for a specific trained/imported version.
+    /// The artifact bytes and recorded digest are not changed by this method.
+    pub fn sign_model_version(
+        &mut self,
+        model_type: ModelType,
+        version: u32,
+        signer_key_id: impl Into<String>,
+        key: &ed25519_dalek::SigningKey,
+    ) -> Result<(), TrainingError> {
+        let versions = self
+            .versions
+            .get_mut(&model_type)
+            .ok_or_else(|| TrainingError::ModelNotFound(model_type.to_string()))?;
+        let model = versions
+            .iter_mut()
+            .find(|model| model.version == version)
+            .ok_or_else(|| {
+                TrainingError::InvalidVersionHistory(format!("model version {version} not found"))
+            })?;
+        model
+            .sign_provenance(signer_key_id, key)
+            .map_err(|error| TrainingError::InvalidVersionHistory(error.to_string()))?;
+        self.save_versions(model_type)
+    }
+
     /// List all versions for a model
     pub fn list_versions(&self, model_type: ModelType) -> Vec<&ModelVersion> {
         self.versions
@@ -2198,9 +2223,6 @@ mod tests {
         fs::write(&artifact, b"signed-model").expect("artifact");
         let digest = format!("sha256:{:x}", Sha256::digest(b"signed-model"));
         let key = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
-        let provenance =
-            ModelProvenance::sign("resource-predictor", 1, &digest, "training-key", &key)
-                .expect("provenance");
         let metadata = serde_json::json!([{
             "model_type": "resource-predictor",
             "version": 1,
@@ -2209,7 +2231,6 @@ mod tests {
             "loss": 0.1,
             "path": artifact,
             "artifact_sha256": digest,
-            "provenance": provenance,
             "active": true
         }]);
         fs::write(
@@ -2217,7 +2238,10 @@ mod tests {
             serde_json::to_vec(&metadata).expect("metadata"),
         )
         .expect("write metadata");
-        let pipeline = TrainingPipeline::new(config).expect("pipeline");
+        let mut pipeline = TrainingPipeline::new(config).expect("pipeline");
+        pipeline
+            .sign_model_version(ModelType::ResourcePredictor, 1, "training-key", &key)
+            .expect("persist provenance");
         pipeline
             .resolve_active_model_with_provenance(
                 ModelType::ResourcePredictor,

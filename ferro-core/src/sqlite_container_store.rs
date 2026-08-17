@@ -251,6 +251,55 @@ impl SqliteContainerStore {
         })
     }
 
+    /// Atomically publish a status transition for an in-flight mutation.
+    ///
+    /// Callers must not read a record, change its status, and then invoke
+    /// `put_for_mutation`: supervisors and health writers can legitimately
+    /// update the same row between those two operations. Keeping the read,
+    /// reservation check, and write in one immediate transaction removes that
+    /// avoidable compare-and-swap race.
+    pub(crate) fn set_status_for_mutation(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        status: &str,
+    ) -> Result<(), ContainerStoreError> {
+        self.transaction(|transaction| {
+            let mut record =
+                Self::get_tx(transaction, id)?.ok_or(ContainerStoreError::MutationConflict)?;
+            let reservation = record
+                .pending_mutation
+                .as_ref()
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            if reservation.operation_id != operation_id
+                || reservation.generation != record.mutation_generation
+            {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            let Some(mut operation) = Self::operation_tx(transaction, operation_id)? else {
+                return Err(ContainerStoreError::MutationConflict);
+            };
+            if operation.container_id != id || operation.generation != record.mutation_generation {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            record.status = status.to_owned();
+            operation.state_after = Some(record.status.clone());
+            operation.pid_after = Some(record.pid);
+            operation.process_start_time_after = process_start_time(record.pid);
+            let record_payload = Self::encode(&record)?;
+            let operation_payload = Self::encode(&operation)?;
+            transaction.execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                params![id, record_payload],
+            )?;
+            transaction.execute(
+                "UPDATE lifecycle_operations SET payload=?2 WHERE operation_id=?1",
+                params![operation_id.as_slice(), operation_payload],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<ContainerRecord>, ContainerStoreError> {
         let connection = self.lock()?;
         let payload: Option<Vec<u8>> = connection
@@ -692,6 +741,34 @@ mod tests {
         store
             .finish_mutation("container-1", operation_id)
             .expect("idempotent finish");
+    }
+
+    #[test]
+    fn status_publication_is_atomic_with_reservation_validation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SqliteContainerStore::open(temp.path()).expect("open");
+        store.put(&record("container-status")).expect("put");
+        let operation_id = [19u8; 16];
+        store
+            .reserve_mutation(
+                "container-status",
+                "created",
+                1,
+                operation_id,
+                "container.delete",
+            )
+            .expect("reserve");
+
+        store
+            .set_status_for_mutation("container-status", operation_id, "removed-pending")
+            .expect("status");
+        let stored = store.get("container-status").expect("get").expect("record");
+        assert_eq!(stored.status, "removed-pending");
+        let operation = store
+            .lifecycle_operation(operation_id)
+            .expect("operation")
+            .expect("lifecycle operation");
+        assert_eq!(operation.state_after.as_deref(), Some("removed-pending"));
     }
 
     #[test]

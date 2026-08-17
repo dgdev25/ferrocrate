@@ -2052,7 +2052,30 @@ impl ContainerRuntime {
         // A crash after the terminal journal flush but before store cleanup
         // leaves no journal-pending entry. The independent operation tree is
         // authoritative for completing that final idempotent clear.
-        for operation in self.store.lifecycle_operations()? {
+        for operation_snapshot in self.store.lifecycle_operations()? {
+            // The operation tree is an independent recovery index. It must
+            // use the same per-container lock as normal lifecycle calls;
+            // otherwise a fresh CLI can finish/delete a live reservation
+            // after the owning process has taken its lock but before that
+            // process publishes the terminal effect.
+            #[cfg(unix)]
+            let _lifecycle_lock = {
+                let lock_path =
+                    lifecycle_lock_path(&self.runtime_dir, &operation_snapshot.container_id);
+                if let Some(parent) = lock_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                match LifecycleLock::try_acquire(&lock_path)? {
+                    Some(lock) => lock,
+                    None => continue,
+                }
+            };
+            let Some(operation) = self
+                .store
+                .lifecycle_operation(operation_snapshot.operation_id)?
+            else {
+                continue;
+            };
             let id = crate::witness::OperationId::from_bytes(operation.operation_id);
             if !matches!(
                 journal.recover(id),
@@ -2538,7 +2561,15 @@ impl ContainerRuntime {
             });
             // Durable create provenance and reservation precede every external
             // creation side effect, closing the decision-to-store crash window.
-            self.store.put_reserved_creation(&candidate)?;
+            if let Err(error) = self.store.put_reserved_creation(&candidate) {
+                log::error!(
+                    "container.run failed while reserving creation: container_id={} operation_id={:?} error={}",
+                    container_id,
+                    operation_id,
+                    error
+                );
+                return Err(error.into());
+            }
             self.phase_hook
                 .reached("container.run", LifecyclePhasePoint::ReservationDurable)?;
         }
@@ -2593,8 +2624,18 @@ impl ContainerRuntime {
             ai_config,
         );
         if witnessed {
-            self.store
-                .mark_mutation_effect(&container_id, operation_id, result.is_ok())?;
+            if let Err(error) =
+                self.store
+                    .mark_mutation_effect(&container_id, operation_id, result.is_ok())
+            {
+                log::error!(
+                    "container.run failed while recording effect: container_id={} operation_id={:?} error={}",
+                    container_id,
+                    operation_id,
+                    error
+                );
+                return Err(error.into());
+            }
             self.phase_hook
                 .reached("container.run", LifecyclePhasePoint::EffectObserved)?;
         }
@@ -2603,7 +2644,15 @@ impl ContainerRuntime {
             .reached("container.run", LifecyclePhasePoint::TerminalDurable)?;
         if witnessed {
             if result.is_ok() {
-                self.store.finish_mutation(&container_id, operation_id)?;
+                if let Err(error) = self.store.finish_mutation(&container_id, operation_id) {
+                    log::error!(
+                        "container.run failed while clearing reservation: container_id={} operation_id={:?} error={}",
+                        container_id,
+                        operation_id,
+                        error
+                    );
+                    return Err(error.into());
+                }
             } else {
                 self.store
                     .delete_for_mutation(&container_id, operation_id)?;
@@ -3055,6 +3104,14 @@ impl ContainerRuntime {
             self.store.put(&record)
         };
         if let Err(error) = persist_result {
+            log::error!(
+                "container.run failed while publishing launch identity: container_id={} operation_id={:?} mutation_generation={} status={} error={}",
+                container_id,
+                record.pending_mutation.as_ref().map(|reservation| reservation.operation_id),
+                record.mutation_generation,
+                record.status,
+                error
+            );
             let _ = kill_pid(child_id);
             rollback.rollback();
             return Err(error.into());
@@ -3792,34 +3849,32 @@ impl ContainerRuntime {
         &self,
         id: &str,
         status: &str,
-        intent: Option<&crate::witness::DurableIntent>,
+        _intent: Option<&crate::witness::DurableIntent>,
     ) -> Result<(), RuntimeError> {
-        if intent.is_some() {
-            let mut record = self
+        for attempt in 0..64 {
+            let record = self
                 .store
                 .get(id)?
                 .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
-            record.status = status.to_owned();
-            let operation_id = record
+            let Some(operation_id) = record
                 .pending_mutation
                 .as_ref()
                 .map(|reservation| reservation.operation_id)
-                .ok_or(ContainerStoreError::MutationConflict)?;
-            self.store.put_for_mutation(&record, operation_id)?;
-        } else {
-            let mut record = self
-                .store
-                .get(id)?
-                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
-            record.status = status.to_owned();
-            let operation_id = record
-                .pending_mutation
-                .as_ref()
-                .map(|reservation| reservation.operation_id)
-                .ok_or(ContainerStoreError::MutationConflict)?;
-            self.store.put_for_mutation(&record, operation_id)?;
+            else {
+                if record.status == status || record.status == "removed" {
+                    return Ok(());
+                }
+                return Err(ContainerStoreError::MutationConflict.into());
+            };
+            match self.store.set_status_for_mutation(id, operation_id, status) {
+                Ok(()) => return Ok(()),
+                Err(ContainerStoreError::MutationConflict) if attempt < 63 => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
-        Ok(())
+        Err(ContainerStoreError::MutationConflict.into())
     }
 
     fn authorize_existing(
@@ -3833,7 +3888,12 @@ impl ContainerRuntime {
         // record rather than surfacing a spurious failure to callers such as
         // `run --rm`. The bounded loop preserves fail-closed behavior for a
         // genuinely contended or malformed store.
-        const MAX_RESERVATION_RETRIES: usize = 32;
+        // A short-lived `run --rm` process can finish its kernel work while
+        // another process is still publishing the creation effect. Under
+        // sustained parallel load that handoff can exceed the old 160 ms
+        // window; retain a bounded fail-closed retry budget large enough for
+        // scheduler and SQLite contention without waiting indefinitely.
+        const MAX_RESERVATION_RETRIES: usize = 256;
         for attempt in 0..MAX_RESERVATION_RETRIES {
             let record = self
                 .store
@@ -3869,6 +3929,14 @@ impl ContainerRuntime {
                 Err(ContainerStoreError::MutationConflict)
                     if attempt + 1 < MAX_RESERVATION_RETRIES =>
                 {
+                    if attempt == 0 || attempt + 1 == MAX_RESERVATION_RETRIES - 1 {
+                        log::warn!(
+                            "container mutation reservation contention: action={} container_id={} attempt={}",
+                            runtime_action_name(action),
+                            id,
+                            attempt + 1
+                        );
+                    }
                     self.authorization.complete(permit, false)?;
                     thread::sleep(Duration::from_millis(5));
                 }
@@ -3921,12 +3989,21 @@ impl ContainerRuntime {
             }),
             _ => None,
         };
-        self.store.mark_mutation_effect_observed(
+        if let Err(error) = self.store.mark_mutation_effect_observed(
             id,
             operation_id,
             result.is_ok() || post_effect_unknown,
             freezer_state,
-        )?;
+        ) {
+            log::error!(
+                "{} failed while recording effect: container_id={} operation_id={:?} error={}",
+                runtime_action_name(action),
+                id,
+                operation_id,
+                error
+            );
+            return Err(error.into());
+        }
         self.phase_hook.reached(
             runtime_action_name(action),
             LifecyclePhasePoint::EffectObserved,
@@ -3939,13 +4016,50 @@ impl ContainerRuntime {
             )?;
             return result;
         } else if action == Action::ContainerDelete && result.is_ok() {
-            self.store.delete_for_mutation(id, operation_id)?;
+            let mut finalized = false;
+            for attempt in 0..64 {
+                match self.store.delete_for_mutation(id, operation_id) {
+                    Ok(()) => {
+                        finalized = true;
+                        break;
+                    }
+                    Err(ContainerStoreError::MutationConflict) if attempt < 63 => {
+                        if self.store.get(id)?.is_none() {
+                            finalized = true;
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "{} failed while deleting record: container_id={} operation_id={:?} error={}",
+                            runtime_action_name(action),
+                            id,
+                            operation_id,
+                            error
+                        );
+                        return Err(error.into());
+                    }
+                }
+            }
+            if !finalized {
+                return Err(ContainerStoreError::MutationConflict.into());
+            }
             self.authorization.complete(permit, true)?;
             self.phase_hook.reached(
                 runtime_action_name(action),
                 LifecyclePhasePoint::TerminalDurable,
             )?;
-            self.store.acknowledge_mutation(operation_id)?;
+            if let Err(error) = self.store.acknowledge_mutation(operation_id) {
+                log::error!(
+                    "{} failed while acknowledging operation: container_id={} operation_id={:?} error={}",
+                    runtime_action_name(action),
+                    id,
+                    operation_id,
+                    error
+                );
+                return Err(error.into());
+            }
             self.phase_hook.reached(
                 runtime_action_name(action),
                 LifecyclePhasePoint::ReservationCleared,
@@ -3956,7 +4070,16 @@ impl ContainerRuntime {
                 runtime_action_name(action),
                 LifecyclePhasePoint::TerminalDurable,
             )?;
-            self.store.finish_mutation(id, operation_id)?;
+            if let Err(error) = self.store.finish_mutation(id, operation_id) {
+                log::error!(
+                    "{} failed while clearing reservation: container_id={} operation_id={:?} error={}",
+                    runtime_action_name(action),
+                    id,
+                    operation_id,
+                    error
+                );
+                return Err(error.into());
+            }
             self.phase_hook.reached(
                 runtime_action_name(action),
                 LifecyclePhasePoint::ReservationCleared,
@@ -9621,7 +9744,10 @@ fn update_exit_after_mutation(
     // observation: wait for the reservation to clear, then publish the exit
     // state. This keeps `run --rm` from racing removal against a stale
     // `running` record under parallel lifecycle load.
-    const MAX_RETRIES: usize = 64;
+    // The supervisor may observe process exit before the creating CLI has
+    // cleared its durable reservation. Give that owner a bounded window to
+    // publish the launch identity and terminal state under heavy contention.
+    const MAX_RETRIES: usize = 256;
     for attempt in 0..MAX_RETRIES {
         match update_exit(db, id, exit_code) {
             Err(ContainerStoreError::MutationConflict) if attempt + 1 < MAX_RETRIES => {

@@ -12,6 +12,7 @@ pub mod recovery;
 pub mod revocation;
 pub mod rotation;
 pub mod rpc;
+pub mod scheduler;
 pub mod store;
 
 pub mod proto {

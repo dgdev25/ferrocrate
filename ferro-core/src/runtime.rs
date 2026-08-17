@@ -1896,7 +1896,7 @@ impl ContainerRuntime {
     }
 
     fn reconcile_pending_mutations(&self) -> Result<(), RuntimeError> {
-        let mut records = self.store.list()?;
+        let records = self.store.list()?;
         let Some(journal) = self.authorization.journal() else {
             for record in records {
                 let Some(reservation) = record.pending_mutation else {
@@ -1912,13 +1912,15 @@ impl ContainerRuntime {
         // journal pending state first so a crash in that interval is discoverable.
         for pending in journal.pending()? {
             let operation = pending.operation_id();
-            let matched = records.iter_mut().find(|record| {
-                record
-                    .pending_mutation
-                    .as_ref()
-                    .is_some_and(|reservation| reservation.operation_id == *operation.as_bytes())
-            });
-            let Some(record) = matched else {
+            let Some(record_snapshot) = records
+                .iter()
+                .find(|record| {
+                    record.pending_mutation.as_ref().is_some_and(|reservation| {
+                        reservation.operation_id == *operation.as_bytes()
+                    })
+                })
+                .cloned()
+            else {
                 let tombstone = self.store.lifecycle_operation(*operation.as_bytes())?;
                 let recovered_delete = tombstone.as_ref().is_some_and(|entry| {
                     entry.action == "container.delete"
@@ -1938,13 +1940,10 @@ impl ContainerRuntime {
                 }
                 continue;
             };
-            let reservation = record
-                .pending_mutation
-                .clone()
-                .expect("matched reservation");
+            let record_id = record_snapshot.id.clone();
             #[cfg(unix)]
             let _lifecycle_lock = {
-                let lock_path = lifecycle_lock_path(&self.runtime_dir, &record.id);
+                let lock_path = lifecycle_lock_path(&self.runtime_dir, &record_id);
                 if let Some(parent) = lock_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -1952,6 +1951,18 @@ impl ContainerRuntime {
                     Some(lock) => lock,
                     None => continue,
                 }
+            };
+            // The initial inventory is only a candidate list. Reload after
+            // taking the per-container lock so recovery never applies a
+            // stale snapshot over a concurrent terminal mutation.
+            let Some(mut record) = self.store.get(&record_id)? else {
+                continue;
+            };
+            let Some(reservation) = record.pending_mutation.clone() else {
+                continue;
+            };
+            if reservation.operation_id != *operation.as_bytes() {
+                continue;
             };
             // A live run reservation belongs to the process that is still
             // publishing its effect. Another CLI process opening the same
@@ -1979,7 +1990,7 @@ impl ContainerRuntime {
             let durable_operation = self.store.lifecycle_operation(reservation.operation_id)?;
             let truth_matches = action_matches
                 && generation_matches
-                && recovery_truth_matches(record, durable_operation.as_ref(), &reservation.action)
+                && recovery_truth_matches(&record, durable_operation.as_ref(), &reservation.action)
                 && (reservation.action != "container.run"
                     || self
                         .runtime_dir
@@ -1988,7 +1999,7 @@ impl ContainerRuntime {
                         .join("rootfs")
                         .exists());
             let run_live_effects = reservation.action == "container.run"
-                && self.authorization.provenance_matches(record)
+                && self.authorization.provenance_matches(&record)
                 && record.status == "running"
                 && process_exists(record.pid)
                 && process_start_time_for_pid(record.pid).is_some()
@@ -2018,11 +2029,11 @@ impl ContainerRuntime {
                     .delete_for_mutation(&record.id, reservation.operation_id)?;
             } else {
                 self.store
-                    .put_for_mutation(record, reservation.operation_id)?;
+                    .put_for_mutation(&record, reservation.operation_id)?;
             }
             let evidence = crate::witness::RecoveryEvidence::verified(
                 &pending,
-                recovery_observation(Some(record), pending.recipe().original_action()),
+                recovery_observation(Some(&record), pending.recipe().original_action()),
                 classification == crate::witness::RecoveryClassification::Recovered,
             );
             journal.reconcile_observed(evidence)?;

@@ -6912,11 +6912,11 @@ fn handle_top(runtime: &ContainerRuntime, container: &str, format: &str) -> Resu
 
 #[cfg(target_os = "linux")]
 fn validate_wait_condition(condition: &str) -> Result<(), String> {
-    if matches!(condition, "not-running" | "next-exit") {
+    if matches!(condition, "not-running" | "next-exit" | "removed") {
         Ok(())
     } else {
         Err(format!(
-            "wait: condition must be not-running or next-exit, got {condition}"
+            "wait: condition must be not-running, next-exit, or removed, got {condition}"
         ))
     }
 }
@@ -9171,6 +9171,8 @@ struct DockerHostConfig {
     port_bindings: Option<HashMap<String, Vec<DockerPortBinding>>>,
     #[serde(rename = "NetworkMode")]
     network_mode: Option<String>,
+    #[serde(rename = "AutoRemove", default)]
+    auto_remove: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -9193,6 +9195,8 @@ struct DockerCreateSpec {
     user: Option<String>,
     name: Option<String>,
     network_mode: String,
+    #[serde(default)]
+    auto_remove: bool,
     health: Option<DockerHealthSpec>,
     #[serde(default)]
     created_at_unix: u64,
@@ -10188,7 +10192,18 @@ fn handle_docker_compat_connection(
                 for key in ["logs", "stream", "stdout", "stderr"] {
                     let _ = parse_docker_bool_query(query.get(key), key)?;
                 }
-                let logs = runtime.logs(id).map_err(|err| err.to_string())?;
+                let pending_attach = runtime.logs(id).is_err();
+                if pending_attach {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                        .contains_key(id);
+                    if !pending {
+                        return Err(format!("docker: container not found: {id}"));
+                    }
+                }
+                let logs = runtime.logs(id).unwrap_or_default();
                 let output = docker_raw_stream(&logs, "");
                 let upgraded = request.headers.get("connection").is_some_and(|value| {
                     value
@@ -10199,7 +10214,13 @@ fn handle_docker_compat_connection(
                     .get("upgrade")
                     .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
                 if upgraded {
-                    attach_hijack = Some(id.to_string());
+                    // Docker creates and attaches before it starts a
+                    // `docker run` container. Return the 101 handshake
+                    // immediately for that pending record so the client can
+                    // issue `/start`; running records retain live streaming.
+                    if !pending_attach {
+                        attach_hijack = Some(id.to_string());
+                    }
                     docker_hijack_headers()
                 } else {
                     http_response(200, &output, "application/vnd.docker.raw-stream")
@@ -10404,6 +10425,9 @@ fn handle_docker_compat_connection(
                 };
                 state.persist_pending()?;
                 let health = spec.health.as_ref();
+                let network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
+                    .unwrap_or_else(|_| "ebpf".to_string());
+                validate_network_backend(&network_backend)?;
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -10412,7 +10436,7 @@ fn handle_docker_compat_connection(
                     &spec.image,
                     &spec.cmd,
                     &spec.network_mode,
-                    "ebpf",
+                    &network_backend,
                     &spec.binds,
                     &[],
                     &[],
@@ -10433,7 +10457,7 @@ fn handle_docker_compat_connection(
                     health.map(|value| value.retries),
                     health.map(|value| value.start_period_secs),
                     "no",
-                    false,
+                    spec.auto_remove,
                     None,
                     None,
                     None,
@@ -10500,12 +10524,14 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/wait");
-                if let Some(condition) = query.get("condition") {
-                    if !matches!(condition.as_str(), "not-running" | "next-exit") {
+                let condition = query
+                    .get("condition")
+                    .map(String::as_str)
+                    .unwrap_or("not-running");
+                if !matches!(condition, "not-running" | "next-exit" | "removed") {
                         return Err(format!(
                             "docker: wait condition is unsupported: {condition}"
                         ));
-                    }
                 }
                 let timeout = query
                     .get("timeout")
@@ -10519,10 +10545,57 @@ fn handle_docker_compat_connection(
                     })
                     .transpose()?
                     .flatten();
-                wait_for_container_exit_with_timeout(&runtime, id, timeout)?;
-                let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+                // Docker CLI issues `/wait?condition=removed` concurrently
+                // with `/start`, while the create record is still pending.
+                // Reconcile that pre-start window before evaluating exit or
+                // removal instead of returning a false 404.
+                let prestart_deadline = timeout
+                    .map(|value| Instant::now() + value)
+                    .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+                let mut observed = false;
+                loop {
+                    match runtime.inspect(id) {
+                        Ok(_) => {
+                            observed = true;
+                            if condition != "removed" {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let pending = state
+                                .pending
+                                .lock()
+                                .map_err(|lock_error| {
+                                    format!("docker: pending lock poisoned: {lock_error}")
+                                })?
+                                .contains_key(id);
+                            if condition == "removed" && !observed && pending {
+                                // Docker CLI sends wait before start. Return
+                                // the provisional removed result so it can
+                                // issue `/start`; the auto-remove start path
+                                // owns the eventual deletion.
+                                break;
+                            }
+                            if condition == "removed" && (observed || !pending) {
+                                break;
+                            }
+                            if Instant::now() >= prestart_deadline {
+                                return Err(error.to_string());
+                            }
+                        }
+                    }
+                    if condition == "removed" && observed {
+                        // Keep polling until the auto-remove start path makes
+                        // the record disappear.
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+                let record = runtime.inspect(id).ok();
+                if condition != "removed" {
+                    wait_for_container_exit_with_timeout(&runtime, id, timeout)?;
+                }
                 let body = serde_json::json!({
-                    "StatusCode": record.last_exit_code.unwrap_or(0),
+                    "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
                     "Error": serde_json::Value::Null
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
@@ -11774,6 +11847,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         binds: None,
         port_bindings: None,
         network_mode: None,
+        auto_remove: false,
     });
     let publish = port_bindings_to_publish(host_config.port_bindings)?;
     let network_mode = match host_config.network_mode.as_deref() {
@@ -11794,6 +11868,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user: request.user,
         name,
         network_mode,
+        auto_remove: host_config.auto_remove,
         health,
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -12299,9 +12374,26 @@ fn stream_docker_attach(
     runtime: &ContainerRuntime,
     id: &str,
 ) -> Result<(), String> {
-    let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+    // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
+    // briefly for the pending record to become a real runtime record instead
+    // of rejecting the valid pre-start handshake with a 404.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let record = loop {
+        match runtime.inspect(id) {
+            Ok(record) => break record,
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     if record.pid == 0 {
-        return Err("docker: interactive attach requires a running container".to_string());
+        let raw = runtime.logs(id).map_err(|error| error.to_string())?;
+        let frame = docker_raw_stream(&raw, "");
+        stream.write_all(&frame).map_err(|error| error.to_string())?;
+        stream.flush().map_err(|error| error.to_string())?;
+        return Ok(());
     }
     let mut stdin = std::fs::OpenOptions::new()
         .write(true)
@@ -14794,6 +14886,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            auto_remove: false,
             health: Some(DockerHealthSpec {
                 cmd: "test -f /ready".to_string(),
                 interval_secs: 2,
@@ -14839,6 +14932,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                auto_remove: false,
                 health: None,
                 created_at_unix: 0,
             },
@@ -14876,6 +14970,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            auto_remove: false,
             health: None,
             created_at_unix: 0,
         };
@@ -15002,6 +15097,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            auto_remove: false,
             health: None,
             created_at_unix: 10,
         };

@@ -12,6 +12,8 @@ pub enum AiRuntimeError {
     CoherenceGateFailed { gate: String, reason: String },
     #[error("seccomp error: {0}")]
     Seccomp(#[from] crate::seccomp::SeccompError),
+    #[error("model backend failed: {0}")]
+    ModelBackend(String),
 }
 
 /// Authority level for an AI agent container.
@@ -96,6 +98,46 @@ impl TokenBudgetCounter {
     /// Returns current usage.
     pub fn used(&self) -> u64 {
         self.used.load(Ordering::SeqCst)
+    }
+}
+
+/// Local adapter that enforces a token budget around a model backend.
+///
+/// The backend remains caller-supplied so the core runtime never makes an
+/// implicit network call or embeds provider credentials. Backends return the
+/// generated text and the provider-reported completion-token count; prompt
+/// tokens are supplied by the caller using the provider's tokenizer. Prompt
+/// usage is charged before invocation and completion usage is charged before
+/// the response is released, so an over-budget response is fail-closed.
+#[derive(Debug, Clone)]
+pub struct MeteredModelProxy {
+    counter: TokenBudgetCounter,
+}
+
+impl MeteredModelProxy {
+    pub fn new(token_budget: u64) -> Self {
+        Self {
+            counter: TokenBudgetCounter::new(token_budget),
+        }
+    }
+
+    pub fn used_tokens(&self) -> u64 {
+        self.counter.used()
+    }
+
+    pub fn invoke<F>(
+        &self,
+        prompt: &str,
+        prompt_tokens: u64,
+        backend: F,
+    ) -> Result<String, AiRuntimeError>
+    where
+        F: FnOnce(&str) -> Result<(String, u64), String>,
+    {
+        self.counter.record(prompt_tokens)?;
+        let (response, completion_tokens) = backend(prompt).map_err(AiRuntimeError::ModelBackend)?;
+        self.counter.record(completion_tokens)?;
+        Ok(response)
     }
 }
 
@@ -218,6 +260,36 @@ mod tests {
         assert_eq!(counter.used(), 90);
         assert!(counter.record(11).is_err());
         assert_eq!(counter.used(), 90);
+    }
+
+    #[test]
+    fn metered_proxy_accounts_prompt_and_completion_before_release() {
+        let proxy = MeteredModelProxy::new(10);
+        let response = proxy
+            .invoke("hello", 4, |prompt| Ok((format!("{prompt} world"), 5)))
+            .expect("within budget");
+        assert_eq!(response, "hello world");
+        assert_eq!(proxy.used_tokens(), 9);
+    }
+
+    #[test]
+    fn metered_proxy_rejects_completion_that_exceeds_budget() {
+        let proxy = MeteredModelProxy::new(5);
+        let error = proxy
+            .invoke("hello", 4, |_| Ok(("response".to_string(), 2)))
+            .unwrap_err();
+        assert!(matches!(error, AiRuntimeError::TokenBudgetExceeded { .. }));
+        assert_eq!(proxy.used_tokens(), 4);
+    }
+
+    #[test]
+    fn metered_proxy_charges_prompt_but_never_hides_backend_failure() {
+        let proxy = MeteredModelProxy::new(10);
+        let error = proxy
+            .invoke("hello", 3, |_| Err("provider unavailable".to_string()))
+            .unwrap_err();
+        assert!(matches!(error, AiRuntimeError::ModelBackend(message) if message == "provider unavailable"));
+        assert_eq!(proxy.used_tokens(), 3);
     }
 
     #[test]

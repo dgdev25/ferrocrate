@@ -66,12 +66,12 @@ use ferro_net::{
 };
 use ferro_net::{HostCapabilities, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
 #[cfg(unix)]
+use nix::errno::Errno;
+#[cfg(unix)]
 #[allow(deprecated)]
 use nix::fcntl::{flock, FlockArg};
-#[cfg(unix)]
-use nix::errno::Errno;
 use rand::Rng;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CString, OsStr};
 use std::fs;
@@ -96,6 +96,14 @@ use tracing::{info, warn};
 #[cfg(unix)]
 struct LifecycleLock {
     _file: fs::File,
+}
+
+#[cfg(unix)]
+fn lifecycle_lock_path(runtime_dir: &Path, container_id: &str) -> PathBuf {
+    let digest = Sha256::digest(container_id.as_bytes());
+    runtime_dir
+        .join("lifecycle-locks")
+        .join(format!("{digest:x}.lock"))
 }
 
 #[cfg(unix)]
@@ -1935,17 +1943,16 @@ impl ContainerRuntime {
                 .clone()
                 .expect("matched reservation");
             #[cfg(unix)]
-            if LifecycleLock::try_acquire(
-                &self
-                    .runtime_dir
-                    .join("containers")
-                    .join(&record.id)
-                    .join("lifecycle.lock"),
-            )?
-            .is_none()
-            {
-                continue;
-            }
+            let _lifecycle_lock = {
+                let lock_path = lifecycle_lock_path(&self.runtime_dir, &record.id);
+                if let Some(parent) = lock_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                match LifecycleLock::try_acquire(&lock_path)? {
+                    Some(lock) => lock,
+                    None => continue,
+                }
+            };
             // A live run reservation belongs to the process that is still
             // publishing its effect. Another CLI process opening the same
             // runtime must not classify that in-flight operation as a crash;
@@ -2439,9 +2446,11 @@ impl ContainerRuntime {
         }
         #[cfg(unix)]
         let _lifecycle_lock = {
-            let container_dir = self.runtime_dir.join("containers").join(&container_id);
-            fs::create_dir_all(&container_dir)?;
-            LifecycleLock::acquire(&container_dir.join("lifecycle.lock"))?
+            let lock_path = lifecycle_lock_path(&self.runtime_dir, &container_id);
+            if let Some(parent) = lock_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            LifecycleLock::acquire(&lock_path)?
         };
         let pinned_image = store.resolve_reference(image)?.map_or_else(
             || image.to_owned(),
@@ -3807,38 +3816,60 @@ impl ContainerRuntime {
         action: Action,
         id: &str,
     ) -> Result<crate::authorization::runtime::MutationPermit, RuntimeError> {
-        let record = self
-            .store
-            .get(id)?
-            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let permit = self.authorization.authorize(action, &record)?;
-        self.phase_hook.reached(
-            runtime_action_name(action),
-            LifecyclePhasePoint::DecisionDurable,
-        )?;
-        let current = self
-            .store
-            .get(id)?
-            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        if let Err(error) = self.authorization.revalidate(&permit, &current) {
-            self.authorization.complete(permit, false)?;
-            return Err(error.into());
+        // A short-lived supervisor can publish an exit status between the
+        // authorization read and the reservation transaction. Treat that as
+        // a retryable compare-and-swap race: re-authorize against the fresh
+        // record rather than surfacing a spurious failure to callers such as
+        // `run --rm`. The bounded loop preserves fail-closed behavior for a
+        // genuinely contended or malformed store.
+        const MAX_RESERVATION_RETRIES: usize = 32;
+        for attempt in 0..MAX_RESERVATION_RETRIES {
+            let record = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+            let permit = self.authorization.authorize(action, &record)?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::DecisionDurable,
+            )?;
+            let current = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+            if let Err(error) = self.authorization.revalidate(&permit, &current) {
+                self.authorization.complete(permit, false)?;
+                return Err(error.into());
+            }
+            match self.store.reserve_mutation(
+                id,
+                &current.status,
+                current.mutation_generation.max(1),
+                permit.operation_id(),
+                runtime_action_name(action),
+            ) {
+                Ok(()) => {
+                    self.phase_hook.reached(
+                        runtime_action_name(action),
+                        LifecyclePhasePoint::ReservationDurable,
+                    )?;
+                    return Ok(permit);
+                }
+                Err(ContainerStoreError::MutationConflict)
+                    if attempt + 1 < MAX_RESERVATION_RETRIES =>
+                {
+                    self.authorization.complete(permit, false)?;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    self.authorization.complete(permit, false)?;
+                    return Err(error.into());
+                }
+            }
         }
-        if let Err(error) = self.store.reserve_mutation(
-            id,
-            &current.status,
-            current.mutation_generation.max(1),
-            permit.operation_id(),
-            runtime_action_name(action),
-        ) {
-            self.authorization.complete(permit, false)?;
-            return Err(error.into());
-        }
-        self.phase_hook.reached(
-            runtime_action_name(action),
-            LifecyclePhasePoint::ReservationDurable,
-        )?;
-        Ok(permit)
+        Err(RuntimeError::InvalidState(
+            "container mutation reservation remained contended after bounded retries".to_string(),
+        ))
     }
 
     fn mediate_existing<T>(
@@ -3851,6 +3882,14 @@ impl ContainerRuntime {
             Option<&crate::witness::DurableIntent>,
         ) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
+        #[cfg(unix)]
+        let _lifecycle_lock = {
+            let lock_path = lifecycle_lock_path(&self.runtime_dir, id);
+            if let Some(parent) = lock_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            LifecycleLock::acquire(&lock_path)?
+        };
         let permit = self.authorize_existing(action, id)?;
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
@@ -5061,7 +5100,7 @@ fn supervise_child(
     loop {
         let status = child.wait();
         let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
-        let current_status = match update_exit(&store, &container_id, exit_code) {
+        let current_status = match update_exit_after_mutation(&store, &container_id, exit_code) {
             Ok(status) => status,
             Err(_) => "exited".to_string(),
         };
@@ -9559,6 +9598,41 @@ fn update_exit(
     exit_code: i32,
 ) -> Result<String, ContainerStoreError> {
     db.update_exit(id, exit_code)
+}
+
+fn update_exit_after_mutation(
+    db: &SqliteContainerStore,
+    id: &str,
+    exit_code: i32,
+) -> Result<String, ContainerStoreError> {
+    // A short-lived workload can exit while its creating `run` mutation is
+    // still being finalized by the parent CLI. Do not drop that terminal
+    // observation: wait for the reservation to clear, then publish the exit
+    // state. This keeps `run --rm` from racing removal against a stale
+    // `running` record under parallel lifecycle load.
+    const MAX_RETRIES: usize = 64;
+    for attempt in 0..MAX_RETRIES {
+        match update_exit(db, id, exit_code) {
+            Err(ContainerStoreError::MutationConflict) if attempt + 1 < MAX_RETRIES => {
+                // Only the creating run mutation is expected to overlap the
+                // supervisor's first exit observation. Do not wait through a
+                // delete/stop/restart reservation, whose kernel effect may
+                // intentionally own the record while it is being finalized.
+                let pending_action = db
+                    .get(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|record| record.pending_mutation)
+                    .map(|reservation| reservation.action);
+                if pending_action.as_deref() != Some("container.run") {
+                    return Err(ContainerStoreError::MutationConflict);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+    update_exit(db, id, exit_code)
 }
 
 fn update_health(

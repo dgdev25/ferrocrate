@@ -2,12 +2,14 @@
 set -euo pipefail
 
 # Rootful sustained OCI lifecycle probe. This deliberately reports a workload
-# baseline, not a full chaos/resource-exhaustion qualification.
+# baseline, not a full chaos/resource-exhaustion qualification. Set
+# FERROCRATE_LIFECYCLE_KEEP_TMP=1 to retain per-run logs for failed probes.
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/../.." && pwd)}"
 binary="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_PERF_IMAGE:-alpine:3.20}"
 count="${FERROCRATE_LIFECYCLE_COUNT:-100}"
 parallel="${FERROCRATE_LIFECYCLE_PARALLEL:-1}"
+keep_tmp="${FERROCRATE_LIFECYCLE_KEEP_TMP:-0}"
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "perf.container_lifecycle_skipped=1"
@@ -25,7 +27,13 @@ fi
 tmp_root="$(mktemp -d /tmp/ferrocrate-lifecycle-100.XXXXXX)"
 runtime_dir="${FERROCRATE_LIFECYCLE_RUNTIME_DIR:-$tmp_root/runtime}"
 mkdir -p "$runtime_dir"
-cleanup() { rm -rf "$tmp_root"; }
+cleanup() {
+  if [[ "$keep_tmp" == "1" ]]; then
+    echo "perf.container_lifecycle_tmp_root=$tmp_root" >&2
+  else
+    rm -rf "$tmp_root"
+  fi
+}
 trap cleanup EXIT
 
 env_prefix=(env "FERROCRATE_RUNTIME_DIR=$runtime_dir" "HOME=$tmp_root" "FERROCRATE_NETWORK_BACKEND=iptables")

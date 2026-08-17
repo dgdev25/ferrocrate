@@ -5365,16 +5365,28 @@ fn wait_for_container_exit_with_timeout(
     timeout: Option<Duration>,
 ) -> Result<(), String> {
     let started = Instant::now();
+    let mut terminal_observations = 0u8;
     loop {
         let record = runtime.inspect(id).map_err(|err| err.to_string())?;
         match record.status.as_str() {
             "running" | "paused" => {
+                terminal_observations = 0;
                 if timeout.is_some_and(|limit| started.elapsed() >= limit) {
                     return Err(format!("wait: timed out waiting for container {id}"));
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
-            _ => return Ok(()),
+            _ => {
+                // The supervisor publishes the terminal state in a separate
+                // process from the CLI's `--rm` caller. Require two stable
+                // observations so removal cannot race the final lifecycle
+                // write and trip the store's compare-and-swap guard.
+                terminal_observations = terminal_observations.saturating_add(1);
+                if terminal_observations >= 2 {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 }

@@ -194,13 +194,12 @@ impl CgroupV2Manager {
         Ok(())
     }
 
-    /// Check if AI features are enabled via environment variable.
+    /// Check whether runtime AI inference is enabled.
     ///
-    /// Returns true if FERROCRATE_AI is set to "1" or "true".
+    /// Inference defaults to enabled, matching `AiConfig::from_env`; setting
+    /// `FERROCRATE_AI=0` or `FERROCRATE_AI=false` opts out.
     pub fn is_ai_enabled() -> bool {
-        std::env::var("FERROCRATE_AI")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        ferro_mind::ai::config::AiConfig::from_env().enabled
     }
 }
 
@@ -254,6 +253,12 @@ fn read_cpu_stat(path: PathBuf) -> Result<CpuStat, CgroupError> {
 mod tests {
     use super::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    fn ai_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn creates_group_and_applies_limits() {
@@ -378,5 +383,23 @@ mod tests {
             cpu_system_usec: Some(60),
         };
         assert_eq!(stats, expected);
+    }
+
+    #[test]
+    fn ai_enablement_matches_runtime_default_and_opt_out() {
+        let _guard = ai_env_lock().lock().expect("AI env lock");
+        let previous = std::env::var("FERROCRATE_AI").ok();
+        unsafe {
+            std::env::remove_var("FERROCRATE_AI");
+        }
+        assert!(CgroupV2Manager::is_ai_enabled());
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "0");
+        }
+        assert!(!CgroupV2Manager::is_ai_enabled());
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
     }
 }

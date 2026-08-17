@@ -42,6 +42,8 @@ pub struct NeuralAnomalyDetector {
     input_size: usize,
     threshold: f32,
     trained: bool,
+    centroid: Option<Vec<f32>>,
+    centroid_threshold: Option<f32>,
 }
 
 // Manual Debug implementation since Network<f32> doesn't derive Debug
@@ -52,6 +54,7 @@ impl std::fmt::Debug for NeuralAnomalyDetector {
             .field("input_size", &self.input_size)
             .field("threshold", &self.threshold)
             .field("trained", &self.trained)
+            .field("centroid", &self.centroid.as_ref().map(Vec::len))
             .finish()
     }
 }
@@ -74,7 +77,76 @@ impl NeuralAnomalyDetector {
             input_size,
             threshold,
             trained: false,
+            centroid: None,
+            centroid_threshold: None,
         }
+    }
+
+    /// Load the centroid artifact produced by the anomaly training pipeline.
+    ///
+    /// The current training artifact intentionally stores a portable centroid
+    /// rather than serialized neural weights. This loader validates the
+    /// envelope and numeric bounds, allowing runtime distance scoring while
+    /// preserving the neural learner for freshly baselined containers.
+    pub fn from_model_artifact(path: &std::path::Path) -> Result<Self, String> {
+        const MAX_ARTIFACT_BYTES: u64 = 1 << 20;
+        if std::fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_ARTIFACT_BYTES
+        {
+            return Err("anomaly model artifact exceeds 1 MiB".to_string());
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid anomaly model artifact: {error}"))?;
+        if value.get("model_type").and_then(serde_json::Value::as_str) != Some("anomaly-detector") {
+            return Err("anomaly model artifact has an unexpected model_type".to_string());
+        }
+        let artifact = value
+            .get("artifact")
+            .ok_or_else(|| "anomaly model artifact is missing artifact data".to_string())?;
+        let centroid = artifact
+            .get("centroid")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "anomaly model artifact is missing centroid".to_string())?
+            .iter()
+            .map(|value| {
+                let value = value
+                    .as_f64()
+                    .ok_or_else(|| "anomaly centroid contains a non-number".to_string())?
+                    as f32;
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    return Err("anomaly centroid value is outside 0..=1".to_string());
+                }
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if centroid.is_empty() || centroid.len() > 64 {
+            return Err("anomaly centroid dimension is unsupported".to_string());
+        }
+        let normal_mean = artifact
+            .get("normal_mean_distance")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| "anomaly normal distance is invalid".to_string())?
+            as f32;
+        let anomaly_mean = artifact
+            .get("anomaly_mean_distance")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| "anomaly distance is invalid".to_string())?
+            as f32;
+        if !normal_mean.is_finite() || !anomaly_mean.is_finite() || normal_mean < 0.0 {
+            return Err("anomaly distance statistics are invalid".to_string());
+        }
+        let threshold = if anomaly_mean > normal_mean {
+            (normal_mean + anomaly_mean) / 2.0
+        } else {
+            (normal_mean * 3.0).max(f32::EPSILON)
+        };
+        let mut detector = Self::new(centroid.len(), threshold);
+        detector.centroid = Some(centroid);
+        detector.centroid_threshold = Some(threshold);
+        Ok(detector)
     }
 
     /// Initialize the neural network with an autoencoder architecture
@@ -105,6 +177,8 @@ impl NeuralAnomalyDetector {
             return false;
         }
 
+        self.centroid = None;
+        self.centroid_threshold = None;
         self.init_network();
 
         let Some(ref mut network) = self.network else {
@@ -153,6 +227,24 @@ impl NeuralAnomalyDetector {
     /// # Returns
     /// AnomalyScore with reconstruction error as score
     pub fn detect(&mut self, features: &[f32]) -> AnomalyScore {
+        if let Some(centroid) = self.centroid.as_ref() {
+            if features.len() != centroid.len() {
+                return AnomalyScore {
+                    score: 0.0,
+                    threshold: self.centroid_threshold.unwrap_or(self.threshold),
+                };
+            }
+            let distance = features
+                .iter()
+                .zip(centroid)
+                .map(|(feature, expected)| (feature - expected).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            return AnomalyScore {
+                score: distance,
+                threshold: self.centroid_threshold.unwrap_or(self.threshold),
+            };
+        }
         if !self.trained || features.len() != self.input_size {
             return AnomalyScore {
                 score: 0.0,
@@ -195,7 +287,12 @@ impl NeuralAnomalyDetector {
 
     /// Check if the detector has been trained
     pub fn is_trained(&self) -> bool {
-        self.trained
+        self.trained || self.centroid.is_some()
+    }
+
+    /// Number of normalized features accepted by this detector.
+    pub fn input_size(&self) -> usize {
+        self.input_size
     }
 
     /// Update the anomaly threshold
@@ -611,6 +708,32 @@ mod tests {
     fn neural_detector_creation() {
         let detector = NeuralAnomalyDetector::new(5, 0.1);
         assert!(!detector.is_trained());
+    }
+
+    #[test]
+    fn loads_trained_anomaly_artifact_and_scores_distance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "model_type": "anomaly-detector",
+                "artifact": {
+                    "centroid": [0.1, 0.2, 0.1],
+                    "normal_mean_distance": 0.02,
+                    "anomaly_mean_distance": 1.2
+                }
+            })
+            .to_string(),
+        )
+        .expect("artifact");
+
+        let mut detector = NeuralAnomalyDetector::from_model_artifact(&path).expect("load model");
+        assert!(detector.is_trained());
+        let normal = detector.detect(&[0.1, 0.2, 0.1]);
+        let anomaly = detector.detect(&[0.9, 0.9, 0.9]);
+        assert!(!normal.is_anomalous());
+        assert!(anomaly.is_anomalous());
     }
 
     #[test]

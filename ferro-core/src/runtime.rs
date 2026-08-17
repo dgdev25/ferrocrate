@@ -10172,7 +10172,46 @@ fn run_resource_monitor(
     // per-container evidence when no optional audit variable is configured.
     let ai_logger = ai_decision_logger();
 
+    let mut anomaly_model_version = "neural-anomaly-runtime-v1".to_string();
     let mut anomaly_detector = ferro_mind::ai::anomaly::NeuralAnomalyDetector::new(3, 0.5);
+    let anomaly_model = match ferro_mind::ai::training::TrainingPipeline::new(
+        ferro_mind::ai::training::TrainingConfig::default(),
+    ) {
+        Ok(pipeline) => pipeline
+            .resolve_active_model(ferro_mind::ai::training::ModelType::AnomalyDetector)
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match anomaly_model {
+        Ok(active) => {
+            match ferro_mind::ai::anomaly::NeuralAnomalyDetector::from_model_artifact(&active.path)
+            {
+                Ok(model_detector) if model_detector.input_size() == 3 => {
+                    anomaly_detector = model_detector;
+                    anomaly_model_version = format!("active-v{}", active.version);
+                    info!(
+                        container = %id,
+                        model_version = %anomaly_model_version,
+                        artifact_sha256 = %active.artifact_sha256,
+                        "resolved active anomaly detector"
+                    );
+                }
+                Ok(model_detector) => {
+                    warn!(
+                        container = %id,
+                        input_size = model_detector.input_size(),
+                        "active anomaly model feature dimension does not match runtime; using runtime baseline"
+                    );
+                }
+                Err(error) => {
+                    warn!(container = %id, error = %error, "active anomaly model rejected; using runtime baseline");
+                }
+            }
+        }
+        Err(error) => {
+            info!(container = %id, error = %error, "no active anomaly model; using runtime baseline");
+        }
+    }
     let mut anomaly_training_samples: Vec<Vec<f32>> = Vec::new();
     let anomaly_train_after = 20usize; // Train after 20 samples of normal behavior
 
@@ -10240,7 +10279,7 @@ fn run_resource_monitor(
                             format!("ai-anomaly-{id}-{ts}"),
                             format!("Container {id} exceeded the learned resource baseline"),
                         )
-                        .with_model("neural-anomaly-detector", "runtime-v1")
+                        .with_model("neural-anomaly-detector", &anomaly_model_version)
                         .with_decision("record-anomaly")
                         .with_evidence("container_id", id.clone())
                         .with_evidence("score", format!("{:.6}", score.score))

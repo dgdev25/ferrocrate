@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -8,6 +9,94 @@ pub struct GpuInfo {
     pub vram_total_bytes: u64,
     pub vram_free_bytes: u64,
     pub utilization_percent: f32,
+}
+
+/// A durable-in-memory placement decision for one workload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GpuReservation {
+    pub request_id: String,
+    pub gpu_id: String,
+    pub vram_bytes: u64,
+}
+
+/// Reservation-aware GPU placement scheduler.
+///
+/// Discovery reports instantaneous free VRAM. This scheduler layers bounded
+/// reservations over that snapshot so concurrent requests cannot each select
+/// the same apparent free capacity. Reservations are process-local and must be
+/// released when the workload exits; a fresh discovery should seed a new
+/// scheduler after restart.
+#[derive(Debug, Clone, Default)]
+pub struct GpuScheduler {
+    gpus: Vec<GpuInfo>,
+    reservations: BTreeMap<String, GpuReservation>,
+}
+
+impl GpuScheduler {
+    pub fn new(gpus: Vec<GpuInfo>) -> Self {
+        Self {
+            gpus,
+            reservations: BTreeMap::new(),
+        }
+    }
+
+    pub fn reservations(&self) -> impl Iterator<Item = &GpuReservation> {
+        self.reservations.values()
+    }
+
+    pub fn available_vram_bytes(&self, gpu_id: &str) -> Option<u64> {
+        let gpu = self.gpus.iter().find(|gpu| gpu.id == gpu_id)?;
+        let reserved = self
+            .reservations
+            .values()
+            .filter(|reservation| reservation.gpu_id == gpu_id)
+            .map(|reservation| reservation.vram_bytes)
+            .fold(0u64, u64::saturating_add);
+        Some(gpu.vram_free_bytes.saturating_sub(reserved))
+    }
+
+    /// Reserve the best fitting GPU for a workload, idempotently by request ID.
+    pub fn reserve(
+        &mut self,
+        request_id: impl Into<String>,
+        required_vram_bytes: u64,
+    ) -> Option<GpuReservation> {
+        let request_id = request_id.into();
+        if let Some(existing) = self.reservations.get(&request_id) {
+            return Some(existing.clone());
+        }
+
+        let selected = self
+            .gpus
+            .iter()
+            .filter_map(|gpu| {
+                let available = self.available_vram_bytes(&gpu.id)?;
+                (available >= required_vram_bytes).then_some((gpu, available))
+            })
+            .min_by(|(a, available_a), (b, available_b)| {
+                a.utilization_percent
+                    .partial_cmp(&b.utilization_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        available_a
+                            .saturating_sub(required_vram_bytes)
+                            .cmp(&available_b.saturating_sub(required_vram_bytes))
+                    })
+                    .then_with(|| a.id.cmp(&b.id))
+            })?;
+
+        let reservation = GpuReservation {
+            request_id: request_id.clone(),
+            gpu_id: selected.0.id.clone(),
+            vram_bytes: required_vram_bytes,
+        };
+        self.reservations.insert(request_id, reservation.clone());
+        Some(reservation)
+    }
+
+    pub fn release(&mut self, request_id: &str) -> Option<GpuReservation> {
+        self.reservations.remove(request_id)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -157,5 +246,46 @@ mod tests {
             utilization_percent: 10.0,
         }];
         assert!(select_gpu(&candidates, 4 * 1024 * 1024 * 1024).is_none());
+    }
+
+    #[test]
+    fn scheduler_accounts_for_reservations_and_release() {
+        let gpu = GpuInfo {
+            id: "0".to_string(),
+            name: "gpu0".to_string(),
+            vram_total_bytes: 10,
+            vram_free_bytes: 10,
+            utilization_percent: 1.0,
+        };
+        let mut scheduler = GpuScheduler::new(vec![gpu]);
+        let first = scheduler.reserve("a", 6).expect("first reservation");
+        assert_eq!(first.gpu_id, "0");
+        assert_eq!(scheduler.available_vram_bytes("0"), Some(4));
+        assert!(scheduler.reserve("b", 5).is_none());
+        assert_eq!(scheduler.reserve("a", 99), Some(first.clone()));
+        assert_eq!(scheduler.release("a"), Some(first));
+        assert_eq!(scheduler.available_vram_bytes("0"), Some(10));
+    }
+
+    #[test]
+    fn scheduler_chooses_lower_utilization_then_stable_id() {
+        let gpus = vec![
+            GpuInfo {
+                id: "b".to_string(),
+                name: "b".to_string(),
+                vram_total_bytes: 10,
+                vram_free_bytes: 10,
+                utilization_percent: 20.0,
+            },
+            GpuInfo {
+                id: "a".to_string(),
+                name: "a".to_string(),
+                vram_total_bytes: 10,
+                vram_free_bytes: 10,
+                utilization_percent: 20.0,
+            },
+        ];
+        let mut scheduler = GpuScheduler::new(gpus);
+        assert_eq!(scheduler.reserve("request", 3).unwrap().gpu_id, "a");
     }
 }

@@ -108,7 +108,7 @@ pub fn check_coherence_gates(gates: &[String], env: &[String]) -> Result<(), AiR
     for gate in gates {
         match gate.as_str() {
             "model_loaded" => {
-                let present = env.iter().any(|e| e.starts_with("FERRO_MODEL_PATH="));
+                let present = env_value_is_nonempty(env, "FERRO_MODEL_PATH");
                 if !present {
                     return Err(AiRuntimeError::CoherenceGateFailed {
                         gate: gate.clone(),
@@ -117,9 +117,7 @@ pub fn check_coherence_gates(gates: &[String], env: &[String]) -> Result<(), AiR
                 }
             }
             "vector_store_healthy" => {
-                let present = env
-                    .iter()
-                    .any(|e| e.starts_with("FERRO_VECTOR_STORE_PATH="));
+                let present = env_value_is_nonempty(env, "FERRO_VECTOR_STORE_PATH");
                 if !present {
                     return Err(AiRuntimeError::CoherenceGateFailed {
                         gate: gate.clone(),
@@ -133,6 +131,15 @@ pub fn check_coherence_gates(gates: &[String], env: &[String]) -> Result<(), AiR
         }
     }
     Ok(())
+}
+
+fn env_value_is_nonempty(env: &[String], key: &str) -> bool {
+    env.iter().any(|entry| {
+        entry
+            .strip_prefix(key)
+            .and_then(|value| value.strip_prefix('='))
+            .is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 /// Returns additional environment variables to inject into an AI container.
@@ -227,9 +234,23 @@ mod tests {
     }
 
     #[test]
+    fn coherence_gate_model_loaded_rejects_empty_path() {
+        let env = vec!["FERRO_MODEL_PATH=  ".to_string()];
+        let err = check_coherence_gates(&["model_loaded".to_string()], &env).unwrap_err();
+        assert!(matches!(err, AiRuntimeError::CoherenceGateFailed { .. }));
+    }
+
+    #[test]
     fn coherence_gate_vector_store_passes() {
         let env = vec!["FERRO_VECTOR_STORE_PATH=/data/store".to_string()];
         assert!(check_coherence_gates(&["vector_store_healthy".to_string()], &env).is_ok());
+    }
+
+    #[test]
+    fn coherence_gate_vector_store_rejects_empty_path() {
+        let env = vec!["FERRO_VECTOR_STORE_PATH=".to_string()];
+        let err = check_coherence_gates(&["vector_store_healthy".to_string()], &env).unwrap_err();
+        assert!(matches!(err, AiRuntimeError::CoherenceGateFailed { .. }));
     }
 
     #[test]

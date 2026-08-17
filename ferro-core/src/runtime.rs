@@ -65,6 +65,11 @@ use ferro_net::{
     exec_cmd_capture as net_exec_cmd_capture,
 };
 use ferro_net::{HostCapabilities, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer};
+#[cfg(unix)]
+#[allow(deprecated)]
+use nix::fcntl::{flock, FlockArg};
+#[cfg(unix)]
+use nix::errno::Errno;
 use rand::Rng;
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -87,6 +92,39 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{info, warn};
+
+#[cfg(unix)]
+struct LifecycleLock {
+    _file: fs::File,
+}
+
+#[cfg(unix)]
+#[allow(deprecated)]
+impl LifecycleLock {
+    fn acquire(path: &Path) -> Result<Self, RuntimeError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        flock(file.as_raw_fd(), FlockArg::LockExclusive)
+            .map_err(|error| RuntimeError::Io(io::Error::from_raw_os_error(error as i32)))?;
+        Ok(Self { _file: file })
+    }
+
+    fn try_acquire(path: &Path) -> Result<Option<Self>, RuntimeError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(Errno::EWOULDBLOCK) => Ok(None),
+            Err(error) => Err(RuntimeError::Io(io::Error::from_raw_os_error(error as i32))),
+        }
+    }
+}
 
 // ============================================================================
 // Atomic Operations Support (Task 4.1)
@@ -1891,6 +1929,18 @@ impl ContainerRuntime {
                 .pending_mutation
                 .clone()
                 .expect("matched reservation");
+            #[cfg(unix)]
+            if LifecycleLock::try_acquire(
+                &self
+                    .runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("lifecycle.lock"),
+            )?
+            .is_none()
+            {
+                continue;
+            }
             // A live run reservation belongs to the process that is still
             // publishing its effect. Another CLI process opening the same
             // runtime must not classify that in-flight operation as a crash;
@@ -2382,6 +2432,12 @@ impl ContainerRuntime {
                 "container identity already exists: {container_id}"
             )));
         }
+        #[cfg(unix)]
+        let _lifecycle_lock = {
+            let container_dir = self.runtime_dir.join("containers").join(&container_id);
+            fs::create_dir_all(&container_dir)?;
+            LifecycleLock::acquire(&container_dir.join("lifecycle.lock"))?
+        };
         let pinned_image = store.resolve_reference(image)?.map_or_else(
             || image.to_owned(),
             |record| {

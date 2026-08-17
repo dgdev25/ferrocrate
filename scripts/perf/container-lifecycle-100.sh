@@ -23,16 +23,15 @@ if [[ ! -x "$binary" ]]; then
 fi
 
 tmp_root="$(mktemp -d /tmp/ferrocrate-lifecycle-100.XXXXXX)"
-runtime_dir="$tmp_root/runtime"
+runtime_dir="${FERROCRATE_LIFECYCLE_RUNTIME_DIR:-$tmp_root/runtime}"
 mkdir -p "$runtime_dir"
 cleanup() { rm -rf "$tmp_root"; }
 trap cleanup EXIT
 
 env_prefix=(env "FERROCRATE_RUNTIME_DIR=$runtime_dir" "HOME=$tmp_root" "FERROCRATE_NETWORK_BACKEND=iptables")
+pull_ok=1
 if ! "${env_prefix[@]}" "$binary" pull "$image" >/dev/null 2>&1; then
-  echo "perf.container_lifecycle_skipped=1"
-  echo "perf.container_lifecycle_skip_reason=image_unavailable"
-  exit 77
+  pull_ok=0
 fi
 
 # A single probe distinguishes a workload failure from a host that cannot
@@ -48,6 +47,11 @@ if ! "${env_prefix[@]}" "$binary" run --rm --network none --network-backend ipta
   fi
   echo "perf.container_lifecycle_probe=failed" >&2
   sed -n '1,8p' "$probe_log" >&2
+  if (( pull_ok == 0 )); then
+    echo "perf.container_lifecycle_skipped=1"
+    echo "perf.container_lifecycle_skip_reason=image_unavailable"
+    exit 77
+  fi
   exit 1
 fi
 

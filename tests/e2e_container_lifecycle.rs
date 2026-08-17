@@ -341,6 +341,8 @@ CMD ["cat", "/hello.txt"]
                 "run",
                 "--name",
                 "commit-test",
+                "--network-backend",
+                "iptables",
                 "alpine:3.19",
                 "sh",
                 "-c",
@@ -364,7 +366,7 @@ CMD ["cat", "/hello.txt"]
         // Verify new image exists
         let images_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
+            .args(["images", "--format", "json"])
             .output()
             .expect("images");
 

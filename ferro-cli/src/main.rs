@@ -58,6 +58,8 @@ use ferro_mind::ai::training::{
     handle_export_rvf_command, handle_rvf_branch_command, handle_rvf_lineage_command,
     handle_rvf_stats_command, handle_rvf_verify_command,
 };
+#[cfg(target_os = "linux")]
+use flate2::{write::GzEncoder, Compression};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
@@ -244,6 +246,12 @@ pub enum Commands {
     Tag {
         source: String,
         target: String,
+    },
+    /// Snapshot a container rootfs into a new OCI image reference.
+    #[cfg(target_os = "linux")]
+    Commit {
+        container: String,
+        repository: String,
     },
     History {
         image: String,
@@ -2708,6 +2716,18 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Tag { source, target } => {
                 handle_tag(&image_store, &source, &target, &surface_authorization)
             }
+            #[cfg(target_os = "linux")]
+            Commands::Commit {
+                container,
+                repository,
+            } => handle_commit(
+                &runtime_dir,
+                &runtime,
+                &image_store,
+                &surface_authorization,
+                &container,
+                &repository,
+            ),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
             Commands::ImagePrune => handle_image_prune(&image_store, &surface_authorization),
             Commands::Volume { command } => {
@@ -6043,6 +6063,209 @@ fn handle_image_inspect(store: &LocalImageStore, image: &str, format: &str) -> R
         println!("Created: {}", payload["Created"]);
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_commit(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    authorization: &SurfaceAuthorization,
+    container: &str,
+    repository: &str,
+) -> Result<(), String> {
+    let target = canonicalize_reference(repository).map_err(|error| error.to_string())?;
+    let record = match runtime.inspect(container) {
+        Ok(record) => record,
+        Err(_) => runtime
+            .list()
+            .map_err(|error| format!("commit: list containers: {error}"))?
+            .into_iter()
+            .find(|candidate| {
+                candidate.id == container || candidate.name.as_deref() == Some(container)
+            })
+            .ok_or_else(|| format!("commit: container not found: {container}"))?,
+    };
+    let rootfs = runtime_dir
+        .join("containers")
+        .join(&record.id)
+        .join("rootfs");
+    if !rootfs.is_dir() {
+        return Err(format!(
+            "commit: container rootfs is unavailable: {}",
+            rootfs.display()
+        ));
+    }
+    if !record.mounts.is_empty() || !record.tmpfs_mounts.is_empty() {
+        return Err(
+            "commit: bind and tmpfs mounts must be removed before committing the rootfs"
+                .to_string(),
+        );
+    }
+
+    // Build a deterministic-in-memory tar before authorization/publication so
+    // an invalid or unreadable rootfs cannot consume a mutation permit.
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        append_commit_rootfs(&mut builder, &rootfs)
+            .map_err(|error| format!("commit: snapshot rootfs: {error}"))?;
+        builder
+            .finish()
+            .map_err(|error| format!("commit: finish snapshot: {error}"))?;
+    }
+    let diff_id = format!("sha256:{:x}", Sha256::digest(&tar_bytes));
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&tar_bytes)
+        .map_err(|error| format!("commit: compress snapshot: {error}"))?;
+    let layer_bytes = encoder
+        .finish()
+        .map_err(|error| format!("commit: finish compressed snapshot: {error}"))?;
+    let layer_digest = format!("sha256:{:x}", Sha256::digest(&layer_bytes));
+
+    let config_json = serde_json::json!({
+        "architecture": host_build_arch(),
+        "os": "linux",
+        "config": {
+            "Cmd": record.command.clone(),
+            "Env": record.env.clone(),
+            "WorkingDir": record.workdir.unwrap_or_default(),
+            "User": record.user.unwrap_or_default(),
+        },
+        "container_config": {
+            "Cmd": record.command,
+            "Env": record.env,
+        },
+        "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+        "history": [{"created_by": "ferrocrate commit", "comment": record.id}],
+    });
+    let config_bytes = serde_json::to_vec(&config_json)
+        .map_err(|error| format!("commit: serialize config: {error}"))?;
+    let config_digest = format!("sha256:{:x}", Sha256::digest(&config_bytes));
+    let manifest = ImageManifest {
+        schema_version: 2,
+        media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+        config: Descriptor {
+            media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+            digest: config_digest.clone(),
+            size: config_bytes.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        },
+        layers: vec![Descriptor {
+            media_type: OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(),
+            digest: layer_digest.clone(),
+            size: layer_bytes.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        }],
+        artifact_type: None,
+        subject: None,
+        annotations: HashMap::new(),
+    };
+    let manifest_json = serde_json::to_string(&manifest)
+        .map_err(|error| format!("commit: serialize manifest: {error}"))?;
+    let plan = store
+        .prepare_reference_write(
+            &target,
+            &config_digest,
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            &manifest_json,
+        )
+        .map_err(|error| format!("commit: prepare image publication: {error}"))?;
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let permit = authorization
+        .authorize_image_reference_write_plan(&origin, &plan)
+        .map_err(|error| format!("commit: authorize image publication: {error}"))?;
+
+    let image_dir = runtime_dir.join("images");
+    let layer_path = image_dir.join("blobs").join(layer_digest.replace(':', "_"));
+    let config_path = image_dir
+        .join("configs")
+        .join(config_digest.replace(':', "_"));
+    write_bytes_atomically(&layer_path, &layer_bytes)
+        .map_err(|error| format!("commit: publish layer: {error}"))?;
+    write_bytes_atomically(&config_path, &config_bytes)
+        .map_err(|error| format!("commit: publish config: {error}"))?;
+    store
+        .put_reference_authorized(plan, permit)
+        .map_err(|error| format!("commit: publish image reference: {error}"))?;
+    println!("commit: container={container} image={target} digest={config_digest}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn append_commit_rootfs<W: Write>(
+    builder: &mut tar::Builder<W>,
+    rootfs: &Path,
+) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(rootfs)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        // These are runtime-only mounts in an active container. Reading them
+        // races with teardown and would incorrectly capture host/kernel state.
+        if matches!(name.to_str(), Some("proc" | "sys" | "dev" | "run")) {
+            continue;
+        }
+        let path = entry.path();
+        let archive_name = Path::new(".").join(&name);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir() {
+            builder.append_dir(&archive_name, &path)?;
+            append_commit_rootfs_dir(builder, &path, &archive_name)?;
+        } else if metadata.file_type().is_symlink() {
+            append_commit_symlink(builder, &path, &archive_name)?;
+        } else {
+            builder.append_path_with_name(&path, &archive_name)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn append_commit_rootfs_dir<W: Write>(
+    builder: &mut tar::Builder<W>,
+    directory: &Path,
+    archive_directory: &Path,
+) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let path = entry.path();
+        let archive_name = archive_directory.join(&name);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir() {
+            builder.append_dir(&archive_name, &path)?;
+            append_commit_rootfs_dir(builder, &path, &archive_name)?;
+        } else if metadata.file_type().is_symlink() {
+            append_commit_symlink(builder, &path, &archive_name)?;
+        } else {
+            builder.append_path_with_name(&path, &archive_name)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn append_commit_symlink<W: Write>(
+    builder: &mut tar::Builder<W>,
+    path: &Path,
+    archive_name: &Path,
+) -> Result<(), std::io::Error> {
+    let target = std::fs::read_link(path)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    header.set_mtime(0);
+    header.set_link_name(target)?;
+    header.set_cksum();
+    builder.append_data(&mut header, archive_name, std::io::empty())
 }
 
 fn handle_tag(
@@ -11950,6 +12173,22 @@ volumes:
             Commands::Tag { source, target } => {
                 assert_eq!(source, "alpine:latest");
                 assert_eq!(target, "registry.local/app:v2");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_commit_command() {
+        let cli = Cli::parse_from(["ferrocrate", "commit", "web", "example/web:v1"]);
+        match cli.command {
+            Commands::Commit {
+                container,
+                repository,
+            } => {
+                assert_eq!(container, "web");
+                assert_eq!(repository, "example/web:v1");
             }
             other => panic!("unexpected command: {other:?}"),
         }

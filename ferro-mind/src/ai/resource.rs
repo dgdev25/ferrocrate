@@ -821,6 +821,26 @@ mod tests {
         assert_eq!(cpu_percent_from_delta(500, 1_500, Duration::ZERO), 0.0);
     }
 
+    #[test]
+    fn read_cgroup_metrics_reads_cpu_usage_usec_for_runtime_sampling() {
+        let directory = tempfile::tempdir().expect("temporary cgroup");
+        std::fs::write(directory.path().join("memory.current"), "4096\n")
+            .expect("memory.current");
+        std::fs::write(directory.path().join("memory.max"), "8192\n").expect("memory.max");
+        std::fs::write(directory.path().join("pids.current"), "3\n").expect("pids.current");
+        std::fs::write(
+            directory.path().join("cpu.stat"),
+            "usage_usec 123456\nuser_usec 100000\nsystem_usec 23456\n",
+        )
+        .expect("cpu.stat");
+
+        let metrics = read_cgroup_metrics(directory.path()).expect("read cgroup metrics");
+        assert_eq!(metrics.memory_current, 4096);
+        assert_eq!(metrics.memory_max, 8192);
+        assert_eq!(metrics.pids_current, 3);
+        assert_eq!(metrics.cpu_usage_usec, 123456);
+    }
+
     fn make_sample(memory: u64, delay_ms: u64) -> ResourceSample {
         std::thread::sleep(Duration::from_millis(delay_ms));
         ResourceSample {

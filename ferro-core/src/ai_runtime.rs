@@ -67,14 +67,29 @@ impl TokenBudgetCounter {
         if self.budget == 0 {
             return Ok(());
         }
-        let used = self.used.fetch_add(count, Ordering::SeqCst) + count;
-        if used > self.budget {
-            Err(AiRuntimeError::TokenBudgetExceeded {
-                used,
-                budget: self.budget,
-            })
-        } else {
-            Ok(())
+        let mut current = self.used.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(count) else {
+                return Err(AiRuntimeError::TokenBudgetExceeded {
+                    used: u64::MAX,
+                    budget: self.budget,
+                });
+            };
+            if next > self.budget {
+                return Err(AiRuntimeError::TokenBudgetExceeded {
+                    used: next,
+                    budget: self.budget,
+                });
+            }
+            match self.used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -177,6 +192,25 @@ mod tests {
         assert!(counter.record(50).is_ok());
         let err = counter.record(1).unwrap_err();
         assert!(matches!(err, AiRuntimeError::TokenBudgetExceeded { .. }));
+    }
+
+    #[test]
+    fn token_budget_never_overshoots_under_concurrent_reservations() {
+        let counter = Arc::new(TokenBudgetCounter::new(100));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let counter = Arc::clone(&counter);
+            workers.push(std::thread::spawn(move || counter.record(15).is_ok()));
+        }
+        let accepted = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker should finish"))
+            .filter(|accepted| *accepted)
+            .count();
+        assert_eq!(accepted, 6);
+        assert_eq!(counter.used(), 90);
+        assert!(counter.record(11).is_err());
+        assert_eq!(counter.used(), 90);
     }
 
     #[test]

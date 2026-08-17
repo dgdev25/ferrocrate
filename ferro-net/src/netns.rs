@@ -53,6 +53,24 @@ pub fn build_ip_link_set_netns_cmd(
     ])
 }
 
+/// Build the narrow command used to make a newly-created sandbox usable.
+/// Keeping this operation allow-listed avoids exposing a generic shell-like
+/// `ip netns exec` surface to callers.
+pub fn build_ip_netns_set_loopback_up_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
+    validate_netns_name(name)?;
+    Ok(vec![
+        "ip".into(),
+        "netns".into(),
+        "exec".into(),
+        name.into(),
+        "ip".into(),
+        "link".into(),
+        "set".into(),
+        "lo".into(),
+        "up".into(),
+    ])
+}
+
 // ============================================================================
 // Execution functions
 // ============================================================================
@@ -70,6 +88,11 @@ pub fn destroy_netns(name: &str) -> Result<(), NetnsError> {
 /// Move a network interface into a namespace.
 pub fn move_to_netns(link: &str, netns: &str) -> Result<(), NetnsError> {
     exec_cmd(&build_ip_link_set_netns_cmd(link, netns)?).map_err(NetnsError::from)
+}
+
+/// Bring loopback up in a namespace created for a pod sandbox.
+pub fn set_loopback_up(name: &str) -> Result<(), NetnsError> {
+    exec_cmd(&build_ip_netns_set_loopback_up_cmd(name)?).map_err(NetnsError::from)
 }
 
 /// Enter a network namespace by path (direct syscall, no shell-out).
@@ -92,7 +115,8 @@ pub fn enter_netns(_path: &Path) -> Result<(), NetnsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ip_link_set_netns_cmd, build_ip_netns_add_cmd, build_ip_netns_del_cmd, netns_path,
+        build_ip_link_set_netns_cmd, build_ip_netns_add_cmd, build_ip_netns_del_cmd,
+        build_ip_netns_set_loopback_up_cmd, netns_path,
     };
 
     #[test]
@@ -114,6 +138,10 @@ mod tests {
         assert_eq!(
             build_ip_link_set_netns_cmd("veth0", "c1").unwrap(),
             vec!["ip", "link", "set", "veth0", "netns", "c1"]
+        );
+        assert_eq!(
+            build_ip_netns_set_loopback_up_cmd("c1").unwrap(),
+            vec!["ip", "netns", "exec", "c1", "ip", "link", "set", "lo", "up"]
         );
     }
 

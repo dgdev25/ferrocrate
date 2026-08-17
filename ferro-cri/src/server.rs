@@ -631,6 +631,12 @@ impl RuntimeService for CriRuntime {
             let netns_name = format!("cri-{}", &record.id[12..]);
             ferro_net::create_netns(&netns_name)
                 .map_err(|error| Status::internal(format!("create CRI sandbox netns: {error}")))?;
+            if let Err(error) = ferro_net::set_loopback_up(&netns_name) {
+                let _ = ferro_net::destroy_netns(&netns_name);
+                return Err(Status::internal(format!(
+                    "configure CRI sandbox loopback: {error}"
+                )));
+            }
             record.netns_name = Some(netns_name);
         }
         let mut sandboxes = self

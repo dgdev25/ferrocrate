@@ -48,7 +48,10 @@ pub use ebpf::{
 pub use veth::{assign_ip, create_veth_pair, destroy_veth_pair, VethConfig, VethPair};
 
 // Re-export netns execution functions
-pub use netns::{create_netns, destroy_netns, enter_netns, move_to_netns, netns_path, NetnsError};
+pub use netns::{
+    create_netns, destroy_netns, enter_netns, move_to_netns, netns_path, set_loopback_up,
+    NetnsError,
+};
 pub use wireguard::{
     WireGuardError, WireGuardInterfaceConfig, WireGuardManager, WireGuardPeer, WireGuardSnapshot,
 };

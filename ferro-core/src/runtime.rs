@@ -9147,6 +9147,7 @@ fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
     let pin_root = config.pin_root.clone();
     validate_security_ebpf_config(&object_path, &pin_root, &events)?;
     validate_security_ebpf_object(&object_path)?;
+    validate_security_ebpf_pin_root(&pin_root)?;
     if !command_available("bpftool") {
         return Err(RuntimeError::Network(
             "security ebpf monitor unavailable: requires bpftool; fallback=disabled (turn the monitor off explicitly)".to_string(),
@@ -9171,6 +9172,20 @@ fn validate_security_ebpf_object(object_path: &str) -> Result<(), RuntimeError> 
     if !metadata.is_file() {
         return Err(RuntimeError::Network(format!(
             "security ebpf monitor object must be a regular file: {object_path}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_security_ebpf_pin_root(pin_root: &str) -> Result<(), RuntimeError> {
+    let metadata = std::fs::metadata(pin_root).map_err(|error| {
+        RuntimeError::Network(format!(
+            "security ebpf monitor pin root unavailable: {pin_root}: {error}"
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(RuntimeError::Network(format!(
+            "security ebpf monitor pin root must be a directory: {pin_root}"
         )));
     }
     Ok(())
@@ -12304,6 +12319,21 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let error = super::validate_security_ebpf_object("/tmp")
             .expect_err("directory cannot be loaded as a security object");
         assert!(error.to_string().contains("regular file"));
+    }
+
+    #[test]
+    fn security_ebpf_pin_root_preflight_rejects_missing_or_non_directory_paths() {
+        let missing = format!(
+            "/tmp/ferrocrate-security-pin-root-missing-{}",
+            std::process::id()
+        );
+        let error = super::validate_security_ebpf_pin_root(&missing)
+            .expect_err("missing pin root must fail before bpftool");
+        assert!(error.to_string().contains("pin root unavailable"));
+
+        let error = super::validate_security_ebpf_pin_root("/etc/hosts")
+            .expect_err("file cannot be used as a pin root");
+        assert!(error.to_string().contains("must be a directory"));
     }
 
     #[test]

@@ -745,7 +745,9 @@ mod tests {
                 && command.iter().any(|argument| argument == "-o")
         }));
         assert!(plan.commands().iter().any(|command| {
-            command.iter().any(|argument| argument == "ESTABLISHED,RELATED")
+            command
+                .iter()
+                .any(|argument| argument == "ESTABLISHED,RELATED")
                 && command.iter().any(|argument| argument == "conntrack")
         }));
     }

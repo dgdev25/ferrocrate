@@ -34,6 +34,15 @@ pub fn stop_pid(pid: u32, timeout: Duration) -> Result<(), ProcessLifecycleError
         }
         return Err(ProcessLifecycleError::Signal(err));
     }
+    // Docker's `t=-1` requests an unbounded graceful wait.  Duration::MAX is
+    // the internal sentinel used by the Docker adapter; avoid adding it to
+    // Instant because that can overflow before the process exits.
+    if timeout == Duration::MAX {
+        while pid_exists(target) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        return Ok(());
+    }
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if !pid_exists(target) {
@@ -131,6 +140,11 @@ impl ManagedProcess {
         }
 
         kill(Pid::from_raw(self.pid() as i32), Signal::SIGTERM)?;
+        if timeout == Duration::MAX {
+            let status = self.child.wait()?;
+            self.state = ProcessState::Exited;
+            return Ok(status);
+        }
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
@@ -215,6 +229,15 @@ mod tests {
     fn stop_pid_terminates_process() {
         let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
         stop_pid(proc.pid(), Duration::from_millis(100)).expect("stop pid");
+    }
+
+    #[test]
+    fn managed_process_supports_unbounded_graceful_stop() {
+        let mut proc = ManagedProcess::start(shell_path(), &["-c", "trap 'exit 0' TERM; sleep 1"])
+            .expect("process starts");
+        let status = proc.stop(Duration::MAX).expect("unbounded stop");
+        assert!(!status.success());
+        assert_eq!(proc.state(), ProcessState::Exited);
     }
 
     #[test]

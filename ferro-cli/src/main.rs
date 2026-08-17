@@ -11049,10 +11049,10 @@ fn parse_docker_limit_query(value: Option<&String>) -> Result<Option<usize>, Str
 
 /// Parse Docker's stop/restart grace period (`t`) in seconds.
 ///
-/// Docker defaults this value to ten seconds and accepts zero for an
-/// immediate escalation.  Negative values (including Docker's special `-1`
-/// infinite form) are rejected until the runtime's stop primitive can model
-/// an unbounded grace period without an overflow-prone `Duration` sentinel.
+/// Docker defaults this value to ten seconds, accepts zero for an immediate
+/// escalation, and uses `-1` for an unbounded graceful wait.  The latter is
+/// represented internally by `Duration::MAX`; the process lifecycle handles
+/// that sentinel without overflowing an `Instant` calculation.
 fn parse_docker_stop_timeout(query: &HashMap<String, String>) -> Result<Duration, String> {
     let Some(value) = query.get("t") else {
         return Ok(Duration::from_secs(10));
@@ -11060,9 +11060,12 @@ fn parse_docker_stop_timeout(query: &HashMap<String, String>) -> Result<Duration
     let seconds = value
         .parse::<i64>()
         .map_err(|_| format!("docker: stop timeout must be an integer, got {value}"))?;
+    if seconds == -1 {
+        return Ok(Duration::MAX);
+    }
     if seconds < 0 {
         return Err(format!(
-            "docker: stop timeout must be non-negative; unbounded timeout is unsupported: {value}"
+            "docker: stop timeout must be non-negative or -1, got {value}"
         ));
     }
     Ok(Duration::from_secs(seconds as u64))
@@ -14975,7 +14978,7 @@ volumes:
     }
 
     #[test]
-    fn docker_stop_timeout_defaults_and_rejects_unbounded_values() {
+    fn docker_stop_timeout_defaults_and_validates_unbounded_values() {
         let empty = HashMap::new();
         assert_eq!(
             parse_docker_stop_timeout(&empty).unwrap(),
@@ -14991,6 +14994,8 @@ volumes:
             Duration::from_secs(7)
         );
         query.insert("t".to_string(), "-1".to_string());
+        assert_eq!(parse_docker_stop_timeout(&query).unwrap(), Duration::MAX);
+        query.insert("t".to_string(), "-2".to_string());
         assert!(parse_docker_stop_timeout(&query).is_err());
         query.insert("t".to_string(), "soon".to_string());
         assert!(parse_docker_stop_timeout(&query).is_err());

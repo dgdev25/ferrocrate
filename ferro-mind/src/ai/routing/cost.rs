@@ -331,8 +331,34 @@ pub fn execute_routed_prompt_with_adapters_metered(
     budget: &TokenBudget,
 ) -> Result<(String, String, u64), ExecutionError> {
     budget.reserve(estimate_tokens(prompt))?;
-    let (provider, response) = execute_routed_prompt_with_adapters(adapters, policy, prompt, timeout)?;
-    budget.reserve(estimate_tokens(&response))?;
+    let providers: Vec<Provider> = adapters
+        .iter()
+        .map(|adapter| adapter.provider().clone())
+        .collect();
+    let selected = choose_provider(&providers, policy).ok_or(ExecutionError::NoProvider)?;
+    let adapter = adapters
+        .iter()
+        .find(|adapter| adapter.provider().name == selected.name)
+        .ok_or(ExecutionError::NoProvider)?;
+    let (provider, response, response_tokens) = match adapter {
+        ProviderAdapter::Command(endpoint) => {
+            let (provider, response) =
+                execute_routed_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)?;
+            let response_tokens = estimate_tokens(&response);
+            (provider, response, response_tokens)
+        }
+        ProviderAdapter::Http(endpoint) => {
+            let (provider, response, usage) = execute_routed_http_prompt_with_usage(
+                std::slice::from_ref(endpoint),
+                policy,
+                prompt,
+                timeout,
+            )?;
+            let response_tokens = usage.unwrap_or_else(|| estimate_tokens(&response));
+            (provider, response, response_tokens)
+        }
+    };
+    budget.reserve(response_tokens)?;
     Ok((provider, response, budget.used_tokens()))
 }
 
@@ -348,6 +374,17 @@ pub fn execute_routed_http_prompt(
     prompt: &str,
     timeout: std::time::Duration,
 ) -> Result<(String, String), ExecutionError> {
+    let (provider, response, _) =
+        execute_routed_http_prompt_with_usage(providers, policy, prompt, timeout)?;
+    Ok((provider, response))
+}
+
+fn execute_routed_http_prompt_with_usage(
+    providers: &[HttpProviderEndpoint],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<(String, String, Option<u64>), ExecutionError> {
     if timeout.is_zero() {
         return Err(ExecutionError::Timeout(0));
     }
@@ -414,7 +451,15 @@ pub fn execute_routed_http_prompt(
     .map(str::trim)
     .filter(|text| !text.is_empty())
     .ok_or_else(|| ExecutionError::InvalidResponse("missing non-empty text content".into()))?;
-    Ok((endpoint.provider.name.clone(), text.to_string()))
+    let output_tokens = match endpoint.protocol {
+        HttpProviderProtocol::OpenAiCompatible => value
+            .pointer("/usage/completion_tokens")
+            .and_then(serde_json::Value::as_u64),
+        HttpProviderProtocol::AnthropicMessages => value
+            .pointer("/usage/output_tokens")
+            .and_then(serde_json::Value::as_u64),
+    };
+    Ok((endpoint.provider.name.clone(), text.to_string(), output_tokens))
 }
 
 fn validate_http_provider_endpoint(endpoint: &HttpProviderEndpoint) -> Result<(), ExecutionError> {
@@ -729,7 +774,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains("\"model\":\"test-model\""));
             assert!(request.contains("provider prompt"));
-            let body = r#"{"choices":[{"message":{"content":"openai reply"}}]}"#;
+            let body = r#"{"choices":[{"message":{"content":"openai reply"}}],"usage":{"completion_tokens":1}}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -751,17 +796,19 @@ mod tests {
             model: "test-model".into(),
             protocol: HttpProviderProtocol::OpenAiCompatible,
         })];
-        let result = execute_routed_prompt_with_adapters(
+        let budget = TokenBudget::new(5);
+        let result = execute_routed_prompt_with_adapters_metered(
             &providers,
             &RoutingPolicy::default(),
             "provider prompt",
             std::time::Duration::from_secs(2),
+            &budget,
         )
         .expect("HTTP provider response");
         server.join().expect("server");
         assert_eq!(
             result,
-            ("local-openai-compatible".into(), "openai reply".into())
+            ("local-openai-compatible".into(), "openai reply".into(), 5)
         );
     }
 

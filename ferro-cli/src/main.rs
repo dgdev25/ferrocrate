@@ -10385,17 +10385,17 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stop");
-                runtime
-                    .stop(id, Duration::from_secs(5))
-                    .map_err(|err| err.to_string())?;
+                let timeout = parse_docker_stop_timeout(&query)?;
+                runtime.stop(id, timeout).map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/restart") => {
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/restart");
+                let timeout = parse_docker_stop_timeout(&query)?;
                 runtime
-                    .restart(id, Duration::from_secs(5))
+                    .restart(id, timeout)
                     .map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
@@ -11045,6 +11045,27 @@ fn parse_docker_limit_query(value: Option<&String>) -> Result<Option<usize>, Str
     usize::try_from(parsed)
         .map(Some)
         .map_err(|_| format!("docker: limit is too large, got {value}"))
+}
+
+/// Parse Docker's stop/restart grace period (`t`) in seconds.
+///
+/// Docker defaults this value to ten seconds and accepts zero for an
+/// immediate escalation.  Negative values (including Docker's special `-1`
+/// infinite form) are rejected until the runtime's stop primitive can model
+/// an unbounded grace period without an overflow-prone `Duration` sentinel.
+fn parse_docker_stop_timeout(query: &HashMap<String, String>) -> Result<Duration, String> {
+    let Some(value) = query.get("t") else {
+        return Ok(Duration::from_secs(10));
+    };
+    let seconds = value
+        .parse::<i64>()
+        .map_err(|_| format!("docker: stop timeout must be an integer, got {value}"))?;
+    if seconds < 0 {
+        return Err(format!(
+            "docker: stop timeout must be non-negative; unbounded timeout is unsupported: {value}"
+        ));
+    }
+    Ok(Duration::from_secs(seconds as u64))
 }
 
 fn parse_docker_filters(
@@ -12235,6 +12256,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::io::Read;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -12258,8 +12280,8 @@ mod tests {
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
         parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
-        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
+        parse_docker_stop_timeout, parse_driver_opts, parse_env_entries, parse_key_values,
+        parse_publish, parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
         read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
         remote_docker_request, remote_docker_stream_request, should_desktop_forward,
         split_path_query, structured_desktop_error, top_level_command_name,
@@ -14950,6 +14972,28 @@ volumes:
             parse_docker_limit_query(Some(&"2".to_string())).unwrap(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn docker_stop_timeout_defaults_and_rejects_unbounded_values() {
+        let empty = HashMap::new();
+        assert_eq!(
+            parse_docker_stop_timeout(&empty).unwrap(),
+            Duration::from_secs(10)
+        );
+
+        let mut query = HashMap::new();
+        query.insert("t".to_string(), "0".to_string());
+        assert_eq!(parse_docker_stop_timeout(&query).unwrap(), Duration::ZERO);
+        query.insert("t".to_string(), "7".to_string());
+        assert_eq!(
+            parse_docker_stop_timeout(&query).unwrap(),
+            Duration::from_secs(7)
+        );
+        query.insert("t".to_string(), "-1".to_string());
+        assert!(parse_docker_stop_timeout(&query).is_err());
+        query.insert("t".to_string(), "soon".to_string());
+        assert!(parse_docker_stop_timeout(&query).is_err());
     }
 
     #[test]

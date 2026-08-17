@@ -756,7 +756,10 @@ pub enum VolumeCommands {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
-    Prune,
+    Prune {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+    },
     Inspect {
         name: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -784,7 +787,10 @@ pub enum NetworkCommands {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
-    Prune,
+    Prune {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+    },
     Inspect {
         name: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -5061,10 +5067,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             request("GET", path).and_then(|body| print_json(body, "json"))
         })(),
         Commands::Volume {
-            command: VolumeCommands::Prune,
-        } => {
-            request("POST", "/volumes/prune".to_string()).and_then(|body| print_json(body, "json"))
-        }
+            command: VolumeCommands::Prune { filters },
+        } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_volume_filters(&parsed)?;
+            let path = if parsed.is_empty() {
+                "/volumes/prune".to_string()
+            } else {
+                let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+                format!(
+                    "/volumes/prune?filters={}",
+                    percent_encode_path_component(&encoded)
+                )
+            };
+            request("POST", path).and_then(|body| print_json(body, "json"))
+        })(),
         Commands::Volume {
             command: VolumeCommands::Inspect { name, format },
         } => request(
@@ -5116,10 +5133,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         )
         .map(|_| ()),
         Commands::Network {
-            command: NetworkCommands::Prune,
-        } => {
-            request("POST", "/networks/prune".to_string()).and_then(|body| print_json(body, "json"))
-        }
+            command: NetworkCommands::Prune { filters },
+        } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_network_filters(&parsed)?;
+            let path = if parsed.is_empty() {
+                "/networks/prune".to_string()
+            } else {
+                let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+                format!(
+                    "/networks/prune?filters={}",
+                    percent_encode_path_component(&encoded)
+                )
+            };
+            request("POST", path).and_then(|body| print_json(body, "json"))
+        })(),
         Commands::Volume {
             command: VolumeCommands::Create { name, driver, opts },
         } => {
@@ -7024,9 +7052,16 @@ fn handle_volume_authorized(
                 println!("Mountpoint: {}", payload["Mountpoint"]);
             }
         }
-        VolumeCommands::Prune => {
+        VolumeCommands::Prune { filters } => {
+            let filters = parse_cli_filters(&filters)?;
+            validate_docker_volume_filters(&filters)?;
             let mut deleted = Vec::new();
-            for record in store.list().map_err(|error| error.to_string())? {
+            for record in store
+                .list()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|record| docker_volume_matches_filters(record, &filters))
+            {
                 let proof = authorization
                     .authorize_named(
                         origin,
@@ -7487,12 +7522,21 @@ fn handle_network_authorized(
             execute_network_remove(runtime_dir, &stored, &associations, proof)?;
             println!("network rm: {name}");
         }
-        NetworkCommands::Prune => {
+        NetworkCommands::Prune { filters } => {
+            let filters = parse_cli_filters(&filters)?;
+            validate_docker_network_filters(&filters)?;
             let associations = runtime.list().map_err(|err| err.to_string())?;
             let records = load_networks(runtime_dir)?;
             let mut deleted = Vec::new();
             for record in records.into_iter().filter(|record| {
                 !is_builtin_network_mode(&record.name)
+                    && docker_network_matches_filters(
+                        &DockerNetworkView {
+                            name: &record.name,
+                            driver: &record.driver,
+                        },
+                        &filters,
+                    )
                     && !associations.iter().any(|container| {
                         container.network_name.as_deref() == Some(record.name.as_str())
                     })
@@ -12999,7 +13043,7 @@ volumes:
         let prune = Cli::parse_from(["ferrocrate", "network", "prune"]);
         match prune.command {
             Commands::Network { command } => {
-                assert!(matches!(command, NetworkCommands::Prune))
+                assert!(matches!(command, NetworkCommands::Prune { filters } if filters.is_empty()))
             }
             _ => panic!("unexpected command"),
         }
@@ -13007,7 +13051,7 @@ volumes:
         let prune = Cli::parse_from(["ferrocrate", "volume", "prune"]);
         match prune.command {
             Commands::Volume { command } => {
-                assert!(matches!(command, VolumeCommands::Prune))
+                assert!(matches!(command, VolumeCommands::Prune { filters } if filters.is_empty()))
             }
             _ => panic!("unexpected command"),
         }

@@ -20,7 +20,10 @@ pub struct AnomalyScore {
 
 impl AnomalyScore {
     pub fn is_anomalous(&self) -> bool {
-        self.score > self.threshold
+        // Z-scores are signed: unusually low values are just as anomalous as
+        // unusually high values. Reconstruction/error scores are non-negative,
+        // so the same magnitude comparison remains correct for neural models.
+        self.score.abs() > self.threshold.abs()
     }
 }
 
@@ -838,6 +841,10 @@ mod tests {
         // Z-score of 5.0 with threshold 3.0 IS anomalous
         let anomalous = zscore(5.0, 0.0, 1.0, 3.0);
         assert!(anomalous.is_anomalous());
+
+        // A sharp drop below the baseline must not be silently ignored.
+        let low_anomaly = zscore(-5.0, 0.0, 1.0, 3.0);
+        assert!(low_anomaly.is_anomalous());
     }
 
     #[test]

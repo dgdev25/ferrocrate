@@ -75,6 +75,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: r#"{"Image":"busybox","Cmd":["true"]}"#,
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/prune",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/networks",
         coverage: Coverage::Implemented,

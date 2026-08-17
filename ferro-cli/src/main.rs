@@ -294,6 +294,12 @@ pub enum Commands {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Remove stopped containers that match Docker prune filters.
+    #[cfg(target_os = "linux")]
+    ContainerPrune {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+    },
     /// Read the durable Docker-compatible event stream.
     #[cfg(target_os = "linux")]
     Events {
@@ -2785,6 +2791,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &filters,
             ),
             #[cfg(target_os = "linux")]
+            Commands::ContainerPrune { filters } => handle_container_prune(&runtime, &filters),
+            #[cfg(target_os = "linux")]
             Commands::Events {
                 since,
                 until,
@@ -4734,6 +4742,19 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             }
             request("GET", path).and_then(|body| print_json(body, format))
         })(),
+        Commands::ContainerPrune { filters } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_container_prune_filters(&parsed)?;
+            let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+            request(
+                "POST",
+                format!(
+                    "/containers/prune?filters={}",
+                    percent_encode_path_component(&encoded)
+                ),
+            )
+            .and_then(|body| print_json(body, "json"))
+        })(),
         Commands::Events {
             since,
             until,
@@ -6634,6 +6655,30 @@ fn handle_containers(
             name
         );
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_container_prune(
+    runtime: &ContainerRuntime,
+    filter_values: &[String],
+) -> Result<(), String> {
+    let filters = parse_cli_filters(filter_values)?;
+    validate_docker_container_prune_filters(&filters)?;
+    let records = runtime
+        .list()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| docker_container_prune_matches_filters(record, &filters))
+        .collect::<Vec<_>>();
+    let mut deleted = Vec::new();
+    for record in records {
+        runtime
+            .remove(&record.id)
+            .map_err(|error| error.to_string())?;
+        deleted.push(record.id);
+    }
+    println!("container prune: removed={}", deleted.len());
     Ok(())
 }
 
@@ -10146,6 +10191,28 @@ fn handle_docker_compat_connection(
                 let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
+            ("POST", "/containers/prune") => {
+                let filters = parse_docker_filters(&query)?;
+                validate_docker_container_prune_filters(&filters)?;
+                let records = runtime
+                    .list()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|record| docker_container_prune_matches_filters(record, &filters))
+                    .collect::<Vec<_>>();
+                let mut deleted = Vec::new();
+                for record in records {
+                    runtime
+                        .remove(&record.id)
+                        .map_err(|error| error.to_string())?;
+                    deleted.push(record.id);
+                }
+                let body = serde_json::json!({
+                    "ContainersDeleted": deleted,
+                    "SpaceReclaimed": 0
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/exec") => {
                 let container = path
                     .trim_start_matches("/containers/")
@@ -11045,6 +11112,62 @@ fn validate_docker_container_filters(filters: &HashMap<String, Vec<String>>) -> 
         }
     }
     Ok(())
+}
+
+fn validate_docker_container_prune_filters(
+    filters: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    for key in filters.keys() {
+        if !matches!(key.as_str(), "label" | "until") {
+            return Err(format!(
+                "docker: container prune filter `{key}` is unsupported; supported filters: label, until"
+            ));
+        }
+    }
+    if let Some(values) = filters.get("until") {
+        if values.len() > 1 {
+            return Err(
+                "docker: container prune until filter accepts at most one selector".to_string(),
+            );
+        }
+        if let Some(value) = values.first() {
+            value.parse::<u64>().map_err(|_| {
+                format!("docker: container prune until filter must be a Unix timestamp: {value}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn docker_container_prune_matches_filters(
+    record: &ferro_core::container_store::ContainerRecord,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    if matches!(record.status.as_str(), "running" | "paused") {
+        return false;
+    }
+    if let Some(until) = filters.get("until").and_then(|values| values.first()) {
+        let Ok(until) = until.parse::<u64>() else {
+            return false;
+        };
+        if record.created_at_unix >= until {
+            return false;
+        }
+    }
+    if let Some(labels) = filters.get("label") {
+        for selector in labels {
+            let mut parts = selector.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let matched = record
+                .labels
+                .get(key)
+                .is_some_and(|actual| parts.next().is_none_or(|expected| actual == expected));
+            if !matched {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(target_os = "linux")]
@@ -12049,11 +12172,11 @@ mod tests {
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
         context_endpoint_available, decode_docker_raw_stream, desktop_forward_enabled,
         discover_rootless_socket, dispatch, dispatch_remote_context, docker_chunked_headers,
-        docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
-        docker_event_resource, docker_event_response_attributes, docker_hijack_headers,
-        docker_image_apply_time_bounds, docker_image_matches_filters,
-        docker_image_prune_matches_filters, docker_network_ipv6_config,
-        docker_network_matches_filters, docker_pending_inspect_payload,
+        docker_container_apply_time_bounds, docker_container_matches_filters,
+        docker_container_prune_matches_filters, docker_event_payload, docker_event_resource,
+        docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
+        docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
         docker_pending_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
         docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
         ensure_context_routing_available, handle_build, handle_containers, handle_context,
@@ -12069,7 +12192,8 @@ mod tests {
         read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
         remote_docker_request, remote_docker_stream_request, should_desktop_forward,
         split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
+        validate_build_platform, validate_docker_container_name,
+        validate_docker_container_prune_filters, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
         validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
@@ -14553,6 +14677,36 @@ volumes:
         assert!(docker_container_matches_filters(&record, &filters));
         record.status = "exited".to_string();
         assert!(!docker_container_matches_filters(&record, &filters));
+    }
+
+    #[test]
+    fn docker_container_prune_filters_only_stopped_matching_records() {
+        let mut record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "abc",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": [],
+                "created_at_unix": 10,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited"
+            }))
+            .expect("record");
+        record.labels.insert("tier".into(), "frontend".into());
+        let filters = serde_json::from_value(serde_json::json!({
+            "until": ["20"],
+            "label": ["tier=frontend"]
+        }))
+        .expect("filters");
+        validate_docker_container_prune_filters(&filters).expect("valid filters");
+        assert!(docker_container_prune_matches_filters(&record, &filters));
+
+        record.status = "running".to_string();
+        assert!(!docker_container_prune_matches_filters(&record, &filters));
+        record.status = "exited".to_string();
+        record.created_at_unix = 20;
+        assert!(!docker_container_prune_matches_filters(&record, &filters));
     }
 
     #[test]

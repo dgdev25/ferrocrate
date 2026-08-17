@@ -369,6 +369,8 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     Kill {
         container: String,
+        #[arg(long, default_value = "SIGKILL")]
+        signal: String,
     },
     #[cfg(target_os = "linux")]
     Rm {
@@ -2845,7 +2847,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Stop { container, timeout } => handle_stop(&runtime, &container, timeout),
             #[cfg(target_os = "linux")]
-            Commands::Kill { container } => handle_kill(&runtime, &container),
+            Commands::Kill { container, signal } => handle_kill(&runtime, &container, &signal),
             #[cfg(target_os = "linux")]
             Commands::Rm { container } => handle_rm(&runtime, &container),
             #[cfg(target_os = "linux")]
@@ -5010,11 +5012,12 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .map(|_| ()),
-        Commands::Kill { container } => request(
+        Commands::Kill { container, signal } => request(
             "POST",
             format!(
-                "/containers/{}/kill",
-                percent_encode_path_component(container)
+                "/containers/{}/kill?signal={}",
+                percent_encode_path_component(container),
+                percent_encode_path_component(signal)
             ),
         )
         .map(|_| ()),
@@ -6951,12 +6954,19 @@ fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Res
 }
 
 #[cfg(target_os = "linux")]
-fn handle_kill(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+fn handle_kill(
+    runtime: &ContainerRuntime,
+    container: &str,
+    signal_name: &str,
+) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("kill: container is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
-    runtime.kill(&resolved).map_err(|err| err.to_string())?;
+    let signal = parse_docker_kill_signal(Some(&signal_name.to_string()))?;
+    runtime
+        .kill_with_signal(&resolved, signal)
+        .map_err(|err| err.to_string())?;
     println!("kill: {resolved}");
     Ok(())
 }
@@ -13145,7 +13155,10 @@ volumes:
     fn parses_kill_command() {
         let cli = Cli::parse_from(["ferrocrate", "kill", "abc123"]);
         match cli.command {
-            Commands::Kill { container } => assert_eq!(container, "abc123"),
+            Commands::Kill { container, signal } => {
+                assert_eq!(container, "abc123");
+                assert_eq!(signal, "SIGKILL");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -14219,7 +14232,7 @@ volumes:
         let err = handle_stop(&runtime, "", 1).expect_err("stop requires container");
         assert!(err.contains("stop: container is required"));
 
-        let err = handle_kill(&runtime, "").expect_err("kill requires container");
+        let err = handle_kill(&runtime, "", "SIGKILL").expect_err("kill requires container");
         assert!(err.contains("kill: container is required"));
 
         let err = handle_pause(&runtime, "").expect_err("pause requires container");

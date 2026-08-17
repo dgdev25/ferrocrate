@@ -2800,6 +2800,18 @@ pub mod quantize {
         })
     }
 
+    /// Train a quantizer and enforce the publication quality policy before
+    /// returning it to a caller.
+    pub fn train_quantizer_with_policy(
+        vectors: &[Vec<f32>],
+        method: Method,
+        policy: QuantizationPolicy,
+    ) -> Result<QuantSummary, String> {
+        let summary = train_quantizer(vectors, method)?;
+        summary.enforce_policy(policy)?;
+        Ok(summary)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2863,6 +2875,17 @@ pub mod quantize {
                 })
                 .expect_err("error gate");
             assert!(error.contains("reconstruction error"));
+
+            let error = train_quantizer_with_policy(
+                &vectors,
+                Method::Scalar8bit,
+                QuantizationPolicy {
+                    min_compression_ratio: 100.0,
+                    max_abs_error: 1.0,
+                },
+            )
+            .expect_err("training entry point must enforce policy");
+            assert!(error.contains("compression ratio"));
         }
     }
 }

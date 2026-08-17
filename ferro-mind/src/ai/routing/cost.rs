@@ -74,6 +74,8 @@ pub enum ExecutionError {
     HttpStatus { status: u16, body: String },
     #[error("provider returned an invalid response: {0}")]
     InvalidResponse(String),
+    #[error("provider endpoint is invalid: {0}")]
+    InvalidEndpoint(String),
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +278,8 @@ pub fn execute_routed_http_prompt(
         .find(|entry| entry.provider.name == selected.name)
         .ok_or(ExecutionError::NoProvider)?;
 
+    validate_http_provider_endpoint(endpoint)?;
+
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
@@ -328,6 +332,36 @@ pub fn execute_routed_http_prompt(
     .filter(|text| !text.is_empty())
     .ok_or_else(|| ExecutionError::InvalidResponse("missing non-empty text content".into()))?;
     Ok((endpoint.provider.name.clone(), text.to_string()))
+}
+
+fn validate_http_provider_endpoint(endpoint: &HttpProviderEndpoint) -> Result<(), ExecutionError> {
+    let url = reqwest::Url::parse(&endpoint.url)
+        .map_err(|error| ExecutionError::InvalidEndpoint(error.to_string()))?;
+    if url.username() != "" || url.password().is_some() {
+        return Err(ExecutionError::InvalidEndpoint(
+            "credentials in provider URL are not allowed; use api_key".into(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(ExecutionError::InvalidEndpoint(
+            "URL fragments are not allowed".into(),
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| ExecutionError::InvalidEndpoint("provider URL has no host".into()))?;
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err(ExecutionError::InvalidEndpoint(
+            "HTTPS is required for non-loopback provider endpoints".into(),
+        ));
+    }
+    if endpoint.api_key.as_deref().is_some_and(str::is_empty) {
+        return Err(ExecutionError::InvalidEndpoint(
+            "api_key must not be empty".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn provider_score(
@@ -481,6 +515,54 @@ mod tests {
         )
         .expect_err("zero timeout must fail closed");
         assert!(matches!(error, ExecutionError::Timeout(0)));
+    }
+
+    #[test]
+    fn provider_endpoint_validation_requires_tls_off_loopback() {
+        let endpoint = HttpProviderEndpoint {
+            provider: Provider {
+                name: "remote".into(),
+                cost_per_1k_tokens: 1.0,
+                quality: 0.9,
+                avg_latency_ms: 100,
+                local: false,
+            },
+            url: "http://models.example.invalid/v1/chat/completions".into(),
+            api_key: Some("key".into()),
+            model: "model".into(),
+            protocol: HttpProviderProtocol::OpenAiCompatible,
+        };
+        let error = validate_http_provider_endpoint(&endpoint).expect_err("TLS required");
+        assert!(
+            matches!(error, ExecutionError::InvalidEndpoint(message) if message.contains("HTTPS"))
+        );
+    }
+
+    #[test]
+    fn provider_endpoint_validation_rejects_url_credentials_and_empty_keys() {
+        let mut endpoint = HttpProviderEndpoint {
+            provider: Provider {
+                name: "local".into(),
+                cost_per_1k_tokens: 0.0,
+                quality: 0.9,
+                avg_latency_ms: 10,
+                local: true,
+            },
+            url: "http://user:password@127.0.0.1:8080".into(),
+            api_key: Some("key".into()),
+            model: "model".into(),
+            protocol: HttpProviderProtocol::OpenAiCompatible,
+        };
+        let error = validate_http_provider_endpoint(&endpoint).expect_err("URL credentials");
+        assert!(
+            matches!(error, ExecutionError::InvalidEndpoint(message) if message.contains("credentials"))
+        );
+        endpoint.url = "http://127.0.0.1:8080".into();
+        endpoint.api_key = Some(String::new());
+        let error = validate_http_provider_endpoint(&endpoint).expect_err("empty key");
+        assert!(
+            matches!(error, ExecutionError::InvalidEndpoint(message) if message.contains("empty"))
+        );
     }
 
     #[test]

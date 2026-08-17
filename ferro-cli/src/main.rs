@@ -10731,9 +10731,9 @@ fn handle_docker_compat_connection(
                     .map(String::as_str)
                     .unwrap_or("not-running");
                 if !matches!(condition, "not-running" | "next-exit" | "removed") {
-                        return Err(format!(
-                            "docker: wait condition is unsupported: {condition}"
-                        ));
+                    return Err(format!(
+                        "docker: wait condition is unsupported: {condition}"
+                    ));
                 }
                 let timeout = query
                     .get("timeout")
@@ -10771,6 +10771,14 @@ fn handle_docker_compat_connection(
                                     format!("docker: pending lock poisoned: {lock_error}")
                                 })?
                                 .contains_key(id);
+                            if condition != "removed" && !pending {
+                                // A missing container cannot ever satisfy a
+                                // non-removal wait condition. Return the
+                                // Docker-compatible 404 immediately instead
+                                // of polling for the default 30-second
+                                // pre-start window.
+                                return Err(error.to_string());
+                            }
                             if condition == "removed" && !observed && pending {
                                 // Docker CLI sends wait before start. Return
                                 // the provisional removed result so it can

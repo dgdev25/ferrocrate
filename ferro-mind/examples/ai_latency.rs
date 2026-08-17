@@ -1,6 +1,30 @@
 use ferro_mind::wasm::{LinearWasmEngine, WasmInferenceEngine, WasmRequest};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+fn latency_model_path() -> std::path::PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "ferro-mind-latency-model-{}-{timestamp}-{sequence}.json",
+        std::process::id()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn model_paths_are_unique_per_invocation() {
+        let first = super::latency_model_path();
+        let second = super::latency_model_path();
+        assert_ne!(first, second);
+    }
+}
 
 fn main() {
     let iterations: u64 = std::env::var("FERROCRATE_AI_ITER")
@@ -8,8 +32,12 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10_000);
 
-    let model_path = std::env::temp_dir().join("ferro-mind-latency-model.json");
-    let mut model = std::fs::File::create(&model_path).expect("create model");
+    let model_path = latency_model_path();
+    let mut model = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&model_path)
+        .expect("create model");
     model
         .write_all(
             br#"{"input_dim":3,"output_dim":2,"weights":[1.0,2.0,3.0,-1.0,0.5,0.0],"bias":[0.5,1.0]}"#,
@@ -34,4 +62,5 @@ fn main() {
     let elapsed = start.elapsed().as_nanos();
     let per = elapsed / iterations as u128;
     println!("perf.ai_inference_ns={}", per);
+    let _ = std::fs::remove_file(model_path);
 }

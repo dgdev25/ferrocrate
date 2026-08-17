@@ -182,7 +182,7 @@ impl Drop for RvfStore {
 
 #[cfg(test)]
 mod tests {
-    use super::RvfStore;
+    use super::{stable_id, RvfStore};
     use rvf_runtime::options::CompressionProfile;
 
     #[test]
@@ -201,6 +201,36 @@ mod tests {
             let hits = store.search(&[1.0, 0.0, 0.0], 1).expect("query");
             assert_eq!(hits.len(), 1);
         }
+    }
+
+    #[test]
+    fn persists_and_queries_a_thousand_vectors_after_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("large-memory.rvf");
+        let dimensions = 8;
+        let target = {
+            let store = RvfStore::open_or_create(&path, dimensions).expect("create");
+            for index in 0..1_000u32 {
+                let mut vector = [0.0_f32; 8];
+                vector[(index as usize) % dimensions] = 1.0;
+                vector[((index as usize) + 1) % dimensions] = (index + 1) as f32;
+                store
+                    .insert(Some(&format!("vector-{index}")), &vector)
+                    .expect("insert vector");
+            }
+            assert_eq!(store.len(), 1_000);
+            [1_000.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        };
+
+        let reopened = RvfStore::open_or_create(&path, dimensions).expect("reopen");
+        assert_eq!(reopened.len(), 1_000);
+        let hits = reopened.search(&target, 10).expect("query after restart");
+        assert_eq!(hits.len(), 10);
+        let expected_id = stable_id(
+            Some("vector-999"),
+            &[1_000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        );
+        assert!(hits.iter().any(|hit| hit.id == expected_id.to_string()));
     }
 
     #[test]

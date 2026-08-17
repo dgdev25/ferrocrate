@@ -25,11 +25,34 @@ before_iptables="$(mktemp)"
 before_nft="$(mktemp)"
 after_iptables="$(mktemp)"
 after_nft="$(mktemp)"
+reserved_ports_path="/proc/sys/net/ipv4/ip_local_reserved_ports"
+reserved_ports_before="$(cat "$reserved_ports_path" 2>/dev/null || true)"
+reserved_ports_changed=0
 cleanup() {
+  if [[ "$reserved_ports_changed" -eq 1 ]]; then
+    printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
+  fi
   rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft"
   rm -rf "/sys/fs/bpf/ferrocrate/${FERRO_EBPF_TEST_NETWORK_ID}" || true
 }
 trap cleanup EXIT
+
+# The eBPF loader refuses to allocate a SNAT port unless the complete range is
+# reserved by the host. Qualification owns only the explicit test range and
+# restores the exact prior sysctl value in the EXIT trap.
+reserved_ports_value="$reserved_ports_before"
+case ",$reserved_ports_before," in
+  *",${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END},"*) ;;
+  *)
+    if [[ -n "$reserved_ports_value" ]]; then
+      reserved_ports_value+=","
+    fi
+    reserved_ports_value+="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
+    printf '%s\n' "$reserved_ports_value" >"$reserved_ports_path" \
+      || fail "could not reserve SNAT range ${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
+    reserved_ports_changed=1
+    ;;
+esac
 
 iptables-save >"$before_iptables" 2>/dev/null || true
 nft list ruleset >"$before_nft" 2>/dev/null || true

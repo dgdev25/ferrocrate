@@ -4532,7 +4532,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 (!tmpfs_mounts.is_empty(), "--tmpfs"),
                 (*profile != "dev", "--profile"),
                 (!annotations.is_empty(), "--annotation"),
-                (!cap_add.is_empty(), "--cap-add"),
                 (
                     health_cmd.is_some()
                         || health_interval.is_some()
@@ -4596,6 +4595,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "PortBindings": port_bindings,
                     "NetworkMode": network_mode,
                     "ReadonlyRootfs": read_only_rootfs,
+                    "CapAdd": cap_add,
                     "SecurityOpt": if *no_new_privs {
                         vec!["no-new-privileges".to_string()]
                     } else {
@@ -15602,6 +15602,8 @@ volumes:
             "8080:80/tcp",
             "--read-only",
             "--no-new-privileges",
+            "--cap-add",
+            "NET_ADMIN",
             "echo",
             "ready",
         ])
@@ -15616,6 +15618,7 @@ volumes:
         assert!(create.contains("\"Image\":\"alpine:latest\""));
         assert!(create.contains("\"NetworkMode\":\"bridge\""));
         assert!(create.contains("\"ReadonlyRootfs\":true"));
+        assert!(create.contains("\"CapAdd\":[\"NET_ADMIN\"]"));
         assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));

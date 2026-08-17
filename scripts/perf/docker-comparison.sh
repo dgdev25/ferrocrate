@@ -76,7 +76,14 @@ ferro_run="$ferro_env $ferro_bin run --rm --network bridge --network-backend ipt
 
 # 1. Pull (Docker's daemon cache and Ferrocrate's isolated store are called out
 # explicitly in the report; this is a warm-cache operation after preparation).
-docker pull "$image" >/dev/null
+# A cached image is sufficient for this benchmark.  Docker Hub rate limiting
+# must not make an otherwise reproducible local comparison impossible.
+if ! docker pull "$image" >/dev/null 2>&1; then
+  docker image inspect "$image" >/dev/null 2>&1 || {
+    echo "image $image is unavailable locally and could not be pulled" >&2
+    exit 1
+  }
+fi
 eval "$ferro_env $ferro_bin pull '$image'" >/dev/null 2>&1 || true
 record "image pull (warm)" "docker pull '$image'" "$ferro_env $ferro_bin pull '$image'" "Docker uses its daemon store; Ferrocrate uses an isolated runtime store."
 

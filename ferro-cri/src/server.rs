@@ -1,18 +1,20 @@
 use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
-    Container, ContainerMetadata, ContainerState, ContainerStatus, ContainerStatusRequest,
-    ContainerStatusResponse, CreateContainerRequest, CreateContainerResponse, ExecSyncRequest,
-    ExecSyncResponse, FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse,
-    ImageStatusRequest, ImageStatusResponse, ListContainersRequest, ListContainersResponse,
-    ListImagesRequest, ListImagesResponse, ListPodSandboxRequest, ListPodSandboxResponse,
-    PodSandbox, PodSandboxState, PodSandboxStatus, PodSandboxStatusRequest,
-    PodSandboxStatusResponse, PullImageRequest, PullImageResponse, RemoveContainerRequest,
-    RemoveContainerResponse, RemoveImageRequest, RemoveImageResponse, RemovePodSandboxRequest,
-    RemovePodSandboxResponse, RunPodSandboxRequest, RunPodSandboxResponse, RuntimeCondition,
-    RuntimeStatus, StartContainerRequest, StartContainerResponse, StatusRequest, StatusResponse,
-    StopContainerRequest, StopContainerResponse, StopPodSandboxRequest, StopPodSandboxResponse,
-    VersionRequest, VersionResponse,
+    Container, ContainerMetadata, ContainerState, ContainerStats, ContainerStatsRequest,
+    ContainerStatsResponse, ContainerStatus, ContainerStatusRequest, ContainerStatusResponse,
+    CpuUsage, CreateContainerRequest, CreateContainerResponse, ExecSyncRequest, ExecSyncResponse,
+    FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
+    ImageStatusResponse, ListContainerStatsRequest, ListContainerStatsResponse,
+    ListContainersRequest, ListContainersResponse, ListImagesRequest, ListImagesResponse,
+    ListPodSandboxRequest, ListPodSandboxResponse, MemoryUsage, PodSandbox, PodSandboxState,
+    PodSandboxStatus, PodSandboxStatusRequest, PodSandboxStatusResponse, PullImageRequest,
+    PullImageResponse, RemoveContainerRequest, RemoveContainerResponse, RemoveImageRequest,
+    RemoveImageResponse, RemovePodSandboxRequest, RemovePodSandboxResponse, RunPodSandboxRequest,
+    RunPodSandboxResponse, RuntimeCondition, RuntimeStatus, StartContainerRequest,
+    StartContainerResponse, StatusRequest, StatusResponse, StopContainerRequest,
+    StopContainerResponse, StopPodSandboxRequest, StopPodSandboxResponse, VersionRequest,
+    VersionResponse,
 };
 pub use ferro_core::authorization::cri_delegation::{
     CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,
@@ -549,6 +551,61 @@ struct ContainerSpecRecord {
     env: Vec<String>,
     runtime_id: Option<String>,
     created_at_unix: u64,
+}
+
+#[allow(clippy::result_large_err)]
+fn project_container_stats(
+    runtime_dir: &Path,
+    record: &ContainerSpecRecord,
+) -> Result<ContainerStats, Status> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64;
+    let cgroup =
+        if let Some(runtime_id) = record.runtime_id.as_deref() {
+            let runtime = ferro_core::runtime::ContainerRuntime::new(runtime_dir)
+                .map_err(|error| Status::internal(error.to_string()))?;
+            Some(runtime.stats(runtime_id).map_err(|error| {
+                Status::internal(format!("read container cgroup stats: {error}"))
+            })?)
+        } else {
+            None
+        };
+    let memory_current = cgroup
+        .as_ref()
+        .and_then(|stats| stats.memory_current)
+        .unwrap_or(0);
+    let memory_max = cgroup
+        .as_ref()
+        .and_then(|stats| stats.memory_max)
+        .unwrap_or(0);
+    let cpu_usage = cgroup
+        .as_ref()
+        .and_then(|stats| stats.cpu_usage_usec)
+        .unwrap_or(0)
+        .saturating_mul(1_000);
+    Ok(ContainerStats {
+        id: record.id.clone(),
+        metadata: Some(ContainerMetadata {
+            name: record.name.clone(),
+            attempt: 0,
+        }),
+        stats_timestamp: timestamp,
+        cpu: Some(CpuUsage {
+            timestamp,
+            usage_core_nano_seconds: cpu_usage,
+            usage_nano_cores: 0,
+        }),
+        memory: Some(MemoryUsage {
+            timestamp,
+            working_set_bytes: memory_current,
+            available_bytes: memory_max.saturating_sub(memory_current),
+            usage_bytes: memory_current,
+            rss_bytes: memory_current,
+        }),
+    })
 }
 
 fn container_state_path(runtime_dir: &Path) -> std::path::PathBuf {
@@ -1262,6 +1319,90 @@ impl RuntimeService for CriRuntime {
                 .then_with(|| left.id.cmp(&right.id))
         });
         Ok(Response::new(ListContainersResponse { containers }))
+    }
+
+    async fn container_stats(
+        &self,
+        request: Request<ContainerStatsRequest>,
+    ) -> Result<Response<ContainerStatsResponse>, Status> {
+        let id = request.into_inner().container_id;
+        if id.trim().is_empty() {
+            return Err(Status::invalid_argument("container ID is required"));
+        }
+        let record = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("container not found"))?;
+        Ok(Response::new(ContainerStatsResponse {
+            stats: Some(project_container_stats(&self.runtime_dir, &record)?),
+        }))
+    }
+
+    async fn list_container_stats(
+        &self,
+        request: Request<ListContainerStatsRequest>,
+    ) -> Result<Response<ListContainerStatsResponse>, Status> {
+        let filter = request.into_inner().filter;
+        if let Some(filter) = filter.as_ref() {
+            if !matches!(filter.state, 0..=3) {
+                return Err(Status::invalid_argument(
+                    "unsupported container state filter",
+                ));
+            }
+        }
+        let records: Vec<_> = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .values()
+            .cloned()
+            .collect();
+        let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let mut stats = Vec::with_capacity(records.len());
+        for record in records {
+            if let Some(filter) = filter.as_ref() {
+                if !filter.id.is_empty() && filter.id != record.id {
+                    continue;
+                }
+                if !filter.pod_sandbox_id.is_empty() && filter.pod_sandbox_id != record.sandbox_id {
+                    continue;
+                }
+            }
+            let state = match record
+                .runtime_id
+                .as_deref()
+                .and_then(|runtime_id| runtime.inspect(runtime_id).ok())
+                .as_ref()
+                .map(|value| value.status.as_str())
+            {
+                Some("running") => ContainerState::Running,
+                Some("exited") | Some("stopped") => ContainerState::Exited,
+                _ => ContainerState::Created,
+            };
+            if let Some(filter) = filter.as_ref() {
+                if filter.state != 0 && filter.state != state as i32 {
+                    continue;
+                }
+            }
+            stats.push(project_container_stats(&self.runtime_dir, &record)?);
+        }
+        stats.sort_by(|left, right| {
+            left.metadata
+                .as_ref()
+                .map(|metadata| metadata.name.as_str())
+                .cmp(
+                    &right
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.name.as_str()),
+                )
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(Response::new(ListContainerStatsResponse { stats }))
     }
 
     async fn start_container(
@@ -2017,9 +2158,10 @@ mod tests {
         assert_eq!(error, "pod sandbox network namespace is missing");
     }
     use crate::runtime::{
-        ContainerConfig, CreateContainerRequest, ImageFsInfoRequest, ImageSpec, ImageStatusRequest,
-        ListContainersRequest, ListImagesRequest, PodSandboxConfig, PullImageRequest,
-        RemoveContainerRequest, RemoveImageRequest,
+        ContainerConfig, ContainerStatsRequest, CreateContainerRequest, ImageFsInfoRequest,
+        ImageSpec, ImageStatusRequest, ListContainerStatsRequest, ListContainersRequest,
+        ListImagesRequest, PodSandboxConfig, PullImageRequest, RemoveContainerRequest,
+        RemoveImageRequest,
     };
     use tonic::Request;
 
@@ -2434,6 +2576,31 @@ mod tests {
             .into_inner();
         assert_eq!(filtered.containers.len(), 1);
         assert_eq!(filtered.containers[0].id, "cri-c-b");
+
+        let single = runtime
+            .container_stats(Request::new(ContainerStatsRequest {
+                container_id: "cri-c-a".into(),
+            }))
+            .await
+            .expect("container stats")
+            .into_inner()
+            .stats
+            .expect("stats projection");
+        assert!(single.stats_timestamp > 0);
+        assert_eq!(single.memory.expect("memory stats").usage_bytes, 0);
+        let stats = runtime
+            .list_container_stats(Request::new(ListContainerStatsRequest {
+                filter: Some(crate::runtime::ContainerFilter {
+                    id: String::new(),
+                    pod_sandbox_id: "cri-sandbox-b".into(),
+                    state: ContainerState::Created as i32,
+                }),
+            }))
+            .await
+            .expect("list container stats")
+            .into_inner();
+        assert_eq!(stats.stats.len(), 1);
+        assert_eq!(stats.stats[0].id, "cri-c-b");
     }
 
     #[tokio::test]

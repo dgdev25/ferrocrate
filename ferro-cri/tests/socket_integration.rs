@@ -7,11 +7,11 @@ use ferro_core::witness::{JournalConfig, JournalMode, WitnessJournal};
 use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
 use ferro_cri::runtime::{
-    ContainerConfig, ContainerStatusRequest, CreateContainerRequest, ImageFsInfoRequest,
-    ListContainersRequest, ListImagesRequest, ListPodSandboxRequest, PodSandboxConfig,
-    PodSandboxMetadata, PodSandboxStatusRequest, RemoveContainerRequest, RemovePodSandboxRequest,
-    RunPodSandboxRequest, StartContainerRequest, StatusRequest, StopPodSandboxRequest,
-    VersionRequest,
+    ContainerConfig, ContainerStatsRequest, ContainerStatusRequest, CreateContainerRequest,
+    ImageFsInfoRequest, ListContainerStatsRequest, ListContainersRequest, ListImagesRequest,
+    ListPodSandboxRequest, PodSandboxConfig, PodSandboxMetadata, PodSandboxStatusRequest,
+    RemoveContainerRequest, RemovePodSandboxRequest, RunPodSandboxRequest, StartContainerRequest,
+    StatusRequest, StopPodSandboxRequest, VersionRequest,
 };
 use ferro_cri::runtime::{ImageSpec, PullImageRequest, RemoveImageRequest};
 use ferro_cri::server::{
@@ -552,6 +552,21 @@ async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
             .name,
         "wire-container"
     );
+    let stats = client
+        .container_stats(ContainerStatsRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect("container stats rpc")
+        .into_inner();
+    assert!(stats.stats.expect("stats projection").stats_timestamp > 0);
+    let listed_stats = client
+        .list_container_stats(ListContainerStatsRequest { filter: None })
+        .await
+        .expect("list container stats rpc")
+        .into_inner();
+    assert_eq!(listed_stats.stats.len(), 1);
+    assert_eq!(listed_stats.stats[0].id, container);
     assert_eq!(
         client
             .container_status(ContainerStatusRequest {

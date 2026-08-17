@@ -237,6 +237,8 @@ pub enum Commands {
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
+        #[arg(long = "filter")]
+        filters: Vec<String>,
     },
     ImageInspect {
         image: String,
@@ -2728,7 +2730,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &build_context,
                 &secret,
             ),
-            Commands::Images { format } => handle_images(&image_store, &format),
+            Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
             Commands::ImageInspect { image, format } => {
                 handle_image_inspect(&image_store, &image, &format)
@@ -2966,7 +2968,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         let image_store = LocalImageStore::open(image_store_path).map_err(|err| err.to_string())?;
 
         match command {
-            Commands::Images { format } => handle_images(&image_store, &format),
+            Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
             Commands::Rmi { image } => handle_rmi(&image_store, &image),
             Commands::ImagePrune { filters } => handle_image_prune(&image_store, &filters),
             Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
@@ -4599,9 +4601,20 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             println!("run: id={id}");
             Ok(())
         })(),
-        Commands::Images { format } => {
-            request("GET", "/images/json".to_string()).and_then(|body| print_json(body, format))
-        }
+        Commands::Images { format, filters } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_image_filters(&parsed)?;
+            let path = if parsed.is_empty() {
+                "/images/json".to_string()
+            } else {
+                let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+                format!(
+                    "/images/json?filters={}",
+                    percent_encode_path_component(&encoded)
+                )
+            };
+            request("GET", path).and_then(|body| print_json(body, format))
+        })(),
         Commands::History { image, format } => request(
             "GET",
             format!("/images/{}/history", percent_encode_path_component(image)),
@@ -6116,8 +6129,22 @@ fn color_status(status: &str) -> String {
     }
 }
 
-fn handle_images(store: &LocalImageStore, format: &str) -> Result<(), String> {
-    let records = store.list_references().map_err(|err| err.to_string())?;
+fn handle_images(
+    store: &LocalImageStore,
+    format: &str,
+    filter_values: &[String],
+) -> Result<(), String> {
+    let filters = parse_cli_filters(filter_values)?;
+    validate_docker_image_filters(&filters)?;
+    let records = docker_image_apply_time_bounds(
+        store
+            .list_references()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .filter(|record| docker_image_matches_filters(record, &filters))
+            .collect(),
+        &filters,
+    )?;
     if format == "json" {
         let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
         println!("{json}");
@@ -11073,6 +11100,17 @@ fn docker_image_matches_filters(
         })
 }
 
+fn validate_docker_image_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    for key in filters.keys() {
+        if !matches!(key.as_str(), "reference" | "since" | "before") {
+            return Err(format!(
+                "docker: image filter `{key}` is unsupported; supported filters: reference, since, before"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_docker_image_prune_filters(
     filters: &HashMap<String, Vec<String>>,
 ) -> Result<(), String> {
@@ -12507,6 +12545,25 @@ volumes:
             Commands::ImageInspect { image, format } => {
                 assert_eq!(image, "alpine:latest");
                 assert_eq!(format, "text");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_image_list_filters() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "images",
+            "--filter",
+            "reference=alpine*",
+            "--filter",
+            "since=100",
+        ]);
+        match cli.command {
+            Commands::Images { format, filters } => {
+                assert_eq!(format, "text");
+                assert_eq!(filters, vec!["reference=alpine*", "since=100"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -14118,7 +14175,7 @@ volumes:
     fn images_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        handle_images(&store, "text").expect("images handler should succeed");
+        handle_images(&store, "text", &[]).expect("images handler should succeed");
     }
 
     #[test]

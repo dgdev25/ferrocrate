@@ -104,6 +104,7 @@ impl LifecycleLock {
     fn acquire(path: &Path) -> Result<Self, RuntimeError> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;
@@ -115,6 +116,7 @@ impl LifecycleLock {
     fn try_acquire(path: &Path) -> Result<Option<Self>, RuntimeError> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;

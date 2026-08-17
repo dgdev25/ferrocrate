@@ -570,11 +570,12 @@ fn ensure_cas_blob(runtime_dir: &Path, blob_path: &Path) -> Result<PathBuf, Imag
         // opening it. Copy to a create-new temporary file, sync it, then
         // atomically rename into the CAS. A racing publisher can safely lose
         // the rename and reuse the complete winner.
+        let thread_id = format!("{:?}", std::thread::current().id());
         let temporary = cas_root.join(format!(
             ".{}.{}.{}.tmp",
             std::process::id(),
             std::thread::current().name().unwrap_or("writer"),
-            format!("{:?}", std::thread::current().id())
+            thread_id
         ));
         let mut output = match fs::OpenOptions::new()
             .write(true)
@@ -613,10 +614,8 @@ fn ensure_cas_blob(runtime_dir: &Path, blob_path: &Path) -> Result<PathBuf, Imag
 
     // Keep an existing published blob untouched; only materialize the link
     // when a prior migration removed it.
-    if !blob_path.exists() {
-        if fs::hard_link(&cas_path, blob_path).is_err() {
-            fs::copy(&cas_path, blob_path)?;
-        }
+    if !blob_path.exists() && fs::hard_link(&cas_path, blob_path).is_err() {
+        fs::copy(&cas_path, blob_path)?;
     }
 
     Ok(cas_path)

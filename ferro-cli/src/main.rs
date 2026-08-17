@@ -4529,7 +4529,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     *network_backend != "ebpf",
                     "--network-backend (remote Docker uses the daemon backend)",
                 ),
-                (!tmpfs_mounts.is_empty(), "--tmpfs"),
                 (*profile != "dev", "--profile"),
                 (!annotations.is_empty(), "--annotation"),
                 (
@@ -4582,6 +4581,15 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             }
             let mut binds = bind_mounts.clone();
             binds.extend(volumes.iter().cloned());
+            let mut tmpfs = serde_json::Map::new();
+            for mount in parse_tmpfs_mounts(tmpfs_mounts)? {
+                let target = format!("/{}", mount.target.display());
+                let options = mount
+                    .size
+                    .map(|size| format!("size={size}"))
+                    .unwrap_or_default();
+                tmpfs.insert(target, serde_json::Value::String(options));
+            }
             let payload = serde_json::json!({
                 "Image": image,
                 "Cmd": cmd,
@@ -4592,6 +4600,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 "Labels": labels,
                 "HostConfig": {
                     "Binds": binds,
+                    "Tmpfs": tmpfs,
                     "PortBindings": port_bindings,
                     "NetworkMode": network_mode,
                     "ReadonlyRootfs": read_only_rootfs,
@@ -15604,6 +15613,8 @@ volumes:
             "--no-new-privileges",
             "--cap-add",
             "NET_ADMIN",
+            "--tmpfs",
+            "/tmp:size=64m",
             "echo",
             "ready",
         ])
@@ -15619,6 +15630,7 @@ volumes:
         assert!(create.contains("\"NetworkMode\":\"bridge\""));
         assert!(create.contains("\"ReadonlyRootfs\":true"));
         assert!(create.contains("\"CapAdd\":[\"NET_ADMIN\"]"));
+        assert!(create.contains("\"Tmpfs\":{\"/tmp\":\"size=64m\"}"));
         assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));

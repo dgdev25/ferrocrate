@@ -6074,6 +6074,31 @@ fn handle_commit(
     container: &str,
     repository: &str,
 ) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let digest = commit_image(
+        runtime_dir,
+        runtime,
+        store,
+        authorization,
+        &origin,
+        container,
+        repository,
+    )?;
+    let target = canonicalize_reference(repository).map_err(|error| error.to_string())?;
+    println!("commit: container={container} image={target} digest={digest}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn commit_image(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    authorization: &SurfaceAuthorization,
+    origin: &RequestOrigin,
+    container: &str,
+    repository: &str,
+) -> Result<String, String> {
     let target = canonicalize_reference(repository).map_err(|error| error.to_string())?;
     let record = match runtime.inspect(container) {
         Ok(record) => record,
@@ -6178,9 +6203,8 @@ fn handle_commit(
             &manifest_json,
         )
         .map_err(|error| format!("commit: prepare image publication: {error}"))?;
-    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     let permit = authorization
-        .authorize_image_reference_write_plan(&origin, &plan)
+        .authorize_image_reference_write_plan(origin, &plan)
         .map_err(|error| format!("commit: authorize image publication: {error}"))?;
 
     let image_dir = runtime_dir.join("images");
@@ -6195,8 +6219,7 @@ fn handle_commit(
     store
         .put_reference_authorized(plan, permit)
         .map_err(|error| format!("commit: publish image reference: {error}"))?;
-    println!("commit: container={container} image={target} digest={config_digest}");
-    Ok(())
+    Ok(config_digest)
 }
 
 #[cfg(target_os = "linux")]
@@ -9799,6 +9822,40 @@ fn handle_docker_compat_connection(
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 }
             }
+            ("POST", "/commit") => {
+                let container = query
+                    .get("container")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "docker: commit requires container".to_string())?;
+                let repository = query
+                    .get("repo")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "docker: commit requires repo".to_string())?;
+                let tag = query.get("tag").map(String::as_str).unwrap_or("latest");
+                if tag.is_empty() {
+                    return Err("docker: commit tag must be non-empty".to_string());
+                }
+                let last_component_has_tag = repository
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|component| component.contains(':'));
+                let reference = if repository.contains('@') || last_component_has_tag {
+                    repository.clone()
+                } else {
+                    format!("{repository}:{tag}")
+                };
+                let digest = commit_image(
+                    &runtime_dir,
+                    &runtime,
+                    &store,
+                    &surface_authorization,
+                    &origin,
+                    container,
+                    &reference,
+                )?;
+                let body = serde_json::json!({"Id": digest});
+                http_response(201, body.to_string().as_bytes(), "application/json")
+            }
             ("POST", "/containers/create") => {
                 let name = query.get("name").cloned();
                 let spec = parse_docker_create_spec(&request.body, name)?;
@@ -10561,6 +10618,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("unsupported")
         || lowered.contains("too large")
         || lowered.contains("bad request")
+        || lowered.contains("requires ")
     {
         return 400;
     }

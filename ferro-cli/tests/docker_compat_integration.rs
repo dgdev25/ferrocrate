@@ -179,6 +179,18 @@ fn docker_compat_unknown_route_returns_docker_json_error() {
 }
 
 #[test]
+fn docker_compat_commit_requires_container_and_repository() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request("POST", "/v1.45/commit");
+    assert_eq!(status, 400, "body={body}");
+    assert!(body.contains("commit requires container"), "body={body}");
+
+    let (status, body) = harness.request("POST", "/v1.45/commit?container=missing");
+    assert_eq!(status, 400, "body={body}");
+    assert!(body.contains("commit requires repo"), "body={body}");
+}
+
+#[test]
 fn docker_compat_malformed_content_length_returns_400_json_error() {
     let harness = DaemonHarness::spawn();
     let raw =

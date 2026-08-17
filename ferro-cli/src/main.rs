@@ -10745,6 +10745,7 @@ fn docker_inspect_payload(
             "WorkingDir": record.workdir,
             "User": record.user,
             "Labels": record.labels,
+            "Healthcheck": record.health.as_ref().map(docker_runtime_healthcheck),
         },
         "State": {
             "Status": record.status,
@@ -10774,6 +10775,7 @@ fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_js
             "WorkingDir": spec.workdir,
             "User": spec.user,
             "Labels": labels,
+            "Healthcheck": spec.health.as_ref().map(docker_pending_healthcheck),
         },
         "State": {
             "Status": "created",
@@ -10782,6 +10784,43 @@ fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_js
             "StartedAt": 0,
             "Health": serde_json::Value::Null,
         }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_pending_healthcheck(health: &DockerHealthSpec) -> serde_json::Value {
+    serde_json::json!({
+        "Test": ["CMD-SHELL", health.cmd],
+        "Interval": health.interval_secs.saturating_mul(1_000_000_000),
+        "Timeout": health.timeout_secs.saturating_mul(1_000_000_000),
+        "Retries": health.retries,
+        "StartPeriod": health.start_period_secs.saturating_mul(1_000_000_000),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_runtime_healthcheck(
+    health: &ferro_core::container_store::HealthConfig,
+) -> serde_json::Value {
+    let test = if health.cmd.len() == 3
+        && health.cmd.first().is_some_and(|value| value == "/bin/sh")
+        && health.cmd.get(1).is_some_and(|value| value == "-c")
+    {
+        vec![
+            serde_json::Value::String("CMD-SHELL".to_string()),
+            serde_json::Value::String(health.cmd[2].clone()),
+        ]
+    } else {
+        std::iter::once(serde_json::Value::String("CMD".to_string()))
+            .chain(health.cmd.iter().cloned().map(serde_json::Value::String))
+            .collect()
+    };
+    serde_json::json!({
+        "Test": test,
+        "Interval": health.interval_secs.saturating_mul(1_000_000_000),
+        "Timeout": health.timeout_secs.saturating_mul(1_000_000_000),
+        "Retries": health.retries,
+        "StartPeriod": health.start_period_secs.saturating_mul(1_000_000_000),
     })
 }
 
@@ -11250,15 +11289,16 @@ mod tests {
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
         docker_event_resource, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_matches_filters,
-        docker_raw_stream, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
-        effective_readonly, ensure_context_routing_available, handle_build, handle_containers,
-        handle_context, handle_exec, handle_image_prune, handle_images, handle_inspect,
-        handle_kill, handle_logs, handle_migrate_compose_report, handle_network, handle_pause,
-        handle_pull, handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats,
-        handle_stop, handle_top, handle_unpause, handle_volume, handle_wait, host_build_arch,
-        import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
+        docker_pending_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
+        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
+        ensure_context_routing_available, handle_build, handle_containers, handle_context,
+        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
+        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
+        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
@@ -11270,8 +11310,8 @@ mod tests {
         validate_docker_volume_filters, validate_network_backend, validate_network_mode,
         validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
-        DockerExecCreateRequest, MigrateCommands, NetworkCommands, RvfCommands, VolumeCommands,
-        WitnessCommands,
+        DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
+        VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -13453,6 +13493,46 @@ volumes:
             None,
         )
         .is_err());
+    }
+
+    #[test]
+    fn docker_inspect_projects_healthcheck_configuration() {
+        let pending = DockerCreateSpec {
+            image: "busybox".to_string(),
+            cmd: vec!["true".to_string()],
+            env: Vec::new(),
+            labels: Vec::new(),
+            binds: Vec::new(),
+            publish: Vec::new(),
+            workdir: None,
+            user: None,
+            name: None,
+            network_mode: "bridge".to_string(),
+            health: Some(DockerHealthSpec {
+                cmd: "test -f /ready".to_string(),
+                interval_secs: 2,
+                timeout_secs: 1,
+                retries: 3,
+                start_period_secs: 4,
+            }),
+        };
+        let payload = docker_pending_inspect_payload("pending", &pending);
+        assert_eq!(payload["Config"]["Healthcheck"]["Test"][0], "CMD-SHELL");
+        assert_eq!(
+            payload["Config"]["Healthcheck"]["Interval"],
+            2_000_000_000u64
+        );
+
+        let health = ferro_core::container_store::HealthConfig {
+            cmd: vec!["/bin/check".to_string(), "ready".to_string()],
+            interval_secs: 5,
+            timeout_secs: 2,
+            retries: 2,
+            start_period_secs: 1,
+        };
+        let projected = docker_runtime_healthcheck(&health);
+        assert_eq!(projected["Test"][0], "CMD");
+        assert_eq!(projected["Test"][1], "/bin/check");
     }
 
     #[test]

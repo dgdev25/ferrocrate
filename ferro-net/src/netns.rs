@@ -124,9 +124,20 @@ pub fn loopback_is_up(name: &str) -> Result<bool, NetnsError> {
     Ok(rows
         .as_array()
         .and_then(|items| items.first())
-        .and_then(|item| item.get("operstate"))
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|state| state.eq_ignore_ascii_case("up")))
+        .is_some_and(|item| {
+            item.get("operstate")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|state| state.eq_ignore_ascii_case("up"))
+                || item
+                    .get("flags")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|flags| {
+                        flags.iter().any(|flag| {
+                            flag.as_str()
+                                .is_some_and(|value| value.eq_ignore_ascii_case("up"))
+                        })
+                    })
+        }))
 }
 
 /// Enter a network namespace by path (direct syscall, no shell-out).

@@ -834,15 +834,17 @@ impl RuntimeService for CriRuntime {
                     )));
                 }
             }
-            if let Err(error) = ferro_net::destroy_netns(&netns_name) {
-                sandboxes.insert(id.clone(), record);
-                let restore = persist_sandboxes(&self.runtime_dir, &sandboxes).err();
-                let detail = restore
-                    .map(|restore| format!("; restore CRI sandbox state: {restore}"))
-                    .unwrap_or_default();
-                return Err(Status::internal(format!(
-                    "remove CRI sandbox netns: {error}{detail}"
-                )));
+            if ferro_net::netns_path(&netns_name).exists() {
+                if let Err(error) = ferro_net::destroy_netns(&netns_name) {
+                    sandboxes.insert(id.clone(), record);
+                    let restore = persist_sandboxes(&self.runtime_dir, &sandboxes).err();
+                    let detail = restore
+                        .map(|restore| format!("; restore CRI sandbox state: {restore}"))
+                        .unwrap_or_default();
+                    return Err(Status::internal(format!(
+                        "remove CRI sandbox netns: {error}{detail}"
+                    )));
+                }
             }
         }
         Ok(Response::new(RemovePodSandboxResponse {}))
@@ -2226,13 +2228,23 @@ mod tests {
             .expect("sandbox create")
             .into_inner()
             .pod_sandbox_id;
-        let netns_name = runtime
+        let (netns_name, bridge_name) = runtime
             .sandboxes
             .lock()
             .expect("sandbox lock")
             .get(&sandbox_id)
-            .and_then(|record| record.netns_name.clone())
-            .expect("netns name");
+            .map(|record| {
+                (
+                    record.netns_name.clone().expect("netns name"),
+                    record
+                        .network
+                        .as_ref()
+                        .expect("network record")
+                        .bridge
+                        .clone(),
+                )
+            })
+            .expect("sandbox record");
         let reopened = CriRuntime::with_runtime_dir(
             Arc::clone(&store),
             root.path(),
@@ -2255,7 +2267,7 @@ mod tests {
             CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
         let notready = reconciled
             .pod_sandbox_status(authenticated(PodSandboxStatusRequest {
-                pod_sandbox_id: sandbox_id,
+                pod_sandbox_id: sandbox_id.clone(),
                 verbose: false,
             }))
             .await
@@ -2265,6 +2277,15 @@ mod tests {
             notready.status.expect("status").state,
             PodSandboxState::Notready as i32
         );
+        reconciled
+            .remove_pod_sandbox(authenticated(RemovePodSandboxRequest {
+                pod_sandbox_id: sandbox_id,
+            }))
+            .await
+            .expect("remove stale sandbox");
+        assert!(ferro_net::observe_bridge_identity(&bridge_name)
+            .expect("bridge observation")
+            .is_none());
     }
 
     #[tokio::test]

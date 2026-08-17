@@ -21,6 +21,15 @@ pub enum RvfStoreError {
 
 type Result<T> = std::result::Result<T, RvfStoreError>;
 
+/// Persisted storage measurements for compression and capacity gates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RvfStoreMetrics {
+    pub dimensions: usize,
+    pub vectors: usize,
+    pub file_size_bytes: u64,
+    pub bytes_per_vector: Option<f64>,
+}
+
 /// Stable ID mapping for RVF's u64 IDs.
 pub(crate) fn stable_id(id: Option<&str>, vector: &[f32]) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -151,6 +160,24 @@ impl RvfStore {
         self.len() == 0
     }
 
+    /// Flush pending vectors and return measured on-disk storage metrics.
+    ///
+    /// The measurements are deliberately descriptive: callers can enforce a
+    /// product-specific size policy, while this layer never invents a recall
+    /// or reconstruction-error guarantee that the backend does not expose.
+    pub fn metrics(&self) -> Result<RvfStoreMetrics> {
+        self.flush_pending()?;
+        let backend = self.backend.lock();
+        let status = backend.status();
+        let vectors = status.total_vectors as usize;
+        Ok(RvfStoreMetrics {
+            dimensions: self.dimensions,
+            vectors,
+            file_size_bytes: status.file_size,
+            bytes_per_vector: (vectors > 0).then(|| status.file_size as f64 / vectors as f64),
+        })
+    }
+
     fn flush_pending(&self) -> Result<()> {
         if !self.has_pending.load(Ordering::Relaxed) {
             return Ok(());
@@ -251,6 +278,11 @@ mod tests {
             .search(&[0.25, 0.5, 0.75], 1)
             .expect("query compressed store");
         assert_eq!(hits.len(), 1);
+        let metrics = store.metrics().expect("metrics");
+        assert_eq!(metrics.dimensions, 3);
+        assert_eq!(metrics.vectors, 1);
+        assert!(metrics.file_size_bytes > 0);
+        assert!(metrics.bytes_per_vector.is_some());
     }
 
     #[test]

@@ -16,6 +16,10 @@ if [[ ! -x "$ferro_bin" ]]; then
   cargo build -p ferro-cli --release >/dev/null
 fi
 command -v docker >/dev/null || { echo "docker is unavailable" >&2; exit 1; }
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "rootful Docker/Ferrocrate comparison requires uid 0; rerun with sudo" >&2
+  exit 77
+fi
 
 tmp_root="$(mktemp -d /tmp/ferrocrate-docker-comparison.XXXXXX)"
 ferro_runtime="$tmp_root/ferro-runtime"

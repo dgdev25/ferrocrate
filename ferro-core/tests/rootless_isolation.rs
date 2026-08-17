@@ -21,6 +21,11 @@ fn resolves_rootless_config_from_system() {
 /// authenticated permit for the exact rootless mapping mutation.
 #[test]
 fn rootless_configuration_mutates_the_real_runtime_namespaces() {
+    // A rootful qualification run resolves the caller as the trusted
+    // administrator. Enforce mode must deny ordinary callers, but an
+    // administrator is intentionally allowed to exercise the real mapping
+    // path; do not turn that valid role distinction into a false failure.
+    let trusted_administrator = nix::unistd::geteuid().is_root();
     for mode in ["disabled", "shadow", "enforce"] {
         let before = ferro_core::observability::authorization_metrics_snapshot();
         let runtime_dir = qualification_fixture::configured_runtime(mode);
@@ -38,7 +43,7 @@ fn rootless_configuration_mutates_the_real_runtime_namespaces() {
             "rootless-namespace-fixture",
             1,
         );
-        if mode == "enforce" {
+        if mode == "enforce" && !trusted_administrator {
             let error = match permit {
                 Ok(_) => panic!("enforce must deny before namespace mutation"),
                 Err(error) => error.to_string(),

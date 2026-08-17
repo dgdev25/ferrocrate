@@ -6,9 +6,12 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
     pub task_id: String,
     pub address: String,
@@ -27,14 +30,53 @@ pub enum CatalogError {
     EmptyAddress,
     #[error("endpoint lease must be in the future")]
     ExpiredLease,
+    #[error("service snapshot exceeds the size limit")]
+    Oversized,
+    #[error("service snapshot is invalid: {0}")]
+    Snapshot(String),
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceCatalog {
     services: BTreeMap<String, BTreeMap<String, Endpoint>>,
 }
 
 impl ServiceCatalog {
+    /// Serialize the catalog in deterministic key order for durable state.
+    pub fn snapshot(&self) -> Result<Vec<u8>, CatalogError> {
+        let bytes =
+            serde_json::to_vec(self).map_err(|error| CatalogError::Snapshot(error.to_string()))?;
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(CatalogError::Oversized);
+        }
+        Ok(bytes)
+    }
+
+    /// Restore a catalog snapshot, dropping endpoints whose leases have expired.
+    pub fn from_snapshot(bytes: &[u8], now_unix: i64) -> Result<Self, CatalogError> {
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(CatalogError::Oversized);
+        }
+        let mut catalog: Self = serde_json::from_slice(bytes)
+            .map_err(|error| CatalogError::Snapshot(error.to_string()))?;
+        for (service, endpoints) in &catalog.services {
+            if service.trim().is_empty()
+                || endpoints.values().any(|endpoint| {
+                    endpoint.task_id.trim().is_empty() || endpoint.address.trim().is_empty()
+                })
+            {
+                return Err(CatalogError::Snapshot("empty service identity".into()));
+            }
+        }
+        for endpoints in catalog.services.values_mut() {
+            endpoints.retain(|_, endpoint| endpoint.expires_at_unix > now_unix);
+        }
+        catalog
+            .services
+            .retain(|_, endpoints| !endpoints.is_empty());
+        Ok(catalog)
+    }
+
     pub fn publish(
         &mut self,
         service: impl Into<String>,
@@ -157,5 +199,35 @@ mod tests {
         assert!(catalog.remove("web", "task-a"));
         assert!(!catalog.remove("web", "task-a"));
         assert!(catalog.resolve("web", 2).is_empty());
+    }
+
+    #[test]
+    fn snapshot_round_trip_is_deterministic_and_expires_entries() {
+        let mut catalog = ServiceCatalog::default();
+        catalog
+            .publish("web", endpoint("task-b", "10.0.0.2", 20), 1)
+            .unwrap();
+        catalog
+            .publish("web", endpoint("task-a", "10.0.0.1", 5), 1)
+            .unwrap();
+        let first = catalog.snapshot().unwrap();
+        let second = catalog.snapshot().unwrap();
+        assert_eq!(first, second);
+        let mut restored = ServiceCatalog::from_snapshot(&first, 5).unwrap();
+        assert_eq!(restored.resolve("web", 5).len(), 1);
+        assert_eq!(restored.resolve("web", 5)[0].task_id, "task-b");
+    }
+
+    #[test]
+    fn snapshot_rejects_oversized_or_malformed_data() {
+        let oversized = vec![b'x'; MAX_SNAPSHOT_BYTES + 1];
+        assert_eq!(
+            ServiceCatalog::from_snapshot(&oversized, 0),
+            Err(CatalogError::Oversized)
+        );
+        assert!(matches!(
+            ServiceCatalog::from_snapshot(b"not-json", 0),
+            Err(CatalogError::Snapshot(_))
+        ));
     }
 }

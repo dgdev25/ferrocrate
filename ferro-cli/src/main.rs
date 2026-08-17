@@ -9107,11 +9107,6 @@ fn handle_events(
     filters: &[String],
     follow: bool,
 ) -> Result<(), String> {
-    if follow {
-        return Err(
-            "events: --follow is available through the Docker-compatible daemon socket".to_string(),
-        );
-    }
     let mut query = HashMap::new();
     if let Some(value) = since {
         query.insert("since".to_string(), value.to_string());
@@ -9139,13 +9134,24 @@ fn handle_events(
                 .map_err(|error| format!("events: encode filters failed: {error}"))?,
         );
     }
-    let store = DockerEventStore::open(runtime_dir.join("events.jsonl"))?;
-    for event in store.query(&query)? {
-        println!(
-            "{}",
-            serde_json::to_string(&docker_event_payload(&event))
-                .map_err(|error| format!("events: serialize failed: {error}"))?
-        );
+    let mut last_id = None;
+    loop {
+        let store = DockerEventStore::open(runtime_dir.join("events.jsonl"))?;
+        for event in store.query(&query)? {
+            if last_id.is_some_and(|id| event.id <= id) {
+                continue;
+            }
+            println!(
+                "{}",
+                serde_json::to_string(&docker_event_payload(&event))
+                    .map_err(|error| format!("events: serialize failed: {error}"))?
+            );
+            last_id = Some(event.id);
+        }
+        if !follow {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
     Ok(())
 }
@@ -14070,9 +14076,6 @@ volumes:
         let error = handle_events(temp.path(), None, None, &["label".to_string()], false)
             .expect_err("malformed CLI filter must fail");
         assert!(error.contains("key=value"), "error={error}");
-        let error = handle_events(temp.path(), None, None, &[], true)
-            .expect_err("local follow must direct operators to the daemon socket");
-        assert!(error.contains("daemon socket"), "error={error}");
     }
 
     #[test]

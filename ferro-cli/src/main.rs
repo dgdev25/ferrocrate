@@ -12335,6 +12335,9 @@ fn stream_docker_events(
     state: &DockerCompatState,
     query: &HashMap<String, String>,
 ) -> Result<(), String> {
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("docker: event stream write timeout setup failed: {error}"))?;
     let mut cursor: Option<u64> = None;
     loop {
         let events = state
@@ -12368,6 +12371,9 @@ fn stream_docker_logs(
     id: &str,
     tail: Option<&str>,
 ) -> Result<(), String> {
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("docker: log stream write timeout setup failed: {error}"))?;
     let mut emitted = 0usize;
     loop {
         let raw = runtime.logs(id).map_err(|error| error.to_string())?;
@@ -12432,6 +12438,9 @@ fn stream_docker_stats(
     runtime: &ContainerRuntime,
     id: &str,
 ) -> Result<(), String> {
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("docker: stats stream write timeout setup failed: {error}"))?;
     loop {
         let stats = runtime.stats(id).map_err(|error| error.to_string())?;
         let mut body =

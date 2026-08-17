@@ -10018,7 +10018,26 @@ fn handle_docker_compat_connection(
                     .map(|event| serde_json::to_string(&event).unwrap_or_default())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if query.get("follow").is_some_and(|value| value == "1") {
+                // Docker Engine treats `/events` as a streaming endpoint. The
+                // Docker CLI advertises JSONL/NDJSON explicitly but does not
+                // add a `follow=1` query parameter, while the repository's
+                // finite socket fixtures intentionally omit that header.
+                let accepts_event_stream = request
+                    .headers
+                    .get("accept")
+                    .is_some_and(|value| {
+                        value
+                            .split(',')
+                            .any(|item| {
+                                let item = item.trim().to_ascii_lowercase();
+                                item.contains("jsonl")
+                                    || item.contains("ndjson")
+                                    || item.contains("json-seq")
+                            })
+                    });
+                if query.get("follow").is_some_and(|value| value == "1")
+                    || accepts_event_stream
+                {
                     event_follow_query = Some(query.clone());
                     docker_chunked_headers(200, "application/x-ndjson")
                 } else {

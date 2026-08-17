@@ -212,6 +212,24 @@ fn docker_compat_events_accepts_docker_cli_scalar_filter_values() {
 }
 
 #[test]
+fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect event stream");
+    stream
+        .write_all(
+            b"GET /v1.45/events?filters=%7B%22type%22%3A%7B%22network%22%3Atrue%7D%7D HTTP/1.1\r\nHost: docker\r\nAccept: application/jsonl\r\nConnection: close\r\n\r\n",
+        )
+        .expect("write event stream request");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("set event stream read timeout");
+    let mut response = [0u8; 512];
+    let read = stream.read(&mut response).expect("read event stream headers");
+    let headers = String::from_utf8_lossy(&response[..read]);
+    assert!(headers.contains("Transfer-Encoding: chunked"), "headers={headers}");
+}
+
+#[test]
 fn docker_compat_commit_requires_container_and_repository() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request("POST", "/v1.45/commit");

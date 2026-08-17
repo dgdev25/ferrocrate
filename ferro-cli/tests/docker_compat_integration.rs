@@ -230,6 +230,31 @@ fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
 }
 
 #[test]
+fn docker_compat_attach_accepts_pre_start_hijack_handshake() {
+    let harness = DaemonHarness::spawn();
+    let body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=attach-before-start HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+
+    let attach = format!(
+        "POST /v1.45/containers/{id}/attach?logs=1&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+    );
+    let (status, response) = harness.request_raw(&attach);
+    assert_eq!(status, 101, "attach handshake response: {response}");
+}
+
+#[test]
 fn docker_compat_listing_accepts_docker_cli_boolean_keyed_filters() {
     let harness = DaemonHarness::spawn();
     for path in [

@@ -5572,7 +5572,10 @@ fn wait_for_container_exit_with_timeout(
     // Short-lived `run --rm` workloads commonly exit before the supervisor's
     // first store observation. Keep the two-observation confirmation below,
     // but avoid adding a 200 ms floor to every successful lifecycle.
-    const RUNNING_POLL_INTERVAL: Duration = Duration::from_millis(25);
+    // Keep short-lived `run --rm` latency below one scheduler tick on the
+    // qualified host without busy-spinning; the terminal state is still
+    // confirmed twice before removal can race the supervisor publication.
+    const RUNNING_POLL_INTERVAL: Duration = Duration::from_millis(10);
     const TERMINAL_CONFIRM_INTERVAL: Duration = Duration::from_millis(5);
     let started = Instant::now();
     let mut terminal_observations = 0u8;

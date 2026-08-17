@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
+
+for required in cargo grep; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "reliability matrix blocked: required command is unavailable: $required" >&2
+    exit 77
+  fi
+done
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 output_dir="${FERROCRATE_RELIABILITY_OUTPUT_DIR:-$repo_root/target/reliability-matrix}"
@@ -36,7 +43,7 @@ run_case sustained-process-lifecycle \
   cargo test -p ferro-core --offline --test container_lifecycle \
   lifecycle_handles_100_concurrent_processes -- --ignored --exact --test-threads=1
 
-if rg -q $'\tfail$' "$manifest"; then
+if grep -q $'\tfail$' "$manifest"; then
   echo "reliability matrix failed; inspect $output_dir" >&2
   exit 1
 fi

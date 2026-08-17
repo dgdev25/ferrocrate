@@ -11605,7 +11605,7 @@ fn docker_volume_matches_filters(
     filters: &HashMap<String, Vec<String>>,
 ) -> bool {
     if let Some(names) = filters.get("name") {
-        if !names.is_empty() && !names.iter().any(|candidate| candidate == &record.name) {
+        if !names.is_empty() && !names.iter().any(|candidate| record.name.contains(candidate)) {
             return false;
         }
     }
@@ -15247,6 +15247,10 @@ volumes:
         }))
         .expect("filters");
         assert!(docker_volume_matches_filters(&record, &filters));
+
+        let substring =
+            serde_json::from_value(serde_json::json!({"name": ["data"]})).expect("filters");
+        assert!(docker_volume_matches_filters(&record, &substring));
 
         let mismatched =
             serde_json::from_value(serde_json::json!({"name": ["cache"]})).expect("filters");

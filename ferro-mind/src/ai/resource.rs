@@ -43,6 +43,13 @@ pub struct ResourcePrediction {
     pub memory_growth_rate: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrainedResourceBaseline {
+    mean_cpu_norm: f32,
+    mean_memory_norm: f32,
+    max_memory_bytes: f32,
+}
+
 /// OOM prediction result.
 #[derive(Debug, Clone, Copy)]
 pub struct OomPrediction {
@@ -77,6 +84,7 @@ pub struct ResourcePredictor {
     neural_last_train_len: usize,
     neural_memory_scale: f32,
     neural_pids_scale: f32,
+    trained_baseline: Option<TrainedResourceBaseline>,
 }
 
 impl Default for ResourcePredictor {
@@ -103,7 +111,66 @@ impl ResourcePredictor {
             neural_last_train_len: 0,
             neural_memory_scale: 1.0,
             neural_pids_scale: 1.0,
+            trained_baseline: None,
         }
+    }
+
+    /// Load a resource-predictor artifact produced by the training pipeline.
+    ///
+    /// Artifacts are JSON envelopes containing validated feature means and
+    /// scales. Invalid, oversized, or mismatched artifacts fail closed so the
+    /// caller can retain the built-in heuristic predictor explicitly.
+    pub fn from_model_artifact(path: &Path) -> Result<Self, String> {
+        const MAX_ARTIFACT_BYTES: usize = 1 << 20;
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+            return Err("resource model artifact exceeds 1 MiB".to_string());
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid resource model artifact: {error}"))?;
+        if value.get("model_type").and_then(serde_json::Value::as_str) != Some("resource-predictor")
+        {
+            return Err("resource model artifact has an unexpected model_type".to_string());
+        }
+        let artifact = value
+            .get("artifact")
+            .ok_or_else(|| "resource model artifact is missing artifact data".to_string())?;
+        let means = artifact
+            .get("feature_means")
+            .ok_or_else(|| "resource model artifact is missing feature means".to_string())?;
+        let maxes = artifact
+            .get("feature_maxes")
+            .ok_or_else(|| "resource model artifact is missing feature scales".to_string())?;
+        let baseline = TrainedResourceBaseline {
+            mean_cpu_norm: means
+                .get("cpu_norm")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "resource model cpu mean is invalid".to_string())?
+                as f32,
+            mean_memory_norm: means
+                .get("mem_norm")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "resource model memory mean is invalid".to_string())?
+                as f32,
+            max_memory_bytes: maxes
+                .get("memory_bytes")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "resource model memory scale is invalid".to_string())?
+                as f32,
+        };
+        if !baseline.mean_cpu_norm.is_finite()
+            || !baseline.mean_memory_norm.is_finite()
+            || !baseline.max_memory_bytes.is_finite()
+            || !(0.0..=1.0).contains(&baseline.mean_cpu_norm)
+            || !(0.0..=1.0).contains(&baseline.mean_memory_norm)
+            || baseline.max_memory_bytes <= 0.0
+        {
+            return Err("resource model baseline is outside supported bounds".to_string());
+        }
+        let mut predictor = Self::new(60);
+        predictor.trained_baseline = Some(baseline);
+        Ok(predictor)
     }
 
     /// Create a predictor with RVF-backed persistence in `data_dir`.
@@ -207,6 +274,13 @@ impl ResourcePredictor {
             memory_bytes: avg_mem,
             memory_growth_rate: avg_growth_rate,
         };
+
+        if let Some(model) = self.trained_baseline {
+            let model_cpu = model.mean_cpu_norm * 100.0;
+            let model_memory = (model.mean_memory_norm * model.max_memory_bytes) as u64;
+            prediction.cpu_percent = (prediction.cpu_percent + model_cpu) / 2.0;
+            prediction.memory_bytes = prediction.memory_bytes.saturating_add(model_memory) / 2;
+        }
 
         #[cfg(feature = "rvf-persistence")]
         if let Some(memory) = self.memory.as_ref() {
@@ -623,6 +697,50 @@ mod tests {
         let pred = p.predict().expect("predict");
         assert!(pred.memory_bytes > 0);
         assert!(pred.cpu_percent > 0.0);
+    }
+
+    #[test]
+    fn loads_trained_resource_artifact_and_blends_baseline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "model_type": "resource-predictor",
+                "artifact": {
+                    "feature_means": {"cpu_norm": 0.8, "mem_norm": 0.8},
+                    "feature_maxes": {"memory_bytes": 1000.0}
+                }
+            })
+            .to_string(),
+        )
+        .expect("artifact");
+
+        let mut predictor = ResourcePredictor::from_model_artifact(&path).expect("load model");
+        for memory in [100, 100, 100] {
+            predictor.push(ResourceSample {
+                cpu_percent: 10.0,
+                memory_bytes: memory,
+                pids_count: 1,
+                timestamp: Instant::now(),
+            });
+        }
+        let prediction = predictor.predict().expect("prediction");
+        assert_eq!(prediction.memory_bytes, 450);
+        assert!((prediction.cpu_percent - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rejects_wrong_resource_artifact_type() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"model_type": "anomaly-detector"}).to_string(),
+        )
+        .expect("artifact");
+        let result = ResourcePredictor::from_model_artifact(&path);
+        assert!(matches!(result, Err(error) if error.contains("unexpected model_type")));
     }
 
     #[test]

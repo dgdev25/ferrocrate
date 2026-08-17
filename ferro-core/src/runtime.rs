@@ -10132,9 +10132,41 @@ fn run_resource_monitor(
         return;
     }
 
-    // Initialize predictor with memory limit
+    // Resolve the digest-bound active resource model when one is available.
+    // The built-in trend predictor remains an explicit, safe fallback for
+    // first-run hosts or unavailable model stores.
+    let mut predictor_model_version = "heuristic-runtime-v1".to_string();
     let mut predictor =
         ferro_mind::ai::resource::ResourcePredictor::new(60).with_memory_limit(memory_limit);
+    let model_config = ferro_mind::ai::training::TrainingConfig::default();
+    let active_model = match ferro_mind::ai::training::TrainingPipeline::new(model_config) {
+        Ok(pipeline) => pipeline
+            .resolve_active_model(ferro_mind::ai::training::ModelType::ResourcePredictor)
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match active_model {
+        Ok(active) => {
+            match ferro_mind::ai::resource::ResourcePredictor::from_model_artifact(&active.path) {
+                Ok(model_predictor) => {
+                    predictor = model_predictor.with_memory_limit(memory_limit);
+                    predictor_model_version = format!("active-v{}", active.version);
+                    info!(
+                        container = %id,
+                        model_version = %predictor_model_version,
+                        artifact_sha256 = %active.artifact_sha256,
+                        "resolved active resource predictor"
+                    );
+                }
+                Err(error) => {
+                    warn!(container = %id, error = %error, "active resource model rejected; using heuristic predictor");
+                }
+            }
+        }
+        Err(error) => {
+            info!(container = %id, error = %error, "no active resource model; using heuristic predictor");
+        }
+    }
     // Persist AI decisions by default when the monitor is enabled. Operators
     // may override the location, but enabling AI must not silently discard
     // per-container evidence when no optional audit variable is configured.
@@ -10277,7 +10309,7 @@ fn run_resource_monitor(
                             prediction.time_to_oom.as_secs()
                         ),
                     )
-                    .with_model("resource-oom-predictor", "runtime-v1")
+                    .with_model("resource-oom-predictor", &predictor_model_version)
                     .with_decision("record-oom-prediction")
                     .with_evidence("container_id", id.clone())
                     .with_evidence(

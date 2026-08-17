@@ -5530,6 +5530,11 @@ fn wait_for_container_exit_with_timeout(
     id: &str,
     timeout: Option<Duration>,
 ) -> Result<(), String> {
+    // Short-lived `run --rm` workloads commonly exit before the supervisor's
+    // first store observation. Keep the two-observation confirmation below,
+    // but avoid adding a 200 ms floor to every successful lifecycle.
+    const RUNNING_POLL_INTERVAL: Duration = Duration::from_millis(25);
+    const TERMINAL_CONFIRM_INTERVAL: Duration = Duration::from_millis(5);
     let started = Instant::now();
     let mut terminal_observations = 0u8;
     loop {
@@ -5540,7 +5545,7 @@ fn wait_for_container_exit_with_timeout(
                 if timeout.is_some_and(|limit| started.elapsed() >= limit) {
                     return Err(format!("wait: timed out waiting for container {id}"));
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(RUNNING_POLL_INTERVAL);
             }
             _ => {
                 // The supervisor publishes the terminal state in a separate
@@ -5551,7 +5556,7 @@ fn wait_for_container_exit_with_timeout(
                 if terminal_observations >= 2 {
                     return Ok(());
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(TERMINAL_CONFIRM_INTERVAL);
             }
         }
     }

@@ -230,6 +230,19 @@ fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
 }
 
 #[test]
+fn docker_compat_listing_accepts_docker_cli_boolean_keyed_filters() {
+    let harness = DaemonHarness::spawn();
+    for path in [
+        "/v1.45/networks?filters=%7B%22name%22%3A%7B%22foo%22%3Atrue%7D%7D",
+        "/v1.45/containers/json?filters=%7B%22status%22%3A%7B%22running%22%3Atrue%7D%7D",
+        "/v1.45/images/json?filters=%7B%22reference%22%3A%7B%22foo%22%3Atrue%7D%7D",
+    ] {
+        let (status, body) = harness.request("GET", path);
+        assert_eq!(status, 200, "path={path} body={body}");
+    }
+}
+
+#[test]
 fn docker_compat_commit_requires_container_and_repository() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request("POST", "/v1.45/commit");

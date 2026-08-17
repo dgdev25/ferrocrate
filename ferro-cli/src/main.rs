@@ -11192,17 +11192,34 @@ fn parse_docker_filters(
         .ok_or_else(|| "docker: filters must be a JSON object".to_string())?;
     let mut filters = HashMap::new();
     for (key, values) in object {
-        let values = values
-            .as_array()
-            .ok_or_else(|| format!("docker: filter {key} must be an array"))?
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("docker: filter {key} values must be strings"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let values = match values {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("docker: filter {key} values must be strings"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            serde_json::Value::Object(values) => values
+                .iter()
+                .map(|(name, enabled)| {
+                    if enabled.as_bool() == Some(true) {
+                        Ok(name.clone())
+                    } else {
+                        Err(format!(
+                            "docker: filter {key} object values must be boolean true"
+                        ))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
+                return Err(format!(
+                    "docker: filter {key} must be an array or boolean object"
+                ));
+            }
+        };
         filters.insert(key.clone(), values);
     }
     Ok(filters)

@@ -4481,7 +4481,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "--health-*",
                 ),
                 (*restart_policy != "no", "--restart"),
-                (*rm, "--rm"),
                 (bridge_cidr.is_some(), "--bridge-cidr"),
                 (bridge_name.is_some(), "--bridge-name"),
                 (net_limit.is_some(), "--net-limit"),
@@ -4553,6 +4552,13 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "remote run create response omitted Id".to_string())?;
             request("POST", format!("/containers/{id}/start"))?;
+            if *rm {
+                request(
+                    "POST",
+                    format!("/containers/{id}/wait?condition=not-running"),
+                )?;
+                request("DELETE", format!("/containers/{id}"))?;
+            }
             println!("run: id={id}");
             Ok(())
         })(),
@@ -14778,7 +14784,7 @@ volumes:
     }
 
     #[test]
-    fn remote_run_rejects_local_only_options_before_connecting() {
+    fn remote_run_rejects_unrepresentable_options_before_connecting() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
         let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
         let temp = tempfile::tempdir().expect("remote run config");
@@ -14794,13 +14800,13 @@ volumes:
             name: "remote".to_string(),
         })
         .expect("select context");
-        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine", "--rm"])
+        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine", "--read-only"])
             .expect("parse run")
             .command;
         let result = dispatch_remote_context(&command)
             .expect("remote context should claim run")
             .expect_err("local-only option must be rejected");
-        assert!(result.contains("--rm"), "error={result}");
+        assert!(result.contains("--read-only"), "error={result}");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
@@ -14868,6 +14874,64 @@ volumes:
         assert!(create.contains("\"NetworkMode\":\"bridge\""));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
+    }
+
+    #[test]
+    fn remote_run_rm_waits_for_exit_then_removes_container() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("remote run rm config");
+        let socket = temp.path().join("remote-run-rm.sock");
+        let listener = UnixListener::bind(&socket).expect("bind remote run rm socket");
+        let worker = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in [
+                b"HTTP/1.1 201 Created\r\nContent-Length: 34\r\nConnection: close\r\n\r\n{\"Id\":\"remote-rm-id\",\"Warnings\":null}".as_slice(),
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"StatusCode\":0}".as_slice(),
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept remote run rm request");
+                let mut request = Vec::new();
+                stream
+                    .read_to_end(&mut request)
+                    .expect("read remote run rm request");
+                requests.push(request);
+                stream
+                    .write_all(response)
+                    .expect("write remote run rm response");
+            }
+            requests
+        });
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+        }
+        handle_context(ContextCommands::Create {
+            name: "remote".to_string(),
+            endpoint: format!("unix://{}", socket.display()),
+        })
+        .expect("create context");
+        handle_context(ContextCommands::Use {
+            name: "remote".to_string(),
+        })
+        .expect("select context");
+        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine:latest", "--rm"])
+            .expect("parse run")
+            .command;
+        dispatch_remote_context(&command)
+            .expect("remote context should claim run")
+            .expect("remote run --rm should succeed");
+        let requests = worker.join().expect("remote run rm worker");
+        assert!(String::from_utf8_lossy(&requests[0]).contains("POST /containers/create"));
+        assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-rm-id/start"));
+        assert!(String::from_utf8_lossy(&requests[2])
+            .contains("POST /containers/remote-rm-id/wait?condition=not-running"));
+        assert!(String::from_utf8_lossy(&requests[3]).contains("DELETE /containers/remote-rm-id"));
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },

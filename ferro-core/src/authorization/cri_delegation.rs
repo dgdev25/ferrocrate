@@ -435,6 +435,12 @@ impl CriDelegationVerifier {
                 CREATE TABLE IF NOT EXISTS delegation_revocations (
                     revocation_key BLOB PRIMARY KEY NOT NULL,
                     revoked_at_unix_ms INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS delegation_key_revocations (
+                    issuer TEXT NOT NULL,
+                    key_id TEXT NOT NULL,
+                    revoked_at_unix_ms INTEGER NOT NULL,
+                    PRIMARY KEY (issuer, key_id)
                 )",
             )
             .map_err(|_| DelegationError::ReplayStore)?;
@@ -482,6 +488,38 @@ impl CriDelegationVerifier {
             .map_err(|_| DelegationError::ReplayStore)
     }
 
+    /// Retire a trusted issuer key. The decision is durable and applies to all
+    /// claims signed by the key, including claims that have not been replayed.
+    pub fn revoke_key(
+        &self,
+        issuer: &str,
+        key_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<(), DelegationError> {
+        if issuer.is_empty() || key_id.is_empty() {
+            return Err(DelegationError::Bounds);
+        }
+        if !self
+            .keys
+            .contains_key(&(issuer.to_string(), key_id.to_string()))
+        {
+            return Err(DelegationError::UntrustedKey);
+        }
+        let replay = self
+            .replay
+            .lock()
+            .map_err(|_| DelegationError::ReplayStore)?;
+        replay
+            .execute(
+                "INSERT OR IGNORE INTO delegation_key_revocations (issuer, key_id, revoked_at_unix_ms) VALUES (?1, ?2, ?3)",
+                params![issuer, key_id, now_unix_ms],
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+        replay
+            .execute_batch("PRAGMA wal_checkpoint(FULL);")
+            .map_err(|_| DelegationError::ReplayStore)
+    }
+
     pub fn verify(
         &self,
         assertion: &DelegationAssertion,
@@ -496,6 +534,19 @@ impl CriDelegationVerifier {
             .keys
             .get(&(claims.issuer.clone(), claims.key_id.clone()))
             .ok_or(DelegationError::UntrustedKey)?;
+        let key_revoked: bool = self
+            .replay
+            .lock()
+            .map_err(|_| DelegationError::ReplayStore)?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM delegation_key_revocations WHERE issuer = ?1 AND key_id = ?2)",
+                params![claims.issuer, claims.key_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+        if key_revoked {
+            return Err(DelegationError::KeyRevoked);
+        }
         key.verify(
             &claims.signing_bytes(),
             &Signature::from_bytes(&assertion.signature),
@@ -570,6 +621,8 @@ pub enum DelegationError {
     Replay,
     #[error("delegation was revoked")]
     Revoked,
+    #[error("delegation signing key was revoked")]
+    KeyRevoked,
     #[error("durable delegation replay store failed")]
     ReplayStore,
     #[error("legacy delegation replay detected; reopen with the `legacy-sled-importers` feature")]

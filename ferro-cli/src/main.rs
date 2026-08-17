@@ -9989,7 +9989,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut attach_hijack: Option<(String, bool, bool)> = None;
+    let mut attach_hijack: Option<(String, bool, bool, bool, bool)> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -10202,6 +10202,16 @@ fn handle_docker_compat_connection(
                     .map(|value| parse_docker_bool_query(Some(value), "stream"))
                     .transpose()?
                     .unwrap_or(false);
+                let stdout_requested = query
+                    .get("stdout")
+                    .map(|value| parse_docker_bool_query(Some(value), "stdout"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let stderr_requested = query
+                    .get("stderr")
+                    .map(|value| parse_docker_bool_query(Some(value), "stderr"))
+                    .transpose()?
+                    .unwrap_or(true);
                 let pending_attach = runtime.logs(id).is_err();
                 if pending_attach {
                     let pending = state
@@ -10213,9 +10223,12 @@ fn handle_docker_compat_connection(
                         return Err(format!("docker: container not found: {id}"));
                     }
                 }
-                let logs = runtime.logs(id).unwrap_or_default();
+                let (stdout, stderr) = runtime.logs_split(id).unwrap_or_default();
                 let output = if logs_requested {
-                    docker_raw_stream(&logs, "")
+                    docker_raw_stream(
+                        if stdout_requested { &stdout } else { "" },
+                        if stderr_requested { &stderr } else { "" },
+                    )
                 } else {
                     Vec::new()
                 };
@@ -10237,6 +10250,8 @@ fn handle_docker_compat_connection(
                             id.to_string(),
                             logs_requested,
                             stream_requested,
+                            stdout_requested,
+                            stderr_requested,
                         ));
                     }
                     docker_hijack_headers()
@@ -11098,7 +11113,9 @@ fn handle_docker_compat_connection(
         stream_docker_stats(&mut stream, &follow_runtime, &id)?;
         return Ok(());
     }
-    if let Some((id, logs_requested, stream_requested)) = attach_hijack {
+    if let Some((id, logs_requested, stream_requested, stdout_requested, stderr_requested)) =
+        attach_hijack
+    {
         let follow_runtime =
             ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
         stream_docker_attach(
@@ -11107,6 +11124,8 @@ fn handle_docker_compat_connection(
             &id,
             logs_requested,
             stream_requested,
+            stdout_requested,
+            stderr_requested,
         )?;
         return Ok(());
     }
@@ -12399,6 +12418,8 @@ fn stream_docker_attach(
     id: &str,
     logs_requested: bool,
     stream_requested: bool,
+    stdout_requested: bool,
+    stderr_requested: bool,
 ) -> Result<(), String> {
     // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
     // briefly for the pending record to become a real runtime record instead
@@ -12416,16 +12437,23 @@ fn stream_docker_attach(
     };
     if record.pid == 0 {
         if logs_requested {
-            let raw = runtime.logs(id).map_err(|error| error.to_string())?;
-            let frame = docker_raw_stream(&raw, "");
+            let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
+            let frame = docker_raw_stream(
+                if stdout_requested { &stdout } else { "" },
+                if stderr_requested { &stderr } else { "" },
+            );
             stream.write_all(&frame).map_err(|error| error.to_string())?;
             stream.flush().map_err(|error| error.to_string())?;
         }
         return Ok(());
     }
-    let initial_logs = runtime.logs(id).map_err(|error| error.to_string())?;
-    if logs_requested && !initial_logs.is_empty() {
-        let frame = docker_raw_stream(&initial_logs, "");
+    let (initial_stdout, initial_stderr) =
+        runtime.logs_split(id).map_err(|error| error.to_string())?;
+    if logs_requested && (!initial_stdout.is_empty() || !initial_stderr.is_empty()) {
+        let frame = docker_raw_stream(
+            if stdout_requested { &initial_stdout } else { "" },
+            if stderr_requested { &initial_stderr } else { "" },
+        );
         stream.write_all(&frame).map_err(|error| error.to_string())?;
         stream.flush().map_err(|error| error.to_string())?;
     }
@@ -12439,7 +12467,8 @@ fn stream_docker_attach(
     stream
         .set_read_timeout(Some(Duration::from_millis(250)))
         .map_err(|error| error.to_string())?;
-    let mut emitted = initial_logs.len();
+    let mut emitted_stdout = initial_stdout.len();
+    let mut emitted_stderr = initial_stderr.len();
     let mut input = [0_u8; 16 * 1024];
     loop {
         match stream.read(&mut input) {
@@ -12460,18 +12489,24 @@ fn stream_docker_attach(
                 ) => {}
             Err(error) => return Err(error.to_string()),
         }
-        let raw = runtime.logs(id).map_err(|error| error.to_string())?;
-        if raw.len() < emitted {
-            emitted = 0;
+        let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
+        if stdout.len() < emitted_stdout {
+            emitted_stdout = 0;
         }
-        if raw.len() > emitted {
-            let delta = &raw[emitted..];
-            let frame = docker_raw_stream(delta, "");
+        if stderr.len() < emitted_stderr {
+            emitted_stderr = 0;
+        }
+        if stdout.len() > emitted_stdout || stderr.len() > emitted_stderr {
+            let frame = docker_raw_stream(
+                if stdout_requested { &stdout[emitted_stdout..] } else { "" },
+                if stderr_requested { &stderr[emitted_stderr..] } else { "" },
+            );
             stream
                 .write_all(&frame)
                 .map_err(|error| error.to_string())?;
             stream.flush().map_err(|error| error.to_string())?;
-            emitted = raw.len();
+            emitted_stdout = stdout.len();
+            emitted_stderr = stderr.len();
         }
         std::thread::sleep(Duration::from_millis(250));
     }

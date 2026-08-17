@@ -3272,18 +3272,28 @@ impl ContainerRuntime {
 
     #[inline]
     pub fn logs(&self, id: &str) -> Result<String, RuntimeError> {
+        let (stdout, stderr) = self.logs_split(id)?;
+        Ok(format!("{stdout}{stderr}"))
+    }
+
+    /// Return stdout and stderr independently for Docker raw-stream framing.
+    #[inline]
+    pub fn logs_split(&self, id: &str) -> Result<(String, String), RuntimeError> {
         let record = self
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let mut output = String::new();
-        if Path::new(&record.stdout_path).exists() {
-            output.push_str(&fs::read_to_string(&record.stdout_path)?);
-        }
-        if Path::new(&record.stderr_path).exists() {
-            output.push_str(&fs::read_to_string(&record.stderr_path)?);
-        }
-        Ok(output)
+        let stdout = if Path::new(&record.stdout_path).exists() {
+            fs::read_to_string(&record.stdout_path)?
+        } else {
+            String::new()
+        };
+        let stderr = if Path::new(&record.stderr_path).exists() {
+            fs::read_to_string(&record.stderr_path)?
+        } else {
+            String::new()
+        };
+        Ok((stdout, stderr))
     }
 
     #[inline]

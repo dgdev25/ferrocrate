@@ -200,7 +200,7 @@ impl ManagedProcess {
 mod tests {
     use super::{kill_pid, probe_pid, stop_pid, ManagedProcess, ProcessState};
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn shell_path() -> &'static str {
         if Path::new("/bin/sh").exists() {
@@ -245,10 +245,32 @@ mod tests {
 
     #[test]
     fn managed_process_supports_unbounded_graceful_stop() {
-        let mut proc = ManagedProcess::start(shell_path(), &["-c", "trap 'exit 0' TERM; sleep 1"])
-            .expect("process starts");
+        let marker = std::env::temp_dir().join(format!(
+            "ferrocrate-graceful-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after epoch")
+                .as_nanos()
+        ));
+        let marker_text = marker.to_string_lossy().into_owned();
+        let command = format!(
+            "trap 'exit 0' TERM; : > '{}'; while :; do sleep 1; done",
+            marker_text
+        );
+        let mut proc = ManagedProcess::start(
+            shell_path(),
+            &["-c", &command],
+        )
+        .expect("process starts");
+        let ready_deadline = Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && Instant::now() < ready_deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(marker.exists(), "graceful-stop fixture did not become ready");
         let status = proc.stop(Duration::MAX).expect("unbounded stop");
-        assert!(!status.success());
+        let _ = std::fs::remove_file(&marker);
+        assert!(status.success());
         assert_eq!(proc.state(), ProcessState::Exited);
     }
 

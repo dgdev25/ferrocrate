@@ -4539,7 +4539,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                         || health_start_period.is_some(),
                     "--health-*",
                 ),
-                (*restart_policy != "no", "--restart"),
                 (bridge_cidr.is_some(), "--bridge-cidr"),
                 (bridge_name.is_some(), "--bridge-name"),
                 (net_limit.is_some(), "--net-limit"),
@@ -4563,6 +4562,12 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 }
             };
             let env = parse_env_entries(env)?;
+            let restart_name = match parse_restart_policy(restart_policy)? {
+                ferro_core::container_store::RestartPolicy::No => "no",
+                ferro_core::container_store::RestartPolicy::OnFailure => "on-failure",
+                ferro_core::container_store::RestartPolicy::Always => "always",
+                ferro_core::container_store::RestartPolicy::UnlessStopped => "unless-stopped",
+            };
             let labels = parse_key_values("run: label", labels)?;
             let entrypoint = entrypoint.as_deref().map(parse_entrypoint).transpose()?;
             let mappings = parse_publish(publish)?;
@@ -4603,6 +4608,10 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "Tmpfs": tmpfs,
                     "PortBindings": port_bindings,
                     "NetworkMode": network_mode,
+                    "RestartPolicy": {
+                        "Name": restart_name,
+                        "MaximumRetryCount": 0,
+                    },
                     "ReadonlyRootfs": read_only_rootfs,
                     "CapAdd": cap_add,
                     "SecurityOpt": if *no_new_privs {
@@ -15615,6 +15624,8 @@ volumes:
             "NET_ADMIN",
             "--tmpfs",
             "/tmp:size=64m",
+            "--restart",
+            "always",
             "echo",
             "ready",
         ])
@@ -15631,6 +15642,7 @@ volumes:
         assert!(create.contains("\"ReadonlyRootfs\":true"));
         assert!(create.contains("\"CapAdd\":[\"NET_ADMIN\"]"));
         assert!(create.contains("\"Tmpfs\":{\"/tmp\":\"size=64m\"}"));
+        assert!(create.contains("\"RestartPolicy\":{\"MaximumRetryCount\":0,\"Name\":\"always\"}"));
         assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));

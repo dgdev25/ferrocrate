@@ -6450,6 +6450,14 @@ fn prepare_shared_ebpf_network(
     );
     let filters_before = shared_tc_filter_snapshot(&route.interface)?;
 
+    // A crash can occur after the pin tree is created but before its ownership
+    // record is published.  Recover only an exact, schema-shaped tree with no
+    // live Ferro TC classifiers; active filters or foreign entries remain a
+    // fail-closed collision.
+    if matches!(action, SharedEbpfAction::PrepareAndAttach) {
+        recover_orphaned_ebpf_pins(network_id, &filters_before)?;
+    }
+
     match action {
         SharedEbpfAction::PrepareAndAttach => Ok(SharedEbpfPreparation {
             network_id: network_id.to_string(),
@@ -7245,6 +7253,62 @@ fn capture_ebpf_pins(root: &Path) -> Result<Vec<EbpfPinOwnershipRecord>, Runtime
     let mut records = Vec::new();
     visit(root, root, &mut records)?;
     Ok(records)
+}
+
+fn recover_orphaned_ebpf_pins(
+    network_id: &str,
+    filters_before: &[EbpfFilterOwnershipRecord],
+) -> Result<(), RuntimeError> {
+    let root = Path::new(FERRO_NETWORK_ROOT).join(network_id);
+    if !root.exists() {
+        return Ok(());
+    }
+    if !filters_before.is_empty() {
+        return Err(RuntimeError::Network(format!(
+            "eBPF pin path already exists and has live classifiers: {}",
+            root.display()
+        )));
+    }
+    let pins = capture_ebpf_pins(&root)?;
+    let expected = BTreeSet::from([
+        "",
+        "maps",
+        "maps/FERRO_COUNTERS",
+        "maps/FERRO_ENDPOINTS",
+        "maps/FERRO_META",
+        "maps/FERRO_POLICY",
+        "maps/FERRO_PORTS",
+        "maps/FERRO_CONNTRACK",
+        "programs",
+        "programs/ferro_egress",
+        "programs/ferro_ingress",
+    ]);
+    if pins
+        .iter()
+        .any(|pin| !expected.contains(pin.relative_path.as_str()))
+        || pins.len() != expected.len()
+    {
+        return Err(RuntimeError::Network(format!(
+            "eBPF pin path contains foreign or incomplete entries: {}",
+            root.display()
+        )));
+    }
+    let identity = PinnedNetworkIdentity {
+        root: root.clone(),
+        objects: pins
+            .iter()
+            .map(|pin| PinnedObjectIdentity {
+                relative_path: pin.relative_path.clone(),
+                device: pin.device,
+                inode: pin.inode,
+                directory: pin.directory,
+                map_id: pin.map_id,
+            })
+            .collect(),
+    };
+    EbpfNetwork::verify_pinned_network(network_id, identity)
+        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    cleanup_captured_ebpf_pins(&root, &pins)
 }
 
 fn ensure_bridge_backend_root(
@@ -8276,7 +8340,14 @@ fn cleanup_owned_ebpf_pins(ownership: &NetworkOwnershipRecord) -> Result<(), Run
             .as_deref()
             .ok_or_else(|| RuntimeError::Network("eBPF ownership has no pin path".to_string()))?,
     );
-    let mut pins = ownership.ebpf_pins.clone();
+    cleanup_captured_ebpf_pins(&root, &ownership.ebpf_pins)
+}
+
+fn cleanup_captured_ebpf_pins(
+    root: &Path,
+    captured: &[EbpfPinOwnershipRecord],
+) -> Result<(), RuntimeError> {
+    let mut pins = captured.to_vec();
     pins.sort_by(|left, right| {
         Path::new(&right.relative_path)
             .components()

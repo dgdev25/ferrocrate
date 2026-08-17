@@ -10596,6 +10596,26 @@ fn run_resource_monitor(
                                     new_limit_mb = adjusted_limit / 1024 / 1024,
                                     "increased memory limit"
                                 );
+                                if let Some(logger) = ai_logger.as_ref() {
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_nanos();
+                                    let trace = ferro_mind::ai::explain::DecisionTrace::new(
+                                        format!("ai-memory-adjustment-{id}-{ts}"),
+                                        format!(
+                                            "Container {id} memory limit increased after predictive-OOM evidence"
+                                        ),
+                                    )
+                                    .with_model("resource-oom-predictor", &predictor_model_version)
+                                    .with_decision("increase-memory-limit")
+                                    .with_evidence("container_id", id.clone())
+                                    .with_evidence("previous_limit_bytes", memory_limit.to_string())
+                                    .with_evidence("new_limit_bytes", adjusted_limit.to_string())
+                                    .with_evidence("ceiling_bytes", ceiling.to_string())
+                                    .with_evidence("action_enabled", "true");
+                                    let _ = logger.log("ai_memory_adjustment", &trace);
+                                }
                                 predictor.set_memory_limit(adjusted_limit);
                             }
                             Err(e) => {

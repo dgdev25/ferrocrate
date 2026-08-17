@@ -8805,6 +8805,7 @@ impl DockerEventStore {
         attributes.insert("httpStatus".to_string(), status.to_string());
         attributes.insert("scope".to_string(), "local".to_string());
         attributes.extend(docker_event_request_attributes(request_body));
+        attributes.extend(docker_event_response_attributes(response_bytes));
         let event = DockerEvent {
             id: self.next_id,
             time: timestamp.as_secs(),
@@ -9029,6 +9030,45 @@ fn docker_event_request_attributes(body: &[u8]) -> BTreeMap<String, String> {
             if attributes.len() >= MAX_ATTRIBUTES {
                 break;
             }
+        }
+    }
+    attributes
+}
+
+#[cfg(target_os = "linux")]
+fn docker_event_response_attributes(response: &[u8]) -> BTreeMap<String, String> {
+    const MAX_ATTRIBUTES: usize = 64;
+    const MAX_TEXT: usize = 256;
+    let Some(object) = response_body_json(response).and_then(|value| value.as_object().cloned())
+    else {
+        return BTreeMap::new();
+    };
+
+    // Docker clients commonly use these response fields when reconstructing
+    // an event actor. Keep the extraction deliberately allow-listed and
+    // bounded: response bodies can contain arbitrary plugin/container data,
+    // and event attributes must never become an unbounded journal sink.
+    let mut attributes = BTreeMap::new();
+    for key in [
+        "Id",
+        "ID",
+        "Name",
+        "Driver",
+        "Mountpoint",
+        "CreatedAt",
+        "Status",
+        "Image",
+        "NetworkID",
+        "Container",
+    ] {
+        let Some(value) = object.get(key).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !value.is_empty() && value.len() <= MAX_TEXT {
+            attributes.insert(key.to_string(), value.to_string());
+        }
+        if attributes.len() >= MAX_ATTRIBUTES {
+            break;
         }
     }
     attributes
@@ -11418,9 +11458,10 @@ mod tests {
         context_endpoint_available, decode_docker_raw_stream, desktop_forward_enabled,
         discover_rootless_socket, dispatch, dispatch_remote_context, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters, docker_event_payload,
-        docker_event_resource, docker_hijack_headers, docker_image_apply_time_bounds,
-        docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
+        docker_event_resource, docker_event_response_attributes, docker_hijack_headers,
+        docker_image_apply_time_bounds, docker_image_matches_filters,
+        docker_image_prune_matches_filters, docker_network_ipv6_config,
+        docker_network_matches_filters, docker_pending_inspect_payload,
         docker_pending_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
         docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
         ensure_context_routing_available, handle_build, handle_containers, handle_context,
@@ -13563,6 +13604,10 @@ volumes:
             Some(&"busybox".to_string())
         );
         assert_eq!(
+            events[0].attributes.get("Id"),
+            Some(&"container-1".to_string())
+        );
+        assert_eq!(
             events[0].attributes.get("tier"),
             Some(&"frontend".to_string())
         );
@@ -13572,6 +13617,18 @@ volumes:
             .any(|value| value.contains("secret")));
         let payload = docker_event_payload(&events[0]);
         assert_eq!(payload["Actor"]["ID"], "container-1");
+    }
+
+    #[test]
+    fn docker_event_response_attributes_are_allow_listed_and_bounded() {
+        let attributes = docker_event_response_attributes(
+            br#"{"Id":"image-1","Name":"alpine:latest","Secret":"must-not-persist","Labels":{"token":"hidden"}}"#,
+        );
+        assert_eq!(attributes.get("Id"), Some(&"image-1".to_string()));
+        assert_eq!(attributes.get("Name"), Some(&"alpine:latest".to_string()));
+        assert!(!attributes.contains_key("Secret"));
+        assert!(!attributes.contains_key("Labels"));
+        assert!(docker_event_response_attributes(br#"not-json"#).is_empty());
     }
 
     #[test]

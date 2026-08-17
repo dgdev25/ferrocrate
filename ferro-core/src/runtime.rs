@@ -1733,6 +1733,9 @@ impl ContainerRuntime {
         kernel_ops: Arc<dyn KernelResourceOps>,
     ) -> Result<Self, RuntimeError> {
         fs::create_dir_all(runtime_dir)?;
+        #[cfg(unix)]
+        let _reconciliation_lock =
+            LifecycleLock::acquire(&runtime_dir.join("reconciliation.lock"))?;
         let store = SqliteContainerStore::open(runtime_dir.join("containers.db"))?;
         let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
             .map(PathBuf::from)

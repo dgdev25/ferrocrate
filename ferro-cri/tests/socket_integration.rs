@@ -8,9 +8,10 @@ use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
 use ferro_cri::runtime::{
     ContainerConfig, ContainerStatusRequest, CreateContainerRequest, ImageFsInfoRequest,
-    ListImagesRequest, ListPodSandboxRequest, PodSandboxConfig, PodSandboxMetadata,
-    PodSandboxStatusRequest, RemoveContainerRequest, RemovePodSandboxRequest, RunPodSandboxRequest,
-    StartContainerRequest, StatusRequest, StopPodSandboxRequest, VersionRequest,
+    ListContainersRequest, ListImagesRequest, ListPodSandboxRequest, PodSandboxConfig,
+    PodSandboxMetadata, PodSandboxStatusRequest, RemoveContainerRequest, RemovePodSandboxRequest,
+    RunPodSandboxRequest, StartContainerRequest, StatusRequest, StopPodSandboxRequest,
+    VersionRequest,
 };
 use ferro_cri::runtime::{ImageSpec, PullImageRequest, RemoveImageRequest};
 use ferro_cri::server::{
@@ -536,6 +537,21 @@ async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
         .expect("create container rpc")
         .into_inner()
         .container_id;
+    let listed = client
+        .list_containers(ListContainersRequest { filter: None })
+        .await
+        .expect("list container rpc")
+        .into_inner();
+    assert_eq!(listed.containers.len(), 1);
+    assert_eq!(listed.containers[0].id, container);
+    assert_eq!(
+        listed.containers[0]
+            .metadata
+            .as_ref()
+            .expect("container metadata")
+            .name,
+        "wire-container"
+    );
     assert_eq!(
         client
             .container_status(ContainerStatusRequest {

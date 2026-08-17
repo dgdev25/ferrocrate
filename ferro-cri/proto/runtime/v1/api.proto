@@ -11,6 +11,7 @@ service RuntimeService {
   rpc ListPodSandbox(ListPodSandboxRequest) returns (ListPodSandboxResponse);
   rpc PodSandboxStatus(PodSandboxStatusRequest) returns (PodSandboxStatusResponse);
   rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
+  rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
   rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
   rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
   rpc RemoveContainer(RemoveContainerRequest) returns (RemoveContainerResponse);
@@ -123,6 +124,29 @@ message CreateContainerRequest {
   PodSandboxConfig sandbox_config = 3;
 }
 message CreateContainerResponse { string container_id = 1; }
+message ListContainersRequest { ContainerFilter filter = 1; }
+message ContainerFilter {
+  string id = 1;
+  string pod_sandbox_id = 2;
+  ContainerState state = 3;
+}
+message ListContainersResponse { repeated Container containers = 1; }
+message ContainerMetadata {
+  string name = 1;
+  uint32 attempt = 2;
+}
+message Container {
+  string id = 1;
+  ContainerMetadata metadata = 2;
+  ContainerState state = 3;
+  int64 created_at = 4;
+  ImageSpec image = 5;
+  string image_ref = 6;
+  map<string, string> labels = 7;
+  map<string, string> annotations = 8;
+  string runtime_handler = 9;
+  string log_path = 10;
+}
 message StartContainerRequest { string container_id = 1; }
 message StartContainerResponse {}
 message StopContainerRequest { string container_id = 1; uint64 timeout = 2; }

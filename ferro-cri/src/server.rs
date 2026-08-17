@@ -1,11 +1,12 @@
 use crate::runtime::image_service_server::{ImageService, ImageServiceServer};
 use crate::runtime::runtime_service_server::{RuntimeService, RuntimeServiceServer};
 use crate::runtime::{
-    ContainerState, ContainerStatus, ContainerStatusRequest, ContainerStatusResponse,
-    CreateContainerRequest, CreateContainerResponse, ExecSyncRequest, ExecSyncResponse,
-    FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
-    ImageStatusResponse, ListImagesRequest, ListImagesResponse, ListPodSandboxRequest,
-    ListPodSandboxResponse, PodSandbox, PodSandboxState, PodSandboxStatus, PodSandboxStatusRequest,
+    Container, ContainerMetadata, ContainerState, ContainerStatus, ContainerStatusRequest,
+    ContainerStatusResponse, CreateContainerRequest, CreateContainerResponse, ExecSyncRequest,
+    ExecSyncResponse, FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse,
+    ImageStatusRequest, ImageStatusResponse, ListContainersRequest, ListContainersResponse,
+    ListImagesRequest, ListImagesResponse, ListPodSandboxRequest, ListPodSandboxResponse,
+    PodSandbox, PodSandboxState, PodSandboxStatus, PodSandboxStatusRequest,
     PodSandboxStatusResponse, PullImageRequest, PullImageResponse, RemoveContainerRequest,
     RemoveContainerResponse, RemoveImageRequest, RemoveImageResponse, RemovePodSandboxRequest,
     RemovePodSandboxResponse, RunPodSandboxRequest, RunPodSandboxResponse, RuntimeCondition,
@@ -1180,6 +1181,89 @@ impl RuntimeService for CriRuntime {
         Ok(Response::new(CreateContainerResponse { container_id: id }))
     }
 
+    async fn list_containers(
+        &self,
+        request: Request<ListContainersRequest>,
+    ) -> Result<Response<ListContainersResponse>, Status> {
+        let filter = request.into_inner().filter;
+        if let Some(filter) = filter.as_ref() {
+            if !matches!(filter.state, 0..=3) {
+                return Err(Status::invalid_argument(
+                    "unsupported container state filter",
+                ));
+            }
+        }
+        let records: Vec<_> = self
+            .containers
+            .lock()
+            .map_err(|_| Status::internal("CRI container state lock poisoned"))?
+            .values()
+            .cloned()
+            .collect();
+        let runtime = ferro_core::runtime::ContainerRuntime::new(&self.runtime_dir)
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let mut containers = Vec::with_capacity(records.len());
+        for record in records {
+            if let Some(filter) = filter.as_ref() {
+                if !filter.id.is_empty() && filter.id != record.id {
+                    continue;
+                }
+                if !filter.pod_sandbox_id.is_empty() && filter.pod_sandbox_id != record.sandbox_id {
+                    continue;
+                }
+            }
+            let runtime_record = record
+                .runtime_id
+                .as_deref()
+                .and_then(|runtime_id| runtime.inspect(runtime_id).ok());
+            let state = match runtime_record.as_ref().map(|value| value.status.as_str()) {
+                Some("running") => ContainerState::Running,
+                Some("exited") | Some("stopped") => ContainerState::Exited,
+                _ => ContainerState::Created,
+            };
+            if let Some(filter) = filter.as_ref() {
+                if filter.state != 0 && filter.state != state as i32 {
+                    continue;
+                }
+            }
+            containers.push(Container {
+                id: record.id,
+                metadata: Some(ContainerMetadata {
+                    name: record.name,
+                    attempt: 0,
+                }),
+                state: state as i32,
+                created_at: record.created_at_unix as i64,
+                image: Some(crate::runtime::ImageSpec {
+                    image: record.image.clone(),
+                }),
+                image_ref: record.image,
+                labels: Default::default(),
+                annotations: [(
+                    "io.kubernetes.cri.sandbox-id".to_string(),
+                    record.sandbox_id,
+                )]
+                .into_iter()
+                .collect(),
+                runtime_handler: String::new(),
+                log_path: String::new(),
+            });
+        }
+        containers.sort_by(|left, right| {
+            left.metadata
+                .as_ref()
+                .map(|metadata| metadata.name.as_str())
+                .cmp(
+                    &right
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.name.as_str()),
+                )
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(Response::new(ListContainersResponse { containers }))
+    }
+
     async fn start_container(
         &self,
         request: Request<StartContainerRequest>,
@@ -1934,8 +2018,8 @@ mod tests {
     }
     use crate::runtime::{
         ContainerConfig, CreateContainerRequest, ImageFsInfoRequest, ImageSpec, ImageStatusRequest,
-        ListImagesRequest, PodSandboxConfig, PullImageRequest, RemoveContainerRequest,
-        RemoveImageRequest,
+        ListContainersRequest, ListImagesRequest, PodSandboxConfig, PullImageRequest,
+        RemoveContainerRequest, RemoveImageRequest,
     };
     use tonic::Request;
 
@@ -2287,6 +2371,69 @@ mod tests {
             .items;
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, all[0].id);
+    }
+
+    #[tokio::test]
+    async fn list_containers_projects_and_filters_durable_records() {
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        {
+            let mut containers = runtime.containers.lock().unwrap();
+            for (id, name, sandbox_id) in [
+                ("cri-c-b", "web-b", "cri-sandbox-b"),
+                ("cri-c-a", "web-a", "cri-sandbox-a"),
+            ] {
+                containers.insert(
+                    id.into(),
+                    ContainerSpecRecord {
+                        id: id.into(),
+                        sandbox_id: sandbox_id.into(),
+                        name: name.into(),
+                        image: "alpine:latest".into(),
+                        command: vec!["true".into()],
+                        env: Vec::new(),
+                        runtime_id: None,
+                        created_at_unix: 7,
+                    },
+                );
+            }
+        }
+        let listed = runtime
+            .list_containers(Request::new(ListContainersRequest { filter: None }))
+            .await
+            .expect("list containers")
+            .into_inner();
+        assert_eq!(
+            listed
+                .containers
+                .iter()
+                .map(|container| container.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cri-c-a", "cri-c-b"]
+        );
+        assert_eq!(listed.containers[0].state, ContainerState::Created as i32);
+        assert_eq!(
+            listed.containers[0]
+                .annotations
+                .get("io.kubernetes.cri.sandbox-id")
+                .map(String::as_str),
+            Some("cri-sandbox-a")
+        );
+        let filtered = runtime
+            .list_containers(Request::new(ListContainersRequest {
+                filter: Some(crate::runtime::ContainerFilter {
+                    id: "cri-c-b".into(),
+                    pod_sandbox_id: String::new(),
+                    state: 0,
+                }),
+            }))
+            .await
+            .expect("filter containers")
+            .into_inner();
+        assert_eq!(filtered.containers.len(), 1);
+        assert_eq!(filtered.containers[0].id, "cri-c-b");
     }
 
     #[tokio::test]

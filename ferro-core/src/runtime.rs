@@ -10217,6 +10217,20 @@ fn should_start_ai_monitor(memory_limit: u64) -> bool {
     is_ai_enabled() && memory_limit > 0
 }
 
+/// Compute the next bounded memory limit for the opt-in AI action path.
+///
+/// The action is deliberately monotonic: a misconfigured ceiling can disable
+/// an increase, but it can never cause the runtime to lower an existing cgroup
+/// limit. Saturating arithmetic also keeps the decision safe at `u64::MAX`.
+fn ai_next_memory_limit(current: u64, ceiling: u64) -> Option<u64> {
+    if current == 0 {
+        return None;
+    }
+    let proposed = current.saturating_add((current / 4).max(1));
+    let bounded = proposed.min(ceiling);
+    (bounded > current).then_some(bounded)
+}
+
 /// Resource monitor thread for predictive OOM prevention (Task 5.1).
 ///
 /// This function runs in a background thread, periodically reading cgroup v2
@@ -10568,30 +10582,37 @@ fn run_resource_monitor(
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
                 {
-                    let manager = CgroupV2Manager::new(&cgroup_root);
-                    let new_limit = (memory_limit as f64 * 1.25) as u64; // 25% increase
                     let ceiling = std::env::var("FERROCRATE_AI_ACT_MEMORY_CEILING")
                         .ok()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(u64::MAX);
 
-                    let adjusted_limit = new_limit.min(ceiling);
-                    match manager.adjust_memory_limit(&cgroup_path, adjusted_limit) {
-                        Ok(()) => {
-                            info!(
-                                container = %id,
-                                new_limit_mb = adjusted_limit / 1024 / 1024,
-                                "increased memory limit"
-                            );
-                            predictor.set_memory_limit(adjusted_limit);
+                    if let Some(adjusted_limit) = ai_next_memory_limit(memory_limit, ceiling) {
+                        let manager = CgroupV2Manager::new(&cgroup_root);
+                        match manager.adjust_memory_limit(&cgroup_path, adjusted_limit) {
+                            Ok(()) => {
+                                info!(
+                                    container = %id,
+                                    new_limit_mb = adjusted_limit / 1024 / 1024,
+                                    "increased memory limit"
+                                );
+                                predictor.set_memory_limit(adjusted_limit);
+                            }
+                            Err(e) => {
+                                warn!(
+                                    container = %id,
+                                    error = %e,
+                                    "failed to adjust memory limit"
+                                );
+                            }
                         }
-                        Err(e) => {
-                            warn!(
-                                container = %id,
-                                error = %e,
-                                "failed to adjust memory limit"
-                            );
-                        }
+                    } else {
+                        warn!(
+                            container = %id,
+                            current_limit = memory_limit,
+                            ceiling,
+                            "skipping AI memory adjustment because the bounded limit cannot increase"
+                        );
                     }
                 }
             }
@@ -13304,6 +13325,15 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_AI") },
         }
+    }
+
+    #[test]
+    fn ai_memory_adjustment_is_bounded_and_never_reduces_limit() {
+        assert_eq!(super::ai_next_memory_limit(100, 200), Some(125));
+        assert_eq!(super::ai_next_memory_limit(100, 110), Some(110));
+        assert_eq!(super::ai_next_memory_limit(100, 99), None);
+        assert_eq!(super::ai_next_memory_limit(0, u64::MAX), None);
+        assert_eq!(super::ai_next_memory_limit(u64::MAX, u64::MAX), None);
     }
 
     #[test]

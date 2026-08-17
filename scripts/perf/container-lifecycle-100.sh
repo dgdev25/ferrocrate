@@ -10,14 +10,20 @@ image="${FERROCRATE_PERF_IMAGE:-alpine:3.20}"
 count="${FERROCRATE_LIFECYCLE_COUNT:-100}"
 parallel="${FERROCRATE_LIFECYCLE_PARALLEL:-1}"
 keep_tmp="${FERROCRATE_LIFECYCLE_KEEP_TMP:-0}"
+memory_max="${FERROCRATE_LIFECYCLE_MEMORY_MAX:-}"
+hold_seconds="${FERROCRATE_LIFECYCLE_HOLD_SECONDS:-0}"
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "perf.container_lifecycle_skipped=1"
   echo "perf.container_lifecycle_skip_reason=root_required"
   exit 77
 fi
-if ! [[ "$count" =~ ^[1-9][0-9]*$ && "$parallel" =~ ^[1-9][0-9]*$ ]]; then
-  echo "invalid lifecycle count or parallelism" >&2
+if ! [[ "$count" =~ ^[1-9][0-9]*$ && "$parallel" =~ ^[1-9][0-9]*$ && "$hold_seconds" =~ ^[0-9]+$ ]]; then
+  echo "invalid lifecycle count, parallelism, or hold duration" >&2
+  exit 2
+fi
+if [[ -n "$memory_max" ]] && ! [[ "$memory_max" =~ ^[1-9][0-9]*$ ]]; then
+  echo "invalid lifecycle memory limit" >&2
   exit 2
 fi
 if [[ ! -x "$binary" ]]; then
@@ -37,6 +43,14 @@ cleanup() {
 trap cleanup EXIT
 
 env_prefix=(env "FERROCRATE_RUNTIME_DIR=$runtime_dir" "HOME=$tmp_root" "FERROCRATE_NETWORK_BACKEND=iptables")
+run_args=(--rm --network none --network-backend iptables)
+if [[ -n "$memory_max" ]]; then
+  run_args+=(--memory-max "$memory_max")
+fi
+workload=(true)
+if (( hold_seconds > 0 )); then
+  workload=(sh -c "sleep $hold_seconds")
+fi
 pull_ok=1
 if ! "${env_prefix[@]}" "$binary" pull "$image" >/dev/null 2>&1; then
   pull_ok=0
@@ -46,7 +60,7 @@ fi
 # expose the namespace identity required for OCI cleanup (common in nested CI
 # or unprivileged development VMs).
 probe_log="$tmp_root/probe.log"
-if ! "${env_prefix[@]}" "$binary" run --rm --network none --network-backend iptables "$image" true >"$probe_log" 2>&1; then
+if ! "${env_prefix[@]}" "$binary" run "${run_args[@]}" "$image" "${workload[@]}" >"$probe_log" 2>&1; then
   if grep -q "no kernel identity\|namespace identity" "$probe_log"; then
     echo "perf.container_lifecycle_skipped=1"
     echo "perf.container_lifecycle_skip_reason=namespace_identity_unavailable"
@@ -77,7 +91,7 @@ reap_one() {
 }
 
 while (( started < count )); do
-  "${env_prefix[@]}" "$binary" run --rm --network none --network-backend iptables "$image" true \
+  "${env_prefix[@]}" "$binary" run "${run_args[@]}" "$image" "${workload[@]}" \
     >"$tmp_root/run-${started}.log" 2>&1 &
   jobs+=("$!")
   running=$((running + 1))
@@ -93,6 +107,10 @@ end_ns="$(date +%s%N)"
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 echo "perf.container_lifecycle_count=$count"
 echo "perf.container_lifecycle_parallel=$parallel"
+if [[ -n "$memory_max" ]]; then
+  echo "perf.container_lifecycle_memory_max=$memory_max"
+fi
+echo "perf.container_lifecycle_hold_seconds=$hold_seconds"
 echo "perf.container_lifecycle_passed=$passed"
 echo "perf.container_lifecycle_failed=$failed"
 echo "perf.container_lifecycle_elapsed_ms=$elapsed_ms"

@@ -59,8 +59,14 @@ pub fn stop_pid(pid: u32, timeout: Duration) -> Result<(), ProcessLifecycleError
 }
 
 pub fn kill_pid(pid: u32) -> Result<(), ProcessLifecycleError> {
+    signal_pid(pid, Signal::SIGKILL)
+}
+
+/// Send an explicitly selected signal to a process, treating an already-exited
+/// process as an idempotent success.
+pub fn signal_pid(pid: u32, signal: Signal) -> Result<(), ProcessLifecycleError> {
     let target = Pid::from_raw(pid as i32);
-    if let Err(err) = kill(target, Signal::SIGKILL) {
+    if let Err(err) = kill(target, signal) {
         if err != nix::Error::from(Errno::ESRCH) {
             return Err(ProcessLifecycleError::Signal(err));
         }

@@ -60,6 +60,8 @@ use ferro_mind::ai::training::{
 };
 #[cfg(target_os = "linux")]
 use flate2::{write::GzEncoder, Compression};
+#[cfg(target_os = "linux")]
+use nix::sys::signal::Signal;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
@@ -10417,7 +10419,10 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/kill");
-                runtime.kill(id).map_err(|err| err.to_string())?;
+                let signal = parse_docker_kill_signal(query.get("signal"))?;
+                runtime
+                    .kill_with_signal(id, signal)
+                    .map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/wait") => {
@@ -11069,6 +11074,33 @@ fn parse_docker_stop_timeout(query: &HashMap<String, String>) -> Result<Duration
         ));
     }
     Ok(Duration::from_secs(seconds as u64))
+}
+
+fn parse_docker_kill_signal(value: Option<&String>) -> Result<Signal, String> {
+    let raw = value.map(String::as_str).unwrap_or("SIGKILL");
+    let normalized = raw.to_ascii_uppercase();
+    let normalized = normalized.strip_prefix("SIG").unwrap_or(&normalized);
+    let signal = match normalized {
+        "HUP" => Ok(Signal::SIGHUP),
+        "INT" => Ok(Signal::SIGINT),
+        "QUIT" => Ok(Signal::SIGQUIT),
+        "KILL" => Ok(Signal::SIGKILL),
+        "TERM" => Ok(Signal::SIGTERM),
+        "USR1" => Ok(Signal::SIGUSR1),
+        "USR2" => Ok(Signal::SIGUSR2),
+        "CONT" => Ok(Signal::SIGCONT),
+        "STOP" => Ok(Signal::SIGSTOP),
+        "TSTP" => Ok(Signal::SIGTSTP),
+        "" => Err("docker: kill signal must not be empty".to_string()),
+        other => other
+            .parse::<i32>()
+            .map_err(|_| format!("docker: unsupported kill signal: {raw}"))
+            .and_then(|number| {
+                Signal::try_from(number)
+                    .map_err(|_| format!("docker: unsupported kill signal: {raw}"))
+            }),
+    };
+    signal.map_err(|_| format!("docker: unsupported kill signal: {raw}"))
 }
 
 fn parse_docker_filters(
@@ -12282,20 +12314,20 @@ mod tests {
         handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
         parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
-        parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
-        parse_docker_stop_timeout, parse_driver_opts, parse_env_entries, parse_key_values,
-        parse_publish, parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
-        read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
-        remote_docker_request, remote_docker_stream_request, should_desktop_forward,
-        split_path_query, structured_desktop_error, top_level_command_name,
-        validate_build_platform, validate_docker_container_name,
-        validate_docker_container_prune_filters, validate_docker_exec_command,
-        validate_docker_image_prune_filters, validate_docker_network_filters,
-        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
-        validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
-        DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
-        VolumeCommands, WitnessCommands,
+        parse_docker_filters, parse_docker_kill_signal, parse_docker_limit_query,
+        parse_docker_network_create_spec, parse_docker_stop_timeout, parse_driver_opts,
+        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
+        parse_tmpfs_mounts, percent_encode_path_component, read_docker_request_after_auth,
+        read_http_request, read_merkle_leaves, remote_commit_path, remote_docker_request,
+        remote_docker_stream_request, should_desktop_forward, split_path_query,
+        structured_desktop_error, top_level_command_name, validate_build_platform,
+        validate_docker_container_name, validate_docker_container_prune_filters,
+        validate_docker_exec_command, validate_docker_image_prune_filters,
+        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
+        validate_network_mode, validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands,
+        ConfigCommands, ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent,
+        DockerEventStore, DockerExecCreateRequest, DockerHealthSpec, MigrateCommands,
+        NetworkCommands, RvfCommands, VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -14999,6 +15031,24 @@ volumes:
         assert!(parse_docker_stop_timeout(&query).is_err());
         query.insert("t".to_string(), "soon".to_string());
         assert!(parse_docker_stop_timeout(&query).is_err());
+    }
+
+    #[test]
+    fn docker_kill_signal_accepts_names_and_rejects_unsafe_unknowns() {
+        assert_eq!(
+            parse_docker_kill_signal(None).unwrap(),
+            nix::sys::signal::Signal::SIGKILL
+        );
+        assert_eq!(
+            parse_docker_kill_signal(Some(&"TERM".to_string())).unwrap(),
+            nix::sys::signal::Signal::SIGTERM
+        );
+        assert_eq!(
+            parse_docker_kill_signal(Some(&"SIGUSR1".to_string())).unwrap(),
+            nix::sys::signal::Signal::SIGUSR1
+        );
+        assert!(parse_docker_kill_signal(Some(&"0".to_string())).is_err());
+        assert!(parse_docker_kill_signal(Some(&"not-a-signal".to_string())).is_err());
     }
 
     #[test]

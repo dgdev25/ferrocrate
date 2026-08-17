@@ -132,6 +132,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/missing/kill?signal=not-a-signal",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/missing/wait",
         coverage: Coverage::Implemented,
         expected_status: 404,

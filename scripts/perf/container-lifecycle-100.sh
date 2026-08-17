@@ -7,7 +7,7 @@ repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/../.." && pwd)}"
 binary="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_PERF_IMAGE:-alpine:3.20}"
 count="${FERROCRATE_LIFECYCLE_COUNT:-100}"
-parallel="${FERROCRATE_LIFECYCLE_PARALLEL:-10}"
+parallel="${FERROCRATE_LIFECYCLE_PARALLEL:-1}"
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "perf.container_lifecycle_skipped=1"
@@ -84,4 +84,13 @@ echo "perf.container_lifecycle_parallel=$parallel"
 echo "perf.container_lifecycle_passed=$passed"
 echo "perf.container_lifecycle_failed=$failed"
 echo "perf.container_lifecycle_elapsed_ms=$elapsed_ms"
-if (( failed != 0 )); then exit 1; fi
+if (( failed != 0 )); then
+  for log in "$tmp_root"/run-*.log; do
+    if grep -q "error:" "$log"; then
+      echo "perf.container_lifecycle_first_failure=$(basename "$log")"
+      sed -n '1,8p' "$log" >&2
+      break
+    fi
+  done
+  exit 1
+fi

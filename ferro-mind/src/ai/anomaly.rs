@@ -45,6 +45,9 @@ pub struct NeuralAnomalyDetector {
     trained: bool,
     centroid: Option<Vec<f32>>,
     centroid_threshold: Option<f32>,
+    /// Mean of the normal training window used as a deterministic guardrail
+    /// around the stochastic neural reconstruction score.
+    baseline_centroid: Option<Vec<f32>>,
 }
 
 // Manual Debug implementation since Network<f32> doesn't derive Debug
@@ -56,6 +59,10 @@ impl std::fmt::Debug for NeuralAnomalyDetector {
             .field("threshold", &self.threshold)
             .field("trained", &self.trained)
             .field("centroid", &self.centroid.as_ref().map(Vec::len))
+            .field(
+                "baseline_centroid",
+                &self.baseline_centroid.as_ref().map(Vec::len),
+            )
             .finish()
     }
 }
@@ -80,6 +87,7 @@ impl NeuralAnomalyDetector {
             trained: false,
             centroid: None,
             centroid_threshold: None,
+            baseline_centroid: None,
         }
     }
 
@@ -180,6 +188,7 @@ impl NeuralAnomalyDetector {
 
         self.centroid = None;
         self.centroid_threshold = None;
+        self.baseline_centroid = None;
         self.init_network();
 
         let Some(ref mut network) = self.network else {
@@ -200,6 +209,21 @@ impl NeuralAnomalyDetector {
         if inputs.is_empty() {
             return false;
         }
+
+        // Keep a deterministic distance baseline alongside the neural model.
+        // ruv-fann initializes weights stochastically, so using this bounded
+        // distance as a floor prevents identical normal/anomalous inputs from
+        // producing an unstable ordering across runs.
+        let mut baseline = vec![0.0f32; self.input_size];
+        for sample in &inputs {
+            for (index, value) in sample.iter().enumerate() {
+                baseline[index] += *value;
+            }
+        }
+        for value in &mut baseline {
+            *value /= inputs.len() as f32;
+        }
+        self.baseline_centroid = Some(baseline);
 
         let training_data = TrainingData { inputs, outputs };
 
@@ -280,8 +304,21 @@ impl NeuralAnomalyDetector {
         }
         let error = error_sum / features.len() as f32;
 
+        let baseline_distance = self
+            .baseline_centroid
+            .as_ref()
+            .map(|centroid| {
+                features
+                    .iter()
+                    .zip(centroid)
+                    .map(|(feature, expected)| (feature - expected).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            })
+            .unwrap_or(0.0);
+
         AnomalyScore {
-            score: error,
+            score: error.max(baseline_distance),
             threshold: self.threshold,
         }
     }

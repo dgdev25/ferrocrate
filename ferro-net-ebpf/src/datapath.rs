@@ -220,6 +220,9 @@ pub struct Decision {
     pub source: Socket,
     pub destination: Socket,
     pub ifindex: Option<u32>,
+    /// Loopback replies must enter the target device's ingress path so the
+    /// host stack receives them; other redirects use normal egress semantics.
+    pub redirect_ingress: bool,
     pub destination_mac: Option<[u8; 6]>,
     pub translation: Translation,
     pub reverse_conntrack: Option<ConntrackRecord>,
@@ -233,6 +236,7 @@ impl Decision {
             source: packet.source,
             destination: packet.destination,
             ifindex: None,
+            redirect_ingress: false,
             destination_mac: None,
             translation: Translation::None,
             reverse_conntrack: None,
@@ -549,6 +553,7 @@ pub fn decide_ingress<S: DatapathState>(
                 }
                 decision.action = Action::Redirect;
                 decision.ifindex = Some(external.loopback_ifindex);
+                decision.redirect_ingress = true;
                 decision.destination_mac = None;
                 Ok(decision)
             } else if external.ifindex != 0 && external.next_hop_mac != [0; 6] {

@@ -31,6 +31,8 @@ mod bpf_program {
         programs::TcContext,
     };
 
+    const BPF_F_INGRESS: u64 = 1;
+
     #[used]
     static ABI_VERSION: u32 = crate::abi::PROGRAM_ABI_VERSION;
 
@@ -115,7 +117,12 @@ mod bpf_program {
                     Some(ifindex) if ifindex != 0 => {
                         // SAFETY: bpf_redirect consumes only the validated ifindex
                         // scalar and zero flags; it dereferences no Rust pointer.
-                        unsafe { bpf_redirect(ifindex, 0) as i32 }
+                        let flags = if decision.redirect_ingress {
+                            BPF_F_INGRESS
+                        } else {
+                            0
+                        };
+                        unsafe { bpf_redirect(ifindex, flags) as i32 }
                     }
                     _ => TC_ACT_SHOT,
                 };

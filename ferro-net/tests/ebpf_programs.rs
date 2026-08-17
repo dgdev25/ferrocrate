@@ -856,6 +856,7 @@ fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
     assert_eq!(redirected.translation, Translation::SourceAndDestination);
     assert_eq!(redirected.action, Action::Redirect);
     assert_eq!(redirected.ifindex, Some(1));
+    assert!(redirected.redirect_ingress);
     assert_eq!(redirected.destination_mac, None);
 
     // The redirected packet re-enters loopback ingress with its translated
@@ -863,6 +864,7 @@ fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
     let translated = tcp_packet(endpoint_address, 80, localhost, 8080);
     let passed = decide_ingress(&translated, &state).unwrap();
     assert_eq!(passed.action, Action::Pass);
+    assert!(!passed.redirect_ingress);
     assert_eq!(passed.translation, Translation::None);
 }
 

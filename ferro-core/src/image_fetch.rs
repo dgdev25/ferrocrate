@@ -6,7 +6,7 @@ use crate::registry::parse_image_reference;
 use crate::registry::RegistryClient;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -566,19 +566,57 @@ fn ensure_cas_blob(runtime_dir: &Path, blob_path: &Path) -> Result<PathBuf, Imag
     let cas_path = cas_root.join(hash);
 
     if !cas_path.exists() {
-        match fs::rename(blob_path, &cas_path) {
-            Ok(()) => {}
-            Err(_) => {
-                fs::copy(blob_path, &cas_path)?;
+        // Never move the published blob while another container may be
+        // opening it. Copy to a create-new temporary file, sync it, then
+        // atomically rename into the CAS. A racing publisher can safely lose
+        // the rename and reuse the complete winner.
+        let temporary = cas_root.join(format!(
+            ".{}.{}.{}.tmp",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("writer"),
+            format!("{:?}", std::thread::current().id())
+        ));
+        let mut output = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&temporary)?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let copy_result = (|| -> Result<(), ImageFetchError> {
+            let mut input = fs::File::open(blob_path)?;
+            std::io::copy(&mut input, &mut output)?;
+            output.flush()?;
+            output.sync_all()?;
+            Ok(())
+        })();
+        drop(output);
+        if let Err(error) = copy_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&temporary, &cas_path) {
+            let _ = fs::remove_file(&temporary);
+            if !cas_path.exists() {
+                return Err(error.into());
             }
         }
     }
 
-    if blob_path.exists() {
-        let _ = fs::remove_file(blob_path);
-    }
-    if fs::hard_link(&cas_path, blob_path).is_err() {
-        let _ = fs::copy(&cas_path, blob_path)?;
+    // Keep an existing published blob untouched; only materialize the link
+    // when a prior migration removed it.
+    if !blob_path.exists() {
+        if fs::hard_link(&cas_path, blob_path).is_err() {
+            fs::copy(&cas_path, blob_path)?;
+        }
     }
 
     Ok(cas_path)
@@ -620,8 +658,8 @@ fn verify_digest(path: &Path, digest: &str) -> Result<(), ImageFetchError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_image_binding, pull_image, pull_manifest_only, pull_planned_image_with_store,
-        ImageFetchError, ImageFetchPlan,
+        ensure_cas_blob, inspect_image_binding, pull_image, pull_manifest_only,
+        pull_planned_image_with_store, ImageFetchError, ImageFetchPlan,
     };
     use crate::image_store::LocalImageStore;
     use httptest::matchers::request;
@@ -629,6 +667,7 @@ mod tests {
     use httptest::{Expectation, Server};
     use sha2::{Digest, Sha256};
     use std::fs;
+    use std::sync::Arc;
 
     #[test]
     fn image_fetch_plan_binds_manifest_config_and_ordered_layers() {
@@ -649,6 +688,31 @@ mod tests {
         assert_eq!(plan.layer_digests().len(), 2);
         assert_ne!(plan.manifest_digest(), plan.config_digest());
         assert_ne!(plan.plan_digest(), changed.plan_digest());
+    }
+
+    #[test]
+    fn concurrent_cas_publication_keeps_blob_complete() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = temp.path().join("runtime");
+        let blob = runtime.join("images/blobs/layer");
+        fs::create_dir_all(blob.parent().unwrap()).expect("blob parent");
+        let payload = vec![0x5a; 128 * 1024];
+        fs::write(&blob, &payload).expect("blob");
+        let blob = Arc::new(blob);
+        let workers = (0..8)
+            .map(|_| {
+                let blob = Arc::clone(&blob);
+                let runtime = runtime.clone();
+                std::thread::spawn(move || ensure_cas_blob(&runtime, &blob).expect("cas"))
+            })
+            .collect::<Vec<_>>();
+        let paths = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker"))
+            .collect::<Vec<_>>();
+        assert!(paths.iter().all(|path| path == &paths[0]));
+        assert_eq!(fs::read(&*blob).expect("published blob"), payload);
+        assert_eq!(fs::read(&paths[0]).expect("cas blob"), payload);
     }
 
     #[test]

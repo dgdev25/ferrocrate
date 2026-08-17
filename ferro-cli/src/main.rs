@@ -9129,6 +9129,8 @@ struct DockerCreateSpec {
     name: Option<String>,
     network_mode: String,
     health: Option<DockerHealthSpec>,
+    #[serde(default)]
+    created_at_unix: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -10207,6 +10209,27 @@ fn handle_docker_compat_connection(
                         .map_err(|error| error.to_string())?;
                     deleted.push(record.id);
                 }
+                let pending_deleted = {
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    let ids = pending
+                        .iter()
+                        .filter(|(id, spec)| {
+                            docker_pending_prune_matches_filters(id, spec, &filters)
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    for id in &ids {
+                        pending.remove(id);
+                    }
+                    ids
+                };
+                if !pending_deleted.is_empty() {
+                    state.persist_pending()?;
+                    deleted.extend(pending_deleted);
+                }
                 let body = serde_json::json!({
                     "ContainersDeleted": deleted,
                     "SpaceReclaimed": 0
@@ -11217,6 +11240,38 @@ fn docker_pending_matches_filters(
     true
 }
 
+#[cfg(target_os = "linux")]
+fn docker_pending_prune_matches_filters(
+    _id: &str,
+    spec: &DockerCreateSpec,
+    filters: &HashMap<String, Vec<String>>,
+) -> bool {
+    if let Some(until) = filters.get("until").and_then(|values| values.first()) {
+        let Ok(until) = until.parse::<u64>() else {
+            return false;
+        };
+        if spec.created_at_unix == 0 || spec.created_at_unix >= until {
+            return false;
+        }
+    }
+    if let Some(labels) = filters.get("label") {
+        for selector in labels {
+            let mut parts = selector.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let matched = spec.labels.iter().any(|entry| {
+                let Some((actual_key, actual_value)) = entry.split_once('=') else {
+                    return false;
+                };
+                actual_key == key && parts.next().is_none_or(|expected| actual_value == expected)
+            });
+            if !matched {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Apply Docker's `since` and `before` list selectors after ordinary filters.
 /// Selectors may name a container (ID or name) or provide a Unix timestamp.
 /// The comparison is strict, matching Docker's boundary semantics: `since`
@@ -11527,6 +11582,10 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         name,
         network_mode,
         health,
+        created_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0),
     })
 }
 
@@ -12177,15 +12236,16 @@ mod tests {
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
         docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
-        docker_pending_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
-        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
-        ensure_context_routing_available, handle_build, handle_containers, handle_context,
-        handle_events, handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill,
-        handle_logs, handle_migrate_compose_report, handle_network, handle_pause, handle_pull,
-        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_top, handle_unpause, handle_volume, handle_wait, host_build_arch,
-        import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        docker_pending_matches_filters, docker_pending_prune_matches_filters, docker_raw_stream,
+        docker_runtime_healthcheck, docker_tail_logs, docker_top_payload,
+        docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
+        handle_build, handle_containers, handle_context, handle_events, handle_exec,
+        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
+        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
+        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
@@ -14524,6 +14584,7 @@ volumes:
                 retries: 3,
                 start_period_secs: 4,
             }),
+            created_at_unix: 0,
         };
         let payload = docker_pending_inspect_payload("pending", &pending);
         assert_eq!(payload["Config"]["Healthcheck"]["Test"][0], "CMD-SHELL");
@@ -14562,6 +14623,7 @@ volumes:
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
                 health: None,
+                created_at_unix: 0,
             },
         );
         state.persist_pending().expect("persist pending");
@@ -14598,6 +14660,7 @@ volumes:
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
             health: None,
+            created_at_unix: 0,
         };
         let mut filters = HashMap::new();
         filters.insert("status".to_string(), vec!["created".to_string()]);
@@ -14707,6 +14770,39 @@ volumes:
         record.status = "exited".to_string();
         record.created_at_unix = 20;
         assert!(!docker_container_prune_matches_filters(&record, &filters));
+    }
+
+    #[test]
+    fn docker_pending_prune_filters_match_labels_and_until() {
+        let spec = DockerCreateSpec {
+            image: "busybox".to_string(),
+            cmd: vec!["true".to_string()],
+            env: Vec::new(),
+            labels: vec!["tier=frontend".to_string()],
+            binds: Vec::new(),
+            publish: Vec::new(),
+            workdir: None,
+            user: None,
+            name: Some("pending".to_string()),
+            network_mode: "bridge".to_string(),
+            health: None,
+            created_at_unix: 10,
+        };
+        let labels = serde_json::from_value(serde_json::json!({
+            "label": ["tier=frontend"]
+        }))
+        .expect("filters");
+        assert!(docker_pending_prune_matches_filters(
+            "pending-id",
+            &spec,
+            &labels
+        ));
+        let until = serde_json::from_value(serde_json::json!({"until": ["10"]})).expect("filters");
+        assert!(!docker_pending_prune_matches_filters(
+            "pending-id",
+            &spec,
+            &until
+        ));
     }
 
     #[test]

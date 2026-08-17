@@ -333,6 +333,7 @@ impl DaemonHarness {
 #[test]
 fn docker_api_compatibility_matrix() {
     let harness = DaemonHarness::spawn();
+    let mut pending_id = None;
 
     for case in API_MATRIX {
         let (status, body) = harness.request(case.method, case.path, case.body);
@@ -341,6 +342,23 @@ fn docker_api_compatibility_matrix() {
             "coverage={:?} {} {} unexpected status, body={}",
             case.coverage, case.method, case.path, body
         );
+        if case.path.starts_with("/containers/create?name=") && status == 201 {
+            pending_id = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("Id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+        }
+        if case.path == "/containers/prune" {
+            assert!(
+                body.contains("ContainersDeleted")
+                    && pending_id.as_deref().is_some_and(|id| body.contains(id)),
+                "pending create must be removed by prune: {body}"
+            );
+        }
     }
 }
 

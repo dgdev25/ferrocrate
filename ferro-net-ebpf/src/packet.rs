@@ -5,6 +5,11 @@ const UDP_HEADER_LEN: usize = 8;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const IP_PROTOCOL_TCP: u8 = 6;
 const IP_PROTOCOL_UDP: u8 = 17;
+// `bpf_skb_store_bytes` accepts BPF_F_RECOMPUTE_CSUM for mutations that may
+// invalidate skb checksum/offload metadata.  Redirected veth packets can
+// carry CHECKSUM_PARTIAL state into loopback, where no NIC completes it.
+#[allow(dead_code)]
+const BPF_F_RECOMPUTE_CSUM: u64 = 1;
 // Loopback-originated packets have no real Ethernet source address. A
 // redirect from loopback to a bridge/veth must synthesize a stable local
 // unicast source or the bridge rejects the frame before it reaches the
@@ -510,6 +515,17 @@ mod tc {
             .map_err(|_| PacketError::Truncated)
     }
 
+    fn store_byte_recompute(ctx: &TcContext, offset: usize, value: u8) -> Result<(), PacketError> {
+        ctx.store(offset, &value, super::BPF_F_RECOMPUTE_CSUM)
+            .map_err(|_| PacketError::Truncated)
+    }
+
+    fn store_u16_recompute(ctx: &TcContext, offset: usize, value: u16) -> Result<(), PacketError> {
+        let bytes = value.to_be_bytes();
+        store_byte_recompute(ctx, offset, bytes[0])?;
+        store_byte_recompute(ctx, offset + 1, bytes[1])
+    }
+
     fn store_u16(ctx: &TcContext, offset: usize, value: u16) -> Result<(), PacketError> {
         let bytes = value.to_be_bytes();
         store_byte(ctx, offset, bytes[0])?;
@@ -571,10 +587,10 @@ mod tc {
                 super::update_transport_checksum(old_transport_checksum, old_address, new_address),
             )
         };
-        store_byte(ctx, address_offset, new_address[0])?;
-        store_byte(ctx, address_offset + 1, new_address[1])?;
-        store_byte(ctx, address_offset + 2, new_address[2])?;
-        store_byte(ctx, address_offset + 3, new_address[3])?;
+        store_byte_recompute(ctx, address_offset, new_address[0])?;
+        store_byte_recompute(ctx, address_offset + 1, new_address[1])?;
+        store_byte_recompute(ctx, address_offset + 2, new_address[2])?;
+        store_byte_recompute(ctx, address_offset + 3, new_address[3])?;
         store_u16(ctx, view.ipv4_offset + 10, new_checksum)?;
         store_u16(ctx, transport_checksum_offset, new_transport_checksum)
     }
@@ -597,7 +613,7 @@ mod tc {
                 super::update_checksum_word(old_checksum, old_port, new_port),
             )
         };
-        store_u16(ctx, port_offset, new_port)?;
+        store_u16_recompute(ctx, port_offset, new_port)?;
         store_u16(ctx, checksum_offset, new_checksum)
     }
 }

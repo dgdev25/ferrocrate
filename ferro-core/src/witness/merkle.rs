@@ -52,6 +52,22 @@ pub struct MerkleConsistencyProof {
     pub new_root: [u8; 32],
 }
 
+/// A compact append-only consistency proof.
+///
+/// Unlike `MerkleConsistencyProof`, this carries only the old tree's binary
+/// frontier and the newly appended leaves. Verification reconstructs the old
+/// and new roots, so proof size is proportional to the retained frontier plus
+/// the append delta rather than the entire journal prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MerkleFrontierConsistencyProof {
+    pub old_size: u64,
+    pub new_size: u64,
+    pub old_frontier: Vec<Option<[u8; 32]>>,
+    pub appended_leaves: Vec<[u8; 32]>,
+    pub old_root: [u8; 32],
+    pub new_root: [u8; 32],
+}
+
 fn leaf_hash(leaf: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(LEAF_DOMAIN);
@@ -82,6 +98,67 @@ fn next_level(level: &[[u8; 32]]) -> Vec<[u8; 32]> {
         .chunks(2)
         .map(|pair| node_hash(&pair[0], pair.get(1).unwrap_or(&pair[0])))
         .collect()
+}
+
+fn append_frontier(
+    frontier: &mut Vec<Option<[u8; 32]>>,
+    leaf: &[u8; 32],
+) -> Result<(), MerkleError> {
+    let mut carry = leaf_hash(leaf);
+    let mut level = 0usize;
+    loop {
+        if level >= MAX_PROOF_DEPTH {
+            return Err(MerkleError::ProofTooDeep);
+        }
+        if frontier.len() <= level {
+            frontier.resize(level + 1, None);
+        }
+        match frontier[level].take() {
+            Some(left) => {
+                carry = node_hash(&left, &carry);
+                level += 1;
+            }
+            None => {
+                frontier[level] = Some(carry);
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn frontier_root(frontier: &[Option<[u8; 32]>], leaf_count: u64) -> Result<[u8; 32], MerkleError> {
+    if leaf_count == 0 || leaf_count as usize > MAX_LEAVES {
+        return Err(if leaf_count == 0 { MerkleError::Empty } else { MerkleError::TooManyLeaves });
+    }
+    let mut current = None;
+    let mut current_level = 0usize;
+    for level in 0..MAX_PROOF_DEPTH {
+        let Some(peak) = frontier.get(level).and_then(|value| *value) else {
+            continue;
+        };
+        if current.is_none() {
+            current = Some(peak);
+            current_level = level;
+            continue;
+        }
+        let mut right = current.take().expect("frontier current exists");
+        while current_level < level {
+            right = node_hash(&right, &right);
+            current_level += 1;
+        }
+        current = Some(node_hash(&peak, &right));
+        current_level = level + 1;
+    }
+    current.ok_or(MerkleError::Empty)
+}
+
+fn frontier_from_leaves(leaves: &[[u8; 32]]) -> Result<Vec<Option<[u8; 32]>>, MerkleError> {
+    checked_leaves(leaves)?;
+    let mut frontier = Vec::new();
+    for leaf in leaves {
+        append_frontier(&mut frontier, leaf)?;
+    }
+    Ok(frontier)
 }
 
 /// Compute the transparency root for canonical witness record hashes.
@@ -190,6 +267,54 @@ pub fn verify_consistency(proof: &MerkleConsistencyProof) -> Result<(), MerkleEr
     Ok(())
 }
 
+/// Create a compact append-only consistency proof for `old_size`.
+pub fn frontier_consistency_proof(
+    leaves: &[[u8; 32]],
+    old_size: usize,
+) -> Result<MerkleFrontierConsistencyProof, MerkleError> {
+    checked_leaves(leaves)?;
+    if old_size == 0 || old_size > leaves.len() {
+        return Err(MerkleError::IndexOutOfRange);
+    }
+    let old_frontier = frontier_from_leaves(&leaves[..old_size])?;
+    Ok(MerkleFrontierConsistencyProof {
+        old_size: old_size as u64,
+        new_size: leaves.len() as u64,
+        old_frontier,
+        appended_leaves: leaves[old_size..].to_vec(),
+        old_root: root(&leaves[..old_size])?,
+        new_root: root(leaves)?,
+    })
+}
+
+/// Verify a compact append-only consistency proof without the old prefix.
+pub fn verify_frontier_consistency(
+    proof: &MerkleFrontierConsistencyProof,
+) -> Result<(), MerkleError> {
+    if proof.old_size == 0
+        || proof.old_size > proof.new_size
+        || proof.old_size as usize > MAX_LEAVES
+        || proof.new_size as usize > MAX_LEAVES
+        || proof.new_size - proof.old_size != proof.appended_leaves.len() as u64
+        || proof.old_frontier.len() > MAX_PROOF_DEPTH
+    {
+        return Err(MerkleError::IndexOutOfRange);
+    }
+    let old_root = frontier_root(&proof.old_frontier, proof.old_size)?;
+    if old_root != proof.old_root {
+        return Err(MerkleError::RootMismatch);
+    }
+    let mut frontier = proof.old_frontier.clone();
+    for leaf in &proof.appended_leaves {
+        append_frontier(&mut frontier, leaf)?;
+    }
+    let new_root = frontier_root(&frontier, proof.new_size)?;
+    if new_root != proof.new_root {
+        return Err(MerkleError::RootMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +366,22 @@ mod tests {
         let mut proof = consistency_proof(&records, 4).expect("consistency proof");
         proof.old_size = 5;
         assert_eq!(verify_consistency(&proof), Err(MerkleError::RootMismatch));
+    }
+
+    #[test]
+    fn compact_frontier_consistency_proof_reconstructs_append_only_roots() {
+        for count in [2, 3, 5, 7, 9, 17, 31] {
+            let records = leaves(count);
+            for old_size in 1..=count {
+                let proof = frontier_consistency_proof(&records, old_size).expect("proof");
+                verify_frontier_consistency(&proof).expect("verify");
+                assert_eq!(proof.new_root, root(&records).expect("root"));
+            }
+        }
+        let records = leaves(9);
+        let mut proof = frontier_consistency_proof(&records, 4).expect("proof");
+        proof.appended_leaves[0][0] ^= 1;
+        assert_eq!(verify_frontier_consistency(&proof), Err(MerkleError::RootMismatch));
     }
 
     #[test]

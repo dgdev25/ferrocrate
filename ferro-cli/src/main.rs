@@ -1966,8 +1966,8 @@ fn dispatch_policy(command: &PolicyCommands, runtime_dir: &Path) -> Result<(), S
 #[cfg(target_os = "linux")]
 fn validate_merkle_proof_kind(value: &str) -> Result<String, String> {
     match value {
-        "inclusion" | "consistency" => Ok(value.to_string()),
-        _ => Err("proof kind must be inclusion or consistency".to_string()),
+        "inclusion" | "consistency" | "frontier-consistency" => Ok(value.to_string()),
+        _ => Err("proof kind must be inclusion, consistency, or frontier-consistency".to_string()),
     }
 }
 
@@ -2165,6 +2165,14 @@ fn dispatch_witness(command: &WitnessCommands, runtime_dir: &Path) -> Result<(),
                             format!("witness merkle verify: invalid consistency proof: {error}")
                         })?;
                     ferro_core::witness::merkle_verify_consistency(&parsed)
+                        .map_err(|error| format!("witness merkle verify: {error}"))?;
+                }
+                "frontier-consistency" => {
+                    let parsed: ferro_core::witness::MerkleFrontierConsistencyProof =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            format!("witness merkle verify: invalid frontier proof: {error}")
+                        })?;
+                    ferro_core::witness::merkle_verify_frontier_consistency(&parsed)
                         .map_err(|error| format!("witness merkle verify: {error}"))?;
                 }
                 _ => unreachable!("clap validates Merkle proof kind"),
@@ -13029,6 +13037,22 @@ volumes:
             Commands::Witness {
                 command: WitnessCommands::MerkleVerify { proof, kind }
             } if proof == *"proof.json" && kind == "consistency"
+        ));
+
+        let compact = Cli::parse_from([
+            "ferrocrate",
+            "witness",
+            "merkle-verify",
+            "--proof",
+            "frontier.json",
+            "--kind",
+            "frontier-consistency",
+        ]);
+        assert!(matches!(
+            compact.command,
+            Commands::Witness {
+                command: WitnessCommands::MerkleVerify { proof, kind }
+            } if proof == *"frontier.json" && kind == "frontier-consistency"
         ));
 
         let temp = tempfile::tempdir().expect("tempdir");

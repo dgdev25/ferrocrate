@@ -42,9 +42,14 @@ pub use journal::{
 };
 pub use keys::{KeyId, KeyMaterial, KeyStore};
 pub use merkle::{
-    consistency_proof as merkle_consistency_proof, prove as merkle_prove, root as merkle_root,
-    verify as merkle_verify, verify_consistency as merkle_verify_consistency,
-    MerkleConsistencyProof, MerkleError, MerkleProof,
+    consistency_proof as merkle_consistency_proof,
+    frontier_consistency_proof as merkle_frontier_consistency_proof,
+    prove as merkle_prove,
+    root as merkle_root,
+    verify as merkle_verify,
+    verify_consistency as merkle_verify_consistency,
+    verify_frontier_consistency as merkle_verify_frontier_consistency,
+    MerkleConsistencyProof, MerkleError, MerkleFrontierConsistencyProof, MerkleProof,
 };
 pub use reader::WitnessReader;
 pub(crate) use recovery::RecoveryEvidence;

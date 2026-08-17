@@ -4554,6 +4554,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 validate_docker_container_name(name)?;
             }
             let env = parse_env_entries(env)?;
+            parse_capabilities(cap_add)?;
             let _ = build_limits(*memory_max, *cpu_quota, *cpu_period, *pids_max)?;
             let health = build_health_config(
                 health_cmd.as_deref(),
@@ -15599,6 +15600,20 @@ volumes:
             .expect("remote context should claim run")
             .expect_err("invalid Docker names must be rejected");
         assert!(result.contains("container name"), "error={result}");
+
+        let invalid_cap = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "alpine",
+            "--cap-add",
+            "NOT_A_CAPABILITY",
+        ])
+        .expect("parse invalid remote capability")
+        .command;
+        let result = dispatch_remote_context(&invalid_cap)
+            .expect("remote context should claim run")
+            .expect_err("invalid capabilities must be rejected");
+        assert!(result.contains("unknown capability"), "error={result}");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },

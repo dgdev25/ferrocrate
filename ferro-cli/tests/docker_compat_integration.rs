@@ -202,6 +202,16 @@ fn docker_compat_rename_uses_docker_name_query_parameter() {
 }
 
 #[test]
+fn docker_compat_events_accepts_docker_cli_scalar_filter_values() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request(
+        "GET",
+        "/v1.45/events?filters=%7B%22type%22%3A%7B%22network%22%3Atrue%7D%7D",
+    );
+    assert_eq!(status, 200, "body={body}");
+}
+
+#[test]
 fn docker_compat_commit_requires_container_and_repository() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request("POST", "/v1.45/commit");

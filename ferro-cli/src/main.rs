@@ -9465,7 +9465,7 @@ impl DockerEventStore {
         // Event filters use the same Docker JSON contract as the container
         // listing endpoint. Validate them before evaluating any predicates so
         // malformed input cannot silently degrade into an unfiltered stream.
-        parse_docker_filters(query)?;
+        parse_docker_event_filters(query)?;
         let contents = std::fs::read_to_string(&self.path).unwrap_or_default();
         let since = query
             .get("since")
@@ -11184,6 +11184,57 @@ fn parse_docker_filters(
                     .ok_or_else(|| format!("docker: filter {key} values must be strings"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        filters.insert(key.clone(), values);
+    }
+    Ok(filters)
+}
+
+/// Docker's events client emits a scalar or boolean-keyed object for one
+/// `--filter` value (for example `{"type":{"network":true}}`), while
+/// listing endpoints conventionally use arrays. Normalize all event forms at
+/// this boundary.
+fn parse_docker_event_filters(
+    query: &HashMap<String, String>,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let Some(raw) = query.get("filters") else {
+        return Ok(HashMap::new());
+    };
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("docker: invalid filters JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "docker: filters must be a JSON object".to_string())?;
+    let mut filters = HashMap::new();
+    for (key, value) in object {
+        let values = match value {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("docker: filter {key} values must be strings"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            serde_json::Value::String(value) => vec![value.clone()],
+            serde_json::Value::Object(values) => values
+                .iter()
+                .map(|(name, enabled)| {
+                    if enabled.as_bool() == Some(true) {
+                        Ok(name.clone())
+                    } else {
+                        Err(format!(
+                            "docker: filter {key} object values must be boolean true"
+                        ))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
+                return Err(format!(
+                    "docker: filter {key} must be a string, boolean object, or array"
+                ));
+            }
+        };
         filters.insert(key.clone(), values);
     }
     Ok(filters)
@@ -15240,11 +15291,11 @@ volumes:
         let temp = tempfile::tempdir().expect("event runtime");
         let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
         let mut query = HashMap::new();
-        query.insert("filters".to_string(), r#"{"event":"start"}"#.to_string());
+        query.insert("filters".to_string(), r#"{"event":true}"#.to_string());
         let error = store
             .query(&query)
             .expect_err("malformed event filters must fail");
-        assert!(error.contains("must be an array"), "error={error}");
+        assert!(error.contains("boolean object"), "error={error}");
     }
 
     #[test]

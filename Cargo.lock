@@ -1051,7 +1051,7 @@ dependencies = [
  "rvf-index",
  "rvf-quant",
  "rvf-runtime",
- "rvf-types 0.2.0",
+ "rvf-types",
  "serde",
  "serde_json",
  "sha2",
@@ -3168,23 +3168,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dff39ba56ba54399ad3796e4b4d079ab9b663afe4b53b4e0f30d68aff98897de"
 dependencies = [
  "ed25519-dalek",
- "rvf-types 0.2.0",
+ "rvf-types",
  "sha3",
 ]
 
 [[package]]
 name = "rvf-index"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b02b415be504ba700ac123e6712ad1b4f5b332e293075a8ee84dce96f9eec7e"
+checksum = "ce36812dd23269e9daf8819344e29c0f13ef73e84f31a02b3b8a9cc0c431795e"
 
 [[package]]
 name = "rvf-quant"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f704bcca2c628c5b80e1663940fe204d7af815a0de1178c9a2ca5c406d75bfb"
+checksum = "6a1984a13b774b4c8a28b0cc3f95b070dcf953575ce99bffc8cf2db5b52894ff"
 dependencies = [
- "rvf-types 0.1.0",
+ "rvf-types",
 ]
 
 [[package]]
@@ -3193,14 +3193,8 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e465af193e27d9c5f939519fa71065a7bab22bfb31f85d614fa9c59218f73858"
 dependencies = [
- "rvf-types 0.2.0",
+ "rvf-types",
 ]
-
-[[package]]
-name = "rvf-types"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a650cb7329774b8eaf764b02ee187adab7e31640a69a4efe33abcb3fc86a5170"
 
 [[package]]
 name = "rvf-types"

@@ -25,8 +25,8 @@ sha2 = "0.10"
 # RVF persistence layer (optional)
 rvf-runtime = { version = "0.2", default-features = false, features = ["std"], optional = true }
 rvf-types = { version = "0.2" }
-rvf-quant = { version = "0.1" }
-rvf-index = { version = "0.1" }
+rvf-quant = { version = "0.2" }
+rvf-index = { version = "0.2" }
 
 [features]
 default = ["rvf-persistence"]

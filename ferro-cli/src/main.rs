@@ -9705,6 +9705,38 @@ fn docker_event_response_attributes(response: &[u8]) -> BTreeMap<String, String>
             break;
         }
     }
+    // Container inspect/create responses place stable image, user, working
+    // directory, and labels beneath `Config`. Preserve only scalar values and
+    // bounded labels so replayed event actors remain useful without turning
+    // arbitrary response JSON into a journal sink.
+    if let Some(config) = object.get("Config").and_then(serde_json::Value::as_object) {
+        for key in ["Image", "WorkingDir", "User", "Entrypoint"] {
+            if attributes.len() >= MAX_ATTRIBUTES {
+                break;
+            }
+            if let Some(value) = config.get(key).and_then(serde_json::Value::as_str) {
+                if !value.is_empty() && value.len() <= MAX_TEXT {
+                    attributes.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        if let Some(labels) = config
+            .get("Labels")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (key, value) in labels.iter().take(MAX_ATTRIBUTES) {
+                if attributes.len() >= MAX_ATTRIBUTES {
+                    break;
+                }
+                let Some(value) = value.as_str() else {
+                    continue;
+                };
+                if !key.is_empty() && key.len() <= MAX_TEXT && value.len() <= MAX_TEXT {
+                    attributes.insert(key.clone(), value.to_string());
+                }
+            }
+        }
+    }
     attributes
 }
 
@@ -14891,6 +14923,22 @@ volumes:
         assert!(!attributes.contains_key("Secret"));
         assert!(!attributes.contains_key("Labels"));
         assert!(docker_event_response_attributes(br#"not-json"#).is_empty());
+    }
+
+    #[test]
+    fn docker_event_response_attributes_project_nested_container_config() {
+        let attributes = docker_event_response_attributes(
+            br#"{"Id":"container-1","Config":{"Image":"alpine:3.20","WorkingDir":"/srv","Labels":{"tier":"frontend","secret":"redacted-by-source"},"Env":["TOKEN=hidden"]},"Secret":"ignored"}"#,
+        );
+        assert_eq!(attributes.get("Image"), Some(&"alpine:3.20".to_string()));
+        assert_eq!(attributes.get("WorkingDir"), Some(&"/srv".to_string()));
+        assert_eq!(attributes.get("tier"), Some(&"frontend".to_string()));
+        assert_eq!(
+            attributes.get("secret"),
+            Some(&"redacted-by-source".to_string())
+        );
+        assert!(!attributes.contains_key("Env"));
+        assert!(!attributes.contains_key("Secret"));
     }
 
     #[test]

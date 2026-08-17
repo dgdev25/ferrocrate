@@ -9164,6 +9164,17 @@ fn validate_security_ebpf_config(
             "security ebpf monitor pin root must be absolute".to_string(),
         ));
     }
+    // `Path::components()` normalizes `.` away, so inspect the raw separators
+    // as well; bpftool and cleanup must receive one canonical, non-traversing
+    // pin namespace rather than an equivalent-looking alias.
+    if pin_root
+        .split('/')
+        .any(|component| component == "." || component == "..")
+    {
+        return Err(RuntimeError::Network(
+            "security ebpf monitor pin root must not contain dot path components".to_string(),
+        ));
+    }
     if events.is_empty() || events.len() > 32 {
         return Err(RuntimeError::Network(
             "security ebpf monitor event set must contain 1..32 events".to_string(),
@@ -12205,6 +12216,20 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             &["execve/open".into()],
         )
         .is_err());
+        let traversal = super::validate_security_ebpf_config(
+            "/usr/lib/ferrocrate/ferro-security.o",
+            "/sys/fs/bpf/ferrocrate-security/../foreign",
+            &["execve".into()],
+        )
+        .expect_err("pin-root traversal must be rejected");
+        assert!(traversal.to_string().contains("dot path components"));
+        let curdir = super::validate_security_ebpf_config(
+            "/usr/lib/ferrocrate/ferro-security.o",
+            "/sys/fs/bpf/./ferrocrate-security-c1",
+            &["execve".into()],
+        )
+        .expect_err("pin-root dot component must be rejected");
+        assert!(curdir.to_string().contains("dot path components"));
         let duplicate = vec!["execve".to_string(), "EXECVE".to_string()];
         let error = super::validate_security_ebpf_config(
             "/usr/lib/ferrocrate/ferro-security.o",

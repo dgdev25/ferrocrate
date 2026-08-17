@@ -4550,6 +4550,9 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 }
             };
             let read_only = effective_readonly(profile, *read_only_rootfs, *read_write_rootfs)?;
+            if let Some(name) = name {
+                validate_docker_container_name(name)?;
+            }
             let env = parse_env_entries(env)?;
             let _ = build_limits(*memory_max, *cpu_quota, *cpu_period, *pids_max)?;
             let health = build_health_config(
@@ -15583,6 +15586,20 @@ volumes:
             .expect_err("conflicting rootfs flags must be rejected");
         assert!(result.contains("read-only and --read-write"), "error={result}");
 
+        let invalid_name = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "alpine",
+            "--name",
+            "bad/name",
+        ])
+        .expect("parse invalid remote name")
+        .command;
+        let result = dispatch_remote_context(&invalid_name)
+            .expect("remote context should claim run")
+            .expect_err("invalid Docker names must be rejected");
+        assert!(result.contains("container name"), "error={result}");
+
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
@@ -15627,7 +15644,7 @@ volumes:
             "run",
             "alpine:latest",
             "--name",
-            "web/name",
+            "web-name",
             "--env",
             "MODE=test",
             "--label",
@@ -15664,7 +15681,7 @@ volumes:
             .expect("remote run should succeed");
         let requests = worker.join().expect("remote run worker");
         let create = String::from_utf8_lossy(&requests[0]);
-        assert!(create.contains("POST /containers/create?name=web%2Fname"));
+        assert!(create.contains("POST /containers/create?name=web-name"));
         assert!(create.contains("\"Image\":\"alpine:latest\""));
         assert!(create.contains("\"NetworkMode\":\"bridge\""));
         assert!(create.contains("\"ReadonlyRootfs\":true"));

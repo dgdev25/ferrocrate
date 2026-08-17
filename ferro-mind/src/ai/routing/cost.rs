@@ -7,6 +7,32 @@ pub struct Provider {
     pub local: bool,
 }
 
+/// A scored provider together with an explicit executable backend.
+///
+/// The command is launched directly (never through a shell) and receives the
+/// prompt on stdin. This keeps the routing primitive useful for local WASM,
+/// model-server, or test adapters without silently inventing a cloud API.
+#[derive(Debug, Clone)]
+pub struct ProviderEndpoint {
+    pub provider: Provider,
+    pub command: std::path::PathBuf,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutionError {
+    #[error("no provider satisfies the routing policy")]
+    NoProvider,
+    #[error("provider command failed to start: {0}")]
+    Spawn(String),
+    #[error("provider command timed out after {0} ms")]
+    Timeout(u64),
+    #[error("provider command exited with status {status}: {stderr}")]
+    NonZeroExit { status: i32, stderr: String },
+    #[error("provider returned an empty response")]
+    EmptyResponse,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoutingPolicy {
     pub min_quality: f32,
@@ -79,6 +105,78 @@ pub fn choose_provider<'a>(
             .partial_cmp(&score_b)
             .unwrap_or(std::cmp::Ordering::Equal)
     })
+}
+
+/// Select a provider and execute its direct local command backend.
+///
+/// The command receives `prompt` as UTF-8 on stdin. A timeout is mandatory in
+/// practice: zero means no wait budget and is rejected, while the child is
+/// killed and reaped on expiry. The returned provider name makes the selected
+/// tier auditable by callers.
+pub fn execute_routed_prompt(
+    providers: &[ProviderEndpoint],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<(String, String), ExecutionError> {
+    if timeout.is_zero() {
+        return Err(ExecutionError::Timeout(0));
+    }
+    let candidates: Vec<Provider> = providers.iter().map(|entry| entry.provider.clone()).collect();
+    let selected = choose_provider(&candidates, policy).ok_or(ExecutionError::NoProvider)?;
+    let endpoint = providers
+        .iter()
+        .find(|entry| entry.provider.name == selected.name)
+        .ok_or(ExecutionError::NoProvider)?;
+
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(&endpoint.command)
+        .args(&endpoint.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ExecutionError::Spawn(error.to_string()))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ExecutionError::Spawn("provider stdin unavailable".to_string()))?;
+    stdin
+        .write_all(prompt.as_bytes())
+        .map_err(|error| ExecutionError::Spawn(error.to_string()))?;
+    drop(stdin);
+
+    let started = std::time::Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| ExecutionError::Spawn(error.to_string()))?
+        {
+            Some(status) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| ExecutionError::Spawn(error.to_string()))?;
+                if !status.success() {
+                    return Err(ExecutionError::NonZeroExit {
+                        status: status.code().unwrap_or(-1),
+                        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    });
+                }
+                let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if response.is_empty() {
+                    return Err(ExecutionError::EmptyResponse);
+                }
+                return Ok((endpoint.provider.name.clone(), response));
+            }
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ExecutionError::Timeout(timeout.as_millis() as u64));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
 }
 
 fn provider_score(
@@ -183,5 +281,51 @@ mod tests {
             ..RoutingPolicy::default()
         };
         assert!(choose_provider(&providers, &policy).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executes_selected_provider_without_shell_interpolation() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("provider.sh");
+        std::fs::write(&script, "#!/bin/sh\nread prompt\nprintf 'reply:%s\\n' \"$prompt\"\n")
+            .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("permissions");
+        let providers = vec![ProviderEndpoint {
+            provider: Provider {
+                name: "local-test".to_string(),
+                cost_per_1k_tokens: 0.0,
+                quality: 0.9,
+                avg_latency_ms: 5,
+                local: true,
+            },
+            command: script,
+            args: Vec::new(),
+        }];
+        let (name, response) = execute_routed_prompt(
+            &providers,
+            &RoutingPolicy::default(),
+            "hello; touch SHOULD_NOT_RUN",
+            std::time::Duration::from_secs(1),
+        )
+        .expect("provider response");
+        assert_eq!(name, "local-test");
+        assert_eq!(response, "reply:hello; touch SHOULD_NOT_RUN");
+        assert!(!temp.path().join("SHOULD_NOT_RUN").exists());
+    }
+
+    #[test]
+    fn execution_rejects_zero_timeout_before_spawning() {
+        let error = execute_routed_prompt(
+            &[],
+            &RoutingPolicy::default(),
+            "prompt",
+            std::time::Duration::ZERO,
+        )
+        .expect_err("zero timeout must fail closed");
+        assert!(matches!(error, ExecutionError::Timeout(0)));
     }
 }

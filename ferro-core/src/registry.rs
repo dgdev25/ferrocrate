@@ -352,7 +352,10 @@ impl RegistryClient {
             })?;
 
         let upload_url = normalize_location(location, &image_ref);
-        let upload_url = format!("{upload_url}?digest={digest}");
+        // Registry implementations commonly return an upload location with
+        // an opaque `_state` query parameter. Preserve it when adding the
+        // final digest instead of producing an invalid second `?` delimiter.
+        let upload_url = append_digest_query(&upload_url, digest);
 
         let mut file = File::open(path).map_err(RegistryError::Io)?;
         let mut body = Vec::new();
@@ -749,9 +752,17 @@ fn normalize_location(location: &str, image_ref: &ImageReference) -> String {
     }
 }
 
+fn append_digest_query(upload_url: &str, digest: &str) -> String {
+    let separator = if upload_url.contains('?') { '&' } else { '?' };
+    format!("{upload_url}{separator}digest={digest}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_image_reference, ReferenceSeparator, RegistryAuth, RegistryClient};
+    use super::{
+        append_digest_query, normalize_location, parse_image_reference, ReferenceSeparator,
+        RegistryAuth, RegistryClient,
+    };
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use httptest::matchers::{all_of, contains, request};
@@ -958,5 +969,18 @@ mod tests {
         client
             .push_blob_from_file(&image, digest, &blob_path, None)
             .expect("push blob");
+    }
+
+    #[test]
+    fn registry_upload_location_preserves_existing_query_parameters() {
+        let image = parse_image_reference("localhost:5000/team/cache:latest").unwrap();
+        let location =
+            normalize_location("/v2/team/cache/blobs/uploads/uuid?_state=opaque", &image);
+        let completed = append_digest_query(&location, "sha256:abc");
+        assert_eq!(
+            completed,
+            "http://localhost:5000/v2/team/cache/blobs/uploads/uuid?_state=opaque&digest=sha256:abc"
+        );
+        assert!(!completed.contains("?_state=opaque?digest"));
     }
 }

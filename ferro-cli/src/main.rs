@@ -4531,14 +4531,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 ),
                 (*profile != "dev", "--profile"),
                 (!annotations.is_empty(), "--annotation"),
-                (
-                    health_cmd.is_some()
-                        || health_interval.is_some()
-                        || health_timeout.is_some()
-                        || health_retries.is_some()
-                        || health_start_period.is_some(),
-                    "--health-*",
-                ),
                 (bridge_cidr.is_some(), "--bridge-cidr"),
                 (bridge_name.is_some(), "--bridge-name"),
                 (net_limit.is_some(), "--net-limit"),
@@ -4562,6 +4554,13 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 }
             };
             let env = parse_env_entries(env)?;
+            let health = build_health_config(
+                health_cmd.as_deref(),
+                *health_interval,
+                *health_timeout,
+                *health_retries,
+                *health_start_period,
+            )?;
             let restart_name = match parse_restart_policy(restart_policy)? {
                 ferro_core::container_store::RestartPolicy::No => "no",
                 ferro_core::container_store::RestartPolicy::OnFailure => "on-failure",
@@ -4612,6 +4611,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                         "Name": restart_name,
                         "MaximumRetryCount": 0,
                     },
+                    "Healthcheck": health.as_ref().map(docker_runtime_healthcheck),
                     "ReadonlyRootfs": read_only_rootfs,
                     "CapAdd": cap_add,
                     "SecurityOpt": if *no_new_privs {
@@ -15626,6 +15626,10 @@ volumes:
             "/tmp:size=64m",
             "--restart",
             "always",
+            "--health-cmd",
+            "test -f /ready",
+            "--health-interval",
+            "10",
             "echo",
             "ready",
         ])
@@ -15643,6 +15647,8 @@ volumes:
         assert!(create.contains("\"CapAdd\":[\"NET_ADMIN\"]"));
         assert!(create.contains("\"Tmpfs\":{\"/tmp\":\"size=64m\"}"));
         assert!(create.contains("\"RestartPolicy\":{\"MaximumRetryCount\":0,\"Name\":\"always\"}"));
+        assert!(create.contains("\"Healthcheck\":{\"Interval\":10000000000"));
+        assert!(create.contains("\"Test\":[\"CMD-SHELL\",\"test -f /ready\"]"));
         assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));

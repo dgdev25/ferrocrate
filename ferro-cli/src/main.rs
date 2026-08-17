@@ -12104,6 +12104,28 @@ fn docker_inspect_payload(
             "Labels": record.labels,
             "Healthcheck": record.health.as_ref().map(docker_runtime_healthcheck),
         },
+        "HostConfig": {
+            "Memory": record
+                .resource_limits
+                .as_ref()
+                .and_then(|limits| limits.memory_max)
+                .unwrap_or(0),
+            "CpuQuota": record
+                .resource_limits
+                .as_ref()
+                .and_then(|limits| limits.cpu_quota)
+                .unwrap_or(0),
+            "CpuPeriod": record
+                .resource_limits
+                .as_ref()
+                .and_then(|limits| limits.cpu_period)
+                .unwrap_or(0),
+            "PidsLimit": record
+                .resource_limits
+                .as_ref()
+                .and_then(|limits| limits.pids_max)
+                .unwrap_or(0),
+        },
         "State": {
             "Status": record.status,
             "Pid": record.pid,

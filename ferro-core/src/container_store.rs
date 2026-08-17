@@ -151,6 +151,8 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub no_new_privileges: bool,
     #[serde(default)]
+    pub resource_limits: Option<ResourceLimitRecord>,
+    #[serde(default)]
     pub network_backend: Option<String>,
     #[serde(default)]
     pub network_ownership: Option<NetworkOwnershipRecord>,
@@ -168,6 +170,21 @@ pub struct ContainerRecord {
     pub mutation_generation: u64,
     #[serde(default)]
     pub pending_mutation: Option<MutationReservation>,
+}
+
+/// Resource limits requested at launch and projected by compatibility APIs.
+/// This is deliberately a storage DTO so records remain independent of the
+/// cgroup manager's live filesystem representation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceLimitRecord {
+    #[serde(default)]
+    pub memory_max: Option<u64>,
+    #[serde(default)]
+    pub cpu_quota: Option<u64>,
+    #[serde(default)]
+    pub cpu_period: Option<u64>,
+    #[serde(default)]
+    pub pids_max: Option<u64>,
 }
 
 fn default_namespace_owned() -> bool {
@@ -239,6 +256,7 @@ impl ContainerRecord {
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,
             no_new_privileges: false,
+            resource_limits: None,
             network_backend: None,
             network_ownership: None,
             managed_overlay: None,

@@ -411,6 +411,64 @@ pub fn execute_routed_prompt_with_adapters_metered(
     Ok((provider, response, budget.used_tokens()))
 }
 
+/// Metered variant of [`execute_routed_prompt_with_adapters_failover`]. The
+/// prompt is reserved once for the whole attempt sequence; response usage is
+/// reserved only for a response that can be returned. A failed or over-budget
+/// provider is removed before the next bounded attempt.
+pub fn execute_routed_prompt_with_adapters_metered_failover(
+    adapters: &[ProviderAdapter],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+    budget: &TokenBudget,
+    max_attempts: usize,
+) -> Result<(String, String, u64), ExecutionError> {
+    if max_attempts == 0 {
+        return Err(ExecutionError::NoProvider);
+    }
+    budget.reserve(estimate_tokens(prompt))?;
+    let mut remaining = adapters.iter().collect::<Vec<_>>();
+    let mut last_error = None;
+    for _ in 0..max_attempts {
+        if remaining.is_empty() {
+            break;
+        }
+        let providers = remaining
+            .iter()
+            .map(|adapter| adapter.provider().clone())
+            .collect::<Vec<_>>();
+        let selected = choose_provider(&providers, policy).ok_or(ExecutionError::NoProvider)?;
+        let index = remaining
+            .iter()
+            .position(|adapter| adapter.provider().name == selected.name)
+            .ok_or(ExecutionError::NoProvider)?;
+        let adapter = remaining.remove(index);
+        let result = match adapter {
+            ProviderAdapter::Command(endpoint) => {
+                execute_routed_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+                    .map(|(provider, response)| (provider, response, None))
+            }
+            ProviderAdapter::Http(endpoint) => execute_routed_http_prompt_with_usage(
+                std::slice::from_ref(endpoint),
+                policy,
+                prompt,
+                timeout,
+            ),
+        };
+        match result {
+            Ok((provider, response, usage)) => {
+                let response_tokens = usage.unwrap_or_else(|| estimate_tokens(&response));
+                match budget.reserve(response_tokens) {
+                    Ok(()) => return Ok((provider, response, budget.used_tokens())),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or(ExecutionError::NoProvider))
+}
+
 /// Select and execute a remote provider using its declared wire protocol.
 ///
 /// The request is built as structured JSON and sent directly through
@@ -774,6 +832,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ExecutionError::NonZeroExit { status: 7, .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metered_failover_charges_prompt_once_and_only_returns_within_budget() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let failing = temp.path().join("failing.sh");
+        let healthy = temp.path().join("healthy.sh");
+        std::fs::write(&failing, "#!/bin/sh\nexit 9\n").expect("failing script");
+        std::fs::write(&healthy, "#!/bin/sh\nread prompt\nprintf 'ok'\n").expect("healthy script");
+        for path in [&failing, &healthy] {
+            let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("permissions");
+        }
+        let make = |name: &str, quality: f32, command| {
+            ProviderAdapter::Command(ProviderEndpoint {
+                provider: Provider {
+                    name: name.into(),
+                    cost_per_1k_tokens: 0.0,
+                    quality,
+                    avg_latency_ms: 1,
+                    local: true,
+                },
+                command,
+                args: Vec::new(),
+            })
+        };
+        let budget = TokenBudget::new(4);
+        let result = execute_routed_prompt_with_adapters_metered_failover(
+            &[make("preferred", 0.99, failing), make("fallback", 0.8, healthy)],
+            &RoutingPolicy::default(),
+            "hello",
+            std::time::Duration::from_secs(5),
+            &budget,
+            2,
+        )
+        .expect("fallback response within budget");
+        assert_eq!(result, ("fallback".into(), "ok".into(), 3));
+        assert_eq!(budget.used_tokens(), estimate_tokens("hello") + estimate_tokens("ok"));
     }
 
     #[cfg(unix)]

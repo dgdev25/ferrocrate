@@ -254,10 +254,12 @@ impl AdaptiveRestartPolicy {
         }
 
         // Standard exponential backoff: base * 2^(failures-1)
-        let base_backoff = self.base_backoff_secs * (1 << (failures - 1).min(10));
+        let multiplier = 1u64 << (failures - 1).min(10);
+        let base_backoff = self.base_backoff_secs.saturating_mul(multiplier);
 
         // Apply learned adjustment
-        let adjusted = (base_backoff as f32 * self.backoff_adjustment) as u64;
+        let adjusted = (base_backoff as f64 * self.backoff_adjustment as f64)
+            .min(u64::MAX as f64) as u64;
 
         // Cap at maximum
         adjusted.min(self.max_backoff_secs)
@@ -842,6 +844,13 @@ mod tests {
 
         assert!(backoff2 > backoff1);
         assert!(backoff3 > backoff2);
+    }
+
+    #[test]
+    fn adaptive_policy_backoff_saturates_before_applying_cap() {
+        let policy = AdaptiveRestartPolicy::new("test").with_backoff(u64::MAX, u64::MAX);
+        assert_eq!(policy.calculate_backoff(1), u64::MAX);
+        assert_eq!(policy.calculate_backoff(10), u64::MAX);
     }
 
     #[test]

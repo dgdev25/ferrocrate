@@ -7,6 +7,7 @@
 
 use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
 use ruv_fann::{Network, NetworkBuilder};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -299,6 +300,104 @@ impl NeuralAnomalyDetector {
     pub fn set_threshold(&mut self, threshold: f32) {
         self.threshold = threshold;
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnomalyTrainingSnapshot {
+    schema: u32,
+    container_id: String,
+    samples: Vec<Vec<f32>>,
+}
+
+/// Persist bounded normal-behavior samples used to warm the runtime detector.
+pub fn save_training_snapshot(
+    path: &std::path::Path,
+    container_id: &str,
+    samples: &[Vec<f32>],
+) -> Result<(), String> {
+    const MAX_BYTES: usize = 64 * 1024;
+    if samples.len() > 64 || samples.iter().any(|sample| {
+        sample.is_empty()
+            || sample.len() > 16
+            || sample
+                .iter()
+                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    }) {
+        return Err("anomaly training snapshot sample bounds are invalid".to_string());
+    }
+    let snapshot = AnomalyTrainingSnapshot {
+        schema: 1,
+        container_id: container_id.to_string(),
+        samples: samples.to_vec(),
+    };
+    let bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_BYTES {
+        return Err("anomaly training snapshot exceeds 64 KiB".to_string());
+    }
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temp = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("anomaly"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        std::fs::rename(&temp, path).map_err(|error| error.to_string())?;
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok::<(), String>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Restore warm-up samples only when the snapshot belongs to this container.
+pub fn load_training_snapshot(
+    path: &std::path::Path,
+    expected_container_id: &str,
+) -> Result<Vec<Vec<f32>>, String> {
+    const MAX_BYTES: u64 = 64 * 1024;
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_BYTES {
+        return Err("anomaly training snapshot exceeds 64 KiB".to_string());
+    }
+    let snapshot: AnomalyTrainingSnapshot = serde_json::from_slice(
+        &std::fs::read(path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("invalid anomaly training snapshot: {error}"))?;
+    if snapshot.schema != 1 {
+        return Err("unsupported anomaly training snapshot schema".to_string());
+    }
+    if snapshot.container_id != expected_container_id {
+        return Err("anomaly training snapshot container identity mismatch".to_string());
+    }
+    if snapshot.samples.len() > 64
+        || snapshot.samples.iter().any(|sample| {
+            sample.is_empty()
+                || sample.len() > 16
+                || sample
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        })
+    {
+        return Err("anomaly training snapshot sample bounds are invalid".to_string());
+    }
+    Ok(snapshot.samples)
 }
 
 /// Container metrics for anomaly detection
@@ -773,6 +872,17 @@ mod tests {
 
         // Anomalous data should have higher reconstruction error
         assert!(anomaly_result.score > normal_result.score);
+    }
+
+    #[test]
+    fn anomaly_training_snapshot_round_trips_and_rejects_identity_forks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("anomaly.json");
+        let samples = vec![vec![0.1, 0.2, 0.3], vec![0.2, 0.3, 0.4]];
+        save_training_snapshot(&path, "container-a", &samples).expect("save");
+        let restored = load_training_snapshot(&path, "container-a").expect("load");
+        assert_eq!(restored, samples);
+        assert!(load_training_snapshot(&path, "container-b").is_err());
     }
 
     #[test]

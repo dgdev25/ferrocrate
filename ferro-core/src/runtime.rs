@@ -10093,6 +10093,15 @@ fn ai_resource_snapshot_path(container_id: &str) -> PathBuf {
         .join(format!("{container_id}.json"))
 }
 
+fn ai_anomaly_snapshot_path(container_id: &str) -> PathBuf {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/ferrocrate"))
+        .join("ai")
+        .join("anomaly")
+        .join(format!("{container_id}.json"))
+}
+
 fn log_ai_restart_lifecycle(
     container_id: &str,
     action: &str,
@@ -10295,8 +10304,27 @@ fn run_resource_monitor(
             info!(container = %id, error = %error, "no active anomaly model; using runtime baseline");
         }
     }
-    let mut anomaly_training_samples: Vec<Vec<f32>> = Vec::new();
+    let anomaly_snapshot_path = ai_anomaly_snapshot_path(&id);
+    let mut anomaly_training_samples = match ferro_mind::ai::anomaly::load_training_snapshot(
+        &anomaly_snapshot_path,
+        &id,
+    ) {
+        Ok(samples) => samples,
+        Err(error) if anomaly_snapshot_path.exists() => {
+            info!(
+                container = %id,
+                error = %error,
+                "anomaly training snapshot rejected; starting a fresh baseline"
+            );
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    };
     let anomaly_train_after = 20usize; // Train after 20 samples of normal behavior
+    if !anomaly_detector.is_trained() && anomaly_training_samples.len() >= anomaly_train_after {
+        anomaly_training_samples.truncate(anomaly_train_after);
+        let _ = anomaly_detector.train(&anomaly_training_samples, 50);
+    }
 
     let sample_interval = Duration::from_secs(30);
     let oom_horizon = Duration::from_secs(1200); // 20 minutes
@@ -10356,6 +10384,13 @@ fn run_resource_monitor(
             // Accumulate training samples during initial "normal" phase
             if !anomaly_detector.is_trained() {
                 anomaly_training_samples.push(features.clone());
+                if let Err(error) = ferro_mind::ai::anomaly::save_training_snapshot(
+                    &anomaly_snapshot_path,
+                    &id,
+                    &anomaly_training_samples,
+                ) {
+                    warn!(container = %id, error = %error, "failed to persist anomaly training snapshot");
+                }
                 if anomaly_training_samples.len() >= anomaly_train_after {
                     anomaly_detector.train(&anomaly_training_samples, 50);
                     info!(container = %id, samples = anomaly_training_samples.len(), "anomaly detector trained");

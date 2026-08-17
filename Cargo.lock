@@ -1046,6 +1046,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dirs",
+ "ed25519-dalek",
  "libc",
  "parking_lot 0.12.5",
  "reqwest",

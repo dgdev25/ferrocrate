@@ -10259,17 +10259,17 @@ fn run_resource_monitor(
 ) {
     use std::time::Instant;
 
-    // No limit = nothing to predict
-    if memory_limit == 0 {
-        return;
-    }
-
     // Resolve the digest-bound active resource model when one is available.
     // The built-in trend predictor remains an explicit, safe fallback for
     // first-run hosts or unavailable model stores.
     let mut predictor_model_version = "heuristic-runtime-v1".to_string();
-    let mut predictor =
-        ferro_mind::ai::resource::ResourcePredictor::new(60).with_memory_limit(memory_limit);
+    // The monitor also owns anomaly detection and trend telemetry, so it must
+    // remain active for unlimited containers. OOM prediction and memory action
+    // stay disabled until a positive cgroup limit is present.
+    let mut predictor = ferro_mind::ai::resource::ResourcePredictor::new(60);
+    if memory_limit > 0 {
+        predictor = predictor.with_memory_limit(memory_limit);
+    }
     let model_config = ferro_mind::ai::training::TrainingConfig::default();
     let active_model = match ferro_mind::ai::training::TrainingPipeline::new(model_config) {
         Ok(pipeline) => pipeline
@@ -10281,7 +10281,11 @@ fn run_resource_monitor(
         Ok(active) => {
             match ferro_mind::ai::resource::ResourcePredictor::from_model_artifact(&active.path) {
                 Ok(model_predictor) => {
-                    predictor = model_predictor.with_memory_limit(memory_limit);
+                    predictor = if memory_limit > 0 {
+                        model_predictor.with_memory_limit(memory_limit)
+                    } else {
+                        model_predictor
+                    };
                     predictor_model_version = format!("active-v{}", active.version);
                     info!(
                         container = %id,
@@ -10381,6 +10385,7 @@ fn run_resource_monitor(
     // cpu.stat reports cumulative CPU time. Retain only the previous sample
     // so anomaly and prediction features use the actual cgroup CPU delta.
     let mut previous_cpu_sample: Option<(u64, Instant)> = None;
+    let mut observed_memory_peak = 1u64;
 
     loop {
         // Check for explicit cancellation
@@ -10416,17 +10421,19 @@ fn run_resource_monitor(
             };
 
             predictor.push(sample);
+            observed_memory_peak = observed_memory_peak.max(metrics.memory_current);
             if let Err(error) = predictor.save_snapshot(&resource_snapshot_path, &id) {
                 warn!(container = %id, error = %error, "failed to persist resource predictor snapshot");
             }
 
             // Build normalized feature vector for anomaly detection
             // Features: [cpu_norm, mem_norm, pids_norm] normalized 0-1
-            let mem_norm = if memory_limit > 0 {
-                metrics.memory_current as f32 / memory_limit as f32
+            let memory_scale = if memory_limit > 0 {
+                memory_limit
             } else {
-                0.0f32
+                observed_memory_peak.max(1)
             };
+            let mem_norm = (metrics.memory_current as f32 / memory_scale as f32).clamp(0.0, 1.0);
             let cpu_norm = (sample.cpu_percent / 100.0).clamp(0.0, 1.0);
             let pids_norm = (metrics.pids_current as f32 / 1000.0).clamp(0.0, 1.0);
             let features = vec![cpu_norm, mem_norm, pids_norm];

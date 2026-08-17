@@ -750,7 +750,10 @@ pub enum VolumeCommands {
         name: String,
         path: String,
     },
-    Ls,
+    Ls {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+    },
     Prune,
     Inspect {
         name: String,
@@ -775,7 +778,10 @@ pub enum NetworkCommands {
         #[arg(long = "ipv6-gateway")]
         ipv6_gateway: Option<String>,
     },
-    Ls,
+    Ls {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+    },
     Prune,
     Inspect {
         name: String,
@@ -5003,8 +5009,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             .map(|_| println!("rename: container={container} name={name}"))
         })(),
         Commands::Network {
-            command: NetworkCommands::Ls,
-        } => request("GET", "/networks".to_string()).and_then(|body| print_json(body, "json")),
+            command: NetworkCommands::Ls { filters },
+        } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_network_filters(&parsed)?;
+            let path = if parsed.is_empty() {
+                "/networks".to_string()
+            } else {
+                let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+                format!(
+                    "/networks?filters={}",
+                    percent_encode_path_component(&encoded)
+                )
+            };
+            request("GET", path).and_then(|body| print_json(body, "json"))
+        })(),
         Commands::Network {
             command: NetworkCommands::Inspect { name, format },
         } => request(
@@ -5013,8 +5032,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         )
         .and_then(|body| print_json(body, format)),
         Commands::Volume {
-            command: VolumeCommands::Ls,
-        } => request("GET", "/volumes".to_string()).and_then(|body| print_json(body, "json")),
+            command: VolumeCommands::Ls { filters },
+        } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_volume_filters(&parsed)?;
+            let path = if parsed.is_empty() {
+                "/volumes".to_string()
+            } else {
+                let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+                format!(
+                    "/volumes?filters={}",
+                    percent_encode_path_component(&encoded)
+                )
+            };
+            request("GET", path).and_then(|body| print_json(body, "json"))
+        })(),
         Commands::Volume {
             command: VolumeCommands::Prune,
         } => {
@@ -6924,8 +6956,15 @@ fn handle_volume_authorized(
                 .map_err(|err| err.to_string())?;
             println!("volume restore: {name} <- {path}");
         }
-        VolumeCommands::Ls => {
-            let records = store.list().map_err(|err| err.to_string())?;
+        VolumeCommands::Ls { filters } => {
+            let filters = parse_cli_filters(&filters)?;
+            validate_docker_volume_filters(&filters)?;
+            let records = store
+                .list()
+                .map_err(|err| err.to_string())?
+                .into_iter()
+                .filter(|record| docker_volume_matches_filters(record, &filters))
+                .collect::<Vec<_>>();
             if records.is_empty() {
                 println!("volumes: no entries");
             } else {
@@ -7330,10 +7369,31 @@ fn handle_network_authorized(
                 record.name, record.driver, record.subnet, record.gateway
             );
         }
-        NetworkCommands::Ls => {
-            let records = load_networks(runtime_dir)?;
+        NetworkCommands::Ls { filters } => {
+            let filters = parse_cli_filters(&filters)?;
+            validate_docker_network_filters(&filters)?;
+            let records = load_networks(runtime_dir)?
+                .into_iter()
+                .filter(|record| {
+                    docker_network_matches_filters(
+                        &DockerNetworkView {
+                            name: &record.name,
+                            driver: &record.driver,
+                        },
+                        &filters,
+                    )
+                })
+                .collect::<Vec<_>>();
             println!("NAME\tDRIVER\tSUBNET\tGATEWAY");
-            println!("bridge\tbridge\t10.0.0.0/24\t10.0.0.1");
+            if docker_network_matches_filters(
+                &DockerNetworkView {
+                    name: "bridge",
+                    driver: "bridge",
+                },
+                &filters,
+            ) {
+                println!("bridge\tbridge\t10.0.0.0/24\t10.0.0.1");
+            }
             for record in records {
                 println!(
                     "{}\t{}\t{}\t{}",
@@ -12202,6 +12262,25 @@ volumes:
             other => panic!("unexpected command: {other:?}"),
         }
 
+        let filtered_ls = Cli::parse_from([
+            "ferrocrate",
+            "volume",
+            "ls",
+            "--filter",
+            "name=data",
+            "--filter",
+            "driver=local",
+        ]);
+        match filtered_ls.command {
+            Commands::Volume { command } => match command {
+                VolumeCommands::Ls { filters } => {
+                    assert_eq!(filters, vec!["name=data", "driver=local"]);
+                }
+                _ => panic!("unexpected volume command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
         let extract = Cli::parse_from(["ferrocrate", "rvf", "extract", "image.rvf", "layer.tar"]);
         match extract.command {
             Commands::Rvf {
@@ -12826,7 +12905,9 @@ volumes:
 
         let ls = Cli::parse_from(["ferrocrate", "volume", "ls"]);
         match ls.command {
-            Commands::Volume { command } => assert!(matches!(command, VolumeCommands::Ls)),
+            Commands::Volume { command } => {
+                assert!(matches!(command, VolumeCommands::Ls { filters } if filters.is_empty()))
+            }
             _ => panic!("unexpected command"),
         }
 
@@ -12939,7 +13020,9 @@ volumes:
 
         let ls = Cli::parse_from(["ferrocrate", "network", "ls"]);
         match ls.command {
-            Commands::Network { command } => assert!(matches!(command, NetworkCommands::Ls)),
+            Commands::Network { command } => {
+                assert!(matches!(command, NetworkCommands::Ls { filters } if filters.is_empty()))
+            }
             _ => panic!("unexpected command"),
         }
 
@@ -12949,6 +13032,25 @@ volumes:
                 NetworkCommands::Inspect { name, format } => {
                     assert_eq!(name, "mesh");
                     assert_eq!(format, "text");
+                }
+                _ => panic!("unexpected network command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
+        let filtered_ls = Cli::parse_from([
+            "ferrocrate",
+            "network",
+            "ls",
+            "--filter",
+            "name=mesh",
+            "--filter",
+            "driver=bridge",
+        ]);
+        match filtered_ls.command {
+            Commands::Network { command } => match command {
+                NetworkCommands::Ls { filters } => {
+                    assert_eq!(filters, vec!["name=mesh", "driver=bridge"]);
                 }
                 _ => panic!("unexpected network command"),
             },
@@ -13082,7 +13184,12 @@ volumes:
             &authorization,
         )
         .expect("restore volume");
-        handle_volume(&runtime_dir, VolumeCommands::Ls, &authorization).expect("ls volumes");
+        handle_volume(
+            &runtime_dir,
+            VolumeCommands::Ls { filters: vec![] },
+            &authorization,
+        )
+        .expect("ls volumes");
         handle_volume(
             &runtime_dir,
             VolumeCommands::Inspect {
@@ -13122,8 +13229,13 @@ volumes:
             &authorization,
         )
         .expect("create network");
-        handle_network(temp.path(), &runtime, NetworkCommands::Ls, &authorization)
-            .expect("ls networks");
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Ls { filters: vec![] },
+            &authorization,
+        )
+        .expect("ls networks");
         handle_network(
             temp.path(),
             &runtime,

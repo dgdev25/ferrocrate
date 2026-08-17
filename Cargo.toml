@@ -20,6 +20,8 @@ version = "0.1.0"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "allow"
+
+[workspace.lints.rustdoc]
 missing_crate_level_docs = "allow"
 
 # Shared dependencies for logging (CQ-03)

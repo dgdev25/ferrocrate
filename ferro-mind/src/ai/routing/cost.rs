@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 #[derive(Debug, Clone)]
 pub struct Provider {
     pub name: String,
@@ -76,6 +79,69 @@ pub enum ExecutionError {
     InvalidResponse(String),
     #[error("provider endpoint is invalid: {0}")]
     InvalidEndpoint(String),
+    #[error("provider token budget exceeded: used {used}, budget {budget}")]
+    TokenBudgetExceeded { used: u64, budget: u64 },
+}
+
+/// Concurrent-safe token budget for provider calls. A zero budget is unlimited.
+#[derive(Debug, Clone)]
+pub struct TokenBudget {
+    used: Arc<AtomicU64>,
+    budget: u64,
+}
+
+impl TokenBudget {
+    pub fn new(budget: u64) -> Self {
+        Self {
+            used: Arc::new(AtomicU64::new(0)),
+            budget,
+        }
+    }
+
+    fn reserve(&self, count: u64) -> Result<(), ExecutionError> {
+        if self.budget == 0 {
+            return Ok(());
+        }
+        let mut current = self.used.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(count)
+                .ok_or(ExecutionError::TokenBudgetExceeded {
+                    used: u64::MAX,
+                    budget: self.budget,
+                })?;
+            if next > self.budget {
+                return Err(ExecutionError::TokenBudgetExceeded {
+                    used: next,
+                    budget: self.budget,
+                });
+            }
+            match self.used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub fn used_tokens(&self) -> u64 {
+        self.used.load(Ordering::Acquire)
+    }
+}
+
+/// Conservative, provider-independent token estimate used when a backend does
+/// not expose tokenizer usage metadata. Four UTF-8 bytes are treated as one
+/// token, with a minimum of one for non-empty calls.
+pub fn estimate_tokens(text: &str) -> u64 {
+    if text.is_empty() {
+        0
+    } else {
+        (text.len() as u64).saturating_add(3) / 4
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +317,23 @@ pub fn execute_routed_prompt_with_adapters(
             execute_routed_http_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
         }
     }
+}
+
+/// Execute a routed provider call while enforcing a shared token budget.
+/// Prompt usage is reserved before the backend is invoked; estimated response
+/// usage is reserved before the response is released. A backend failure keeps
+/// the already-accounted prompt usage observable and never bypasses the budget.
+pub fn execute_routed_prompt_with_adapters_metered(
+    adapters: &[ProviderAdapter],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+    budget: &TokenBudget,
+) -> Result<(String, String, u64), ExecutionError> {
+    budget.reserve(estimate_tokens(prompt))?;
+    let (provider, response) = execute_routed_prompt_with_adapters(adapters, policy, prompt, timeout)?;
+    budget.reserve(estimate_tokens(&response))?;
+    Ok((provider, response, budget.used_tokens()))
 }
 
 /// Select and execute a remote provider using its declared wire protocol.
@@ -515,6 +598,74 @@ mod tests {
         )
         .expect_err("zero timeout must fail closed");
         assert!(matches!(error, ExecutionError::Timeout(0)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metered_routing_reserves_prompt_and_response_before_release() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("provider.sh");
+        std::fs::write(&script, "#!/bin/sh\nread prompt\nprintf 'reply'\n").expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("permissions");
+        let provider = ProviderAdapter::Command(ProviderEndpoint {
+            provider: Provider {
+                name: "metered-local".into(),
+                cost_per_1k_tokens: 0.0,
+                quality: 0.9,
+                avg_latency_ms: 1,
+                local: true,
+            },
+            command: script,
+            args: Vec::new(),
+        });
+        let budget = TokenBudget::new(3);
+        let error = execute_routed_prompt_with_adapters_metered(
+            &[provider],
+            &RoutingPolicy::default(),
+            "hello",
+            std::time::Duration::from_secs(1),
+            &budget,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ExecutionError::TokenBudgetExceeded { .. }));
+        assert_eq!(budget.used_tokens(), estimate_tokens("hello"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metered_routing_keeps_prompt_usage_when_backend_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("provider.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 9\n").expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("permissions");
+        let provider = ProviderAdapter::Command(ProviderEndpoint {
+            provider: Provider {
+                name: "failing-local".into(),
+                cost_per_1k_tokens: 0.0,
+                quality: 0.9,
+                avg_latency_ms: 1,
+                local: true,
+            },
+            command: script,
+            args: Vec::new(),
+        });
+        let budget = TokenBudget::new(20);
+        let error = execute_routed_prompt_with_adapters_metered(
+            &[provider],
+            &RoutingPolicy::default(),
+            "hello",
+            std::time::Duration::from_secs(1),
+            &budget,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ExecutionError::NonZeroExit { status: 9, .. }));
+        assert_eq!(budget.used_tokens(), estimate_tokens("hello"));
     }
 
     #[test]

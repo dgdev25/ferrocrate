@@ -274,6 +274,10 @@ fn sandbox_state_path(runtime_dir: &Path) -> std::path::PathBuf {
     runtime_dir.join("cri-sandboxes.json")
 }
 
+fn pending_sandbox_network_state_path(runtime_dir: &Path) -> std::path::PathBuf {
+    runtime_dir.join("cri-pending-sandbox-networks.json")
+}
+
 fn cri_state_db(runtime_dir: &Path) -> Result<rusqlite::Connection, String> {
     fs::create_dir_all(runtime_dir).map_err(|error| error.to_string())?;
     let connection = rusqlite::Connection::open(runtime_dir.join("cri-state.sqlite"))
@@ -354,6 +358,26 @@ fn persist_sandboxes(
 ) -> Result<(), Status> {
     persist_cri_state(runtime_dir, "sandboxes", sandboxes)
         .map_err(|error| Status::internal(format!("persist CRI sandbox state: {error}")))
+}
+
+fn load_pending_sandbox_networks(runtime_dir: &Path) -> BTreeMap<String, SandboxRecord> {
+    load_cri_state(
+        runtime_dir,
+        "pending-sandbox-networks",
+        &pending_sandbox_network_state_path(runtime_dir),
+    )
+}
+
+#[allow(clippy::result_large_err)]
+fn persist_pending_sandbox_networks(
+    runtime_dir: &Path,
+    pending: &BTreeMap<String, SandboxRecord>,
+) -> Result<(), Status> {
+    persist_cri_state(runtime_dir, "pending-sandbox-networks", pending).map_err(|error| {
+        Status::internal(format!(
+            "persist pending CRI sandbox network state: {error}"
+        ))
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -463,6 +487,50 @@ fn reconcile_persisted_sandbox_networks(sandboxes: &BTreeMap<String, SandboxReco
         };
         let _ = ferro_net::sandbox::destroy_sandbox_network(&config);
     }
+}
+
+/// Remove kernel effects whose durable sandbox publication did not complete.
+/// The pending record is retained when cleanup fails so a later daemon start
+/// can retry it instead of silently losing ownership evidence.
+fn reconcile_pending_sandbox_networks(
+    runtime_dir: &Path,
+    pending: &mut BTreeMap<String, SandboxRecord>,
+) {
+    let mut cleaned = Vec::new();
+    for (id, record) in pending.iter() {
+        let (Some(namespace), Some(network)) =
+            (record.netns_name.as_deref(), record.network.as_ref())
+        else {
+            cleaned.push(id.clone());
+            continue;
+        };
+        let netns_ok = !ferro_net::netns_path(namespace).exists()
+            || ferro_net::destroy_netns(namespace).is_ok();
+        // Remove the namespace first so its peer veth is released before the
+        // host-side bridge/veth teardown. This ordering is required after a
+        // crash immediately following network creation.
+        let network_ok = network
+            .config(namespace)
+            .map(|config| {
+                let destroyed = ferro_net::sandbox::destroy_sandbox_network(&config).is_ok();
+                destroyed
+                    || ferro_net::observe_bridge_identity(&network.bridge)
+                        .ok()
+                        .flatten()
+                        .is_none()
+            })
+            .unwrap_or(false);
+        if network_ok && netns_ok {
+            cleaned.push(id.clone());
+        }
+    }
+    if cleaned.is_empty() {
+        return;
+    }
+    for id in cleaned {
+        pending.remove(&id);
+    }
+    let _ = persist_pending_sandbox_networks(runtime_dir, pending);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -595,6 +663,8 @@ impl CriRuntime {
         let runtime_dir = std::path::PathBuf::from(runtime_dir);
         let sandboxes = load_sandboxes(&runtime_dir);
         reconcile_persisted_sandbox_networks(&sandboxes);
+        let mut pending = load_pending_sandbox_networks(&runtime_dir);
+        reconcile_pending_sandbox_networks(&runtime_dir, &mut pending);
         let mut containers = load_containers(&runtime_dir);
         reconcile_persisted_container_bindings(&runtime_dir, &mut containers);
         Self {
@@ -615,6 +685,8 @@ impl CriRuntime {
         let runtime_dir = runtime_dir.into();
         let sandboxes = load_sandboxes(&runtime_dir);
         reconcile_persisted_sandbox_networks(&sandboxes);
+        let mut pending = load_pending_sandbox_networks(&runtime_dir);
+        reconcile_pending_sandbox_networks(&runtime_dir, &mut pending);
         let mut containers = load_containers(&runtime_dir);
         reconcile_persisted_container_bindings(&runtime_dir, &mut containers);
         Self {
@@ -740,24 +812,35 @@ impl RuntimeService for CriRuntime {
         let mut record = record;
         if record.network_mode != "none" {
             let netns_name = format!("cri-{}", &record.id[12..]);
-            ferro_net::create_netns(&netns_name)
-                .map_err(|error| Status::internal(format!("create CRI sandbox netns: {error}")))?;
+            let network = sandbox_network_for(&record.id);
+            record.netns_name = Some(netns_name.clone());
+            record.network = Some(network.clone());
+            let mut pending = load_pending_sandbox_networks(&self.runtime_dir);
+            pending.insert(record.id.clone(), record.clone());
+            persist_pending_sandbox_networks(&self.runtime_dir, &pending)?;
+            ferro_net::create_netns(&netns_name).map_err(|error| {
+                pending.remove(&record.id);
+                let _ = persist_pending_sandbox_networks(&self.runtime_dir, &pending);
+                Status::internal(format!("create CRI sandbox netns: {error}"))
+            })?;
             if let Err(error) = ferro_net::set_loopback_up(&netns_name) {
                 let _ = ferro_net::destroy_netns(&netns_name);
+                pending.remove(&record.id);
+                let _ = persist_pending_sandbox_networks(&self.runtime_dir, &pending);
                 return Err(Status::internal(format!(
                     "configure CRI sandbox loopback: {error}"
                 )));
             }
-            let network = sandbox_network_for(&record.id);
             let config = network.config(&netns_name).map_err(Status::internal)?;
             if let Err(error) = ferro_net::sandbox::create_sandbox_network(&config) {
                 let _ = ferro_net::destroy_netns(&netns_name);
+                pending.remove(&record.id);
+                let _ = persist_pending_sandbox_networks(&self.runtime_dir, &pending);
                 return Err(Status::internal(format!(
                     "configure CRI sandbox bridge network: {error}"
                 )));
             }
-            record.netns_name = Some(netns_name);
-            record.network = Some(network);
+            maybe_crash_at_start_boundary("after-sandbox-network-effect");
         }
         let mut sandboxes = self
             .sandboxes
@@ -779,6 +862,7 @@ impl RuntimeService for CriRuntime {
         }
         let created_netns = record.netns_name.clone();
         let created_network = record.network.clone();
+        let has_network = record.network.is_some();
         sandboxes.insert(id.clone(), record);
         if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
             sandboxes.remove(&id);
@@ -791,6 +875,11 @@ impl RuntimeService for CriRuntime {
                 let _ = ferro_net::destroy_netns(&netns_name);
             }
             return Err(error);
+        }
+        if has_network {
+            let mut pending = load_pending_sandbox_networks(&self.runtime_dir);
+            pending.remove(&id);
+            persist_pending_sandbox_networks(&self.runtime_dir, &pending)?;
         }
         maybe_crash_after_store_publication("sandboxes");
         let _ = identity;

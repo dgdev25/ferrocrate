@@ -303,7 +303,11 @@ fn build_owned_nftables_plan(
     bridge: &str,
 ) -> NetworkPlan {
     let firewall_id = format!("fc_{}", firewall_owner_token(owner_id));
-    let marker = format!("ferrocrate:{firewall_id}");
+    // nft parses comments as quoted strings.  The command executor passes
+    // argv directly (without a shell to add quoting), so retain the quotes in
+    // this argument; otherwise the colon is tokenized as nft syntax and the
+    // rule fails at runtime.
+    let marker = format!("\"ferrocrate:{firewall_id}\"");
     let mut commands = vec![
         nft_cmd(&["add", "table", "ip", &firewall_id]),
         nft_cmd(&[
@@ -744,6 +748,39 @@ mod tests {
             command.iter().any(|argument| argument == "ESTABLISHED,RELATED")
                 && command.iter().any(|argument| argument == "conntrack")
         }));
+    }
+
+    #[test]
+    fn network_backend_nftables_quotes_colon_ownership_comment_for_argv_exec() {
+        let plan = super::build_network_plan(
+            crate::backend::NetworkBackend::Nftables,
+            "nft-comment-owner",
+            &[PortMapping {
+                host_port: 45_123,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
+            "10.0.0.2",
+            "10.0.0.0/24",
+            "ferro0",
+        )
+        .unwrap();
+        let comment = plan
+            .commands()
+            .iter()
+            .find(|command| {
+                command.first().map(String::as_str) == Some("nft")
+                    && command.iter().any(|argument| argument == "comment")
+            })
+            .and_then(|command| {
+                command
+                    .iter()
+                    .position(|argument| argument == "comment")
+                    .and_then(|index| command.get(index + 1))
+            })
+            .expect("nft ownership comment");
+        assert!(comment.starts_with('"') && comment.ends_with('"'));
+        assert!(comment.contains("ferrocrate:fc_"));
     }
 
     #[test]

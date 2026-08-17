@@ -44,6 +44,11 @@ veth_ep="ve${if_id}"
 runtime_dir="$(mktemp -d "/tmp/${prefix}-runtime.XXXXXX")"
 net_name="${prefix}-net"
 test_image="${FERROCRATE_NETWORK_TEST_IMAGE:-alpine:3.19}"
+network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
+case "$network_backend" in
+  iptables|nftables) ;;
+  *) fail "unsupported FERROCRATE_NETWORK_BACKEND=$network_backend (use iptables or nftables)" ;;
+esac
 subnet="172.30.203.0/24"
 expected_cidr="172.30.203.1/24"
 endpoint_cidr="172.30.203.2/24"
@@ -231,7 +236,7 @@ printf 'privileged network lifecycle: endpoint %s pinged gateway %s\n' "$endpoin
 # Exercise the public container path. The command intentionally omits --rm so
 # an exited record remains an extant association and must still block rm.
 run_output="$(ferro_net run "$test_image" --network "$net_name" \
-  --network-backend iptables -- sleep 60)" \
+  --network-backend "$network_backend" -- sleep 60)" \
   || fail "public run failed on named network"
 container_id="$(sed -n 's/.*container_id=\([^ ]*\).*/\1/p' <<<"$run_output" | head -n 1)"
 [[ -n "$container_id" ]] || fail "public run did not return a container id"

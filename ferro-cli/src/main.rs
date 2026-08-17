@@ -4534,10 +4534,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 (bridge_cidr.is_some(), "--bridge-cidr"),
                 (bridge_name.is_some(), "--bridge-name"),
                 (net_limit.is_some(), "--net-limit"),
-                (memory_max.is_some(), "--memory-max"),
-                (cpu_quota.is_some(), "--cpu-quota"),
-                (cpu_period.is_some(), "--cpu-period"),
-                (pids_max.is_some(), "--pids-max"),
                 (ai_model.is_some(), "--ai-model"),
             ];
             if let Some((_, option)) = unsupported.into_iter().find(|(enabled, _)| *enabled) {
@@ -4554,6 +4550,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 }
             };
             let env = parse_env_entries(env)?;
+            let _ = build_limits(*memory_max, *cpu_quota, *cpu_period, *pids_max)?;
             let health = build_health_config(
                 health_cmd.as_deref(),
                 *health_interval,
@@ -4619,6 +4616,10 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     } else {
                         Vec::new()
                     },
+                    "Memory": memory_max.unwrap_or(0),
+                    "CpuQuota": cpu_quota.unwrap_or(0),
+                    "CpuPeriod": cpu_period.unwrap_or(0),
+                    "PidsLimit": pids_max.unwrap_or(0),
                 },
             });
             let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
@@ -15630,6 +15631,14 @@ volumes:
             "test -f /ready",
             "--health-interval",
             "10",
+            "--memory-max",
+            "1048576",
+            "--cpu-quota",
+            "50000",
+            "--cpu-period",
+            "100000",
+            "--pids-max",
+            "64",
             "echo",
             "ready",
         ])
@@ -15649,6 +15658,10 @@ volumes:
         assert!(create.contains("\"RestartPolicy\":{\"MaximumRetryCount\":0,\"Name\":\"always\"}"));
         assert!(create.contains("\"Healthcheck\":{\"Interval\":10000000000"));
         assert!(create.contains("\"Test\":[\"CMD-SHELL\",\"test -f /ready\"]"));
+        assert!(create.contains("\"Memory\":1048576"));
+        assert!(create.contains("\"CpuQuota\":50000"));
+        assert!(create.contains("\"CpuPeriod\":100000"));
+        assert!(create.contains("\"PidsLimit\":64"));
         assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));

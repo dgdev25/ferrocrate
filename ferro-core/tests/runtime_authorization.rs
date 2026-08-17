@@ -9,10 +9,13 @@ use ferro_core::sqlite_container_store::SqliteContainerStore;
 use ferro_core::witness::{
     decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage,
 };
+use sha2::{Digest, Sha256};
+use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::{MutexGuard, OnceLock};
+use tar::{Builder, Header};
 
 fn runtime_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -24,8 +27,33 @@ fn runtime_test_guard() -> MutexGuard<'static, ()> {
 fn seed_alpine(root: &std::path::Path) {
     let store = LocalImageStore::open(root.join("images")).unwrap();
     let digest = format!("sha256:{}", "b".repeat(64));
+    // Include the executable fixture so direct rootful chroot has the same
+    // workload surface as the unprivileged bubblewrap path.
+    let busybox = std::fs::read("/usr/bin/busybox").expect("busybox fixture");
+    let mut layer = Vec::new();
+    {
+        let mut builder = Builder::new(&mut layer);
+        let mut header = Header::new_gnu();
+        header.set_size(busybox.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        for path in ["bin/sh", "true"] {
+            builder
+                .append_data(&mut header, path, Cursor::new(&busybox))
+                .expect("append executable fixture");
+        }
+        builder.finish().expect("finish executable layer");
+    }
+    let layer_digest = format!("sha256:{:x}", Sha256::digest(&layer));
+    let blob_path = root
+        .join("images")
+        .join("blobs")
+        .join(layer_digest.replace(':', "_"));
+    std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
+    std::fs::write(&blob_path, &layer).unwrap();
     let manifest = format!(
-        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":0}},"layers":[]}}"#
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":0}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
+        layer.len()
     );
     let plan = store
         .prepare_reference_write(
@@ -630,8 +658,11 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
             store.put(&record).unwrap();
             drop(store);
             if action == "restart" {
-                std::fs::create_dir_all(root.path().join("containers").join(id).join("rootfs"))
-                    .unwrap();
+                let bin = root.path().join("containers").join(id).join("rootfs/bin");
+                std::fs::create_dir_all(&bin).unwrap();
+                for name in ["busybox", "sh"] {
+                    std::fs::copy("/usr/bin/busybox", bin.join(name)).unwrap();
+                }
             }
         }
         let runtime =
@@ -784,7 +815,9 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             if action == "restart" {
                 let bin = root.path().join("containers").join(id).join("rootfs/bin");
                 std::fs::create_dir_all(&bin).unwrap();
-                std::fs::copy("/usr/bin/busybox", bin.join("busybox")).unwrap();
+                for name in ["busybox", "sh"] {
+                    std::fs::copy("/usr/bin/busybox", bin.join(name)).unwrap();
+                }
             }
         }
         let runtime =

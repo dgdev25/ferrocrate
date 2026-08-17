@@ -1,8 +1,10 @@
 //! Durable named-network lifecycle core (FCNET-101).
 //!
 //! Crate-private lifecycle state machine, durable operation journal, and
-//! recovery driver for named bridge networks. Not wired to any public CLI or
-//! Docker-compatible handler in this ticket.
+//! recovery driver for named bridge networks. The Linux CLI and Docker socket
+//! handlers route named-network create/remove/prune mutations through this
+//! executor after surface authorization; tests can opt into the file-backed
+//! kernel adapter without changing the production path.
 //!
 //! Safety properties:
 //! - An intent is durably journaled (file fsync + atomic rename + parent

@@ -4584,6 +4584,16 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             )
             .map(|_| println!("tag: source={source} target={target}"))
         })(),
+        Commands::Commit {
+            container,
+            repository,
+        } => (|| -> Result<(), String> {
+            if container.trim().is_empty() {
+                return Err("remote commit: container is required".to_string());
+            }
+            request("POST", remote_commit_path(container, repository)?)
+            .and_then(|body| print_json(body, "json"))
+        })(),
         Commands::Rmi { image } => (|| -> Result<(), String> {
             let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
             request(
@@ -5048,6 +5058,21 @@ fn percent_encode_path_component(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn remote_commit_path(container: &str, repository: &str) -> Result<String, String> {
+    if container.trim().is_empty() {
+        return Err("remote commit: container is required".to_string());
+    }
+    let target = canonicalize_reference(repository).map_err(|error| error.to_string())?;
+    let (repo, tag) = split_reference(&target);
+    Ok(format!(
+        "/commit?container={}&repo={}&tag={}",
+        percent_encode_path_component(container),
+        percent_encode_path_component(repo),
+        percent_encode_path_component(tag),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -11757,6 +11782,7 @@ mod tests {
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
         read_docker_request_after_auth, read_http_request, read_merkle_leaves,
         remote_docker_request, remote_docker_stream_request, should_desktop_forward,
+        remote_commit_path,
         split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
@@ -14614,6 +14640,16 @@ volumes:
         assert_eq!(status, 200);
         assert_eq!(body, b"[]");
         assert_eq!(percent_encode_path_component("web/name"), "web%2Fname");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remote_commit_path_preserves_repository_and_tag() {
+        assert_eq!(
+            remote_commit_path("web/name", "example/app:v2").unwrap(),
+            "/commit?container=web%2Fname&repo=registry-1.docker.io%2Fexample%2Fapp&tag=v2"
+        );
+        assert!(remote_commit_path("", "example/app:v2").is_err());
     }
 
     #[test]

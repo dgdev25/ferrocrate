@@ -154,12 +154,18 @@ record "API info" "curl --silent --fail --unix-socket /var/run/docker.sock http:
   echo "Docker's daemon/image cache and Ferrocrate's isolated runtime are different storage systems;"
   echo "the report records skips as \`SKIP\` instead of converting unsupported operations to zero."
   echo
-  echo "| Feature | Docker median (ms) | Ferrocrate median (ms) | Difference (Ferrocrate-Docker) | Notes |"
-  echo "|---|---:|---:|---:|---|"
+  echo "| Feature | Docker median (ms) | Ferrocrate median (ms) | Difference (Ferrocrate-Docker) | Relative vs Docker | Notes |"
+  echo "|---|---:|---:|---:|---:|---|"
   for i in "${!names[@]}"; do
     d="${docker_values[$i]}"; f="${ferro_values[$i]}"
-    if [[ "$d" == SKIP || "$f" == SKIP ]]; then diff="n/a"; else diff=$((f-d)); fi
-    echo "| ${names[$i]} | $d | $f | $diff | ${notes[$i]} |"
+    if [[ "$d" == SKIP || "$f" == SKIP ]]; then
+      diff="n/a"
+      relative="n/a"
+    else
+      diff=$((f-d))
+      relative="$(awk -v docker="$d" -v ferro="$f" 'BEGIN { if (docker == 0) { print "n/a" } else { printf "%+.1f%%", ((ferro-docker) * 100) / docker } }')"
+    fi
+    echo "| ${names[$i]} | $d | $f | $diff | $relative | ${notes[$i]} |"
   done
   echo
   echo "## Interpretation"

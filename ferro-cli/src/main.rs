@@ -8439,8 +8439,25 @@ struct DockerCreateRequest {
     user: Option<String>,
     #[serde(rename = "Labels")]
     labels: Option<HashMap<String, String>>,
+    #[serde(rename = "Healthcheck")]
+    healthcheck: Option<DockerHealthcheck>,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerHealthcheck {
+    #[serde(rename = "Test", default)]
+    test: Vec<String>,
+    #[serde(rename = "Interval", default)]
+    interval_nanos: u64,
+    #[serde(rename = "Timeout", default)]
+    timeout_nanos: u64,
+    #[serde(rename = "Retries", default)]
+    retries: u32,
+    #[serde(rename = "StartPeriod", default)]
+    start_period_nanos: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -8474,6 +8491,17 @@ struct DockerCreateSpec {
     user: Option<String>,
     name: Option<String>,
     network_mode: String,
+    health: Option<DockerHealthSpec>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DockerHealthSpec {
+    cmd: String,
+    interval_secs: u64,
+    timeout_secs: u64,
+    retries: u32,
+    start_period_secs: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -9478,6 +9506,7 @@ fn handle_docker_compat_connection(
                     return Ok(http_response(204, &[], "text/plain"));
                 };
                 state.persist_pending()?;
+                let health = spec.health.as_ref();
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -9501,11 +9530,11 @@ fn handle_docker_compat_connection(
                     spec.user.as_deref(),
                     spec.name.as_deref(),
                     &spec.publish,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    health.map(|value| value.cmd.as_str()),
+                    health.map(|value| value.interval_secs),
+                    health.map(|value| value.timeout_secs),
+                    health.map(|value| value.retries),
+                    health.map(|value| value.start_period_secs),
                     "no",
                     false,
                     None,
@@ -10599,6 +10628,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         Some("none") => "none".to_string(),
         Some(other) => return Err(format!("docker: unsupported network mode {other}")),
     };
+    let health = parse_docker_healthcheck(request.healthcheck)?;
     Ok(DockerCreateSpec {
         image: request.image,
         cmd,
@@ -10610,7 +10640,73 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user: request.user,
         name,
         network_mode,
+        health,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_docker_healthcheck(
+    healthcheck: Option<DockerHealthcheck>,
+) -> Result<Option<DockerHealthSpec>, String> {
+    let Some(healthcheck) = healthcheck else {
+        return Ok(None);
+    };
+    let Some(kind) = healthcheck.test.first().map(String::as_str) else {
+        return Err("docker: Healthcheck.Test must contain a command or NONE".to_string());
+    };
+    if kind == "NONE" {
+        if healthcheck.test.len() != 1 {
+            return Err("docker: Healthcheck NONE must not include a command".to_string());
+        }
+        return Ok(None);
+    }
+    let cmd = match kind {
+        "CMD-SHELL" => healthcheck
+            .test
+            .get(1)
+            .filter(|command| !command.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| "docker: CMD-SHELL healthcheck requires a command".to_string())?,
+        "CMD" => {
+            let args = healthcheck.test.get(1..).unwrap_or_default();
+            if args.is_empty() || args.iter().any(|arg| arg.trim().is_empty()) {
+                return Err("docker: CMD healthcheck requires non-empty arguments".to_string());
+            }
+            args.iter()
+                .map(|arg| shell_quote_health_arg(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        other => return Err(format!("docker: unsupported Healthcheck.Test mode {other}")),
+    };
+    Ok(Some(DockerHealthSpec {
+        cmd,
+        interval_secs: duration_nanos_to_secs(healthcheck.interval_nanos, "Interval")?,
+        timeout_secs: duration_nanos_to_secs(healthcheck.timeout_nanos, "Timeout")?,
+        retries: healthcheck.retries.max(1),
+        start_period_secs: duration_nanos_to_secs(healthcheck.start_period_nanos, "StartPeriod")?,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn duration_nanos_to_secs(value: u64, field: &str) -> Result<u64, String> {
+    if value == 0 {
+        return Ok(match field {
+            "Interval" => 30,
+            "Timeout" => 5,
+            _ => 0,
+        });
+    }
+    let seconds = value.div_ceil(1_000_000_000);
+    if seconds == 0 {
+        return Err(format!("docker: Healthcheck.{field} is too small"));
+    }
+    Ok(seconds)
+}
+
+#[cfg(target_os = "linux")]
+fn shell_quote_health_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(target_os = "linux")]
@@ -13327,6 +13423,39 @@ volumes:
     }
 
     #[test]
+    fn docker_create_spec_parses_healthcheck_modes_and_bounds() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","Healthcheck":{"Test":["CMD-SHELL","test -f /ready"],"Interval":2000000000,"Timeout":1000000000,"Retries":2}}"#,
+            None,
+        )
+        .expect("CMD-SHELL healthcheck");
+        let health = spec.health.expect("health config");
+        assert_eq!(health.cmd, "test -f /ready");
+        assert_eq!(health.interval_secs, 2);
+        assert_eq!(health.timeout_secs, 1);
+        assert_eq!(health.retries, 2);
+
+        let cmd = parse_docker_create_spec(
+            br#"{"Image":"busybox","Healthcheck":{"Test":["CMD","/bin/check","ready"]}}"#,
+            None,
+        )
+        .expect("CMD healthcheck");
+        assert_eq!(cmd.health.expect("CMD config").cmd, "'/bin/check' 'ready'");
+
+        let none = parse_docker_create_spec(
+            br#"{"Image":"busybox","Healthcheck":{"Test":["NONE"]}}"#,
+            None,
+        )
+        .expect("NONE healthcheck");
+        assert!(none.health.is_none());
+        assert!(parse_docker_create_spec(
+            br#"{"Image":"busybox","Healthcheck":{"Test":["CMD-SHELL"]}}"#,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn docker_pending_create_state_reopens_atomically() {
         let temp = tempfile::tempdir().expect("runtime");
         let state = DockerCompatState::new(temp.path()).expect("state");
@@ -13343,6 +13472,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                health: None,
             },
         );
         state.persist_pending().expect("persist pending");
@@ -13378,6 +13508,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            health: None,
         };
         let mut filters = HashMap::new();
         filters.insert("status".to_string(), vec!["created".to_string()]);

@@ -5,11 +5,13 @@ const UDP_HEADER_LEN: usize = 8;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const IP_PROTOCOL_TCP: u8 = 6;
 const IP_PROTOCOL_UDP: u8 = 17;
-// `bpf_skb_store_bytes` accepts BPF_F_RECOMPUTE_CSUM for mutations that may
-// invalidate skb checksum/offload metadata.  Redirected veth packets can
-// carry CHECKSUM_PARTIAL state into loopback, where no NIC completes it.
-#[allow(dead_code)]
-const BPF_F_RECOMPUTE_CSUM: u64 = 1;
+// The TC checksum helpers update both the wire checksum fields and skb
+// checksum/offload metadata. Redirected veth packets can carry CHECKSUM_PARTIAL
+// state into loopback, where no NIC completes it.
+#[cfg(target_arch = "bpf")]
+const BPF_F_PSEUDO_HDR: u64 = 1 << 4;
+#[cfg(target_arch = "bpf")]
+const BPF_F_MARK_MANGLED_0: u64 = 1 << 5;
 // Loopback-originated packets have no real Ethernet source address. A
 // redirect from loopback to a bridge/veth must synthesize a stable local
 // unicast source or the bridge rejects the frame before it reaches the
@@ -180,6 +182,7 @@ pub fn rewrite_ethernet_source(packet: &mut [u8], source_mac: [u8; 6]) -> Result
     Ok(())
 }
 
+#[allow(dead_code)]
 fn update_checksum_word(checksum: u16, old: u16, new: u16) -> u16 {
     let sum = u32::from(!checksum) + u32::from(!old) + u32::from(new);
     let sum = (sum & 0xffff) + (sum >> 16);
@@ -187,6 +190,7 @@ fn update_checksum_word(checksum: u16, old: u16, new: u16) -> u16 {
     !(sum as u16)
 }
 
+#[allow(dead_code)]
 pub fn update_ipv4_checksum(checksum: u16, old: [u8; 4], new: [u8; 4]) -> u16 {
     let checksum = update_checksum_word(
         checksum,
@@ -200,6 +204,7 @@ pub fn update_ipv4_checksum(checksum: u16, old: [u8; 4], new: [u8; 4]) -> u16 {
     )
 }
 
+#[allow(dead_code)]
 pub fn update_transport_checksum(checksum: u16, old: [u8; 4], new: [u8; 4]) -> u16 {
     update_ipv4_checksum(checksum, old, new)
 }
@@ -229,6 +234,7 @@ fn transport_checksum_offset(view: PacketView) -> usize {
         }
 }
 
+#[allow(dead_code)]
 fn normalize_udp_checksum(protocol: TransportProtocol, checksum: u16) -> u16 {
     if protocol == TransportProtocol::Udp && checksum == 0 {
         u16::MAX
@@ -499,37 +505,9 @@ mod tc {
         Ok(())
     }
 
-    fn load_byte(ctx: &TcContext, offset: usize) -> Result<u8, PacketError> {
-        ctx.load::<u8>(offset).map_err(|_| PacketError::Truncated)
-    }
-
-    fn load_u16(ctx: &TcContext, offset: usize) -> Result<u16, PacketError> {
-        Ok(u16::from_be_bytes([
-            load_byte(ctx, offset)?,
-            load_byte(ctx, offset + 1)?,
-        ]))
-    }
-
     fn store_byte(ctx: &TcContext, offset: usize, value: u8) -> Result<(), PacketError> {
         ctx.store(offset, &value, 0)
             .map_err(|_| PacketError::Truncated)
-    }
-
-    fn store_byte_recompute(ctx: &TcContext, offset: usize, value: u8) -> Result<(), PacketError> {
-        ctx.store(offset, &value, super::BPF_F_RECOMPUTE_CSUM)
-            .map_err(|_| PacketError::Truncated)
-    }
-
-    fn store_u16_recompute(ctx: &TcContext, offset: usize, value: u16) -> Result<(), PacketError> {
-        let bytes = value.to_be_bytes();
-        store_byte_recompute(ctx, offset, bytes[0])?;
-        store_byte_recompute(ctx, offset + 1, bytes[1])
-    }
-
-    fn store_u16(ctx: &TcContext, offset: usize, value: u16) -> Result<(), PacketError> {
-        let bytes = value.to_be_bytes();
-        store_byte(ctx, offset, bytes[0])?;
-        store_byte(ctx, offset + 1, bytes[1])
     }
 
     fn transport_offsets(view: PacketView, destination: bool) -> Option<(usize, usize)> {
@@ -574,25 +552,28 @@ mod tc {
     ) -> Result<(), PacketError> {
         let (_, transport_checksum_offset) =
             transport_offsets(view, false).ok_or(PacketError::Truncated)?;
-        let old_checksum = load_u16(ctx, view.ipv4_offset + 10)?;
-        let new_checksum = super::update_ipv4_checksum(old_checksum, old_address, new_address);
-        let old_transport_checksum = load_u16(ctx, transport_checksum_offset)?;
-        let new_transport_checksum = if view.transport == super::TransportProtocol::Udp
-            && old_transport_checksum == 0
-        {
-            0
-        } else {
-            super::normalize_udp_checksum(
-                view.transport,
-                super::update_transport_checksum(old_transport_checksum, old_address, new_address),
-            )
-        };
-        store_byte_recompute(ctx, address_offset, new_address[0])?;
-        store_byte_recompute(ctx, address_offset + 1, new_address[1])?;
-        store_byte_recompute(ctx, address_offset + 2, new_address[2])?;
-        store_byte_recompute(ctx, address_offset + 3, new_address[3])?;
-        store_u16(ctx, view.ipv4_offset + 10, new_checksum)?;
-        store_u16(ctx, transport_checksum_offset, new_transport_checksum)
+        let old_address = u32::from_be_bytes(old_address) as u64;
+        let new_address = u32::from_be_bytes(new_address) as u64;
+        ctx.l3_csum_replace(view.ipv4_offset + 10, old_address, new_address, 4)
+            .map_err(|_| PacketError::Truncated)?;
+        ctx.l4_csum_replace(
+            transport_checksum_offset,
+            old_address,
+            new_address,
+            super::BPF_F_PSEUDO_HDR
+                | 4
+                | if view.transport == super::TransportProtocol::Udp {
+                    super::BPF_F_MARK_MANGLED_0
+                } else {
+                    0
+                },
+        )
+        .map_err(|_| PacketError::Truncated)?;
+        let bytes = new_address.to_be_bytes();
+        store_byte(ctx, address_offset, bytes[0])?;
+        store_byte(ctx, address_offset + 1, bytes[1])?;
+        store_byte(ctx, address_offset + 2, bytes[2])?;
+        store_byte(ctx, address_offset + 3, bytes[3])
     }
 
     fn rewrite_transport_port_context(
@@ -604,17 +585,20 @@ mod tc {
     ) -> Result<(), PacketError> {
         let (port_offset, checksum_offset) =
             transport_offsets(view, destination).ok_or(PacketError::Truncated)?;
-        let old_checksum = load_u16(ctx, checksum_offset)?;
-        let new_checksum = if view.transport == super::TransportProtocol::Udp && old_checksum == 0 {
-            0
-        } else {
-            super::normalize_udp_checksum(
-                view.transport,
-                super::update_checksum_word(old_checksum, old_port, new_port),
-            )
-        };
-        store_u16_recompute(ctx, port_offset, new_port)?;
-        store_u16(ctx, checksum_offset, new_checksum)
+        ctx.l4_csum_replace(
+            checksum_offset,
+            old_port as u64,
+            new_port as u64,
+            2 | if view.transport == super::TransportProtocol::Udp {
+                super::BPF_F_MARK_MANGLED_0
+            } else {
+                0
+            },
+        )
+        .map_err(|_| PacketError::Truncated)?;
+        let bytes = new_port.to_be_bytes();
+        store_byte(ctx, port_offset, bytes[0])?;
+        store_byte(ctx, port_offset + 1, bytes[1])
     }
 }
 

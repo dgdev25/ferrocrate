@@ -2862,6 +2862,7 @@ impl ContainerRuntime {
             stderr_path: stderr_path.display().to_string(),
             status: "running".to_string(),
             netns: netns_name.clone(),
+            namespace_identity: network_setup.namespace_identity,
             network_name: persisted_network_name(associated_network, network_mode),
             ip_address: container_ip.clone(),
             ipv6_address: container_ipv6.clone(),
@@ -5158,6 +5159,7 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
 
 struct NetworkSetup {
     netns_name: Option<String>,
+    namespace_identity: Option<KernelObjectIdentityRecord>,
     container_ip: Option<String>,
     container_ipv6: Option<String>,
     backend: Option<NetworkBackend>,
@@ -5300,6 +5302,7 @@ impl NetworkSetup {
     ) -> Self {
         Self {
             netns_name,
+            namespace_identity: None,
             container_ip,
             container_ipv6,
             backend: None,
@@ -5360,7 +5363,9 @@ fn setup_network(
                 &netns_name,
                 &["ip", "link", "set", "lo", "up"],
             ))?;
-            return Ok(NetworkSetup::isolated(Some(netns_name), None, None));
+            let mut setup = NetworkSetup::isolated(Some(netns_name), None, None);
+            setup.namespace_identity = Some(identity);
+            return Ok(setup);
         }
         "bridge" => {}
         "wireguard" => {
@@ -5382,7 +5387,9 @@ fn setup_network(
                 &["ip", "link", "set", "lo", "up"],
             ))?;
             let (ipv4, ipv6) = setup_wireguard(&netns_name, container_id)?;
-            return Ok(NetworkSetup::isolated(Some(netns_name), ipv4, ipv6));
+            let mut setup = NetworkSetup::isolated(Some(netns_name), ipv4, ipv6);
+            setup.namespace_identity = Some(identity);
+            return Ok(setup);
         }
         _ => {
             return Err(RuntimeError::Network(
@@ -5637,6 +5644,7 @@ fn setup_network(
 
     Ok(NetworkSetup {
         netns_name: Some(netns_name),
+        namespace_identity: Some(namespace_identity),
         container_ip: Some(container_ip),
         container_ipv6,
         backend: Some(active_backend),
@@ -7453,11 +7461,34 @@ fn cleanup_network(
         let proven = legacy_firewall_rules_proven(record)?;
         match classify_legacy_network_record(record.network_name.as_deref(), proven)? {
             LegacyNetworkAction::NotManagedBridge => {
-                if record.netns.is_some() {
-                    return Err(RuntimeError::Network(format!(
-                        "legacy container {} has a namespace name but no kernel identity; retain the record and remove the namespace manually",
-                        record.id
-                    )));
+                if let Some(netns_name) = record.netns.as_deref() {
+                    let expected = record.namespace_identity.ok_or_else(|| {
+                        RuntimeError::Network(format!(
+                            "legacy container {} has a namespace name but no kernel identity; retain the record and remove the namespace manually",
+                            record.id
+                        ))
+                    })?;
+                    let path = netns::netns_path(netns_name);
+                    let observed = match fs::symlink_metadata(&path) {
+                        Ok(metadata) => Some(KernelIdentity {
+                            device: metadata.dev(),
+                            inode: metadata.ino(),
+                        }),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                        Err(error) => return Err(RuntimeError::Io(error)),
+                    };
+                    match verify_kernel_identity(
+                        KernelIdentity {
+                            device: expected.device,
+                            inode: expected.inode,
+                        },
+                        observed,
+                    )? {
+                        OwnedResourceState::Present => {
+                            run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                        }
+                        OwnedResourceState::Missing => {}
+                    }
                 }
             }
             LegacyNetworkAction::CleanupProvenRules => {
@@ -10088,6 +10119,7 @@ mod tests {
             std::fs::write(self.state.with_extension("network-owned"), b"owned")?;
             Ok(super::NetworkSetup {
                 netns_name: rollback.netns_name.clone(),
+                namespace_identity: rollback.namespace_identity,
                 container_ip: Some("192.0.2.2".into()),
                 container_ipv6: None,
                 backend: Some(backend),
@@ -10542,6 +10574,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            namespace_identity: None,
             network_name: None,
             ip_address: None,
             ipv6_address: None,
@@ -10601,6 +10634,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            namespace_identity: None,
             network_name: None,
             ip_address: None,
             ipv6_address: None,
@@ -11028,6 +11062,7 @@ mod tests {
             stderr_path: "/tmp/fixture.stderr".to_string(),
             status: status.to_string(),
             netns: None,
+            namespace_identity: None,
             network_name: Some("bridge".to_string()),
             ip_address: Some("10.44.1.2".to_string()),
             ipv6_address: None,
@@ -11984,6 +12019,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: Some("ferro-existing".to_string()),
+            namespace_identity: None,
             network_name: Some("bridge".to_string()),
             ip_address: Some("10.0.0.2".to_string()),
             ipv6_address: None,

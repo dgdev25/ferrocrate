@@ -1018,6 +1018,15 @@ async fn cri_start_recovery_rebinds_published_runtime_after_response_crash() {
         status.state,
         ferro_cri::runtime::ContainerState::Exited as i32
     );
+    recovered
+        .remove_container(RemoveContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect("recovered container cleanup");
+    assert!(!std::path::Path::new("/var/run/netns")
+        .join(format!("ferro-{container}"))
+        .exists());
     restarted.kill().expect("stop restarted CRI daemon");
     let _ = restarted.wait();
     unsafe {

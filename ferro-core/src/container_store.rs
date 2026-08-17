@@ -127,6 +127,11 @@ pub struct ContainerRecord {
     pub status: String,
     #[serde(default)]
     pub netns: Option<String>,
+    /// Kernel identity of the persisted network namespace.  This is separate
+    /// from bridge ownership because `network_mode=none` has a namespace but
+    /// no bridge/backend record.
+    #[serde(default)]
+    pub namespace_identity: Option<KernelObjectIdentityRecord>,
     #[serde(default)]
     pub network_name: Option<String>,
     #[serde(default)]
@@ -218,6 +223,7 @@ impl ContainerRecord {
             stderr_path: String::new(),
             status: "created".into(),
             netns: None,
+            namespace_identity: None,
             network_name: None,
             ip_address: None,
             ipv6_address: None,
@@ -1202,6 +1208,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: Some("ferro-c1".to_string()),
+            namespace_identity: None,
             network_name: Some("bridge".to_string()),
             ip_address: Some("10.0.0.2".to_string()),
             ipv6_address: Some("fd00::2".to_string()),
@@ -1334,6 +1341,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            namespace_identity: None,
             network_name: None,
             ip_address: None,
             ipv6_address: None,

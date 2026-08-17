@@ -11082,6 +11082,10 @@ fn handle_docker_compat_connection(
                 handle_pull_authorized(&store, &reference, lazy, &origin, &surface_authorization)?;
                 http_response(200, b"{}", "application/json")
             }
+            ("POST", "/plugins/pull") => docker_error_response(
+                404,
+                "docker: plugin pull is unsupported; install a signed local plugin manifest",
+            ),
             ("POST", path) if path.starts_with("/images/") && path.ends_with("/push") => {
                 let encoded = path
                     .trim_start_matches("/images/")

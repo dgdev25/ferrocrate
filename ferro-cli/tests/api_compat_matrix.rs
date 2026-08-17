@@ -377,6 +377,18 @@ fn docker_api_compatibility_matrix() {
 }
 
 #[test]
+fn unsupported_plugin_pull_reports_an_explicit_boundary() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request("POST", "/plugins/pull", "{}");
+    assert_eq!(status, 404);
+    assert!(
+        body.contains("plugin pull is unsupported")
+            && body.contains("signed local plugin manifest"),
+        "body={body}"
+    );
+}
+
+#[test]
 fn docker_events_are_durable_and_filterable_over_the_socket() {
     let harness = DaemonHarness::spawn();
     let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"events-volume"}"#);

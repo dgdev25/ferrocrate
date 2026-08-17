@@ -8,9 +8,9 @@ use ferro_cri::runtime::image_service_client::ImageServiceClient;
 use ferro_cri::runtime::runtime_service_client::RuntimeServiceClient;
 use ferro_cri::runtime::{
     ContainerConfig, ContainerStatusRequest, CreateContainerRequest, ImageFsInfoRequest,
-    ListImagesRequest, PodSandboxConfig, PodSandboxMetadata, PodSandboxStatusRequest,
-    RemoveContainerRequest, RemovePodSandboxRequest, RunPodSandboxRequest, StartContainerRequest,
-    StatusRequest, StopPodSandboxRequest, VersionRequest,
+    ListImagesRequest, ListPodSandboxRequest, PodSandboxConfig, PodSandboxMetadata,
+    PodSandboxStatusRequest, RemoveContainerRequest, RemovePodSandboxRequest, RunPodSandboxRequest,
+    StartContainerRequest, StatusRequest, StopPodSandboxRequest, VersionRequest,
 };
 use ferro_cri::runtime::{ImageSpec, PullImageRequest, RemoveImageRequest};
 use ferro_cri::server::{
@@ -505,6 +505,21 @@ async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
         .expect("run sandbox rpc")
         .into_inner()
         .pod_sandbox_id;
+    let listed = client
+        .list_pod_sandbox(ListPodSandboxRequest { filter: None })
+        .await
+        .expect("list sandbox rpc")
+        .into_inner();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].id, sandbox);
+    assert_eq!(
+        listed.items[0]
+            .metadata
+            .as_ref()
+            .expect("sandbox metadata")
+            .name,
+        "wire-pod"
+    );
     let container = client
         .create_container(CreateContainerRequest {
             pod_sandbox_id: sandbox.clone(),

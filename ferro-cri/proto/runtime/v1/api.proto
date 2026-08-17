@@ -8,6 +8,7 @@ service RuntimeService {
   rpc RunPodSandbox(RunPodSandboxRequest) returns (RunPodSandboxResponse);
   rpc StopPodSandbox(StopPodSandboxRequest) returns (StopPodSandboxResponse);
   rpc RemovePodSandbox(RemovePodSandboxRequest) returns (RemovePodSandboxResponse);
+  rpc ListPodSandbox(ListPodSandboxRequest) returns (ListPodSandboxResponse);
   rpc PodSandboxStatus(PodSandboxStatusRequest) returns (PodSandboxStatusResponse);
   rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
   rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
@@ -58,6 +59,22 @@ message StopPodSandboxRequest { string pod_sandbox_id = 1; }
 message StopPodSandboxResponse {}
 message RemovePodSandboxRequest { string pod_sandbox_id = 1; }
 message RemovePodSandboxResponse {}
+
+message ListPodSandboxRequest { PodSandboxFilter filter = 1; }
+message PodSandboxFilter {
+  string id = 1;
+  PodSandboxState state = 2;
+}
+message ListPodSandboxResponse { repeated PodSandbox items = 1; }
+message PodSandbox {
+  string id = 1;
+  PodSandboxMetadata metadata = 2;
+  PodSandboxState state = 3;
+  int64 created_at = 4;
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+  string runtime_handler = 7;
+}
 
 message PodSandboxStatusRequest {
   string pod_sandbox_id = 1;

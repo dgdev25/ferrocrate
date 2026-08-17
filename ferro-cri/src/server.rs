@@ -4,13 +4,14 @@ use crate::runtime::{
     ContainerState, ContainerStatus, ContainerStatusRequest, ContainerStatusResponse,
     CreateContainerRequest, CreateContainerResponse, ExecSyncRequest, ExecSyncResponse,
     FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
-    ImageStatusResponse, ListImagesRequest, ListImagesResponse, PodSandboxState, PodSandboxStatus,
-    PodSandboxStatusRequest, PodSandboxStatusResponse, PullImageRequest, PullImageResponse,
-    RemoveContainerRequest, RemoveContainerResponse, RemoveImageRequest, RemoveImageResponse,
-    RemovePodSandboxRequest, RemovePodSandboxResponse, RunPodSandboxRequest, RunPodSandboxResponse,
-    RuntimeCondition, RuntimeStatus, StartContainerRequest, StartContainerResponse, StatusRequest,
-    StatusResponse, StopContainerRequest, StopContainerResponse, StopPodSandboxRequest,
-    StopPodSandboxResponse, VersionRequest, VersionResponse,
+    ImageStatusResponse, ListImagesRequest, ListImagesResponse, ListPodSandboxRequest,
+    ListPodSandboxResponse, PodSandbox, PodSandboxState, PodSandboxStatus, PodSandboxStatusRequest,
+    PodSandboxStatusResponse, PullImageRequest, PullImageResponse, RemoveContainerRequest,
+    RemoveContainerResponse, RemoveImageRequest, RemoveImageResponse, RemovePodSandboxRequest,
+    RemovePodSandboxResponse, RunPodSandboxRequest, RunPodSandboxResponse, RuntimeCondition,
+    RuntimeStatus, StartContainerRequest, StartContainerResponse, StatusRequest, StatusResponse,
+    StopContainerRequest, StopContainerResponse, StopPodSandboxRequest, StopPodSandboxResponse,
+    VersionRequest, VersionResponse,
 };
 pub use ferro_core::authorization::cri_delegation::{
     CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,
@@ -389,6 +390,10 @@ struct SandboxRecord {
     state: String,
     created_at_unix: u64,
     network_mode: String,
+    #[serde(default)]
+    attempt: u32,
+    #[serde(default)]
+    runtime_handler: String,
     #[serde(default)]
     netns_name: Option<String>,
     #[serde(default)]
@@ -772,6 +777,7 @@ impl RuntimeService for CriRuntime {
             Action::ContainerRun,
             "cri:pod-sandbox",
         )?;
+        let runtime_handler = request.get_ref().runtime_handler.clone();
         let config = request
             .into_inner()
             .config
@@ -791,6 +797,7 @@ impl RuntimeService for CriRuntime {
                 .unwrap_or_default()
                 .as_nanos()
         );
+        let attempt = metadata.attempt;
         let record = SandboxRecord {
             id: id.clone(),
             name: metadata.name,
@@ -806,6 +813,8 @@ impl RuntimeService for CriRuntime {
             } else {
                 config.network_namespace
             },
+            attempt,
+            runtime_handler,
             netns_name: None,
             network: None,
         };
@@ -1016,6 +1025,74 @@ impl RuntimeService for CriRuntime {
                 Default::default()
             },
         }))
+    }
+
+    async fn list_pod_sandbox(
+        &self,
+        request: Request<ListPodSandboxRequest>,
+    ) -> Result<Response<ListPodSandboxResponse>, Status> {
+        let filter = request.into_inner().filter;
+        if let Some(filter) = filter.as_ref() {
+            if !matches!(filter.state, 0..=2) {
+                return Err(Status::invalid_argument(
+                    "unsupported pod sandbox state filter",
+                ));
+            }
+        }
+        let sandboxes = self
+            .sandboxes
+            .lock()
+            .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?;
+        let mut items = Vec::with_capacity(sandboxes.len());
+        for record in sandboxes.values() {
+            if let Some(filter) = filter.as_ref() {
+                if !filter.id.is_empty() && filter.id != record.id {
+                    continue;
+                }
+            }
+            let state = if record.state == "ready"
+                && record.netns_name.as_deref().is_none_or(|name| {
+                    ferro_net::netns_path(name).exists()
+                        && ferro_net::loopback_is_up(name).unwrap_or(false)
+                        && sandbox_network_is_present(record)
+                }) {
+                PodSandboxState::Ready
+            } else {
+                PodSandboxState::Notready
+            };
+            if let Some(filter) = filter.as_ref() {
+                if filter.state != 0 && filter.state != state as i32 {
+                    continue;
+                }
+            }
+            items.push(PodSandbox {
+                id: record.id.clone(),
+                metadata: Some(crate::runtime::PodSandboxMetadata {
+                    name: record.name.clone(),
+                    uid: record.uid.clone(),
+                    namespace: record.namespace.clone(),
+                    attempt: record.attempt,
+                }),
+                state: state as i32,
+                created_at: record.created_at_unix as i64,
+                labels: Default::default(),
+                annotations: Default::default(),
+                runtime_handler: record.runtime_handler.clone(),
+            });
+        }
+        items.sort_by(|left, right| {
+            left.metadata
+                .as_ref()
+                .map(|metadata| metadata.name.as_str())
+                .cmp(
+                    &right
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.name.as_str()),
+                )
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(Response::new(ListPodSandboxResponse { items }))
     }
 
     async fn create_container(
@@ -1995,6 +2072,8 @@ mod tests {
             state: "ready".into(),
             created_at_unix: 1,
             network_mode: "none".into(),
+            attempt: 0,
+            runtime_handler: String::new(),
             netns_name: None,
             network: None,
         };
@@ -2040,6 +2119,8 @@ mod tests {
                 state: "ready".into(),
                 created_at_unix: 1,
                 network_mode: "none".into(),
+                attempt: 0,
+                runtime_handler: String::new(),
                 netns_name: None,
                 network: None,
             },
@@ -2149,6 +2230,63 @@ mod tests {
         assert!(condition.status);
         assert_eq!(condition.reason, "Ready");
         assert_eq!(condition.message, "FerroCrate CRI shim is ready");
+    }
+
+    #[tokio::test]
+    async fn list_pod_sandbox_projects_and_filters_durable_sandboxes() {
+        let root = tempfile::tempdir().expect("runtime dir");
+        let store = Arc::new(LocalImageStore::open(root.path().join("images")).unwrap());
+        let runtime =
+            CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        for (name, uid) in [("pod-b", "uid-b"), ("pod-a", "uid-a")] {
+            runtime
+                .run_pod_sandbox(authenticated(RunPodSandboxRequest {
+                    config: Some(PodSandboxConfig {
+                        metadata: Some(crate::runtime::PodSandboxMetadata {
+                            name: name.into(),
+                            uid: uid.into(),
+                            namespace: "default".into(),
+                            attempt: 1,
+                        }),
+                        hostname: name.into(),
+                        log_directory: String::new(),
+                        dns_config: String::new(),
+                        network_namespace: "none".into(),
+                    }),
+                    runtime_handler: "kata".into(),
+                }))
+                .await
+                .expect("sandbox create");
+        }
+
+        let all = runtime
+            .list_pod_sandbox(authenticated(ListPodSandboxRequest::default()))
+            .await
+            .expect("list sandboxes")
+            .into_inner()
+            .items;
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].metadata.as_ref().expect("metadata").name, "pod-a");
+        assert_eq!(all[1].metadata.as_ref().expect("metadata").name, "pod-b");
+        assert_eq!(all[0].metadata.as_ref().expect("metadata").attempt, 1);
+        assert_eq!(all[0].runtime_handler, "kata");
+        assert!(all
+            .iter()
+            .all(|item| item.state == PodSandboxState::Ready as i32));
+
+        let filtered = runtime
+            .list_pod_sandbox(authenticated(ListPodSandboxRequest {
+                filter: Some(crate::runtime::PodSandboxFilter {
+                    id: all[0].id.clone(),
+                    state: PodSandboxState::Unknown as i32,
+                }),
+            }))
+            .await
+            .expect("filter sandboxes")
+            .into_inner()
+            .items;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, all[0].id);
     }
 
     #[tokio::test]

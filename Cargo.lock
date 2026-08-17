@@ -1048,6 +1048,7 @@ dependencies = [
  "dirs",
  "libc",
  "parking_lot 0.12.5",
+ "reqwest",
  "ruv-fann",
  "ruvector-core",
  "rvf-index",

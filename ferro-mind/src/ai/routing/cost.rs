@@ -19,6 +19,25 @@ pub struct ProviderEndpoint {
     pub args: Vec<String>,
 }
 
+/// Wire format for a remote model endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpProviderProtocol {
+    /// OpenAI-compatible `/chat/completions` request and response shape.
+    OpenAiCompatible,
+    /// Anthropic `/messages` request and response shape.
+    AnthropicMessages,
+}
+
+/// A remote provider endpoint with an explicit, non-shell HTTP transport.
+#[derive(Debug, Clone)]
+pub struct HttpProviderEndpoint {
+    pub provider: Provider,
+    pub url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub protocol: HttpProviderProtocol,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
     #[error("no provider satisfies the routing policy")]
@@ -31,6 +50,12 @@ pub enum ExecutionError {
     NonZeroExit { status: i32, stderr: String },
     #[error("provider returned an empty response")]
     EmptyResponse,
+    #[error("provider HTTP client failed: {0}")]
+    HttpClient(String),
+    #[error("provider HTTP request returned status {status}: {body}")]
+    HttpStatus { status: u16, body: String },
+    #[error("provider returned an invalid response: {0}")]
+    InvalidResponse(String),
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +147,10 @@ pub fn execute_routed_prompt(
     if timeout.is_zero() {
         return Err(ExecutionError::Timeout(0));
     }
-    let candidates: Vec<Provider> = providers.iter().map(|entry| entry.provider.clone()).collect();
+    let candidates: Vec<Provider> = providers
+        .iter()
+        .map(|entry| entry.provider.clone())
+        .collect();
     let selected = choose_provider(&candidates, policy).ok_or(ExecutionError::NoProvider)?;
     let endpoint = providers
         .iter()
@@ -177,6 +205,85 @@ pub fn execute_routed_prompt(
             None => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
+}
+
+/// Select and execute a remote provider using its declared wire protocol.
+///
+/// The request is built as structured JSON and sent directly through
+/// `reqwest`; no shell, command interpolation, or implicit credential lookup is
+/// involved. Callers should provide an HTTPS URL for non-local endpoints and a
+/// bounded timeout. The selected provider name is returned for audit traces.
+pub fn execute_routed_http_prompt(
+    providers: &[HttpProviderEndpoint],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<(String, String), ExecutionError> {
+    if timeout.is_zero() {
+        return Err(ExecutionError::Timeout(0));
+    }
+    let candidates: Vec<Provider> = providers
+        .iter()
+        .map(|entry| entry.provider.clone())
+        .collect();
+    let selected = choose_provider(&candidates, policy).ok_or(ExecutionError::NoProvider)?;
+    let endpoint = providers
+        .iter()
+        .find(|entry| entry.provider.name == selected.name)
+        .ok_or(ExecutionError::NoProvider)?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| ExecutionError::HttpClient(error.to_string()))?;
+    let mut request = client.post(&endpoint.url);
+    let body = match endpoint.protocol {
+        HttpProviderProtocol::OpenAiCompatible => serde_json::json!({
+            "model": endpoint.model,
+            "messages": [{"role": "user", "content": prompt}],
+        }),
+        HttpProviderProtocol::AnthropicMessages => serde_json::json!({
+            "model": endpoint.model,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}],
+        }),
+    };
+    request = request.json(&body);
+    if let Some(key) = endpoint.api_key.as_deref() {
+        request = match endpoint.protocol {
+            HttpProviderProtocol::OpenAiCompatible => request.bearer_auth(key),
+            HttpProviderProtocol::AnthropicMessages => request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01"),
+        };
+    }
+    let response = request
+        .send()
+        .map_err(|error| ExecutionError::HttpClient(error.to_string()))?;
+    let status = response.status();
+    let body_text = response
+        .text()
+        .map_err(|error| ExecutionError::HttpClient(error.to_string()))?;
+    if !status.is_success() {
+        return Err(ExecutionError::HttpStatus {
+            status: status.as_u16(),
+            body: body_text.chars().take(512).collect(),
+        });
+    }
+    let value: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|error| ExecutionError::InvalidResponse(error.to_string()))?;
+    let text = match endpoint.protocol {
+        HttpProviderProtocol::OpenAiCompatible => value
+            .pointer("/choices/0/message/content")
+            .and_then(serde_json::Value::as_str),
+        HttpProviderProtocol::AnthropicMessages => value
+            .pointer("/content/0/text")
+            .and_then(serde_json::Value::as_str),
+    }
+    .map(str::trim)
+    .filter(|text| !text.is_empty())
+    .ok_or_else(|| ExecutionError::InvalidResponse("missing non-empty text content".into()))?;
+    Ok((endpoint.provider.name.clone(), text.to_string()))
 }
 
 fn provider_score(
@@ -289,8 +396,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
         let script = temp.path().join("provider.sh");
-        std::fs::write(&script, "#!/bin/sh\nread prompt\nprintf 'reply:%s\\n' \"$prompt\"\n")
-            .expect("script");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nread prompt\nprintf 'reply:%s\\n' \"$prompt\"\n",
+        )
+        .expect("script");
         let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script, permissions).expect("permissions");
@@ -327,5 +437,101 @@ mod tests {
         )
         .expect_err("zero timeout must fail closed");
         assert!(matches!(error, ExecutionError::Timeout(0)));
+    }
+
+    #[test]
+    fn executes_openai_compatible_http_provider_with_structured_request() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let mut request = [0u8; 8192];
+            let size = stream.read(&mut request).expect("request bytes");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.contains("\"model\":\"test-model\""));
+            assert!(request.contains("provider prompt"));
+            let body = r#"{"choices":[{"message":{"content":"openai reply"}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("response");
+        });
+        let providers = vec![HttpProviderEndpoint {
+            provider: Provider {
+                name: "local-openai-compatible".into(),
+                cost_per_1k_tokens: 0.0,
+                quality: 0.8,
+                avg_latency_ms: 10,
+                local: true,
+            },
+            url: format!("http://{address}/v1/chat/completions"),
+            api_key: Some("test-key".into()),
+            model: "test-model".into(),
+            protocol: HttpProviderProtocol::OpenAiCompatible,
+        }];
+        let result = execute_routed_http_prompt(
+            &providers,
+            &RoutingPolicy::default(),
+            "provider prompt",
+            std::time::Duration::from_secs(2),
+        )
+        .expect("HTTP provider response");
+        server.join().expect("server");
+        assert_eq!(
+            result,
+            ("local-openai-compatible".into(), "openai reply".into())
+        );
+    }
+
+    #[test]
+    fn executes_anthropic_http_provider_and_reports_http_errors() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let body = r#"{"error":"upstream unavailable"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("response");
+        });
+        let providers = vec![HttpProviderEndpoint {
+            provider: Provider {
+                name: "cloud-anthropic".into(),
+                cost_per_1k_tokens: 8.0,
+                quality: 0.96,
+                avg_latency_ms: 380,
+                local: false,
+            },
+            url: format!("http://{address}/v1/messages"),
+            api_key: Some("test-key".into()),
+            model: "claude-test".into(),
+            protocol: HttpProviderProtocol::AnthropicMessages,
+        }];
+        let error = execute_routed_http_prompt(
+            &providers,
+            &RoutingPolicy {
+                min_quality: 0.9,
+                ..RoutingPolicy::default()
+            },
+            "provider prompt",
+            std::time::Duration::from_secs(2),
+        )
+        .expect_err("upstream status must fail closed");
+        server.join().expect("server");
+        assert!(matches!(
+            error,
+            ExecutionError::HttpStatus { status: 503, .. }
+        ));
     }
 }

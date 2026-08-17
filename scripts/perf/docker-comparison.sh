@@ -10,6 +10,11 @@ out="${FERROCRATE_DOCKER_COMPARISON_OUTPUT:-$repo_root/docs/evidence/performance
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
+network_backend="${FERROCRATE_COMPARISON_NETWORK_BACKEND:-iptables}"
+case "$network_backend" in
+  iptables|nftables) ;;
+  *) echo "unsupported FERROCRATE_COMPARISON_NETWORK_BACKEND=$network_backend (use iptables or nftables)" >&2; exit 2 ;;
+esac
 
 mkdir -p "$(dirname -- "$out")"
 if [[ ! -x "$ferro_bin" ]]; then
@@ -74,9 +79,9 @@ record() {
   notes+=("$note")
 }
 
-ferro_env="env FERROCRATE_RUNTIME_DIR=$ferro_runtime HOME=$tmp_root FERROCRATE_NETWORK_BACKEND=iptables"
+ferro_env="env FERROCRATE_RUNTIME_DIR=$ferro_runtime HOME=$tmp_root FERROCRATE_NETWORK_BACKEND=$network_backend"
 docker_run="docker run --rm --network bridge $image true"
-ferro_run="$ferro_env $ferro_bin run --rm --network bridge --network-backend iptables $image true"
+ferro_run="$ferro_env $ferro_bin run --rm --network bridge --network-backend $network_backend $image true"
 
 # 1. Pull (Docker's daemon cache and Ferrocrate's isolated store are called out
 # explicitly in the report; this is a warm-cache operation after preparation).
@@ -149,6 +154,7 @@ record "API info" "curl --silent --fail --unix-socket /var/run/docker.sock http:
   echo "- Ferrocrate commit: $(git -C "$repo_root" rev-parse --short HEAD)"
   echo "- Image: \`$image\`; rounds per operation: $rounds; reported value is median wall-clock milliseconds."
   echo "- Privilege: this run requires rootful access to Docker and Ferrocrate networking."
+  echo "- Ferrocrate network backend: $network_backend"
   echo
   echo "This is an operational comparison, not a compatibility or production-readiness claim."
   echo "Docker's daemon/image cache and Ferrocrate's isolated runtime are different storage systems;"

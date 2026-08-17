@@ -742,11 +742,10 @@ impl RuntimeService for CriRuntime {
             .get(&id)
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
         let state = if record.state == "ready"
-            && record
-                .netns_name
-                .as_deref()
-                .is_none_or(|name| ferro_net::netns_path(name).exists())
-        {
+            && record.netns_name.as_deref().is_none_or(|name| {
+                ferro_net::netns_path(name).exists()
+                    && ferro_net::loopback_is_up(name).unwrap_or(false)
+            }) {
             PodSandboxState::Ready
         } else {
             PodSandboxState::Notready
@@ -796,10 +795,10 @@ impl RuntimeService for CriRuntime {
             .cloned()
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
         if sandbox.state != "ready"
-            || sandbox
-                .netns_name
-                .as_deref()
-                .is_some_and(|name| !ferro_net::netns_path(name).exists())
+            || sandbox.netns_name.as_deref().is_some_and(|name| {
+                !ferro_net::netns_path(name).exists()
+                    || !ferro_net::loopback_is_up(name).unwrap_or(false)
+            })
         {
             return Err(Status::failed_precondition("pod sandbox is not ready"));
         }

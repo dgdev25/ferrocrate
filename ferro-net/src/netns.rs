@@ -1,4 +1,4 @@
-use crate::executor::{exec_cmd, ExecError};
+use crate::executor::{exec_cmd, exec_cmd_capture, ExecError};
 use crate::validate::{validate_interface_name, validate_netns_name, ValidationError};
 #[cfg(target_os = "linux")]
 use nix::sched::{setns, CloneFlags};
@@ -71,6 +71,23 @@ pub fn build_ip_netns_set_loopback_up_cmd(name: &str) -> Result<Vec<String>, Val
     ])
 }
 
+pub fn build_ip_netns_loopback_observe_cmd(name: &str) -> Result<Vec<String>, ValidationError> {
+    validate_netns_name(name)?;
+    Ok(vec![
+        "ip".into(),
+        "-j".into(),
+        "netns".into(),
+        "exec".into(),
+        name.into(),
+        "ip".into(),
+        "-j".into(),
+        "link".into(),
+        "show".into(),
+        "dev".into(),
+        "lo".into(),
+    ])
+}
+
 // ============================================================================
 // Execution functions
 // ============================================================================
@@ -95,6 +112,23 @@ pub fn set_loopback_up(name: &str) -> Result<(), NetnsError> {
     exec_cmd(&build_ip_netns_set_loopback_up_cmd(name)?).map_err(NetnsError::from)
 }
 
+pub fn loopback_is_up(name: &str) -> Result<bool, NetnsError> {
+    let output =
+        exec_cmd_capture(&build_ip_netns_loopback_observe_cmd(name)?).map_err(NetnsError::from)?;
+    let rows = serde_json::from_str::<serde_json::Value>(&output).map_err(|error| {
+        NetnsError::Exec(ExecError::CommandFailed {
+            cmd: "ip -j netns exec ... ip -j link show dev lo".into(),
+            stderr: format!("invalid loopback read-back: {error}"),
+        })
+    })?;
+    Ok(rows
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("operstate"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|state| state.eq_ignore_ascii_case("up")))
+}
+
 /// Enter a network namespace by path (direct syscall, no shell-out).
 #[cfg(target_os = "linux")]
 pub fn enter_netns(path: &Path) -> Result<(), NetnsError> {
@@ -116,7 +150,7 @@ pub fn enter_netns(_path: &Path) -> Result<(), NetnsError> {
 mod tests {
     use super::{
         build_ip_link_set_netns_cmd, build_ip_netns_add_cmd, build_ip_netns_del_cmd,
-        build_ip_netns_set_loopback_up_cmd, netns_path,
+        build_ip_netns_loopback_observe_cmd, build_ip_netns_set_loopback_up_cmd, netns_path,
     };
 
     #[test]
@@ -142,6 +176,10 @@ mod tests {
         assert_eq!(
             build_ip_netns_set_loopback_up_cmd("c1").unwrap(),
             vec!["ip", "netns", "exec", "c1", "ip", "link", "set", "lo", "up"]
+        );
+        assert_eq!(
+            build_ip_netns_loopback_observe_cmd("c1").unwrap(),
+            vec!["ip", "-j", "netns", "exec", "c1", "ip", "-j", "link", "show", "dev", "lo"]
         );
     }
 

@@ -100,6 +100,7 @@ struct CreationRollback {
     container_id: String,
     container_dir: Option<PathBuf>,
     netns_name: Option<String>,
+    namespace_owned: bool,
     namespace_identity: Option<KernelObjectIdentityRecord>,
     host_veth: Option<(String, Option<u32>)>,
     container_ip: Option<String>,
@@ -359,6 +360,8 @@ struct PendingNetworkCleanup {
     schema_version: u32,
     container_id: String,
     netns_name: Option<String>,
+    #[serde(default = "default_namespace_owned")]
+    namespace_owned: bool,
     namespace_identity: Option<KernelObjectIdentityRecord>,
     host_veth: Option<(String, Option<u32>)>,
     container_ip: Option<String>,
@@ -390,6 +393,10 @@ struct PendingNetworkCleanup {
     creation_provenance: CreationProvenance,
 }
 
+fn default_namespace_owned() -> bool {
+    true
+}
+
 impl CreationRollback {
     fn new(
         container_id: &str,
@@ -401,6 +408,7 @@ impl CreationRollback {
             container_id: container_id.to_string(),
             container_dir: None,
             netns_name: None,
+            namespace_owned: false,
             namespace_identity: None,
             host_veth: None,
             container_ip: None,
@@ -454,6 +462,7 @@ impl CreationRollback {
             container_id: pending.container_id,
             container_dir: Some(container_dir),
             netns_name: pending.netns_name,
+            namespace_owned: pending.namespace_owned,
             namespace_identity: pending.namespace_identity,
             host_veth: pending.host_veth,
             container_ip: pending.container_ip,
@@ -541,6 +550,7 @@ impl CreationRollback {
         ports: &[PortMappingRecord],
     ) -> Result<(), RuntimeError> {
         self.netns_name = setup.netns_name.clone();
+        self.namespace_owned = setup.namespace_owned;
         self.container_ip = setup.container_ip.clone();
         self.port_mappings = ports.to_vec();
         if self.network_backend.is_none() {
@@ -669,6 +679,7 @@ impl CreationRollback {
             schema_version: 2,
             container_id: self.container_id.clone(),
             netns_name: self.netns_name.clone(),
+            namespace_owned: self.namespace_owned,
             namespace_identity: self.namespace_identity,
             host_veth: self.host_veth.clone(),
             container_ip: self.container_ip.clone(),
@@ -787,6 +798,7 @@ impl CreationRollback {
         }
         let mut identity_cleanup_failure = false;
         let safe_netns = match (&self.netns_name, self.namespace_identity) {
+            (Some(_), _) if !self.namespace_owned => None,
             (Some(name), Some(expected)) if self.network_ownership.is_none() => {
                 let path = Path::new("/var/run/netns").join(name);
                 match fs::symlink_metadata(path) {
@@ -2893,6 +2905,7 @@ impl ContainerRuntime {
             stderr_path: stderr_path.display().to_string(),
             status: "running".to_string(),
             netns: netns_name.clone(),
+            namespace_owned: network_setup.namespace_owned,
             namespace_identity: network_setup.namespace_identity,
             network_name: persisted_network_name(associated_network, network_mode),
             ip_address: container_ip.clone(),
@@ -5190,6 +5203,7 @@ fn ensure_kernel_min_version() -> Result<(), RuntimeError> {
 
 struct NetworkSetup {
     netns_name: Option<String>,
+    namespace_owned: bool,
     namespace_identity: Option<KernelObjectIdentityRecord>,
     container_ip: Option<String>,
     container_ipv6: Option<String>,
@@ -5331,8 +5345,10 @@ impl NetworkSetup {
         container_ip: Option<String>,
         container_ipv6: Option<String>,
     ) -> Self {
+        let namespace_owned = netns_name.is_some();
         Self {
             netns_name,
+            namespace_owned,
             namespace_identity: None,
             container_ip,
             container_ipv6,
@@ -5366,6 +5382,37 @@ fn setup_network(
             network_backend,
             rollback,
         );
+    }
+    if let Some(shared_netns) = network_mode.strip_prefix("container:") {
+        if shared_netns.is_empty() {
+            return Err(RuntimeError::Network(
+                "shared network namespace name is empty".to_string(),
+            ));
+        }
+        // Reuse the existing namespace without recording ownership. The
+        // caller remains responsible for its lifecycle; container cleanup
+        // must never delete a CRI pod sandbox namespace.
+        netns::build_ip_netns_del_cmd(shared_netns)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        let path = netns::netns_path(shared_netns);
+        if !path.exists() {
+            return Err(RuntimeError::Network(format!(
+                "shared network namespace {shared_netns} does not exist"
+            )));
+        }
+        return Ok(NetworkSetup {
+            netns_name: Some(shared_netns.to_string()),
+            namespace_owned: false,
+            namespace_identity: Some(kernel_path_identity(&path)?),
+            container_ip: None,
+            container_ipv6: None,
+            backend: None,
+            ownership: None,
+            ebpf_network: None,
+            managed_overlay: None,
+            managed_cleanup_provenance: None,
+            managed_host_veth: None,
+        });
     }
     match network_mode {
         "host" => {
@@ -5676,6 +5723,7 @@ fn setup_network(
 
     Ok(NetworkSetup {
         netns_name: Some(netns_name),
+        namespace_owned: true,
         namespace_identity: Some(namespace_identity),
         container_ip: Some(container_ip),
         container_ipv6,
@@ -7493,33 +7541,35 @@ fn cleanup_network(
         let proven = legacy_firewall_rules_proven(record)?;
         match classify_legacy_network_record(record.network_name.as_deref(), proven)? {
             LegacyNetworkAction::NotManagedBridge => {
-                if let Some(netns_name) = record.netns.as_deref() {
-                    let expected = record.namespace_identity.ok_or_else(|| {
+                if record.namespace_owned {
+                    if let Some(netns_name) = record.netns.as_deref() {
+                        let expected = record.namespace_identity.ok_or_else(|| {
                         RuntimeError::Network(format!(
                             "legacy container {} has a namespace name but no kernel identity; retain the record and remove the namespace manually",
                             record.id
                         ))
                     })?;
-                    let path = netns::netns_path(netns_name);
-                    let observed = match fs::symlink_metadata(&path) {
-                        Ok(metadata) => Some(KernelIdentity {
-                            device: metadata.dev(),
-                            inode: metadata.ino(),
-                        }),
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                        Err(error) => return Err(RuntimeError::Io(error)),
-                    };
-                    match verify_kernel_identity(
-                        KernelIdentity {
-                            device: expected.device,
-                            inode: expected.inode,
-                        },
-                        observed,
-                    )? {
-                        OwnedResourceState::Present => {
-                            run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                        let path = netns::netns_path(netns_name);
+                        let observed = match fs::symlink_metadata(&path) {
+                            Ok(metadata) => Some(KernelIdentity {
+                                device: metadata.dev(),
+                                inode: metadata.ino(),
+                            }),
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                            Err(error) => return Err(RuntimeError::Io(error)),
+                        };
+                        match verify_kernel_identity(
+                            KernelIdentity {
+                                device: expected.device,
+                                inode: expected.inode,
+                            },
+                            observed,
+                        )? {
+                            OwnedResourceState::Present => {
+                                run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                            }
+                            OwnedResourceState::Missing => {}
                         }
-                        OwnedResourceState::Missing => {}
                     }
                 }
             }
@@ -10248,6 +10298,7 @@ mod tests {
             std::fs::write(self.state.with_extension("network-owned"), b"owned")?;
             Ok(super::NetworkSetup {
                 netns_name: rollback.netns_name.clone(),
+                namespace_owned: true,
                 namespace_identity: rollback.namespace_identity,
                 container_ip: Some("192.0.2.2".into()),
                 container_ipv6: None,
@@ -10703,6 +10754,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            namespace_owned: true,
             namespace_identity: None,
             network_name: None,
             ip_address: None,
@@ -10763,6 +10815,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            namespace_owned: true,
             namespace_identity: None,
             network_name: None,
             ip_address: None,
@@ -11191,6 +11244,7 @@ mod tests {
             stderr_path: "/tmp/fixture.stderr".to_string(),
             status: status.to_string(),
             netns: None,
+            namespace_owned: true,
             namespace_identity: None,
             network_name: Some("bridge".to_string()),
             ip_address: Some("10.44.1.2".to_string()),
@@ -11312,6 +11366,7 @@ mod tests {
             schema_version: 1,
             container_id: "pending-owner".to_string(),
             netns_name: None,
+            namespace_owned: true,
             namespace_identity: None,
             host_veth: None,
             container_ip: None,
@@ -11354,6 +11409,51 @@ mod tests {
         )
         .unwrap();
         assert!(container_dir.exists());
+    }
+
+    #[test]
+    fn network_setup_isolated_marks_namespace_as_owned() {
+        let setup = super::NetworkSetup::isolated(
+            Some("ferro-test-netns".to_string()),
+            Some("192.0.2.10".to_string()),
+            None,
+        );
+        assert!(setup.namespace_owned);
+        assert_eq!(setup.netns_name.as_deref(), Some("ferro-test-netns"));
+    }
+
+    #[test]
+    fn pending_cleanup_preserves_shared_namespace_non_ownership() {
+        let pending = super::PendingNetworkCleanup {
+            schema_version: 1,
+            container_id: "shared-netns".to_string(),
+            netns_name: Some("cri-sandbox-1".to_string()),
+            namespace_owned: false,
+            namespace_identity: None,
+            host_veth: None,
+            container_ip: None,
+            port_mappings: Vec::new(),
+            network_backend: None,
+            network_ownership: None,
+            network_persisted: false,
+            shared_network_created: false,
+            bridge_created: None,
+            ip_forward: None,
+            route_localnet: None,
+            pending_firewall_cleanup: Vec::new(),
+            operation_id: None,
+            cgroup_name: None,
+            cgroup_generation: None,
+            planned_resources: Default::default(),
+            applied_resources: Default::default(),
+            resource_plans: Vec::new(),
+            typed_applied_resources: Vec::new(),
+            creation_provenance: Default::default(),
+        };
+        let encoded = serde_json::to_vec(&pending).unwrap();
+        let decoded: super::PendingNetworkCleanup = serde_json::from_slice(&encoded).unwrap();
+        assert!(!decoded.namespace_owned);
+        assert_eq!(decoded.netns_name.as_deref(), Some("cri-sandbox-1"));
     }
 
     #[test]
@@ -12193,6 +12293,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: Some("ferro-existing".to_string()),
+            namespace_owned: true,
             namespace_identity: None,
             network_name: Some("bridge".to_string()),
             ip_address: Some("10.0.0.2".to_string()),

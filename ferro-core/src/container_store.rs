@@ -127,6 +127,8 @@ pub struct ContainerRecord {
     pub status: String,
     #[serde(default)]
     pub netns: Option<String>,
+    #[serde(default = "default_namespace_owned")]
+    pub namespace_owned: bool,
     /// Kernel identity of the persisted network namespace.  This is separate
     /// from bridge ownership because `network_mode=none` has a namespace but
     /// no bridge/backend record.
@@ -166,6 +168,10 @@ pub struct ContainerRecord {
     pub mutation_generation: u64,
     #[serde(default)]
     pub pending_mutation: Option<MutationReservation>,
+}
+
+fn default_namespace_owned() -> bool {
+    true
 }
 
 /// Durable bind-mount configuration required to replay a container after a
@@ -223,6 +229,7 @@ impl ContainerRecord {
             stderr_path: String::new(),
             status: "created".into(),
             netns: None,
+            namespace_owned: true,
             namespace_identity: None,
             network_name: None,
             ip_address: None,

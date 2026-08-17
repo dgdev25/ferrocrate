@@ -892,13 +892,21 @@ impl RuntimeService for CriRuntime {
             .map_err(Status::internal)?;
             return Ok(Response::new(StartContainerResponse {}));
         }
-        let (sandbox_uid, sandbox_network_mode) = self
+        let (sandbox_uid, sandbox_network_mode, sandbox_netns) = self
             .sandboxes
             .lock()
             .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?
             .get(&record.sandbox_id)
-            .map(|sandbox| (sandbox.uid.clone(), sandbox.network_mode.clone()))
+            .map(|sandbox| {
+                (
+                    sandbox.uid.clone(),
+                    sandbox.network_mode.clone(),
+                    sandbox.netns_name.clone(),
+                )
+            })
             .ok_or_else(|| Status::failed_precondition("pod sandbox is not present"))?;
+        let launch_network_mode =
+            sandbox_launch_network_mode(&sandbox_network_mode, sandbox_netns.as_deref())?;
         let mut labels = std::collections::HashMap::new();
         labels.insert(
             "io.ferrocrate.parent-resource".to_string(),
@@ -931,7 +939,7 @@ impl RuntimeService for CriRuntime {
                     None,
                     Some(&record.name),
                     &[],
-                    &sandbox_network_mode,
+                    &launch_network_mode,
                     ferro_net::NetworkBackend::Iptables,
                     None,
                 )
@@ -1150,6 +1158,19 @@ impl RuntimeService for CriRuntime {
             exit_code: result.exit_code,
         }))
     }
+}
+
+fn sandbox_launch_network_mode(
+    network_mode: &str,
+    netns_name: Option<&str>,
+) -> Result<String, Status> {
+    if network_mode == "none" {
+        return Ok(network_mode.to_string());
+    }
+    let netns = netns_name
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| Status::failed_precondition("pod sandbox network namespace is missing"))?;
+    Ok(format!("container:{netns}"))
 }
 
 #[tonic::async_trait]
@@ -1559,6 +1580,25 @@ async fn serve_configured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_launch_network_mode_preserves_none() {
+        assert_eq!(sandbox_launch_network_mode("none", None).unwrap(), "none");
+    }
+
+    #[test]
+    fn sandbox_launch_network_mode_joins_existing_namespace() {
+        assert_eq!(
+            sandbox_launch_network_mode("bridge", Some("cri-sandbox-1")).unwrap(),
+            "container:cri-sandbox-1"
+        );
+    }
+
+    #[test]
+    fn sandbox_launch_network_mode_rejects_missing_namespace() {
+        let error = sandbox_launch_network_mode("bridge", None).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
     use crate::runtime::{
         ContainerConfig, CreateContainerRequest, ImageFsInfoRequest, ImageSpec, ImageStatusRequest,
         ListImagesRequest, PodSandboxConfig, PullImageRequest, RemoveContainerRequest,

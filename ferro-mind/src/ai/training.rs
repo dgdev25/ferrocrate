@@ -895,6 +895,9 @@ impl TrainingPipeline {
         if !self.config.online_learning {
             return Ok(());
         }
+        if !self.config.data_collection_consent {
+            return Err(TrainingError::DataCollectionDisabled);
+        }
 
         self.online_running.store(true, Ordering::SeqCst);
         let _ = self.run_online_learning_cycle()?;
@@ -2334,6 +2337,19 @@ mod tests {
         pipeline.start_online_learning().unwrap();
         assert!(pipeline.is_online_learning());
         pipeline.stop_online_learning();
+        assert!(!pipeline.is_online_learning());
+    }
+
+    #[test]
+    fn online_learning_requires_explicit_collection_consent() {
+        let (_temp, mut config) = setup_test_env();
+        config.online_learning = true;
+        config.data_collection_consent = false;
+        let mut pipeline = TrainingPipeline::new(config).expect("pipeline");
+        assert!(matches!(
+            pipeline.start_online_learning(),
+            Err(TrainingError::DataCollectionDisabled)
+        ));
         assert!(!pipeline.is_online_learning());
     }
 

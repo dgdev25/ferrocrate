@@ -5077,15 +5077,13 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 return Err("rename: container is required".to_string());
             }
             validate_docker_container_name(name)?;
-            let body = serde_json::to_vec(&serde_json::json!({"name": name}))
-                .map_err(|error| error.to_string())?;
-            request_with_body(
+            request(
                 "POST",
                 format!(
-                    "/containers/{}/rename",
-                    percent_encode_path_component(container)
+                    "/containers/{}/rename?name={}",
+                    percent_encode_path_component(container),
+                    percent_encode_path_component(name)
                 ),
-                Some(body),
             )
             .map(|_| println!("rename: container={container} name={name}"))
         })(),
@@ -10359,12 +10357,12 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/rename");
-                let body: serde_json::Value = serde_json::from_slice(&request.body)
-                    .map_err(|error| format!("docker: invalid rename payload: {error}"))?;
-                let name = body
+                let name = query
                     .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "docker: rename requires a string name".to_string())?;
+                    .ok_or_else(|| {
+                        "docker: rename requires the name query parameter".to_string()
+                    })?;
+                validate_docker_container_name(name)?;
                 runtime
                     .rename(id, name)
                     .map_err(|error| error.to_string())?;

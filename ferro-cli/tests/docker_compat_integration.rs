@@ -179,6 +179,29 @@ fn docker_compat_unknown_route_returns_docker_json_error() {
 }
 
 #[test]
+fn docker_compat_rename_uses_docker_name_query_parameter() {
+    let harness = DaemonHarness::spawn();
+
+    let (status, body) = harness.request(
+        "POST",
+        "/v1.45/containers/missing/rename?name=renamed-container",
+    );
+    assert_eq!(
+        status, 404,
+        "a valid rename request should reach lookup: {body}"
+    );
+
+    let (status, body) = harness.request("POST", "/v1.45/containers/missing/rename");
+    assert_eq!(status, 400);
+    assert!(body.contains("name query parameter"), "body={body}");
+
+    let raw = "POST /v1.45/containers/missing/rename HTTP/1.1\r\nHost: docker\r\nContent-Length: 22\r\nConnection: close\r\n\r\n{\"name\":\"legacy-body\"}";
+    let (status, body) = harness.request_raw(raw);
+    assert_eq!(status, 400);
+    assert!(body.contains("name query parameter"), "body={body}");
+}
+
+#[test]
 fn docker_compat_commit_requires_container_and_repository() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request("POST", "/v1.45/commit");

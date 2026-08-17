@@ -25,6 +25,108 @@ fn claims(deadline: u64, nonce: &str) -> CriDelegationClaims {
 }
 
 #[test]
+fn attenuation_cannot_broaden_scope_or_deadline() {
+    let parent = CriDelegationClaims::new(
+        "issuer-a",
+        "key-a",
+        "transport-a",
+        "ferro-cri",
+        "alice",
+        vec![Action::ImagePull, Action::ImageDelete],
+        vec!["image:alpine".into(), "image:busybox".into()],
+        "parent-nonce",
+        2_000,
+        "boot-a",
+        [7; 32],
+    )
+    .unwrap();
+    let child = parent
+        .attenuate(
+            vec![Action::ImagePull],
+            vec!["image:alpine".into()],
+            "child-nonce",
+            1_500,
+        )
+        .unwrap();
+    assert_ne!(child.signing_bytes(), parent.signing_bytes());
+    let signing = SigningKey::from_bytes(&[9; 32]);
+    let assertion = DelegationAssertion::new(
+        child.clone(),
+        signing.sign(&child.signing_bytes()).to_bytes(),
+    )
+    .unwrap();
+    let replay = tempfile::tempdir().unwrap();
+    let verifier = CriDelegationVerifier::open(
+        vec![DelegationTrustKey::developer(
+            "issuer-a",
+            "key-a",
+            signing.verifying_key(),
+        )],
+        "ferro-cri",
+        "boot-a",
+        [7; 32],
+        replay.path(),
+    )
+    .unwrap();
+    verifier
+        .verify(
+            &assertion,
+            "transport-a",
+            Action::ImagePull,
+            "image:alpine",
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        verifier.verify(
+            &assertion,
+            "transport-a",
+            Action::ImageDelete,
+            "image:alpine",
+            1_000,
+        ),
+        Err(DelegationError::Scope)
+    );
+
+    assert_eq!(
+        parent.attenuate(
+            vec![Action::ImageBuild],
+            vec!["image:alpine".into()],
+            "broaden-action",
+            1_500,
+        ),
+        Err(DelegationError::Attenuation)
+    );
+    assert_eq!(
+        parent.attenuate(
+            vec![Action::ImagePull],
+            vec!["image:ubuntu".into()],
+            "broaden-resource",
+            1_500,
+        ),
+        Err(DelegationError::Attenuation)
+    );
+    assert_eq!(
+        parent.attenuate(
+            vec![Action::ImagePull],
+            vec!["image:alpine".into()],
+            "broaden-deadline",
+            2_001,
+        ),
+        Err(DelegationError::Attenuation)
+    );
+    assert_eq!(
+        parent.attenuate(
+            vec![Action::ImagePull],
+            vec!["image:alpine".into()],
+            "parent-nonce",
+            1_500,
+        ),
+        Err(DelegationError::Attenuation)
+    );
+}
+
+#[test]
 fn signed_delegation_is_single_use_and_expires() {
     let temp = tempfile::tempdir().unwrap();
     let signing = SigningKey::from_bytes(&[3; 32]);

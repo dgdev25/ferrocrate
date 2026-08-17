@@ -133,6 +133,47 @@ impl CriDelegationClaims {
         &self.delegated_principal
     }
 
+    /// Create a child claim whose authority is no broader than this claim.
+    ///
+    /// The child keeps the issuer, audience, transport binding, boot binding,
+    /// and policy digest, while requiring a strictly new nonce, a no-later
+    /// deadline, and action/resource sets that are subsets of the parent.
+    /// Callers still sign the returned claims with the issuer key before
+    /// putting them on the wire.
+    pub fn attenuate(
+        &self,
+        allowed_actions: Vec<Action>,
+        allowed_resources: Vec<String>,
+        nonce: impl Into<String>,
+        deadline_unix_ms: u64,
+    ) -> Result<Self, DelegationError> {
+        let nonce = nonce.into();
+        if nonce == self.nonce
+            || !allowed_actions
+                .iter()
+                .all(|action| self.allowed_actions.contains(action))
+            || !allowed_resources
+                .iter()
+                .all(|resource| self.allowed_resources.contains(resource))
+            || deadline_unix_ms > self.deadline_unix_ms
+        {
+            return Err(DelegationError::Attenuation);
+        }
+        Self::new(
+            self.issuer.clone(),
+            self.key_id.clone(),
+            self.transport_subject.clone(),
+            self.audience.clone(),
+            self.delegated_principal.clone(),
+            allowed_actions,
+            allowed_resources,
+            nonce,
+            deadline_unix_ms,
+            self.boot_id.clone(),
+            self.policy_digest,
+        )
+    }
+
     fn replay_key(&self) -> Vec<u8> {
         let mut key = b"ferrocrate/cri-delegation-replay/v1\0".to_vec();
         for value in [&self.issuer, &self.key_id, &self.nonce] {
@@ -467,6 +508,8 @@ pub enum DelegationError {
     Expired,
     #[error("delegation context or scope does not match")]
     Scope,
+    #[error("delegated claim attempts to broaden or reuse its parent authority")]
+    Attenuation,
     #[error("delegation was already used")]
     Replay,
     #[error("durable delegation replay store failed")]

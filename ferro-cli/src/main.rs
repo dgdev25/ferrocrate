@@ -51,7 +51,7 @@ use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ai::training::{
     handle_community_download_command, handle_community_list_command,
     handle_community_publish_command, handle_export_command, handle_import_command,
-    handle_stats_command, handle_train_command,
+    handle_stats_command, handle_train_command, ModelType, TrainingConfig, TrainingPipeline,
 };
 #[cfg(target_os = "linux")]
 use ferro_mind::ai::training::{
@@ -850,6 +850,23 @@ pub enum AiCommands {
         model_type: String,
         #[arg(long)]
         input: String,
+        #[arg(long = "models-dir")]
+        models_dir: Option<String>,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
+    /// Attach an Ed25519 provenance signature to a persisted model version.
+    /// The key file must contain exactly 32 raw private-key bytes or 64 hex
+    /// characters; it is never printed or included in output.
+    Sign {
+        #[arg(long = "model-type")]
+        model_type: String,
+        #[arg(long)]
+        version: u32,
+        #[arg(long = "signer-key-id")]
+        signer_key_id: String,
+        #[arg(long = "key")]
+        key: PathBuf,
         #[arg(long = "models-dir")]
         models_dir: Option<String>,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -3480,6 +3497,53 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             );
             Ok(())
         }
+        AiCommands::Sign {
+            model_type,
+            version,
+            signer_key_id,
+            key,
+            models_dir,
+            format,
+        } => {
+            let model_type = model_type
+                .parse::<ModelType>()
+                .map_err(|error| format!("ai sign: {error}"))?;
+            if signer_key_id.trim().is_empty()
+                || signer_key_id.chars().count() > 128
+                || signer_key_id.chars().any(char::is_control)
+            {
+                return Err("ai sign: signer key id must be 1-128 non-control characters".into());
+            }
+            let key_bytes = read_signing_key_file(&key)?;
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+            let mut config = TrainingConfig::default();
+            if let Some(models_dir) = models_dir {
+                config.models_dir = PathBuf::from(models_dir);
+            }
+            let mut pipeline = TrainingPipeline::new(config)
+                .map_err(|error| format!("ai sign: load model history: {error}"))?;
+            pipeline
+                .sign_model_version(model_type, version, signer_key_id.clone(), &signing_key)
+                .map_err(|error| format!("ai sign: {error}"))?;
+            let signed = pipeline
+                .list_versions(model_type)
+                .into_iter()
+                .find(|model| model.version == version)
+                .ok_or_else(|| {
+                    format!("ai sign: model version {version} disappeared after signing")
+                })?;
+            if format == "json" {
+                let text = serde_json::to_string_pretty(signed)
+                    .map_err(|error| format!("ai sign: {error}"))?;
+                println!("{text}");
+            } else {
+                println!(
+                    "ai sign: model_type={} version={} signer_key_id={} artifact_sha256={}",
+                    signed.model_type, signed.version, signer_key_id, signed.artifact_sha256
+                );
+            }
+            Ok(())
+        }
         AiCommands::Stats {
             path,
             model_type,
@@ -3789,6 +3853,52 @@ fn handle_ai(command: AiCommands) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Read a bounded Ed25519 signing key without accepting symlinked or oversized
+/// files. Raw 32-byte keys and 64-character hexadecimal keys are supported so
+/// operators can use either a secret-key export or a text secret provisioner.
+fn read_signing_key_file(path: &Path) -> Result<[u8; 32], String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("read signing key metadata {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "signing key is not a regular file: {}",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(format!(
+                "signing key must not be group/other writable: {}",
+                path.display()
+            ));
+        }
+    }
+    if metadata.len() > 4096 {
+        return Err("signing key file exceeds 4096 bytes".into());
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("read signing key {}: {error}", path.display()))?;
+    if bytes.len() == 32 {
+        return bytes
+            .try_into()
+            .map_err(|_| "signing key must contain exactly 32 bytes".to_string());
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "signing key must be 32 raw bytes or 64 hexadecimal characters".to_string())?
+        .trim();
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("signing key must be 32 raw bytes or 64 hexadecimal characters".into());
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, slot) in decoded.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "invalid hexadecimal signing key".to_string())?;
+    }
+    Ok(decoded)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13391,6 +13501,85 @@ volumes:
                 assert_eq!(format, "json");
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_sign_command() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "ai",
+            "sign",
+            "--model-type",
+            "resource-predictor",
+            "--version",
+            "7",
+            "--signer-key-id",
+            "operator-1",
+            "--key",
+            "/run/secrets/model-key",
+            "--models-dir",
+            "/var/lib/ferrocrate/models",
+            "--format",
+            "json",
+        ]);
+        match cli.command {
+            Commands::Ai {
+                command: AiCommands::Sign {
+                    model_type,
+                    version,
+                    signer_key_id,
+                    key,
+                    models_dir,
+                    format,
+                },
+            } => {
+                assert_eq!(model_type, "resource-predictor");
+                assert_eq!(version, 7);
+                assert_eq!(signer_key_id, "operator-1");
+                assert_eq!(key, PathBuf::from("/run/secrets/model-key"));
+                assert_eq!(models_dir.as_deref(), Some("/var/lib/ferrocrate/models"));
+                assert_eq!(format, "json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signing_key_file_accepts_raw_and_hex_and_rejects_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let raw_path = temp.path().join("raw-key");
+        let raw = [0x2a_u8; 32];
+        std::fs::write(&raw_path, raw).expect("raw key");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &raw_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .expect("raw key permissions");
+        assert_eq!(
+            super::read_signing_key_file(&raw_path).expect("raw key parse"),
+            raw
+        );
+
+        let hex_path = temp.path().join("hex-key");
+        std::fs::write(&hex_path, "2a".repeat(32)).expect("hex key");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &hex_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .expect("hex key permissions");
+        assert_eq!(
+            super::read_signing_key_file(&hex_path).expect("hex key parse"),
+            raw
+        );
+
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link-key");
+            std::os::unix::fs::symlink(&raw_path, &link).expect("symlink");
+            assert!(super::read_signing_key_file(&link).is_err());
         }
     }
 

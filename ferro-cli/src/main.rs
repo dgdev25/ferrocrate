@@ -11639,7 +11639,9 @@ fn docker_network_matches_filters(
 ) -> bool {
     let name_matches = filters
         .get("name")
-        .is_none_or(|values| values.is_empty() || values.iter().any(|value| value == record.name));
+        .is_none_or(|values| {
+            values.is_empty() || values.iter().any(|value| record.name.contains(value))
+        });
     let driver_matches = filters.get("driver").is_none_or(|values| {
         values.is_empty() || values.iter().any(|value| value == record.driver)
     });
@@ -15279,6 +15281,10 @@ volumes:
         }))
         .expect("filters");
         assert!(docker_network_matches_filters(&custom, &filters));
+
+        let substring =
+            serde_json::from_value(serde_json::json!({"name": ["app"]})).expect("filters");
+        assert!(docker_network_matches_filters(&custom, &substring));
 
         let builtin = super::DockerNetworkView {
             name: "bridge",

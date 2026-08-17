@@ -3414,6 +3414,7 @@ impl ContainerRuntime {
         if let Some((_, cancel)) = self.resource_cancel.remove(id) {
             cancel.store(true, Ordering::Relaxed);
         }
+        cleanup_ai_container_snapshots(&self.runtime_dir, id);
 
         let record = self
             .store
@@ -10102,6 +10103,29 @@ fn ai_anomaly_snapshot_path(container_id: &str) -> PathBuf {
         .join(format!("{container_id}.json"))
 }
 
+fn cleanup_ai_container_snapshots(runtime_dir: &Path, container_id: &str) {
+    for path in [
+        runtime_dir
+            .join("ai")
+            .join("restart")
+            .join(format!("{container_id}.json")),
+        runtime_dir
+            .join("ai")
+            .join("resource")
+            .join(format!("{container_id}.json")),
+        runtime_dir
+            .join("ai")
+            .join("anomaly")
+            .join(format!("{container_id}.json")),
+    ] {
+        if let Err(error) = fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = %path.display(), error = %error, "failed to remove AI container snapshot");
+            }
+        }
+    }
+}
+
 fn log_ai_restart_lifecycle(
     container_id: &str,
     action: &str,
@@ -13305,6 +13329,20 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+    }
+
+    #[test]
+    fn ai_snapshot_cleanup_removes_all_per_container_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for kind in ["restart", "resource", "anomaly"] {
+            let folder = dir.path().join("ai").join(kind);
+            std::fs::create_dir_all(&folder).expect("folder");
+            std::fs::write(folder.join("container-a.json"), b"snapshot").expect("snapshot");
+        }
+        super::cleanup_ai_container_snapshots(dir.path(), "container-a");
+        for kind in ["restart", "resource", "anomaly"] {
+            assert!(!dir.path().join("ai").join(kind).join("container-a.json").exists());
         }
     }
 

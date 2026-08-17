@@ -281,6 +281,16 @@ pub enum Commands {
     Containers {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        before: Option<String>,
+        #[arg(long = "filter")]
+        filters: Vec<String>,
     },
     /// Read the durable Docker-compatible event stream.
     #[cfg(target_os = "linux")]
@@ -2744,7 +2754,22 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 handle_network(&runtime_dir, &runtime, command, &surface_authorization)
             }
             #[cfg(target_os = "linux")]
-            Commands::Containers { format } => handle_containers(&runtime, &format),
+            Commands::Containers {
+                format,
+                all,
+                limit,
+                since,
+                before,
+                filters,
+            } => handle_containers(
+                &runtime,
+                &format,
+                all,
+                limit,
+                since.as_deref(),
+                before.as_deref(),
+                &filters,
+            ),
             #[cfg(target_os = "linux")]
             Commands::Events {
                 since,
@@ -4656,8 +4681,34 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             )
             .map(|_| println!("push: image={canonical}"))
         })(),
-        Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
-            .and_then(|body| print_json(body, format)),
+        Commands::Containers {
+            format,
+            all,
+            limit,
+            since,
+            before,
+            filters,
+        } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            let mut path = format!("/containers/json?all={}", if *all { 1 } else { 0 });
+            if let Some(limit) = limit {
+                path.push_str(&format!("&limit={limit}"));
+            }
+            if let Some(value) = since {
+                path.push_str("&since=");
+                path.push_str(&percent_encode_path_component(value));
+            }
+            if let Some(value) = before {
+                path.push_str("&before=");
+                path.push_str(&percent_encode_path_component(value));
+            }
+            if !parsed.is_empty() {
+                let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+                path.push_str("&filters=");
+                path.push_str(&percent_encode_path_component(&encoded));
+            }
+            request("GET", path).and_then(|body| print_json(body, format))
+        })(),
         Commands::Events {
             since,
             until,
@@ -6451,8 +6502,32 @@ fn handle_image_prune(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_containers(runtime: &ContainerRuntime, format: &str) -> Result<(), String> {
-    let records = runtime.list().map_err(|err| err.to_string())?;
+fn handle_containers(
+    runtime: &ContainerRuntime,
+    format: &str,
+    all: bool,
+    limit: Option<usize>,
+    since: Option<&str>,
+    before: Option<&str>,
+    filter_values: &[String],
+) -> Result<(), String> {
+    let filters = parse_cli_filters(filter_values)?;
+    validate_docker_container_filters(&filters)?;
+    let mut records = runtime.list().map_err(|err| err.to_string())?;
+    if !all {
+        records.retain(|record| matches!(record.status.as_str(), "running" | "paused"));
+    }
+    records.retain(|record| docker_container_matches_filters(record, &filters));
+    records = docker_container_apply_time_bounds(records, since, before)?;
+    records.sort_by(|left, right| {
+        right
+            .created_at_unix
+            .cmp(&left.created_at_unix)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    if let Some(limit) = limit {
+        records.truncate(limit);
+    }
     if format == "json" {
         let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
         println!("{json}");
@@ -10830,6 +10905,17 @@ fn docker_container_matches_filters(
     true
 }
 
+fn validate_docker_container_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    for key in filters.keys() {
+        if !matches!(key.as_str(), "status" | "name" | "ancestor" | "label") {
+            return Err(format!(
+                "docker: container filter `{key}` is unsupported; supported filters: status, name, ancestor, label"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn docker_pending_matches_filters(
     id: &str,
@@ -15042,7 +15128,8 @@ volumes:
     fn containers_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        handle_containers(&runtime, "text").expect("containers handler should succeed");
+        handle_containers(&runtime, "text", false, None, None, None, &[])
+            .expect("containers handler should succeed");
     }
 
     #[test]

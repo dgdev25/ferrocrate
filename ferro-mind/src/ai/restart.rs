@@ -312,6 +312,21 @@ impl AdaptiveRestartPolicy {
         }
     }
 
+    /// Resolve the pending restart observation from the replacement uptime.
+    ///
+    /// A replacement is not considered successful merely because it spawned:
+    /// short-lived crashes must train the policy as failures.  Keeping the
+    /// observation-window decision here ensures every lifecycle caller uses
+    /// the same bounded criterion.
+    pub fn record_observation(&mut self, uptime_secs: u64) {
+        let outcome = if uptime_secs >= self.observation_window_secs {
+            RestartOutcome::Success
+        } else {
+            RestartOutcome::Failure
+        };
+        self.record_outcome(outcome);
+    }
+
     /// Detect crash patterns from history
     fn detect_patterns(&mut self) {
         let records: Vec<_> = self
@@ -876,6 +891,18 @@ mod tests {
         policy.record_outcome(RestartOutcome::Success);
 
         assert!(policy.backoff_adjustment < 2.0);
+    }
+
+    #[test]
+    fn observation_requires_the_configured_window() {
+        let mut policy = AdaptiveRestartPolicy::new("test");
+        policy.record_restart(1, 2);
+        policy.record_observation(299);
+        assert_eq!(policy.success_rate(), 0.0);
+
+        policy.record_restart(1, 2);
+        policy.record_observation(300);
+        assert!(policy.success_rate() > 0.0);
     }
 
     #[test]

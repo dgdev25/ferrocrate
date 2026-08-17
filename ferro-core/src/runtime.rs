@@ -5343,6 +5343,12 @@ fn supervise_child(
 
         let uptime_secs = container_start_time.elapsed().as_secs();
         if ai_enabled {
+            // Resolve the previous replacement only after observing its
+            // uptime. Spawning alone is not a successful restart: a process
+            // that crashes before the observation window must train failure.
+            if restart_count > 0 {
+                adaptive_policy.record_observation(uptime_secs);
+            }
             adaptive_policy.record_restart(exit_code, uptime_secs);
             if let Some(path) = restart_snapshot.as_ref() {
                 let _ = adaptive_policy.save_snapshot(path);
@@ -5471,10 +5477,6 @@ fn supervise_child(
         _pidfd = new_pidfd;
         container_start_time = std::time::Instant::now();
         if ai_enabled {
-            adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
-            if let Some(path) = restart_snapshot.as_ref() {
-                let _ = adaptive_policy.save_snapshot(path);
-            }
             log_ai_restart_lifecycle(
                 &container_id,
                 "ai_restart_applied",

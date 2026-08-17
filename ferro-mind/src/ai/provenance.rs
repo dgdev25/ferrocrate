@@ -66,12 +66,11 @@ impl ModelProvenance {
                 "signer_key_id must be 1..=128 bytes".into(),
             ));
         }
-        if self.artifact_sha256.len() != 64
-            || !self
-                .artifact_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        {
+        let digest = self
+            .artifact_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.artifact_sha256);
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(ProvenanceError::InvalidFields(
                 "artifact_sha256 must be a 64-character hexadecimal digest".into(),
             ));
@@ -106,7 +105,7 @@ mod tests {
         let provenance = ModelProvenance::sign(
             "resource-predictor",
             4,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "training-key-1",
             &signing,
         )

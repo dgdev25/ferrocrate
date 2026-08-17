@@ -922,6 +922,28 @@ impl TrainingPipeline {
         })
     }
 
+    /// Resolve an active model and require a valid operator-signed provenance
+    /// envelope in addition to the persisted artifact digest.
+    pub fn resolve_active_model_with_provenance(
+        &self,
+        model_type: ModelType,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<RoutedModel, TrainingError> {
+        let routed = self.resolve_active_model(model_type)?;
+        let active = self
+            .get_active_version(model_type)
+            .ok_or_else(|| TrainingError::ModelNotFound(model_type.to_string()))?;
+        if active.provenance.is_none() {
+            return Err(TrainingError::InvalidVersionHistory(
+                "active model has no signed provenance".into(),
+            ));
+        }
+        active
+            .verify_provenance(key)
+            .map_err(|error| TrainingError::InvalidVersionHistory(error.to_string()))?;
+        Ok(routed)
+    }
+
     /// List all versions for a model
     pub fn list_versions(&self, model_type: ModelType) -> Vec<&ModelVersion> {
         self.versions
@@ -2163,6 +2185,45 @@ mod tests {
             version.verify_provenance(&key.verifying_key()),
             Err(ProvenanceError::InvalidSignature)
         );
+    }
+
+    #[test]
+    fn active_model_resolution_can_require_signed_provenance() {
+        let (_temp, config) = setup_test_env();
+        let dir = config
+            .models_dir
+            .join(ModelType::ResourcePredictor.to_string());
+        fs::create_dir_all(&dir).expect("model directory");
+        let artifact = dir.join("model_v1.bin");
+        fs::write(&artifact, b"signed-model").expect("artifact");
+        let digest = format!("sha256:{:x}", Sha256::digest(b"signed-model"));
+        let key = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
+        let provenance =
+            ModelProvenance::sign("resource-predictor", 1, &digest, "training-key", &key)
+                .expect("provenance");
+        let metadata = serde_json::json!([{
+            "model_type": "resource-predictor",
+            "version": 1,
+            "trained_at": "2026-01-01T00:00:00Z",
+            "samples_count": 3,
+            "loss": 0.1,
+            "path": artifact,
+            "artifact_sha256": digest,
+            "provenance": provenance,
+            "active": true
+        }]);
+        fs::write(
+            dir.join("versions.json"),
+            serde_json::to_vec(&metadata).expect("metadata"),
+        )
+        .expect("write metadata");
+        let pipeline = TrainingPipeline::new(config).expect("pipeline");
+        pipeline
+            .resolve_active_model_with_provenance(
+                ModelType::ResourcePredictor,
+                &key.verifying_key(),
+            )
+            .expect("signed model should resolve");
     }
 
     #[test]

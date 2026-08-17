@@ -10084,6 +10084,15 @@ fn ai_restart_snapshot_path(container_id: &str) -> PathBuf {
         .join(format!("{container_id}.json"))
 }
 
+fn ai_resource_snapshot_path(container_id: &str) -> PathBuf {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/ferrocrate"))
+        .join("ai")
+        .join("resource")
+        .join(format!("{container_id}.json"))
+}
+
 fn log_ai_restart_lifecycle(
     container_id: &str,
     action: &str,
@@ -10231,6 +10240,16 @@ fn run_resource_monitor(
             info!(container = %id, error = %error, "no active resource model; using heuristic predictor");
         }
     }
+    let resource_snapshot_path = ai_resource_snapshot_path(&id);
+    if let Err(error) = predictor.restore_snapshot(&resource_snapshot_path, &id) {
+        if resource_snapshot_path.exists() {
+            info!(
+                container = %id,
+                error = %error,
+                "resource predictor snapshot rejected; starting a fresh window"
+            );
+        }
+    }
     // Persist AI decisions by default when the monitor is enabled. Operators
     // may override the location, but enabling AI must not silently discard
     // per-container evidence when no optional audit variable is configured.
@@ -10319,6 +10338,9 @@ fn run_resource_monitor(
             };
 
             predictor.push(sample);
+            if let Err(error) = predictor.save_snapshot(&resource_snapshot_path, &id) {
+                warn!(container = %id, error = %error, "failed to persist resource predictor snapshot");
+            }
 
             // Build normalized feature vector for anomaly detection
             // Features: [cpu_norm, mem_norm, pids_norm] normalized 0-1

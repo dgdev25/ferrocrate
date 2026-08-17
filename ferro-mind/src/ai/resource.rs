@@ -7,6 +7,7 @@
 
 use ruv_fann::training::{IncrementalBackprop, TrainingAlgorithm, TrainingData};
 use ruv_fann::{Network, NetworkBuilder};
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "rvf-persistence")]
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -48,6 +49,23 @@ struct TrainedResourceBaseline {
     mean_cpu_norm: f32,
     mean_memory_norm: f32,
     max_memory_bytes: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResourceSnapshot {
+    schema: u32,
+    container_id: String,
+    max_len: usize,
+    memory_limit: u64,
+    samples: Vec<ResourceSnapshotSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResourceSnapshotSample {
+    cpu_percent: f32,
+    memory_bytes: u64,
+    pids_count: u64,
+    age_ms: u64,
 }
 
 /// OOM prediction result.
@@ -228,6 +246,134 @@ impl ResourcePredictor {
     /// Clear all samples.
     pub fn clear(&mut self) {
         self.window.clear();
+    }
+
+    /// Persist the bounded rolling sample window for one container.
+    ///
+    /// Timestamps are stored as ages relative to the newest sample because
+    /// `Instant` is intentionally not portable across process restarts.
+    /// The snapshot is written create-new, synced, and atomically renamed.
+    pub fn save_snapshot(
+        &self,
+        path: &std::path::Path,
+        container_id: &str,
+    ) -> Result<(), String> {
+        const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
+        const SCHEMA: u32 = 1;
+        let newest = self.window.back().map(|sample| sample.timestamp);
+        let samples = self
+            .window
+            .iter()
+            .map(|sample| {
+                let age_ms = newest
+                    .and_then(|latest| latest.checked_duration_since(sample.timestamp))
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                ResourceSnapshotSample {
+                    cpu_percent: sample.cpu_percent,
+                    memory_bytes: sample.memory_bytes,
+                    pids_count: sample.pids_count,
+                    age_ms,
+                }
+            })
+            .collect::<Vec<_>>();
+        let snapshot = ResourceSnapshot {
+            schema: SCHEMA,
+            container_id: container_id.to_string(),
+            max_len: self.max_len,
+            memory_limit: self.memory_limit,
+            samples,
+        };
+        let bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err("resource snapshot exceeds 64 KiB".to_string());
+        }
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let temp = parent.join(format!(
+            ".{}.tmp-{}-{}",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("resource"),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            std::fs::rename(&temp, path).map_err(|error| error.to_string())?;
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+            Ok::<(), String>(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
+    }
+
+    /// Restore a sample window only when its container identity matches.
+    pub fn from_snapshot(path: &std::path::Path, expected_container_id: &str) -> Result<Self, String> {
+        const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024;
+        const SCHEMA: u32 = 1;
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        if metadata.len() > MAX_SNAPSHOT_BYTES {
+            return Err("resource snapshot exceeds 64 KiB".to_string());
+        }
+        let snapshot: ResourceSnapshot = serde_json::from_slice(
+            &std::fs::read(path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("invalid resource snapshot: {error}"))?;
+        if snapshot.schema != SCHEMA {
+            return Err("unsupported resource snapshot schema".to_string());
+        }
+        if snapshot.container_id != expected_container_id {
+            return Err("resource snapshot container identity mismatch".to_string());
+        }
+        if !(3..=4096).contains(&snapshot.max_len) || snapshot.samples.len() > snapshot.max_len {
+            return Err("resource snapshot sample bounds are invalid".to_string());
+        }
+        let now = Instant::now();
+        let mut predictor = Self::new(snapshot.max_len).with_memory_limit(snapshot.memory_limit);
+        for sample in snapshot.samples {
+            if !sample.cpu_percent.is_finite() || !(0.0..=100.0).contains(&sample.cpu_percent) {
+                return Err("resource snapshot CPU value is invalid".to_string());
+            }
+            if sample.age_ms > 7 * 24 * 60 * 60 * 1000 {
+                return Err("resource snapshot sample age is invalid".to_string());
+            }
+            predictor.window.push_back(ResourceSample {
+                cpu_percent: sample.cpu_percent,
+                memory_bytes: sample.memory_bytes,
+                pids_count: sample.pids_count,
+                timestamp: now - Duration::from_millis(sample.age_ms),
+            });
+        }
+        Ok(predictor)
+    }
+
+    /// Restore only the portable rolling window into an already configured
+    /// predictor (for example one that has also loaded an active model).
+    pub fn restore_snapshot(
+        &mut self,
+        path: &std::path::Path,
+        expected_container_id: &str,
+    ) -> Result<(), String> {
+        let restored = Self::from_snapshot(path, expected_container_id)?;
+        self.window = restored.window;
+        self.neural_network = None;
+        self.neural_trained = false;
+        self.neural_last_train_len = 0;
+        Ok(())
     }
 
     /// Predict average resource usage.
@@ -714,6 +860,30 @@ mod tests {
         let pred = p.predict().expect("should have prediction");
         // Average of 20,21,22,23,24 = 22
         assert!((pred.cpu_percent - 22.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn predictor_snapshot_round_trips_samples_and_rejects_identity_forks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resource.json");
+        let base = Instant::now();
+        let mut predictor = ResourcePredictor::new(10).with_memory_limit(4096);
+        for i in 0..3 {
+            predictor.push(ResourceSample {
+                cpu_percent: 10.0 + i as f32,
+                memory_bytes: 1000 + i * 100,
+                pids_count: 2,
+                timestamp: base + Duration::from_secs(i as u64),
+            });
+        }
+        predictor
+            .save_snapshot(&path, "container-a")
+            .expect("save snapshot");
+        let restored = ResourcePredictor::from_snapshot(&path, "container-a")
+            .expect("restore snapshot");
+        assert_eq!(restored.sample_count(), 3);
+        assert_eq!(restored.memory_limit, 4096);
+        assert!(ResourcePredictor::from_snapshot(&path, "container-b").is_err());
     }
 
     #[test]

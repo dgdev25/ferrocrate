@@ -20,6 +20,7 @@ pub mod gpu;
 pub mod learning;
 /// Online learning scheduler for incremental model updates
 pub mod online_learner;
+pub mod provenance;
 /// Resource prediction and OOM prevention
 pub mod resource;
 /// Intelligent restart policies

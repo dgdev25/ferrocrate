@@ -38,6 +38,24 @@ pub struct HttpProviderEndpoint {
     pub protocol: HttpProviderProtocol,
 }
 
+/// A provider candidate backed by either a local executable or a structured
+/// HTTP endpoint. Keeping the adapter explicit makes tier selection auditable
+/// and prevents an unavailable tier from being silently substituted.
+#[derive(Debug, Clone)]
+pub enum ProviderAdapter {
+    Command(ProviderEndpoint),
+    Http(HttpProviderEndpoint),
+}
+
+impl ProviderAdapter {
+    fn provider(&self) -> &Provider {
+        match self {
+            Self::Command(endpoint) => &endpoint.provider,
+            Self::Http(endpoint) => &endpoint.provider,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
     #[error("no provider satisfies the routing policy")]
@@ -203,6 +221,32 @@ pub fn execute_routed_prompt(
                 return Err(ExecutionError::Timeout(timeout.as_millis() as u64));
             }
             None => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
+}
+
+/// Select and execute one provider across local and HTTP adapter tiers.
+pub fn execute_routed_prompt_with_adapters(
+    adapters: &[ProviderAdapter],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<(String, String), ExecutionError> {
+    let providers: Vec<Provider> = adapters
+        .iter()
+        .map(|adapter| adapter.provider().clone())
+        .collect();
+    let selected = choose_provider(&providers, policy).ok_or(ExecutionError::NoProvider)?;
+    let adapter = adapters
+        .iter()
+        .find(|adapter| adapter.provider().name == selected.name)
+        .ok_or(ExecutionError::NoProvider)?;
+    match adapter {
+        ProviderAdapter::Command(endpoint) => {
+            execute_routed_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+        }
+        ProviderAdapter::Http(endpoint) => {
+            execute_routed_http_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
         }
     }
 }
@@ -461,7 +505,7 @@ mod tests {
             )
             .expect("response");
         });
-        let providers = vec![HttpProviderEndpoint {
+        let providers = vec![ProviderAdapter::Http(HttpProviderEndpoint {
             provider: Provider {
                 name: "local-openai-compatible".into(),
                 cost_per_1k_tokens: 0.0,
@@ -473,8 +517,8 @@ mod tests {
             api_key: Some("test-key".into()),
             model: "test-model".into(),
             protocol: HttpProviderProtocol::OpenAiCompatible,
-        }];
-        let result = execute_routed_http_prompt(
+        })];
+        let result = execute_routed_prompt_with_adapters(
             &providers,
             &RoutingPolicy::default(),
             "provider prompt",

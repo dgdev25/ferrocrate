@@ -5,6 +5,7 @@
 //! - Online learning via background process (opt-in)
 //! - Model versioning and rollback support
 
+use crate::ai::provenance::{ModelProvenance, ProvenanceError};
 #[cfg(feature = "rvf-persistence")]
 use crate::ruv::embeddings::{EmbeddingProvider, HashEmbedding};
 #[cfg(feature = "rvf-persistence")]
@@ -88,8 +89,46 @@ pub struct ModelVersion {
     /// returned by `resolve_active_model`.
     #[serde(default)]
     pub artifact_sha256: String,
+    /// Optional operator-signed provenance for this exact artifact.
+    #[serde(default)]
+    pub provenance: Option<ModelProvenance>,
     /// Whether this is the active model
     pub active: bool,
+}
+
+impl ModelVersion {
+    /// Attach an Ed25519 attestation to the current exact artifact digest.
+    pub fn sign_provenance(
+        &mut self,
+        signer_key_id: impl Into<String>,
+        key: &ed25519_dalek::SigningKey,
+    ) -> Result<(), ProvenanceError> {
+        self.provenance = Some(ModelProvenance::sign(
+            self.model_type.clone(),
+            self.version,
+            self.artifact_sha256.clone(),
+            signer_key_id,
+            key,
+        )?);
+        Ok(())
+    }
+
+    /// Verify the optional attestation, failing when one is present but invalid.
+    pub fn verify_provenance(
+        &self,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), ProvenanceError> {
+        if let Some(provenance) = &self.provenance {
+            provenance.verify(key)?;
+            if provenance.model_type != self.model_type
+                || provenance.version != self.version
+                || provenance.artifact_sha256 != self.artifact_sha256
+            {
+                return Err(ProvenanceError::InvalidSignature);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Training configuration
@@ -629,6 +668,7 @@ impl TrainingPipeline {
             loss: Some(trained.loss),
             path: model_path.clone(),
             artifact_sha256: artifact_sha256(&model_path)?,
+            provenance: None,
             active: approved,
         };
 
@@ -1454,6 +1494,7 @@ pub fn handle_import_command(
         loss: None,
         path: model_path,
         artifact_sha256: imported_digest,
+        provenance: None,
         active: true,
     };
 
@@ -2097,6 +2138,34 @@ mod tests {
     }
 
     #[test]
+    fn model_version_provenance_is_bound_to_metadata() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[21; 32]);
+        let mut version = ModelVersion {
+            model_type: "resource-predictor".into(),
+            version: 3,
+            trained_at: "2026-08-17T00:00:00Z".into(),
+            samples_count: 10,
+            loss: Some(0.1),
+            path: PathBuf::from("model.rvf"),
+            artifact_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
+            provenance: None,
+            active: true,
+        };
+        version
+            .sign_provenance("training-key", &key)
+            .expect("sign provenance");
+        version
+            .verify_provenance(&key.verifying_key())
+            .expect("verify provenance");
+        version.version = 4;
+        assert_eq!(
+            version.verify_provenance(&key.verifying_key()),
+            Err(ProvenanceError::InvalidSignature)
+        );
+    }
+
+    #[test]
     fn train_with_ai_disabled() {
         let _guard = AI_ENV_LOCK.lock().expect("lock env");
         let (_temp, config) = setup_test_env();
@@ -2713,7 +2782,9 @@ pub mod quantize {
                 return Err("minimum compression ratio must be finite and at least 1".to_string());
             }
             if !self.max_abs_error.is_finite() || self.max_abs_error < 0.0 {
-                return Err("maximum reconstruction error must be finite and non-negative".to_string());
+                return Err(
+                    "maximum reconstruction error must be finite and non-negative".to_string(),
+                );
             }
             Ok(())
         }
@@ -2734,7 +2805,8 @@ pub mod quantize {
             if self.compression_ratio() < policy.min_compression_ratio {
                 return Err(format!(
                     "compression ratio {:.4} is below required {:.4}",
-                    self.compression_ratio(), policy.min_compression_ratio
+                    self.compression_ratio(),
+                    policy.min_compression_ratio
                 ));
             }
             if self.max_abs_error > policy.max_abs_error {

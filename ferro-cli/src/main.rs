@@ -1714,6 +1714,7 @@ fn handle_doctor(
         #[cfg(target_os = "linux")]
         {
             let rootless = ferro_core::rootless::RootlessConfig::from_system();
+            let user_namespace_ok = ferro_core::rootless::user_namespace_available();
             let runtime_socket = discover_rootless_socket();
             let socket_message = runtime_socket.as_ref().map_or_else(
                 || "rootless Docker socket not discovered (set XDG_RUNTIME_DIR or use the configured daemon socket)".to_string(),
@@ -1721,10 +1722,15 @@ fn handle_doctor(
             );
             checks.push(DoctorCheck {
                 id: "rootless_context".to_string(),
-                ok: rootless.is_ok(),
+                ok: rootless.is_ok() && user_namespace_ok,
                 message: match rootless {
                     Ok(config) => format!(
-                        "rootless context available for {} (uid map {}:{} size {}; gid map {}:{} size {}); {}",
+                        "rootless context {} for {} (uid map {}:{} size {}; gid map {}:{} size {}); {}",
+                        if user_namespace_ok {
+                            "available"
+                        } else {
+                            "configured but user-namespace creation is unavailable"
+                        },
                         config.username,
                         config.uid_mapping.container_id,
                         config.uid_mapping.host_id,

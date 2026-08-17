@@ -10158,13 +10158,7 @@ fn log_ai_kernel_reconciliation(network_id: &str, action: &str, container_count:
 }
 
 fn ai_lifecycle_enabled(config: Option<&AiRuntimeConfig>) -> bool {
-    if config.is_none() {
-        return false;
-    }
-    match std::env::var("FERROCRATE_AI") {
-        Ok(value) => value == "1" || value.eq_ignore_ascii_case("true"),
-        Err(_) => true,
-    }
+    config.is_some() && is_ai_enabled()
 }
 
 fn should_start_ai_monitor(memory_limit: u64) -> bool {
@@ -13235,6 +13229,22 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         }
         assert!(super::ai_lifecycle_enabled(Some(&config)));
         assert!(!super::ai_lifecycle_enabled(None));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+    }
+
+    #[test]
+    fn ai_lifecycle_enablement_matches_inference_for_non_boolean_opt_in_values() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous = std::env::var("FERROCRATE_AI").ok();
+        let config = crate::ai_runtime::AiRuntimeConfig::default();
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "yes");
+        }
+        assert!(super::is_ai_enabled());
+        assert!(super::ai_lifecycle_enabled(Some(&config)));
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_AI") },

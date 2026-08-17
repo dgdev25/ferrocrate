@@ -893,7 +893,7 @@ mod tests {
                 cpu_percent: 10.0 + i as f32,
                 memory_bytes: 1000 + i * 100,
                 pids_count: 2,
-                timestamp: base + Duration::from_secs(i as u64),
+                timestamp: base + Duration::from_secs(i),
             });
         }
         predictor

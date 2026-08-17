@@ -23,14 +23,23 @@ baseline_enforce="${FERROCRATE_PERF_ENFORCE:-0}"
 run_benchmark() {
   local name="$1" script="$2"
   echo "running $name"
-  if FERROCRATE_PERF_ALLOW_SKIP="$baseline_allow_skip" \
+  local rc=0
+  FERROCRATE_PERF_ALLOW_SKIP="$baseline_allow_skip" \
     FERROCRATE_PERF_ENFORCE="$baseline_enforce" \
-    bash "$repo_root/$script" >"$output_dir/$name.txt" 2>&1; then
+    bash "$repo_root/$script" >"$output_dir/$name.txt" 2>&1 || rc=$?
+  case "$rc" in
+    0)
     printf '%s\tpass\n' "$name" >>"$manifest"
-  else
+      ;;
+    77)
+      printf '%s\tskip\n' "$name" >>"$manifest"
+      echo "baseline: $name skipped; see $output_dir/$name.txt" >&2
+      ;;
+    *)
     printf '%s\tfail\n' "$name" >>"$manifest"
     echo "baseline: $name failed; see $output_dir/$name.txt" >&2
-  fi
+      ;;
+  esac
 }
 
 run_benchmark startup scripts/perf/startup.sh

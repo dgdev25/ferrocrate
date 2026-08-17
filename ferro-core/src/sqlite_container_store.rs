@@ -418,8 +418,16 @@ impl SqliteContainerStore {
         self.transaction(|transaction| {
             let record =
                 Self::get_tx(transaction, id)?.ok_or(ContainerStoreError::MutationConflict)?;
-            let mut operation = Self::operation_tx(transaction, operation_id)?
-                .ok_or(ContainerStoreError::MutationConflict)?;
+            let Some(mut operation) = Self::operation_tx(transaction, operation_id)? else {
+                // Another process may have durably completed and acknowledged
+                // this terminal transition. Observation is idempotent in that
+                // case; a present-but-mismatched reservation still fails
+                // closed below.
+                if record.pending_mutation.is_none() {
+                    return Ok(());
+                }
+                return Err(ContainerStoreError::MutationConflict);
+            };
             if record
                 .pending_mutation
                 .as_ref()
@@ -516,10 +524,12 @@ impl SqliteContainerStore {
                 Some(record) => record,
                 None => return Ok(()),
             };
-            let reservation = record
-                .pending_mutation
-                .as_ref()
-                .ok_or(ContainerStoreError::MutationConflict)?;
+            let Some(reservation) = record.pending_mutation.as_ref() else {
+                if Self::operation_tx(transaction, operation_id)?.is_none() {
+                    return Ok(());
+                }
+                return Err(ContainerStoreError::MutationConflict);
+            };
             if reservation.operation_id != operation_id
                 || reservation.generation != record.mutation_generation
             {
@@ -674,6 +684,14 @@ mod tests {
         assert_eq!(stored.status, "running");
         assert!(stored.pending_mutation.is_none());
         assert_eq!(store.lifecycle_operations().expect("operations").len(), 0);
+        // Terminal publication is safe to acknowledge again if another
+        // process completed it between observation and cleanup.
+        store
+            .mark_mutation_effect("container-1", operation_id, true)
+            .expect("idempotent effect");
+        store
+            .finish_mutation("container-1", operation_id)
+            .expect("idempotent finish");
     }
 
     #[test]

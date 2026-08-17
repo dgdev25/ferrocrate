@@ -54,7 +54,7 @@ impl NetworkPlan {
                 let mut rollback = command.clone();
                 match rollback.get(3).map(String::as_str) {
                     Some("-N") => rollback[3] = "-X".to_string(),
-                    Some("-A") => rollback[3] = "-D".to_string(),
+                    Some("-A" | "-I") => rollback[3] = "-D".to_string(),
                     _ => return Vec::new(),
                 }
                 vec![rollback]
@@ -168,11 +168,14 @@ fn build_owned_iptables_plan(
         commands.push(iptables_cmd(table, "-N", chain, &[]));
     }
     for (table, parent, child) in jumps {
+        // Insert each owned dispatch first. This prevents a stale same-port
+        // NAT chain, or a host FORWARD chain installed by another runtime,
+        // from shadowing the current authorized endpoint rule.
         commands.push(iptables_cmd(
             table,
-            "-A",
+            "-I",
             parent,
-            &["-m", "comment", "--comment", &comment, "-j", child],
+            &["1", "-m", "comment", "--comment", &comment, "-j", child],
         ));
     }
     commands.push(iptables_cmd(
@@ -215,6 +218,26 @@ fn build_owned_iptables_plan(
                 &container_port,
                 "-j",
                 "ACCEPT",
+            ],
+        ));
+        // Host-loopback requests retain a 127/8 source after OUTPUT DNAT.
+        // Route them through the bridge gateway so the container can return
+        // the response through conntrack instead of routing 127/8 directly.
+        commands.push(iptables_cmd(
+            "nat",
+            "-A",
+            &postrouting,
+            &[
+                "-s",
+                "127.0.0.0/8",
+                "-d",
+                &format!("{container_ip}/32"),
+                "-p",
+                &mapping.protocol,
+                "--dport",
+                &container_port,
+                "-j",
+                "MASQUERADE",
             ],
         ));
     }
@@ -680,6 +703,11 @@ mod tests {
                 .iter()
                 .filter(|argument| argument.starts_with("FC_") || argument.starts_with("fc_"))
                 .all(|argument| argument.to_ascii_lowercase().contains(firewall_id))
+        }));
+        assert!(plan.commands().iter().any(|command| {
+            command.iter().any(|argument| argument == "127.0.0.0/8")
+                && command.iter().any(|argument| argument == "10.0.0.2/32")
+                && command.iter().any(|argument| argument == "MASQUERADE")
         }));
     }
 

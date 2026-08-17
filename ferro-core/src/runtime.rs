@@ -111,6 +111,7 @@ struct CreationRollback {
     shared_network_created: bool,
     bridge_created: Option<(String, Option<u32>)>,
     ip_forward: Option<GlobalValueOwnership>,
+    route_localnet: Option<InterfaceValueOwnership>,
     pending_firewall_cleanup: Vec<Vec<String>>,
     journal: NetworkMutationJournal,
     cgroup_name: Option<String>,
@@ -346,6 +347,13 @@ struct GlobalValueOwnership {
     expected: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct InterfaceValueOwnership {
+    interface: String,
+    previous: String,
+    expected: String,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PendingNetworkCleanup {
     schema_version: u32,
@@ -361,6 +369,8 @@ struct PendingNetworkCleanup {
     shared_network_created: bool,
     bridge_created: Option<(String, Option<u32>)>,
     ip_forward: Option<GlobalValueOwnership>,
+    #[serde(default)]
+    route_localnet: Option<InterfaceValueOwnership>,
     pending_firewall_cleanup: Vec<Vec<String>>,
     #[serde(default)]
     operation_id: Option<[u8; 16]>,
@@ -402,6 +412,7 @@ impl CreationRollback {
             shared_network_created: false,
             bridge_created: None,
             ip_forward: None,
+            route_localnet: None,
             pending_firewall_cleanup: Vec::new(),
             journal: NetworkMutationJournal::default(),
             cgroup_name: None,
@@ -454,6 +465,7 @@ impl CreationRollback {
             shared_network_created: pending.shared_network_created,
             bridge_created: pending.bridge_created,
             ip_forward: pending.ip_forward,
+            route_localnet: pending.route_localnet,
             pending_firewall_cleanup: pending.pending_firewall_cleanup,
             journal: NetworkMutationJournal::default(),
             cgroup_name: pending.cgroup_name,
@@ -628,6 +640,14 @@ impl CreationRollback {
         self.persist_cleanup_journal()
     }
 
+    fn track_route_localnet(
+        &mut self,
+        ownership: InterfaceValueOwnership,
+    ) -> Result<(), RuntimeError> {
+        self.route_localnet = Some(ownership);
+        self.persist_cleanup_journal()
+    }
+
     fn acquire_firewall_rollback(&mut self, command: Vec<String>) -> Result<(), RuntimeError> {
         self.pending_firewall_cleanup.push(command);
         self.persist_cleanup_journal()
@@ -659,6 +679,7 @@ impl CreationRollback {
             shared_network_created: self.shared_network_created,
             bridge_created: self.bridge_created.clone(),
             ip_forward: self.ip_forward.clone(),
+            route_localnet: self.route_localnet.clone(),
             pending_firewall_cleanup: self.pending_firewall_cleanup.clone(),
             operation_id: self.operation_id,
             cgroup_name: self.cgroup_name.clone(),
@@ -839,6 +860,16 @@ impl CreationRollback {
                         retain_container_dir = true;
                         log::warn!("[rollback] host veth identity changed; refusing deletion");
                     }
+                }
+            }
+        }
+
+        if let Some(ownership) = self.route_localnet.take() {
+            match restore_route_localnet(&ownership) {
+                Ok(()) => {}
+                Err(error) => {
+                    retain_container_dir = true;
+                    log::warn!("[rollback] failed to restore route_localnet: {error}");
                 }
             }
         }
@@ -5449,6 +5480,7 @@ fn setup_network(
         rollback.identify_bridge(bridge_ifindex)?;
     }
     ensure_ip_forwarding(rollback)?;
+    ensure_bridge_route_localnet(&bridge_config.name, rollback)?;
     let subnet = network_cidr_v4(&bridge_config.gateway, bridge_config.prefix)
         .map_err(RuntimeError::Network)?;
     let netns_name = format!("ferro-{container_id}");
@@ -8549,6 +8581,12 @@ fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
 
 const IP_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
 
+fn route_localnet_path(interface: &str) -> PathBuf {
+    Path::new("/proc/sys/net/ipv4/conf")
+        .join(interface)
+        .join("route_localnet")
+}
+
 trait GlobalValueStore {
     fn read(&mut self) -> Result<String, RuntimeError>;
     fn write(&mut self, value: &str) -> Result<(), RuntimeError>;
@@ -8624,6 +8662,67 @@ fn restore_ip_forwarding(ownership: &GlobalValueOwnership) -> Result<(), Runtime
         path: Path::new(IP_FORWARD_PATH),
     };
     restore_ip_forwarding_with(ownership, &mut store)
+}
+
+fn acquire_route_localnet_with<S: GlobalValueStore>(
+    interface: &str,
+    store: &mut S,
+) -> Result<Option<InterfaceValueOwnership>, RuntimeError> {
+    let current = store.read()?;
+    match current.as_str() {
+        "1" => Ok(None),
+        "0" => {
+            store.write("1")?;
+            Ok(Some(InterfaceValueOwnership {
+                interface: interface.to_string(),
+                previous: "0".to_string(),
+                expected: "1".to_string(),
+            }))
+        }
+        _ => Err(RuntimeError::Network(format!(
+            "refusing to change malformed route_localnet value for {interface}: {current:?}"
+        ))),
+    }
+}
+
+fn restore_route_localnet_with<S: GlobalValueStore>(
+    ownership: &InterfaceValueOwnership,
+    store: &mut S,
+) -> Result<(), RuntimeError> {
+    if ownership.previous != "0" || ownership.expected != "1" || ownership.interface.is_empty() {
+        return Err(RuntimeError::Network(
+            "malformed persisted route_localnet ownership".to_string(),
+        ));
+    }
+    let current = store.read()?;
+    if current == ownership.previous {
+        return Ok(());
+    }
+    if current != ownership.expected {
+        return Err(RuntimeError::Network(format!(
+            "route_localnet for {} changed to foreign value {current:?}; refusing restoration",
+            ownership.interface
+        )));
+    }
+    store.write(&ownership.previous)
+}
+
+fn restore_route_localnet(ownership: &InterfaceValueOwnership) -> Result<(), RuntimeError> {
+    let path = route_localnet_path(&ownership.interface);
+    let mut store = FileGlobalValueStore { path: &path };
+    restore_route_localnet_with(ownership, &mut store)
+}
+
+fn ensure_bridge_route_localnet(
+    bridge: &str,
+    rollback: &mut CreationRollback,
+) -> Result<(), RuntimeError> {
+    let path = route_localnet_path(bridge);
+    let mut store = FileGlobalValueStore { path: &path };
+    if let Some(ownership) = acquire_route_localnet_with(bridge, &mut store)? {
+        rollback.track_route_localnet(ownership)?;
+    }
+    Ok(())
 }
 
 /// Execute a command with logging and timeout.
@@ -11171,6 +11270,40 @@ mod tests {
     }
 
     #[test]
+    fn network_backend_route_localnet_restores_only_its_owned_transition() {
+        let mut store = FakeGlobalValueStore {
+            value: "0".to_string(),
+            ..FakeGlobalValueStore::default()
+        };
+        let ownership = super::acquire_route_localnet_with("ferro0", &mut store)
+            .unwrap()
+            .expect("0 to 1 transition is owned");
+        assert_eq!(ownership.interface, "ferro0");
+        assert_eq!(store.value, "1");
+        let mut restored = FakeGlobalValueStore {
+            value: store.value,
+            ..FakeGlobalValueStore::default()
+        };
+        super::restore_route_localnet_with(&ownership, &mut restored).unwrap();
+        assert_eq!(restored.value, "0");
+    }
+
+    #[test]
+    fn network_backend_route_localnet_rejects_foreign_replacement() {
+        let mut store = FakeGlobalValueStore {
+            value: "0".to_string(),
+            ..FakeGlobalValueStore::default()
+        };
+        let ownership = super::acquire_route_localnet_with("ferro0", &mut store)
+            .unwrap()
+            .unwrap();
+        store.value = "2".to_string();
+        let current = store.value.clone();
+        assert!(super::restore_route_localnet_with(&ownership, &mut store).is_err());
+        assert_eq!(store.value, current);
+    }
+
+    #[test]
     fn network_backend_pending_cleanup_journal_is_consumed_behaviorally() {
         let temp = tempfile::tempdir().unwrap();
         let container_dir = temp.path().join("containers").join("pending-owner");
@@ -11189,6 +11322,7 @@ mod tests {
             shared_network_created: false,
             bridge_created: None,
             ip_forward: None,
+            route_localnet: None,
             pending_firewall_cleanup: Vec::new(),
             operation_id: None,
             cgroup_name: None,
@@ -11433,7 +11567,7 @@ mod tests {
         fn run(&mut self, command: &[String]) -> Result<(), super::RuntimeError> {
             self.calls.push(command.to_vec());
             let action = command.get(3).map(String::as_str);
-            if matches!(action, Some("-N" | "-A")) {
+            if matches!(action, Some("-N" | "-A" | "-I")) {
                 let attempt = self.setup_attempts;
                 self.setup_attempts += 1;
                 if self.fail_setup_at == Some(attempt) {
@@ -11455,12 +11589,22 @@ mod tests {
                     }
                     self.live.push(command.to_vec());
                 }
-                Some("-A") => self.live.push(command.to_vec()),
+                Some("-A" | "-I") => self.live.push(command.to_vec()),
                 Some("-X" | "-D") => {
-                    let setup_action = if action == Some("-X") { "-N" } else { "-A" };
-                    let mut setup = command.to_vec();
-                    setup[3] = setup_action.to_string();
-                    if let Some(index) = self.live.iter().position(|existing| existing == &setup) {
+                    let chain = command.get(4);
+                    let marker = &command[5..];
+                    if let Some(index) = self.live.iter().position(|existing| {
+                        existing.get(4) == chain
+                            && if action == Some("-X") {
+                                existing.get(3).map(String::as_str) == Some("-N")
+                            } else {
+                                matches!(existing.get(3).map(String::as_str), Some("-A" | "-I"))
+                                    && (existing.get(3).map(String::as_str) == Some("-A")
+                                        && existing.get(5..).is_some_and(|args| args == marker)
+                                        || existing.get(3).map(String::as_str) == Some("-I")
+                                            && existing.get(6..).is_some_and(|args| args == marker))
+                            }
+                    }) {
                         self.live.remove(index);
                     }
                 }
@@ -11468,7 +11612,7 @@ mod tests {
                     self.live.retain(|existing| {
                         existing.get(1) != command.get(1)
                             || existing.get(2) != command.get(2)
-                            || existing.get(3).map(String::as_str) != Some("-A")
+                            || !matches!(existing.get(3).map(String::as_str), Some("-A" | "-I"))
                             || existing.get(4) != command.get(4)
                     });
                 }

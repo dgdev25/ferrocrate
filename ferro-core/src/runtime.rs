@@ -10022,12 +10022,13 @@ fn run_health_checks(
 
 /// Check if AI features are enabled via environment variable.
 ///
-/// Returns true if FERROCRATE_AI is set to "1" or "true".
-/// When disabled, no AI-related threads are spawned for zero overhead.
+/// Returns whether runtime inference is enabled.
+///
+/// Inference is enabled by default, matching `AiConfig::from_env`; operators
+/// can opt out with `FERROCRATE_AI=0` or `FERROCRATE_AI=false`. Training and
+/// data collection retain their separate explicit-consent gates.
 fn is_ai_enabled() -> bool {
-    std::env::var("FERROCRATE_AI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    ferro_mind::ai::config::AiConfig::from_env().enabled
 }
 
 /// Return the durable AI decision logger used by every runtime lifecycle path.
@@ -13163,6 +13164,24 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(super::is_ai_enabled());
         assert!(super::should_start_ai_monitor(1024));
         assert!(!super::should_start_ai_monitor(0));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+    }
+
+    #[test]
+    fn ai_is_enabled_by_default_and_explicitly_opt_out() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous = std::env::var("FERROCRATE_AI").ok();
+        unsafe {
+            std::env::remove_var("FERROCRATE_AI");
+        }
+        assert!(super::is_ai_enabled());
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "false");
+        }
+        assert!(!super::is_ai_enabled());
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_AI") },

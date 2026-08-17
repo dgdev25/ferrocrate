@@ -8,10 +8,11 @@ use crate::container_store::{
     process_start_time, ContainerRecord, ContainerStoreError, LifecycleOperation, LifecyclePhase,
     MutationReservation,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const CONTAINERS_SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -70,7 +71,17 @@ impl SqliteContainerStore {
             }
         }
         let connection = Connection::open(&sqlite_path)?;
+        // Multiple CLI processes can start together during a parallel
+        // workload. SQLite's default busy timeout is zero, so a concurrent
+        // schema initialization would surface as a spurious `database is
+        // locked` migration failure. Wait briefly for the initializer/writer
+        // while retaining SQLite's transactional locking semantics.
+        connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(CONTAINERS_SCHEMA)?;
+        // Keep the timeout in force after schema pragmas as well; SQLite
+        // resets connection-level busy handlers when certain pragmas are
+        // applied on older bundled builds.
+        connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
         let store = Self {
             db: Arc::new(Mutex::new(connection)),
             path: sqlite_path,
@@ -89,7 +100,11 @@ impl SqliteContainerStore {
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, ContainerStoreError>,
     ) -> Result<T, ContainerStoreError> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        // Acquire the write reservation before any reads. A deferred
+        // transaction can deadlock when several lifecycle writers read the
+        // same snapshot and then upgrade simultaneously, yielding an
+        // immediate `database is locked` despite the busy timeout.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = operation(&transaction)?;
         transaction.commit()?;
         Ok(value)
@@ -659,6 +674,28 @@ mod tests {
         assert_eq!(stored.status, "running");
         assert!(stored.pending_mutation.is_none());
         assert_eq!(store.lifecycle_operations().expect("operations").len(), 0);
+    }
+
+    #[test]
+    fn concurrent_open_waits_for_schema_initialization() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("containers.db");
+        let workers = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let store = SqliteContainerStore::open(path).expect("open");
+                    store
+                        .put(&record(&format!("container-{index}")))
+                        .expect("put");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        let store = SqliteContainerStore::open(&path).expect("reopen");
+        assert_eq!(store.list().expect("list").len(), 8);
     }
 
     #[cfg(feature = "legacy-sled-importers")]

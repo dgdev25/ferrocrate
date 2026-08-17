@@ -35,7 +35,7 @@ use crate::mounts::{
     open_mount_target_beneath, BindMount, MountError, TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
-use crate::process_lifecycle::{kill_pid, signal_pid, stop_pid, ProcessLifecycleError};
+use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, stop_pid, ProcessLifecycleError};
 use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
@@ -3442,13 +3442,13 @@ impl ContainerRuntime {
     }
 
     pub fn kill(&self, id: &str) -> Result<(), RuntimeError> {
-        self.kill_with_signal(id, nix::sys::signal::Signal::SIGKILL)
+        self.kill_with_signal(id, Some(nix::sys::signal::Signal::SIGKILL))
     }
 
     pub fn kill_with_signal(
         &self,
         id: &str,
-        signal: nix::sys::signal::Signal,
+        signal: Option<nix::sys::signal::Signal>,
     ) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::ContainerKill, id, |runtime, proof, intent| {
             runtime.kill_authorized(proof, intent, id, signal)
@@ -3460,13 +3460,20 @@ impl ContainerRuntime {
         proof: &AuthorizedRequest,
         intent: Option<&crate::witness::DurableIntent>,
         id: &str,
-        signal: nix::sys::signal::Signal,
+        signal: Option<nix::sys::signal::Signal>,
     ) -> Result<(), RuntimeError> {
         let record = self
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        signal_pid(record.pid, signal)?;
+        if let Some(signal) = signal {
+            signal_pid(record.pid, signal)?;
+        } else {
+            // Docker's signal 0 is an existence probe. It must not publish a
+            // killed state or trigger cleanup side effects.
+            probe_pid(record.pid)?;
+            return Ok(());
+        }
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         self.persist_effect_status(proof, intent, id, "running", "killed")?;

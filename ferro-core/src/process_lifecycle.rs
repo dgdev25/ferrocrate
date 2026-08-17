@@ -74,6 +74,12 @@ pub fn signal_pid(pid: u32, signal: Signal) -> Result<(), ProcessLifecycleError>
     Ok(())
 }
 
+/// Probe whether a process still exists using the POSIX signal-0 semantics.
+pub fn probe_pid(pid: u32) -> Result<(), ProcessLifecycleError> {
+    let target = Pid::from_raw(pid as i32);
+    nix::sys::signal::kill(target, None).map_err(ProcessLifecycleError::Signal)
+}
+
 /// Check if a process exists by reading its /proc entry.
 ///
 /// SECURITY NOTE: This function has an inherent TOCTOU race - the PID could be recycled
@@ -192,7 +198,7 @@ impl ManagedProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{kill_pid, stop_pid, ManagedProcess, ProcessState};
+    use super::{kill_pid, probe_pid, stop_pid, ManagedProcess, ProcessState};
     use std::path::Path;
     use std::time::Duration;
 
@@ -250,5 +256,11 @@ mod tests {
     fn kill_pid_terminates_process() {
         let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
         kill_pid(proc.pid()).expect("kill pid");
+    }
+
+    #[test]
+    fn probe_pid_matches_signal_zero_semantics() {
+        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 1"]).expect("process starts");
+        probe_pid(proc.pid()).expect("live process probe");
     }
 }

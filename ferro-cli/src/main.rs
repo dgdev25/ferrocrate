@@ -11076,10 +11076,13 @@ fn parse_docker_stop_timeout(query: &HashMap<String, String>) -> Result<Duration
     Ok(Duration::from_secs(seconds as u64))
 }
 
-fn parse_docker_kill_signal(value: Option<&String>) -> Result<Signal, String> {
+fn parse_docker_kill_signal(value: Option<&String>) -> Result<Option<Signal>, String> {
     let raw = value.map(String::as_str).unwrap_or("SIGKILL");
     let normalized = raw.to_ascii_uppercase();
     let normalized = normalized.strip_prefix("SIG").unwrap_or(&normalized);
+    if normalized == "0" {
+        return Ok(None);
+    }
     let signal = match normalized {
         "HUP" => Ok(Signal::SIGHUP),
         "INT" => Ok(Signal::SIGINT),
@@ -11100,7 +11103,9 @@ fn parse_docker_kill_signal(value: Option<&String>) -> Result<Signal, String> {
                     .map_err(|_| format!("docker: unsupported kill signal: {raw}"))
             }),
     };
-    signal.map_err(|_| format!("docker: unsupported kill signal: {raw}"))
+    signal
+        .map(Some)
+        .map_err(|_| format!("docker: unsupported kill signal: {raw}"))
 }
 
 fn parse_docker_filters(
@@ -15037,17 +15042,20 @@ volumes:
     fn docker_kill_signal_accepts_names_and_rejects_unsafe_unknowns() {
         assert_eq!(
             parse_docker_kill_signal(None).unwrap(),
-            nix::sys::signal::Signal::SIGKILL
+            Some(nix::sys::signal::Signal::SIGKILL)
         );
         assert_eq!(
             parse_docker_kill_signal(Some(&"TERM".to_string())).unwrap(),
-            nix::sys::signal::Signal::SIGTERM
+            Some(nix::sys::signal::Signal::SIGTERM)
         );
         assert_eq!(
             parse_docker_kill_signal(Some(&"SIGUSR1".to_string())).unwrap(),
-            nix::sys::signal::Signal::SIGUSR1
+            Some(nix::sys::signal::Signal::SIGUSR1)
         );
-        assert!(parse_docker_kill_signal(Some(&"0".to_string())).is_err());
+        assert_eq!(
+            parse_docker_kill_signal(Some(&"0".to_string())).unwrap(),
+            None
+        );
         assert!(parse_docker_kill_signal(Some(&"not-a-signal".to_string())).is_err());
     }
 

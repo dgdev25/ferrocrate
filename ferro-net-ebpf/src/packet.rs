@@ -12,6 +12,8 @@ const IP_PROTOCOL_UDP: u8 = 17;
 const BPF_F_PSEUDO_HDR: u64 = 1 << 4;
 #[cfg(target_arch = "bpf")]
 const BPF_F_MARK_MANGLED_0: u64 = 1 << 5;
+#[cfg(target_arch = "bpf")]
+const BPF_F_RECOMPUTE_CSUM: u64 = 1;
 // Loopback-originated packets have no real Ethernet source address. A
 // redirect from loopback to a bridge/veth must synthesize a stable local
 // unicast source or the bridge rejects the frame before it reaches the
@@ -506,7 +508,11 @@ mod tc {
     }
 
     fn store_byte(ctx: &TcContext, offset: usize, value: u8) -> Result<(), PacketError> {
-        ctx.store(offset, &value, 0)
+        // Header bytes are written after the skb-aware L3/L4 checksum
+        // helpers.  Ask the kernel to materialize the skb checksum state so
+        // a redirect to loopback cannot carry a CHECKSUM_PARTIAL seed that
+        // would otherwise require a physical NIC to finish.
+        ctx.store(offset, &value, super::BPF_F_RECOMPUTE_CSUM)
             .map_err(|_| PacketError::Truncated)
     }
 

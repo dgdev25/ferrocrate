@@ -37,6 +37,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+dump_redirect_diagnostics() {
+  printf '%s\n' '--- eBPF redirect diagnostics (qualification failure) ---' >&2
+  printf '%s\n' 'veth links:' >&2
+  ip -o link show type veth >&2 || true
+  while IFS= read -r interface; do
+    [[ -n "$interface" ]] || continue
+    printf 'tc ingress %s:\n' "$interface" >&2
+    tc -s filter show dev "$interface" ingress >&2 || true
+    printf 'tc egress %s:\n' "$interface" >&2
+    tc -s filter show dev "$interface" egress >&2 || true
+  done < <(ip -o link show type veth | awk -F': ' '{print $2}' | cut -d@ -f1)
+  printf '%s\n' 'tc ingress lo:' >&2
+  tc -s filter show dev lo ingress >&2 || true
+  printf '%s\n' 'tc egress lo:' >&2
+  tc -s filter show dev lo egress >&2 || true
+}
+
 # The eBPF loader refuses to allocate a SNAT port unless the complete range is
 # reserved by the host. Qualification owns only the explicit test range and
 # restores the exact prior sysctl value in the EXIT trap.
@@ -59,7 +76,10 @@ nft list ruleset >"$before_nft" 2>/dev/null || true
 
 cargo test -p ferro-net --test kernel_compat -- --ignored
 cargo test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
-cargo test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes
+if ! cargo test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
+  dump_redirect_diagnostics
+  exit 1
+fi
 
 iptables-save >"$after_iptables" 2>/dev/null || true
 nft list ruleset >"$after_nft" 2>/dev/null || true

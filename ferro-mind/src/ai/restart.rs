@@ -3,6 +3,7 @@
 //! Records restart outcomes and learns patterns for intelligent restart decisions.
 //! Uses exponential backoff with learned adjustments based on failure patterns.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -39,7 +40,7 @@ pub enum RestartOutcome {
 }
 
 /// Pattern detected from restart history
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrashPattern {
     /// No pattern detected yet (insufficient data)
     Unknown,
@@ -483,6 +484,135 @@ impl AdaptiveRestartPolicy {
             decision
         )
     }
+
+    /// Persist the bounded learned state used by restart decisions.
+    pub fn save_snapshot(&self, path: &std::path::Path) -> Result<(), String> {
+        let snapshot = RestartPolicySnapshot::from_policy(self);
+        let bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_SNAPSHOT_BYTES as usize {
+            return Err("restart policy snapshot exceeds size limit".to_string());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
+        let result = (|| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+            if let Some(parent) = path.parent() {
+                std::fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok::<(), String>(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    /// Load a persisted policy, rejecting malformed, oversized, or mismatched
+    /// snapshots before they can influence restart behavior.
+    pub fn from_snapshot(path: &std::path::Path, container_id: &str) -> Result<Self, String> {
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        if metadata.len() > MAX_SNAPSHOT_BYTES {
+            return Err("restart policy snapshot exceeds size limit".to_string());
+        }
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        let snapshot: RestartPolicySnapshot = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("invalid restart policy snapshot: {error}"))?;
+        snapshot.into_policy(container_id)
+    }
+}
+
+const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RestartPolicySnapshot {
+    schema_version: u8,
+    container_id: String,
+    max_retries: u32,
+    base_backoff_secs: u64,
+    max_backoff_secs: u64,
+    observation_window_secs: u64,
+    detected_pattern: CrashPattern,
+    pattern_confidence: f32,
+    backoff_adjustment: f32,
+    decision_weights: [f32; 5],
+    decision_bias: f32,
+    decision_learning_rate: f32,
+}
+
+impl RestartPolicySnapshot {
+    fn from_policy(policy: &AdaptiveRestartPolicy) -> Self {
+        Self {
+            schema_version: 1,
+            container_id: policy.container_id.clone(),
+            max_retries: policy.max_retries,
+            base_backoff_secs: policy.base_backoff_secs,
+            max_backoff_secs: policy.max_backoff_secs,
+            observation_window_secs: policy.observation_window_secs,
+            detected_pattern: policy.detected_pattern,
+            pattern_confidence: policy.pattern_confidence,
+            backoff_adjustment: policy.backoff_adjustment,
+            decision_weights: policy.decision_weights,
+            decision_bias: policy.decision_bias,
+            decision_learning_rate: policy.decision_learning_rate,
+        }
+    }
+
+    fn into_policy(self, expected_container_id: &str) -> Result<AdaptiveRestartPolicy, String> {
+        if self.schema_version != 1 {
+            return Err("unsupported restart policy snapshot schema".to_string());
+        }
+        if self.container_id != expected_container_id {
+            return Err("restart policy snapshot container identity mismatch".to_string());
+        }
+        if self.max_retries > 100
+            || self.base_backoff_secs > 86_400
+            || self.max_backoff_secs > 86_400
+            || self.base_backoff_secs > self.max_backoff_secs
+            || self.observation_window_secs > 86_400
+            || !self.pattern_confidence.is_finite()
+            || !(0.0..=1.0).contains(&self.pattern_confidence)
+            || !self.backoff_adjustment.is_finite()
+            || !(0.1..=10.0).contains(&self.backoff_adjustment)
+            || !self.decision_bias.is_finite()
+            || self.decision_bias.abs() > 20.0
+            || !self.decision_learning_rate.is_finite()
+            || !(0.001..=1.0).contains(&self.decision_learning_rate)
+            || self
+                .decision_weights
+                .iter()
+                .any(|value| !value.is_finite() || value.abs() > 20.0)
+        {
+            return Err("restart policy snapshot contains out-of-range values".to_string());
+        }
+        let mut policy = AdaptiveRestartPolicy::new(expected_container_id);
+        policy.max_retries = self.max_retries;
+        policy.base_backoff_secs = self.base_backoff_secs;
+        policy.max_backoff_secs = self.max_backoff_secs;
+        policy.observation_window_secs = self.observation_window_secs;
+        policy.detected_pattern = self.detected_pattern;
+        policy.pattern_confidence = self.pattern_confidence;
+        policy.backoff_adjustment = self.backoff_adjustment;
+        policy.decision_weights = self.decision_weights;
+        policy.decision_bias = self.decision_bias;
+        policy.decision_learning_rate = self.decision_learning_rate;
+        Ok(policy)
+    }
 }
 
 /// Basic restart decision (backward compatible)
@@ -625,6 +755,34 @@ mod tests {
             }),
             RestartDecision::DoNotRestart
         );
+    }
+
+    #[test]
+    fn restart_policy_snapshot_round_trips_learned_state_and_rejects_identity_forks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("restart-policy.json");
+        let mut policy = AdaptiveRestartPolicy::new("container-a");
+        policy.backoff_adjustment = 2.25;
+        policy.pattern_confidence = 0.8;
+        policy.record_restart(1, 3);
+        policy.record_outcome(RestartOutcome::Failure);
+        let before = policy.estimate_success_probability(&RestartSignal {
+            exit_code: 1,
+            recent_failures: 1,
+            uptime_secs: 3,
+        });
+
+        policy.save_snapshot(&path).expect("save snapshot");
+        let restored =
+            AdaptiveRestartPolicy::from_snapshot(&path, "container-a").expect("restore snapshot");
+        let after = restored.estimate_success_probability(&RestartSignal {
+            exit_code: 1,
+            recent_failures: 1,
+            uptime_secs: 3,
+        });
+        assert!((before - after).abs() < f32::EPSILON);
+        assert_eq!(restored.restart_count(), 0);
+        assert!(AdaptiveRestartPolicy::from_snapshot(&path, "container-b").is_err());
     }
 
     #[test]

@@ -5266,6 +5266,7 @@ fn supervise_child(
 ) {
     let mut adaptive_model_version = "runtime-v1".to_string();
     let mut adaptive_policy = ferro_mind::ai::restart::AdaptiveRestartPolicy::new(&container_id);
+    let restart_snapshot = ai_enabled.then(|| ai_restart_snapshot_path(&container_id));
     if ai_enabled {
         let active_model = match ferro_mind::ai::training::TrainingPipeline::new(
             ferro_mind::ai::training::TrainingConfig::default(),
@@ -5300,6 +5301,23 @@ fn supervise_child(
                 info!(container = %container_id, error = %error, "no active restart model; using runtime policy");
             }
         }
+        if let Some(path) = restart_snapshot.as_ref() {
+            if path.exists() {
+                match ferro_mind::ai::restart::AdaptiveRestartPolicy::from_snapshot(
+                    path,
+                    &container_id,
+                ) {
+                    Ok(snapshot_policy) => {
+                        adaptive_policy = snapshot_policy;
+                        adaptive_model_version = "persisted-runtime-v1".to_string();
+                        info!(container = %container_id, path = %path.display(), "restored adaptive restart policy snapshot");
+                    }
+                    Err(error) => {
+                        warn!(container = %container_id, error = %error, "restart policy snapshot rejected; using active model or runtime policy");
+                    }
+                }
+            }
+        }
     }
     let mut restart_count: u32 = 0;
     let mut container_start_time = std::time::Instant::now();
@@ -5315,6 +5333,9 @@ fn supervise_child(
         let uptime_secs = container_start_time.elapsed().as_secs();
         if ai_enabled {
             adaptive_policy.record_restart(exit_code, uptime_secs);
+            if let Some(path) = restart_snapshot.as_ref() {
+                let _ = adaptive_policy.save_snapshot(path);
+            }
         }
 
         if !should_restart(&restart_policy, &current_status, exit_code) {
@@ -5440,6 +5461,9 @@ fn supervise_child(
         container_start_time = std::time::Instant::now();
         if ai_enabled {
             adaptive_policy.record_outcome(ferro_mind::ai::restart::RestartOutcome::Success);
+            if let Some(path) = restart_snapshot.as_ref() {
+                let _ = adaptive_policy.save_snapshot(path);
+            }
             log_ai_restart_lifecycle(
                 &container_id,
                 "ai_restart_applied",
@@ -10049,6 +10073,15 @@ fn ai_decision_logger() -> Option<ferro_mind::ai::audit::AuditLogger> {
                 .join("decisions.jsonl")
         });
     Some(ferro_mind::ai::audit::AuditLogger::new(path))
+}
+
+fn ai_restart_snapshot_path(container_id: &str) -> PathBuf {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/ferrocrate"))
+        .join("ai")
+        .join("restart")
+        .join(format!("{container_id}.json"))
 }
 
 fn log_ai_restart_lifecycle(

@@ -1891,6 +1891,25 @@ impl ContainerRuntime {
                 .pending_mutation
                 .clone()
                 .expect("matched reservation");
+            // A live run reservation belongs to the process that is still
+            // publishing its effect. Another CLI process opening the same
+            // runtime must not classify that in-flight operation as a crash;
+            // doing so races the owner's terminal compare-and-swap. If the
+            // process disappears (or never produced a rootfs), normal
+            // recovery below remains authoritative.
+            if reservation.action == "container.run"
+                && record.status == "running"
+                && process_exists(record.pid)
+                && process_start_time_for_pid(record.pid).is_some()
+                && self
+                    .runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("rootfs")
+                    .exists()
+            {
+                continue;
+            }
             let action_matches = runtime_witness_action_name(pending.recipe().original_action())
                 == reservation.action;
             let generation_matches =

@@ -281,3 +281,55 @@ fn verifier_rejects_context_mismatch_and_persists_replay_across_restart() {
         Err(DelegationError::Replay)
     );
 }
+
+#[test]
+fn signed_revocation_persists_and_precedes_replay_consumption() {
+    let temp = tempfile::tempdir().unwrap();
+    let replay_path = temp.path().join("replay");
+    let signing = SigningKey::from_bytes(&[8; 32]);
+    let make_verifier = || {
+        CriDelegationVerifier::open(
+            vec![DelegationTrustKey::developer(
+                "issuer-a",
+                "key-a",
+                signing.verifying_key(),
+            )],
+            "ferro-cri",
+            "boot-a",
+            [7; 32],
+            &replay_path,
+        )
+        .unwrap()
+    };
+    let token_claims = claims(2_000, "revoked-nonce");
+    let assertion = DelegationAssertion::new(
+        token_claims.clone(),
+        signing.sign(&token_claims.signing_bytes()).to_bytes(),
+    )
+    .unwrap();
+    let verifier = make_verifier();
+    verifier.revoke(&assertion, 1_100).unwrap();
+    assert_eq!(
+        verifier.verify(
+            &assertion,
+            "transport-a",
+            Action::ImageDelete,
+            "image:alpine",
+            1_000,
+        ),
+        Err(DelegationError::Revoked)
+    );
+    drop(verifier);
+
+    let reopened = make_verifier();
+    assert_eq!(
+        reopened.verify(
+            &assertion,
+            "transport-a",
+            Action::ImageDelete,
+            "image:alpine",
+            1_000,
+        ),
+        Err(DelegationError::Revoked)
+    );
+}

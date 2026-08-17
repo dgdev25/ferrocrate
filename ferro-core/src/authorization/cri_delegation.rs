@@ -182,6 +182,15 @@ impl CriDelegationClaims {
         }
         key
     }
+
+    fn revocation_key(&self) -> Vec<u8> {
+        let mut key = b"ferrocrate/cri-delegation-revocation/v1\0".to_vec();
+        for value in [&self.issuer, &self.key_id, &self.nonce] {
+            key.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            key.extend_from_slice(value.as_bytes());
+        }
+        key
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -422,6 +431,10 @@ impl CriDelegationVerifier {
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS delegation_replay (
                     replay_key BLOB PRIMARY KEY NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS delegation_revocations (
+                    revocation_key BLOB PRIMARY KEY NOT NULL,
+                    revoked_at_unix_ms INTEGER NOT NULL
                 )",
             )
             .map_err(|_| DelegationError::ReplayStore)?;
@@ -434,6 +447,39 @@ impl CriDelegationVerifier {
             policy_digest,
             replay: Mutex::new(replay),
         })
+    }
+
+    /// Persist revocation of a signed claim without consuming its one-shot
+    /// replay entry. Reopening the verifier retains the revocation decision.
+    pub fn revoke(
+        &self,
+        assertion: &DelegationAssertion,
+        now_unix_ms: u64,
+    ) -> Result<(), DelegationError> {
+        let claims = &assertion.claims;
+        claims.validate()?;
+        let (key, _) = self
+            .keys
+            .get(&(claims.issuer.clone(), claims.key_id.clone()))
+            .ok_or(DelegationError::UntrustedKey)?;
+        key.verify(
+            &claims.signing_bytes(),
+            &Signature::from_bytes(&assertion.signature),
+        )
+        .map_err(|_| DelegationError::Signature)?;
+        let replay = self
+            .replay
+            .lock()
+            .map_err(|_| DelegationError::ReplayStore)?;
+        replay
+            .execute(
+                "INSERT OR IGNORE INTO delegation_revocations (revocation_key, revoked_at_unix_ms) VALUES (?1, ?2)",
+                params![claims.revocation_key(), now_unix_ms],
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+        replay
+            .execute_batch("PRAGMA wal_checkpoint(FULL);")
+            .map_err(|_| DelegationError::ReplayStore)
     }
 
     pub fn verify(
@@ -455,6 +501,20 @@ impl CriDelegationVerifier {
             &Signature::from_bytes(&assertion.signature),
         )
         .map_err(|_| DelegationError::Signature)?;
+        let replay = self
+            .replay
+            .lock()
+            .map_err(|_| DelegationError::ReplayStore)?;
+        let revoked: bool = replay
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM delegation_revocations WHERE revocation_key = ?1)",
+                params![claims.revocation_key()],
+                |row| row.get(0),
+            )
+            .map_err(|_| DelegationError::ReplayStore)?;
+        if revoked {
+            return Err(DelegationError::Revoked);
+        }
         if claims.deadline_unix_ms < now_unix_ms {
             return Err(DelegationError::Expired);
         }
@@ -471,10 +531,6 @@ impl CriDelegationVerifier {
             return Err(DelegationError::Scope);
         }
         let replay_key = claims.replay_key();
-        let replay = self
-            .replay
-            .lock()
-            .map_err(|_| DelegationError::ReplayStore)?;
         let inserted = replay
             .execute(
                 "INSERT OR IGNORE INTO delegation_replay (replay_key) VALUES (?1)",
@@ -512,6 +568,8 @@ pub enum DelegationError {
     Attenuation,
     #[error("delegation was already used")]
     Replay,
+    #[error("delegation was revoked")]
+    Revoked,
     #[error("durable delegation replay store failed")]
     ReplayStore,
     #[error("legacy delegation replay detected; reopen with the `legacy-sled-importers` feature")]

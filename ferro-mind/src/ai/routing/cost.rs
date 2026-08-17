@@ -319,6 +319,55 @@ pub fn execute_routed_prompt_with_adapters(
     }
 }
 
+/// Execute provider adapters in deterministic score order, trying at most
+/// `max_attempts` eligible providers. A failed provider is removed before the
+/// next selection, so a retry cannot replay the same backend. If every attempt
+/// fails, the final backend error is returned unchanged.
+pub fn execute_routed_prompt_with_adapters_failover(
+    adapters: &[ProviderAdapter],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+    max_attempts: usize,
+) -> Result<(String, String), ExecutionError> {
+    if max_attempts == 0 {
+        return Err(ExecutionError::NoProvider);
+    }
+    let mut remaining = adapters.iter().collect::<Vec<_>>();
+    let mut last_error = None;
+    for _ in 0..max_attempts {
+        if remaining.is_empty() {
+            break;
+        }
+        let providers = remaining
+            .iter()
+            .map(|adapter| adapter.provider().clone())
+            .collect::<Vec<_>>();
+        let selected = choose_provider(&providers, policy).ok_or(ExecutionError::NoProvider)?;
+        let index = remaining
+            .iter()
+            .position(|adapter| adapter.provider().name == selected.name)
+            .ok_or(ExecutionError::NoProvider)?;
+        let adapter = remaining.remove(index);
+        let result = match adapter {
+            ProviderAdapter::Command(endpoint) => {
+                execute_routed_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+            }
+            ProviderAdapter::Http(endpoint) => execute_routed_http_prompt(
+                std::slice::from_ref(endpoint),
+                policy,
+                prompt,
+                timeout,
+            ),
+        };
+        match result {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or(ExecutionError::NoProvider))
+}
+
 /// Execute a routed provider call while enforcing a shared token budget.
 /// Prompt usage is reserved before the backend is invoked; estimated response
 /// usage is reserved before the response is released. A backend failure keeps
@@ -647,6 +696,88 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn adapter_failover_tries_next_scored_provider_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let failing = temp.path().join("failing.sh");
+        let healthy = temp.path().join("healthy.sh");
+        std::fs::write(&failing, "#!/bin/sh\nexit 9\n").expect("failing script");
+        std::fs::write(&healthy, "#!/bin/sh\nread prompt\nprintf 'fallback:%s' \"$prompt\"\n")
+            .expect("healthy script");
+        for path in [&failing, &healthy] {
+            let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("permissions");
+        }
+        let provider = |name: &str, quality: f32, command: std::path::PathBuf| {
+            ProviderAdapter::Command(ProviderEndpoint {
+                provider: Provider {
+                    name: name.into(),
+                    cost_per_1k_tokens: 0.0,
+                    quality,
+                    avg_latency_ms: 1,
+                    local: true,
+                },
+                command,
+                args: Vec::new(),
+            })
+        };
+        let adapters = vec![
+            provider("preferred-but-failing", 0.99, failing),
+            provider("healthy-fallback", 0.80, healthy),
+        ];
+        let result = execute_routed_prompt_with_adapters_failover(
+            &adapters,
+            &RoutingPolicy::default(),
+            "hello",
+            std::time::Duration::from_secs(5),
+            2,
+        )
+        .expect("fallback response");
+        assert_eq!(result.0, "healthy-fallback");
+        assert_eq!(result.1, "fallback:hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adapter_failover_respects_attempt_limit_and_returns_final_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("first.sh");
+        let second = temp.path().join("second.sh");
+        std::fs::write(&first, "#!/bin/sh\nexit 7\n").expect("first script");
+        std::fs::write(&second, "#!/bin/sh\nexit 8\n").expect("second script");
+        for path in [&first, &second] {
+            let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("permissions");
+        }
+        let make = |name: &str, quality: f32, command| {
+            ProviderAdapter::Command(ProviderEndpoint {
+                provider: Provider {
+                    name: name.into(),
+                    cost_per_1k_tokens: 0.0,
+                    quality,
+                    avg_latency_ms: 1,
+                    local: true,
+                },
+                command,
+                args: Vec::new(),
+            })
+        };
+        let error = execute_routed_prompt_with_adapters_failover(
+            &[make("first", 0.99, first), make("second", 0.80, second)],
+            &RoutingPolicy::default(),
+            "hello",
+            std::time::Duration::from_secs(5),
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ExecutionError::NonZeroExit { status: 7, .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn metered_routing_reserves_prompt_and_response_before_release() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
@@ -671,7 +802,7 @@ mod tests {
             &[provider],
             &RoutingPolicy::default(),
             "hello",
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
             &budget,
         )
         .unwrap_err();

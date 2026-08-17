@@ -570,6 +570,18 @@ fn maybe_crash_at_start_boundary(point: &str) {
     }
 }
 
+/// Test-only crash injection immediately after a durable CRI state-store
+/// publication. This exercises the publication boundary independently from
+/// OCI/kernel effects and is only reachable from the explicit fixture.
+fn maybe_crash_after_store_publication(kind: &str) {
+    let point = match kind {
+        "sandboxes" => "after-sandbox-store-publication",
+        "containers" => "after-container-store-publication",
+        _ => return,
+    };
+    maybe_crash_at_start_boundary(point);
+}
+
 impl std::fmt::Debug for CriRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CriRuntime").finish_non_exhaustive()
@@ -780,6 +792,7 @@ impl RuntimeService for CriRuntime {
             }
             return Err(error);
         }
+        maybe_crash_after_store_publication("sandboxes");
         let _ = identity;
         Ok(Response::new(RunPodSandboxResponse { pod_sandbox_id: id }))
     }
@@ -997,6 +1010,7 @@ impl RuntimeService for CriRuntime {
             containers.remove(&id);
             return Err(error);
         }
+        maybe_crash_after_store_publication("containers");
         Ok(Response::new(CreateContainerResponse { container_id: id }))
     }
 

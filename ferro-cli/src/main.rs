@@ -270,6 +270,18 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Read the durable Docker-compatible event stream.
+    #[cfg(target_os = "linux")]
+    Events {
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        #[arg(long)]
+        follow: bool,
+    },
     #[cfg(target_os = "linux")]
     Logs {
         container: String,
@@ -2708,6 +2720,19 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Containers { format } => handle_containers(&runtime, &format),
             #[cfg(target_os = "linux")]
+            Commands::Events {
+                since,
+                until,
+                filters,
+                follow,
+            } => handle_events(
+                &runtime_dir,
+                since.as_deref(),
+                until.as_deref(),
+                &filters,
+                follow,
+            ),
+            #[cfg(target_os = "linux")]
             Commands::Logs {
                 container,
                 format,
@@ -4582,6 +4607,55 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         })(),
         Commands::Containers { format } => request("GET", "/containers/json?all=1".to_string())
             .and_then(|body| print_json(body, format)),
+        Commands::Events {
+            since,
+            until,
+            filters,
+            follow,
+        } => (|| -> Result<(), String> {
+            let mut path = "/events".to_string();
+            let mut first = true;
+            let mut add = |key: &str, value: &str| {
+                path.push(if first { '?' } else { '&' });
+                first = false;
+                path.push_str(key);
+                path.push('=');
+                path.push_str(&percent_encode_path_component(value));
+            };
+            if let Some(value) = since.as_deref() {
+                add("since", value);
+            }
+            if let Some(value) = until.as_deref() {
+                add("until", value);
+            }
+            let mut filter_values: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for filter in filters {
+                let (key, value) = filter
+                    .split_once('=')
+                    .ok_or_else(|| format!("events: filter must use key=value syntax: {filter}"))?;
+                if key.is_empty() || value.is_empty() {
+                    return Err("events: filter key and value must be non-empty".to_string());
+                }
+                filter_values
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(value.to_string());
+            }
+            if !filter_values.is_empty() {
+                let encoded = serde_json::to_string(&filter_values)
+                    .map_err(|error| format!("events: encode filters failed: {error}"))?;
+                add("filters", &encoded);
+            }
+            if *follow {
+                add("follow", "1");
+                remote_docker_stream_request(&endpoint, "GET", &path, None, |chunk| {
+                    print!("{}", String::from_utf8_lossy(chunk));
+                    std::io::stdout().flush().map_err(|error| error.to_string())
+                })
+            } else {
+                request("GET", path).map(|body| print!("{}", String::from_utf8_lossy(&body)))
+            }
+        })(),
         Commands::Exec { container, cmd } => (|| -> Result<(), String> {
             if cmd.is_empty() {
                 return Err("exec: command is required".to_string());
@@ -9026,6 +9100,57 @@ fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
 }
 
 #[cfg(target_os = "linux")]
+fn handle_events(
+    runtime_dir: &Path,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &[String],
+    follow: bool,
+) -> Result<(), String> {
+    if follow {
+        return Err(
+            "events: --follow is available through the Docker-compatible daemon socket".to_string(),
+        );
+    }
+    let mut query = HashMap::new();
+    if let Some(value) = since {
+        query.insert("since".to_string(), value.to_string());
+    }
+    if let Some(value) = until {
+        query.insert("until".to_string(), value.to_string());
+    }
+    let mut filter_values: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for filter in filters {
+        let (key, value) = filter
+            .split_once('=')
+            .ok_or_else(|| format!("events: filter must use key=value syntax: {filter}"))?;
+        if key.is_empty() || value.is_empty() {
+            return Err("events: filter key and value must be non-empty".to_string());
+        }
+        filter_values
+            .entry(key.to_string())
+            .or_default()
+            .push(value.to_string());
+    }
+    if !filter_values.is_empty() {
+        query.insert(
+            "filters".to_string(),
+            serde_json::to_string(&filter_values)
+                .map_err(|error| format!("events: encode filters failed: {error}"))?,
+        );
+    }
+    let store = DockerEventStore::open(runtime_dir.join("events.jsonl"))?;
+    for event in store.query(&query)? {
+        println!(
+            "{}",
+            serde_json::to_string(&docker_event_payload(&event))
+                .map_err(|error| format!("events: serialize failed: {error}"))?
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 trait Pipe: Sized {
     fn pipe<T>(self, function: impl FnOnce(Self) -> T) -> T;
 }
@@ -11293,12 +11418,12 @@ mod tests {
         docker_pending_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
         docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
         ensure_context_routing_available, handle_build, handle_containers, handle_context,
-        handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
-        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
-        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
-        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        handle_events, handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill,
+        handle_logs, handle_migrate_compose_report, handle_network, handle_pause, handle_pull,
+        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_top, handle_unpause, handle_volume, handle_wait, host_build_arch,
+        import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
+        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
@@ -13937,6 +14062,17 @@ volumes:
             .query(&query)
             .expect_err("malformed event filters must fail");
         assert!(error.contains("must be an array"), "error={error}");
+    }
+
+    #[test]
+    fn events_cli_validates_filters_and_local_follow_mode() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let error = handle_events(temp.path(), None, None, &["label".to_string()], false)
+            .expect_err("malformed CLI filter must fail");
+        assert!(error.contains("key=value"), "error={error}");
+        let error = handle_events(temp.path(), None, None, &[], true)
+            .expect_err("local follow must direct operators to the daemon socket");
+        assert!(error.contains("daemon socket"), "error={error}");
     }
 
     #[test]

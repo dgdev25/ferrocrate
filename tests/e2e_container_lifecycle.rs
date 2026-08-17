@@ -94,6 +94,26 @@ fn wait_for_container(container_id: &str, state: &str, timeout: Duration) -> boo
 mod tests {
     use super::*;
 
+    struct CleanupGuard<F: FnOnce()> {
+        cleanup: Option<F>,
+    }
+
+    impl<F: FnOnce()> CleanupGuard<F> {
+        fn new(cleanup: F) -> Self {
+            Self {
+                cleanup: Some(cleanup),
+            }
+        }
+    }
+
+    impl<F: FnOnce()> Drop for CleanupGuard<F> {
+        fn drop(&mut self) {
+            if let Some(cleanup) = self.cleanup.take() {
+                cleanup();
+            }
+        }
+    }
+
     fn netfilter_snapshot() -> (String, String) {
         let iptables = Command::new("iptables-save")
             .output()
@@ -132,6 +152,20 @@ mod tests {
             normalize_netfilter_snapshot(before),
             normalize_netfilter_snapshot(deleted)
         );
+    }
+
+    #[test]
+    fn cleanup_guard_runs_when_scope_unwinds() {
+        let cleaned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = cleaned.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = CleanupGuard::new(move || {
+                marker.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            panic!("exercise cleanup path");
+        }));
+        assert!(result.is_err());
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -508,6 +542,25 @@ CMD ["cat", "/hello.txt"]
         }
 
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let cleanup_runtime_dir = runtime_dir.path().to_path_buf();
+        let _cleanup_guard = CleanupGuard::new(move || {
+            let _ = ferro_cli()
+                .env("FERROCRATE_RUNTIME_DIR", &cleanup_runtime_dir)
+                .args(["stop", "ferro-e2e-ebpf-web"])
+                .output();
+            let output = ferro_cli()
+                .env("FERROCRATE_RUNTIME_DIR", &cleanup_runtime_dir)
+                .args(["rm", "ferro-e2e-ebpf-web"])
+                .output();
+            if let Ok(output) = output {
+                if !output.status.success() {
+                    eprintln!(
+                        "eBPF test cleanup failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        });
         let (port_reservation, host_port) =
             reserve_dynamic_host_port().expect("reserve unoccupied localhost port");
         let port_mapping = format!("{host_port}:80");
@@ -612,9 +665,13 @@ CMD ["cat", "/hello.txt"]
             String::from_utf8_lossy(&egress.stderr)
         );
 
+        let _ = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["stop", "ferro-e2e-ebpf-web"])
+            .output();
         let cleanup = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args(["rm", "-f", "ferro-e2e-ebpf-web"])
+            .args(["rm", "ferro-e2e-ebpf-web"])
             .output()
             .expect("remove eBPF test container");
         assert!(

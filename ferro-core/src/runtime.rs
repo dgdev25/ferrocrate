@@ -6723,31 +6723,48 @@ fn setup_ebpf_backend(
         let mut network = prepared
             .attach()
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
-        network
-            .attach_interface(host_veth, host_ifindex)
-            .map_err(|error| RuntimeError::Network(error.to_string()))?;
-        let mut filters = shared_tc_filter_snapshot(&preparation.route.interface)?;
-        filters.retain(|filter| !preparation.filters_before.contains(filter));
-        if filters.len() != 4 {
-            return Err(RuntimeError::Network(format!(
-                "shared eBPF ownership capture expected external and loopback classifier pairs, found {} filters",
-                filters.len()
-            )));
-        }
-        let pin_path = Path::new(FERRO_NETWORK_ROOT).join(&preparation.network_id);
-        let pins = capture_ebpf_pins(&pin_path)?;
-        let ownership = build_ebpf_ownership(
-            &preparation,
-            container_id,
-            host_veth,
-            source_cidr,
-            bridge,
-            bridge_ifindex,
-            host_ifindex,
-            namespace_identity,
-            filters,
-            pins,
-        )?;
+        // The shared network is not transactionally owned until its complete
+        // classifier inventory and pin identity have been captured. Detach it
+        // on any pre-adoption error, otherwise a failed container create can
+        // strand live tc classifiers and an orphaned pin tree that blocks the
+        // next attempt.
+        let ownership = match (|| {
+            network
+                .attach_interface(host_veth, host_ifindex)
+                .map_err(|error| RuntimeError::Network(error.to_string()))?;
+            let mut filters = shared_tc_filter_snapshot(&preparation.route.interface)?;
+            filters.retain(|filter| !preparation.filters_before.contains(filter));
+            if filters.len() != 4 {
+                return Err(RuntimeError::Network(format!(
+                    "shared eBPF ownership capture expected external and loopback classifier pairs, found {} filters",
+                    filters.len()
+                )));
+            }
+            let pin_path = Path::new(FERRO_NETWORK_ROOT).join(&preparation.network_id);
+            let pins = capture_ebpf_pins(&pin_path)?;
+            build_ebpf_ownership(
+                &preparation,
+                container_id,
+                host_veth,
+                source_cidr,
+                bridge,
+                bridge_ifindex,
+                host_ifindex,
+                namespace_identity,
+                filters,
+                pins,
+            )
+        })() {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                if let Err(detach_error) = network.detach() {
+                    log::warn!(
+                        "[rollback] failed to detach unadopted eBPF network: {detach_error}"
+                    );
+                }
+                return Err(error);
+            }
+        };
         rollback.adopt_backend(NetworkBackend::Ebpf, ownership.clone(), Some(network))?;
         let network = rollback.ebpf_network.as_mut().ok_or_else(|| {
             RuntimeError::Network(

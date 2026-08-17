@@ -367,6 +367,80 @@ struct SandboxRecord {
     network_mode: String,
     #[serde(default)]
     netns_name: Option<String>,
+    #[serde(default)]
+    network: Option<SandboxNetworkRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SandboxNetworkRecord {
+    bridge: String,
+    host_veth: String,
+    peer_veth: String,
+    gateway: String,
+    container: String,
+    prefix: u8,
+    mtu: Option<u32>,
+}
+
+impl SandboxNetworkRecord {
+    fn config(&self, namespace: &str) -> Result<ferro_net::sandbox::SandboxNetworkConfig, String> {
+        let gateway = self
+            .gateway
+            .parse()
+            .map_err(|_| "invalid persisted sandbox gateway".to_string())?;
+        let container = self
+            .container
+            .parse()
+            .map_err(|_| "invalid persisted sandbox address".to_string())?;
+        Ok(ferro_net::sandbox::SandboxNetworkConfig {
+            namespace: namespace.to_string(),
+            bridge: self.bridge.clone(),
+            host_veth: self.host_veth.clone(),
+            peer_veth: self.peer_veth.clone(),
+            gateway,
+            container,
+            prefix: self.prefix,
+            mtu: self.mtu,
+        })
+    }
+}
+
+fn sandbox_network_for(id: &str) -> SandboxNetworkRecord {
+    let token = id
+        .strip_prefix("cri-sandbox-")
+        .unwrap_or(id)
+        .bytes()
+        .fold(0u32, |value, byte| {
+            value.wrapping_mul(33).wrapping_add(byte as u32)
+        });
+    let slot = token % 16_000;
+    let third = (slot / 64) as u8;
+    let fourth = ((slot % 64) * 4 + 1) as u8;
+    SandboxNetworkRecord {
+        bridge: format!("fcb{:x}", token & 0xffff),
+        host_veth: format!("fch{:x}", token & 0xffff),
+        peer_veth: format!("fcp{:x}", token & 0xffff),
+        gateway: format!("10.240.{third}.{fourth}"),
+        container: format!("10.240.{third}.{}", fourth + 1),
+        prefix: 30,
+        mtu: None,
+    }
+}
+
+fn sandbox_network_is_present(record: &SandboxRecord) -> bool {
+    let Some(network) = record.network.as_ref() else {
+        return record.netns_name.is_none();
+    };
+    let Some(namespace) = record.netns_name.as_deref() else {
+        return false;
+    };
+    if !ferro_net::netns_path(namespace).exists() {
+        return false;
+    }
+    ferro_net::observe_bridge_identity(&network.bridge)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -625,6 +699,7 @@ impl RuntimeService for CriRuntime {
                 config.network_namespace
             },
             netns_name: None,
+            network: None,
         };
         let mut record = record;
         if record.network_mode != "none" {
@@ -637,7 +712,16 @@ impl RuntimeService for CriRuntime {
                     "configure CRI sandbox loopback: {error}"
                 )));
             }
+            let network = sandbox_network_for(&record.id);
+            let config = network.config(&netns_name).map_err(Status::internal)?;
+            if let Err(error) = ferro_net::sandbox::create_sandbox_network(&config) {
+                let _ = ferro_net::destroy_netns(&netns_name);
+                return Err(Status::internal(format!(
+                    "configure CRI sandbox bridge network: {error}"
+                )));
+            }
             record.netns_name = Some(netns_name);
+            record.network = Some(network);
         }
         let mut sandboxes = self
             .sandboxes
@@ -647,13 +731,27 @@ impl RuntimeService for CriRuntime {
             .values()
             .any(|candidate| candidate.uid == record.uid)
         {
+            if let (Some(netns_name), Some(network)) =
+                (record.netns_name.as_deref(), record.network.as_ref())
+            {
+                if let Ok(config) = network.config(netns_name) {
+                    let _ = ferro_net::sandbox::destroy_sandbox_network(&config);
+                }
+                let _ = ferro_net::destroy_netns(netns_name);
+            }
             return Err(Status::already_exists("pod sandbox uid already exists"));
         }
         let created_netns = record.netns_name.clone();
+        let created_network = record.network.clone();
         sandboxes.insert(id.clone(), record);
         if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
             sandboxes.remove(&id);
             if let Some(netns_name) = created_netns {
+                if let Some(network) = created_network.as_ref() {
+                    if let Ok(config) = network.config(&netns_name) {
+                        let _ = ferro_net::sandbox::destroy_sandbox_network(&config);
+                    }
+                }
                 let _ = ferro_net::destroy_netns(&netns_name);
             }
             return Err(error);
@@ -710,11 +808,32 @@ impl RuntimeService for CriRuntime {
             .remove(&id)
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
         let netns_name = record.netns_name.clone();
+        let network = record.network.clone();
         if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
             sandboxes.insert(id, record);
             return Err(error);
         }
         if let Some(netns_name) = netns_name {
+            if let Some(network) = network.as_ref() {
+                let config = match network.config(&netns_name) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        sandboxes.insert(id.clone(), record);
+                        let _ = persist_sandboxes(&self.runtime_dir, &sandboxes);
+                        return Err(Status::internal(error));
+                    }
+                };
+                if let Err(error) = ferro_net::sandbox::destroy_sandbox_network(&config) {
+                    sandboxes.insert(id.clone(), record);
+                    let restore = persist_sandboxes(&self.runtime_dir, &sandboxes).err();
+                    let detail = restore
+                        .map(|restore| format!("; restore CRI sandbox state: {restore}"))
+                        .unwrap_or_default();
+                    return Err(Status::internal(format!(
+                        "remove CRI sandbox network: {error}{detail}"
+                    )));
+                }
+            }
             if let Err(error) = ferro_net::destroy_netns(&netns_name) {
                 sandboxes.insert(id.clone(), record);
                 let restore = persist_sandboxes(&self.runtime_dir, &sandboxes).err();
@@ -745,6 +864,7 @@ impl RuntimeService for CriRuntime {
             && record.netns_name.as_deref().is_none_or(|name| {
                 ferro_net::netns_path(name).exists()
                     && ferro_net::loopback_is_up(name).unwrap_or(false)
+                    && sandbox_network_is_present(record)
             }) {
             PodSandboxState::Ready
         } else {
@@ -798,6 +918,7 @@ impl RuntimeService for CriRuntime {
             || sandbox.netns_name.as_deref().is_some_and(|name| {
                 !ferro_net::netns_path(name).exists()
                     || !ferro_net::loopback_is_up(name).unwrap_or(false)
+                    || !sandbox_network_is_present(&sandbox)
             })
         {
             return Err(Status::failed_precondition("pod sandbox is not ready"));
@@ -911,7 +1032,8 @@ impl RuntimeService for CriRuntime {
             })
             .ok_or_else(|| Status::failed_precondition("pod sandbox is not present"))?;
         let launch_network_mode =
-            sandbox_launch_network_mode(&sandbox_network_mode, sandbox_netns.as_deref())?;
+            sandbox_launch_network_mode(&sandbox_network_mode, sandbox_netns.as_deref())
+                .map_err(Status::failed_precondition)?;
         let mut labels = std::collections::HashMap::new();
         labels.insert(
             "io.ferrocrate.parent-resource".to_string(),
@@ -1168,13 +1290,13 @@ impl RuntimeService for CriRuntime {
 fn sandbox_launch_network_mode(
     network_mode: &str,
     netns_name: Option<&str>,
-) -> Result<String, Status> {
+) -> Result<String, String> {
     if network_mode == "none" {
         return Ok(network_mode.to_string());
     }
     let netns = netns_name
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| Status::failed_precondition("pod sandbox network namespace is missing"))?;
+        .ok_or_else(|| "pod sandbox network namespace is missing".to_string())?;
     Ok(format!("container:{netns}"))
 }
 
@@ -1602,7 +1724,7 @@ mod tests {
     #[test]
     fn sandbox_launch_network_mode_rejects_missing_namespace() {
         let error = sandbox_launch_network_mode("bridge", None).unwrap_err();
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error, "pod sandbox network namespace is missing");
     }
     use crate::runtime::{
         ContainerConfig, CreateContainerRequest, ImageFsInfoRequest, ImageSpec, ImageStatusRequest,
@@ -1745,6 +1867,7 @@ mod tests {
             created_at_unix: 1,
             network_mode: "none".into(),
             netns_name: None,
+            network: None,
         };
         let mut legacy = BTreeMap::new();
         legacy.insert(sandbox.id.clone(), sandbox.clone());
@@ -1789,6 +1912,7 @@ mod tests {
                 created_at_unix: 1,
                 network_mode: "none".into(),
                 netns_name: None,
+                network: None,
             },
         );
         persist_sandboxes(
@@ -2025,14 +2149,27 @@ mod tests {
             .expect("bridge sandbox create")
             .into_inner()
             .pod_sandbox_id;
-        let netns_name = runtime
+        let (netns_name, bridge_name) = runtime
             .sandboxes
             .lock()
             .expect("sandbox lock")
             .get(&id)
-            .and_then(|record| record.netns_name.clone())
-            .expect("sandbox netns");
+            .map(|record| {
+                (
+                    record.netns_name.clone().expect("sandbox netns"),
+                    record
+                        .network
+                        .as_ref()
+                        .expect("sandbox network")
+                        .bridge
+                        .clone(),
+                )
+            })
+            .expect("sandbox record");
         assert!(ferro_net::netns_path(&netns_name).exists());
+        assert!(ferro_net::observe_bridge_identity(&bridge_name)
+            .expect("bridge observation")
+            .is_some());
         runtime
             .stop_pod_sandbox(authenticated(StopPodSandboxRequest {
                 pod_sandbox_id: id.clone(),
@@ -2046,6 +2183,9 @@ mod tests {
             .await
             .expect("bridge sandbox remove");
         assert!(!ferro_net::netns_path(&netns_name).exists());
+        assert!(ferro_net::observe_bridge_identity(&bridge_name)
+            .expect("bridge observation")
+            .is_none());
     }
 
     #[tokio::test]

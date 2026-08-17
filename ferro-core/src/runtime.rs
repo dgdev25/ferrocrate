@@ -9146,6 +9146,7 @@ fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
     let object_path = config.object_path.clone();
     let pin_root = config.pin_root.clone();
     validate_security_ebpf_config(&object_path, &pin_root, &events)?;
+    validate_security_ebpf_object(&object_path)?;
     if !command_available("bpftool") {
         return Err(RuntimeError::Network(
             "security ebpf monitor unavailable: requires bpftool; fallback=disabled (turn the monitor off explicitly)".to_string(),
@@ -9158,6 +9159,20 @@ fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
         container_id,
         installed
     );
+    Ok(())
+}
+
+fn validate_security_ebpf_object(object_path: &str) -> Result<(), RuntimeError> {
+    let metadata = std::fs::metadata(object_path).map_err(|error| {
+        RuntimeError::Network(format!(
+            "security ebpf monitor object unavailable: {object_path}: {error}"
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(RuntimeError::Network(format!(
+            "security ebpf monitor object must be a regular file: {object_path}"
+        )));
+    }
     Ok(())
 }
 
@@ -12274,6 +12289,21 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         )
         .expect_err("case-insensitive duplicate events must be rejected");
         assert!(error.to_string().contains("must be unique"));
+    }
+
+    #[test]
+    fn security_ebpf_object_preflight_rejects_missing_or_non_file_artifacts() {
+        let missing = format!(
+            "/tmp/ferrocrate-security-object-missing-{}",
+            std::process::id()
+        );
+        let error = super::validate_security_ebpf_object(&missing)
+            .expect_err("missing security object must fail before bpftool");
+        assert!(error.to_string().contains("object unavailable"));
+
+        let error = super::validate_security_ebpf_object("/tmp")
+            .expect_err("directory cannot be loaded as a security object");
+        assert!(error.to_string().contains("regular file"));
     }
 
     #[test]

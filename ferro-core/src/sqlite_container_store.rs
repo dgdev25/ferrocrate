@@ -64,7 +64,7 @@ impl SqliteContainerStore {
                 return Err(ContainerStoreError::LegacyMigrationRequired);
                 #[cfg(feature = "legacy-sled-importers")]
                 {
-                    let legacy = super::container_store::LocalContainerStore::open(&legacy_path)?;
+                    let legacy = super::container_store::LocalContainerStore::open(legacy_path)?;
                     legacy.export_sqlite_snapshot(&sqlite_path)?;
                     std::fs::write(marker, b"sqlite-v1\n")?;
                 }

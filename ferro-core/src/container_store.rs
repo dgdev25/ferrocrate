@@ -388,6 +388,7 @@ pub struct LocalContainerStore {
 }
 
 #[cfg(feature = "legacy-sled-importers")]
+#[allow(dead_code)]
 impl LocalContainerStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ContainerStoreError> {
         let db = sled::open(path)?;
@@ -1110,6 +1111,7 @@ impl LocalContainerStore {
 }
 
 #[cfg(feature = "legacy-sled-importers")]
+#[allow(dead_code)]
 fn lifecycle_operation(
     record: &ContainerRecord,
     operation_id: [u8; 16],
@@ -1215,6 +1217,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: Some("ferro-c1".to_string()),
+            namespace_owned: true,
             namespace_identity: None,
             network_name: Some("bridge".to_string()),
             ip_address: Some("10.0.0.2".to_string()),
@@ -1348,6 +1351,7 @@ mod tests {
             stderr_path: "stderr.log".to_string(),
             status: "running".to_string(),
             netns: None,
+            namespace_owned: true,
             namespace_identity: None,
             network_name: None,
             ip_address: None,

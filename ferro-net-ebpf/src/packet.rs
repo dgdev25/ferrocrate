@@ -558,14 +558,18 @@ mod tc {
     ) -> Result<(), PacketError> {
         let (_, transport_checksum_offset) =
             transport_offsets(view, false).ok_or(PacketError::Truncated)?;
-        let old_address = u32::from_be_bytes(old_address) as u64;
-        let new_address = u32::from_be_bytes(new_address) as u64;
-        ctx.l3_csum_replace(view.ipv4_offset + 10, old_address, new_address, 4)
+        // The helper consumes the raw in-memory representation of the
+        // network-order field (`__be32`), not the host-order integer obtained
+        // by decoding the wire bytes.  On little-endian hosts this keeps the
+        // two 16-bit checksum words in their packet order.
+        let old_helper_value = u32::from_ne_bytes(old_address) as u64;
+        let new_helper_value = u32::from_ne_bytes(new_address) as u64;
+        ctx.l3_csum_replace(view.ipv4_offset + 10, old_helper_value, new_helper_value, 4)
             .map_err(|_| PacketError::Truncated)?;
         ctx.l4_csum_replace(
             transport_checksum_offset,
-            old_address,
-            new_address,
+            old_helper_value,
+            new_helper_value,
             super::BPF_F_PSEUDO_HDR
                 | 4
                 | if view.transport == super::TransportProtocol::Udp {
@@ -575,7 +579,7 @@ mod tc {
                 },
         )
         .map_err(|_| PacketError::Truncated)?;
-        let bytes = new_address.to_be_bytes();
+        let bytes = new_helper_value.to_ne_bytes();
         store_byte(ctx, address_offset, bytes[0])?;
         store_byte(ctx, address_offset + 1, bytes[1])?;
         store_byte(ctx, address_offset + 2, bytes[2])?;
@@ -593,8 +597,8 @@ mod tc {
             transport_offsets(view, destination).ok_or(PacketError::Truncated)?;
         ctx.l4_csum_replace(
             checksum_offset,
-            old_port as u64,
-            new_port as u64,
+            u16::from_ne_bytes(old_port.to_be_bytes()) as u64,
+            u16::from_ne_bytes(new_port.to_be_bytes()) as u64,
             2 | if view.transport == super::TransportProtocol::Udp {
                 super::BPF_F_MARK_MANGLED_0
             } else {

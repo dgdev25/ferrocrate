@@ -10253,6 +10253,9 @@ fn run_resource_monitor(
 
     let sample_interval = Duration::from_secs(30);
     let oom_horizon = Duration::from_secs(1200); // 20 minutes
+    // cpu.stat reports cumulative CPU time. Retain only the previous sample
+    // so anomaly and prediction features use the actual cgroup CPU delta.
+    let mut previous_cpu_sample: Option<(u64, Instant)> = None;
 
     loop {
         // Check for explicit cancellation
@@ -10268,12 +10271,23 @@ fn run_resource_monitor(
         // Read cgroup metrics
         let cgroup_path = cgroup_root.join("ferrocrate").join(&id);
         if let Ok(metrics) = ferro_mind::ai::resource::read_cgroup_metrics(&cgroup_path) {
+            let sample_timestamp = Instant::now();
+            let cpu_percent = previous_cpu_sample
+                .map(|(previous_usage, previous_timestamp)| {
+                    ferro_mind::ai::resource::cpu_percent_from_delta(
+                        previous_usage,
+                        metrics.cpu_usage_usec,
+                        sample_timestamp.duration_since(previous_timestamp),
+                    )
+                })
+                .unwrap_or(0.0);
+            previous_cpu_sample = Some((metrics.cpu_usage_usec, sample_timestamp));
             // Create sample with current metrics
             let sample = ferro_mind::ai::resource::ResourceSample {
-                cpu_percent: 0.0, // CPU percentage requires delta calculation
+                cpu_percent,
                 memory_bytes: metrics.memory_current,
                 pids_count: metrics.pids_current,
-                timestamp: Instant::now(),
+                timestamp: sample_timestamp,
             };
 
             predictor.push(sample);

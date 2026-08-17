@@ -583,6 +583,27 @@ pub struct CgroupMetrics {
     pub cpu_usage_usec: u64,
 }
 
+/// Convert a cgroup CPU usage counter delta into a wall-clock percentage.
+///
+/// `cpu.stat::usage_usec` is cumulative CPU time, while resource samples are
+/// taken on a wall-clock interval. A counter reset or a zero interval is
+/// treated as no usable signal. The result is bounded to the documented
+/// `ResourceSample::cpu_percent` range; multi-core usage therefore saturates
+/// at 100% rather than producing an invalid feature value.
+pub fn cpu_percent_from_delta(
+    previous_usage_usec: u64,
+    current_usage_usec: u64,
+    elapsed: Duration,
+) -> f32 {
+    let elapsed_usec = elapsed.as_secs_f64() * 1_000_000.0;
+    if elapsed_usec <= 0.0 || current_usage_usec < previous_usage_usec {
+        return 0.0;
+    }
+    let usage_delta = current_usage_usec - previous_usage_usec;
+    ((usage_delta as f64 / elapsed_usec) * 100.0)
+        .clamp(0.0, 100.0) as f32
+}
+
 /// Read cgroup v2 metrics from the cgroup filesystem.
 ///
 /// This is a helper function that can be called from ferro-core.
@@ -639,6 +660,20 @@ pub fn read_cgroup_metrics(cgroup_path: &std::path::Path) -> std::io::Result<Cgr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_percent_from_delta_uses_elapsed_wall_time() {
+        assert!((cpu_percent_from_delta(1_000, 501_000, Duration::from_secs(1)) - 50.0).abs() < 0.01);
+        // A cgroup can consume more than one CPU; ResourceSample exposes a
+        // bounded percentage so anomaly features remain in their documented range.
+        assert_eq!(cpu_percent_from_delta(0, 2_000_000, Duration::from_secs(1)), 100.0);
+    }
+
+    #[test]
+    fn cpu_percent_from_delta_fails_closed_on_reset_or_zero_interval() {
+        assert_eq!(cpu_percent_from_delta(500, 400, Duration::from_secs(1)), 0.0);
+        assert_eq!(cpu_percent_from_delta(500, 1_500, Duration::ZERO), 0.0);
+    }
 
     fn make_sample(memory: u64, delay_ms: u64) -> ResourceSample {
         std::thread::sleep(Duration::from_millis(delay_ms));

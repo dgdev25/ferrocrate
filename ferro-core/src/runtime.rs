@@ -1781,6 +1781,13 @@ impl ContainerRuntime {
             if record.status != "running" && record.status != "paused" {
                 continue;
             }
+            // A different process may be between durable reservation and
+            // effect publication. `reconcile_pending_mutations` owns that
+            // recovery path; treating its PID as stale here would overwrite
+            // the reservation and make the writer fail its compare-and-swap.
+            if record.pending_mutation.is_some() {
+                continue;
+            }
             if process_exists(record.pid) {
                 continue;
             }
@@ -9960,9 +9967,9 @@ mod tests {
     use crate::cgroups::{CpuMax, ResourceLimits};
     #[cfg(feature = "legacy-sled-importers")]
     use crate::container_store::LocalContainerStore;
-    #[cfg(feature = "legacy-sled-importers")]
-    use crate::container_store::MutationReservation;
-    use crate::container_store::{now_unix, ContainerRecord, PortMappingRecord, RestartPolicy};
+    use crate::container_store::{
+        now_unix, ContainerRecord, MutationReservation, PortMappingRecord, RestartPolicy,
+    };
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
     use crate::image_tagging::canonicalize_reference;
@@ -11639,6 +11646,28 @@ mod tests {
                 "status {status}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn startup_reconciliation_defers_pending_running_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(temp.path()).unwrap();
+        let operation_id = [17u8; 16];
+        let mut record = fixture_container_record("pending-running", "running");
+        record.network_name = Some("none".to_string());
+        record.namespace_owned = false;
+        record.pending_mutation = Some(MutationReservation {
+            operation_id,
+            generation: record.mutation_generation,
+            expected_status: "created".to_string(),
+            action: "container.run".to_string(),
+        });
+        runtime.store.put_reserved_creation(&record).unwrap();
+
+        runtime.reconcile_persisted_state().unwrap();
+        let stored = runtime.store.get("pending-running").unwrap().unwrap();
+        assert_eq!(stored.status, "running");
+        assert_eq!(stored.pending_mutation.unwrap().operation_id, operation_id);
     }
 
     #[test]

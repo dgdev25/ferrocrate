@@ -1012,6 +1012,7 @@ fn cleanup_security_monitor_paths(pin_root: &str, events: &[String]) -> Result<(
 }
 
 fn normalize_security_events(events: &[String]) -> Result<Vec<String>, ExecError> {
+    const MAX_SECURITY_EVENTS: usize = 32;
     let source = if events.is_empty() {
         default_security_events()
             .iter()
@@ -1020,6 +1021,12 @@ fn normalize_security_events(events: &[String]) -> Result<Vec<String>, ExecError
     } else {
         events.to_vec()
     };
+    if source.len() > MAX_SECURITY_EVENTS {
+        return Err(ExecError::CommandFailed {
+            cmd: format!("events={}", source.len()),
+            stderr: "too many security monitor events".to_string(),
+        });
+    }
     let mut normalized = Vec::with_capacity(source.len());
     for event in source {
         let event = sanitize_event(&event)?;
@@ -1096,6 +1103,17 @@ mod lifecycle_tests {
         let error = normalize_security_events(&["execve".to_string(), "bad/name".to_string()])
             .expect_err("invalid later event");
         assert!(error.to_string().contains("invalid security monitor event"));
+    }
+
+    #[test]
+    fn security_monitor_rejects_unbounded_event_configuration() {
+        let events = (0..33)
+            .map(|index| format!("event_{index}"))
+            .collect::<Vec<_>>();
+        let error = normalize_security_events(&events).expect_err("event list must be bounded");
+        assert!(error
+            .to_string()
+            .contains("too many security monitor events"));
     }
 
     struct FakeKernel {

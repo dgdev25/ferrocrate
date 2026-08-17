@@ -184,6 +184,32 @@ fn build_owned_iptables_plan(
         &postrouting,
         &["-s", source_cidr, "!", "-o", bridge, "-j", "MASQUERADE"],
     ));
+    // A host with a restrictive FORWARD policy still needs to permit
+    // container-originated egress and the corresponding established return
+    // traffic. Port-specific DNAT accepts below are insufficient for an
+    // outbound connection because its destination is external, not the
+    // container address.
+    commands.push(iptables_cmd(
+        "filter",
+        "-A",
+        &forward,
+        &["-s", source_cidr, "!", "-o", bridge, "-j", "ACCEPT"],
+    ));
+    commands.push(iptables_cmd(
+        "filter",
+        "-A",
+        &forward,
+        &[
+            "-d",
+            source_cidr,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ],
+    ));
     for mapping in mappings {
         let host_port = mapping.host_port.to_string();
         let container_port = mapping.container_port.to_string();
@@ -708,6 +734,15 @@ mod tests {
             command.iter().any(|argument| argument == "127.0.0.0/8")
                 && command.iter().any(|argument| argument == "10.0.0.2/32")
                 && command.iter().any(|argument| argument == "MASQUERADE")
+        }));
+        assert!(plan.commands().iter().any(|command| {
+            command.iter().any(|argument| argument == "10.0.0.0/24")
+                && command.iter().any(|argument| argument == "ACCEPT")
+                && command.iter().any(|argument| argument == "-o")
+        }));
+        assert!(plan.commands().iter().any(|command| {
+            command.iter().any(|argument| argument == "ESTABLISHED,RELATED")
+                && command.iter().any(|argument| argument == "conntrack")
         }));
     }
 

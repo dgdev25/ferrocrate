@@ -45,6 +45,16 @@ if HOME="$tmp_home" XDG_CONFIG_HOME="$tmp_home/config" XDG_RUNTIME_DIR="$runtime
 fi
 grep -q 'socket must be an absolute path' "$tmp_home/unsafe.txt"
 
+mkdir -p "$tmp_home/path with spaces"
+cp /bin/true "$tmp_home/path with spaces/ferrocrate"
+if HOME="$tmp_home" XDG_CONFIG_HOME="$tmp_home/config-space" XDG_RUNTIME_DIR="$runtime_dir" \
+  "$installer" --binary "$tmp_home/path with spaces/ferrocrate" --socket "$runtime_dir/space.sock" --dry-run \
+  >"$tmp_home/space.txt" 2>&1; then
+  echo "space-containing binary path unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -q 'binary must be an absolute path' "$tmp_home/space.txt"
+
 strict_home="$tmp_home/strict-home"
 mkdir -p "$strict_home"
 if HOME="$strict_home" XDG_CONFIG_HOME="$strict_home/config" XDG_RUNTIME_DIR="$strict_home/missing" \

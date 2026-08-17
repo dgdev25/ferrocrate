@@ -54,11 +54,11 @@ if [[ -z "$binary" || ! -x "$binary" ]]; then
   echo "rootless-install: ferrocrate/ferro-cli executable not found; pass --binary PATH" >&2
   exit 1
 fi
-if [[ "$binary" != /* || "$binary" == *[$'\t\n\r"%']* ]]; then
+if [[ "$binary" != /* || "$binary" == *[$'\t\n\r "%']* ]]; then
   echo "rootless-install: binary must be an absolute path without unit-file metacharacters" >&2
   exit 1
 fi
-if [[ "$socket" != /* || "$socket" == *[$'\t\n\r"%']* ]]; then
+if [[ "$socket" != /* || "$socket" == *[$'\t\n\r "%']* ]]; then
   echo "rootless-install: socket must be an absolute path" >&2
   exit 1
 fi

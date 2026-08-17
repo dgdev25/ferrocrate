@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOCKERFILE=${FERROCRATE_PERF_DOCKERFILE:-Dockerfile}
+repo_root="$(cd "$(dirname -- "$0")/../.." && pwd)"
+# The repository intentionally has no product Dockerfile.  Use a tiny, tracked
+# benchmark fixture by default so this probe measures the build pipeline rather
+# than failing merely because the checkout has no root Dockerfile.
+DOCKERFILE=${FERROCRATE_PERF_DOCKERFILE:-$repo_root/scripts/perf/fixtures/Dockerfile}
 TAG=${FERROCRATE_PERF_TAG:-local/perf:test}
 MAX_BUILD_MS=${FERROCRATE_PERF_BUILD_MAX_MS:-60000}
 ENFORCE=${FERROCRATE_PERF_ENFORCE:-1}
 ALLOW_SKIP=${FERROCRATE_PERF_ALLOW_SKIP:-0}
 
-if [ ! -x ./target/release/ferro-cli ]; then
-  cargo build -p ferro-cli --release
+ferro_bin=${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}
+if [ ! -x "$ferro_bin" ]; then
+  (cd "$repo_root" && cargo build -p ferro-cli --release)
 fi
 
 start_ns=$(date +%s%N)
-if ! ./target/release/ferro-cli build --tag "$TAG" --dockerfile "$DOCKERFILE" >/dev/null 2>&1; then
+if ! "$ferro_bin" build --tag "$TAG" --dockerfile "$DOCKERFILE" >/dev/null 2>&1; then
   if [ "${ALLOW_SKIP}" = "1" ]; then
     echo "perf.build_skipped=1"
     echo "perf.build_skip_reason=build_failed"

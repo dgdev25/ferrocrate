@@ -3861,7 +3861,14 @@ impl ContainerRuntime {
                 .as_ref()
                 .map(|reservation| reservation.operation_id)
             else {
-                if record.status == status || record.status == "removed" {
+                // A recovery process may have already cleared this
+                // terminal reservation while the original `run --rm`
+                // caller was finishing cleanup. Do not turn that durable
+                // terminal state into a spurious compare-and-swap failure.
+                if record.status == status
+                    || record.status == "removed"
+                    || !matches!(record.status.as_str(), "running" | "paused")
+                {
                     return Ok(());
                 }
                 return Err(ContainerStoreError::MutationConflict.into());
@@ -4029,6 +4036,20 @@ impl ContainerRuntime {
                             break;
                         }
                         thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(ContainerStoreError::MutationConflict)
+                        if self.store.lifecycle_operation(operation_id)?.is_none()
+                            && self.store.get(id)?.is_some_and(|record| {
+                                !matches!(record.status.as_str(), "running" | "paused")
+                            }) =>
+                    {
+                        // Recovery may have acknowledged the operation after
+                        // the effect was observed. The record is terminal and
+                        // no operation remains, so removing it is the
+                        // idempotent completion of the same delete.
+                        self.store.remove(id)?;
+                        finalized = true;
+                        break;
                     }
                     Err(error) => {
                         log::error!(

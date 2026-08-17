@@ -2698,6 +2698,27 @@ pub mod quantize {
         pub max_abs_error: f32,
     }
 
+    /// Operator-selected size and reconstruction-error bounds for a
+    /// quantized artifact. Bounds are checked after training, before an
+    /// artifact is published or used for future inserts.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct QuantizationPolicy {
+        pub min_compression_ratio: f32,
+        pub max_abs_error: f32,
+    }
+
+    impl QuantizationPolicy {
+        pub fn validate(self) -> Result<(), String> {
+            if !self.min_compression_ratio.is_finite() || self.min_compression_ratio < 1.0 {
+                return Err("minimum compression ratio must be finite and at least 1".to_string());
+            }
+            if !self.max_abs_error.is_finite() || self.max_abs_error < 0.0 {
+                return Err("maximum reconstruction error must be finite and non-negative".to_string());
+            }
+            Ok(())
+        }
+    }
+
     impl QuantSummary {
         /// Compression ratio of the measured encoded vectors.
         pub fn compression_ratio(&self) -> f32 {
@@ -2705,6 +2726,24 @@ pub mod quantize {
                 return 0.0;
             }
             self.original_bytes as f32 / self.encoded_bytes as f32
+        }
+
+        /// Enforce measured size and accuracy bounds before publication.
+        pub fn enforce_policy(&self, policy: QuantizationPolicy) -> Result<(), String> {
+            policy.validate()?;
+            if self.compression_ratio() < policy.min_compression_ratio {
+                return Err(format!(
+                    "compression ratio {:.4} is below required {:.4}",
+                    self.compression_ratio(), policy.min_compression_ratio
+                ));
+            }
+            if self.max_abs_error > policy.max_abs_error {
+                return Err(format!(
+                    "reconstruction error {:.6} exceeds maximum {:.6}",
+                    self.max_abs_error, policy.max_abs_error
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -2776,6 +2815,12 @@ pub mod quantize {
             assert_eq!(summary.dim, 8);
             assert!(summary.compression_ratio() >= 3.0);
             assert!(summary.max_abs_error < 0.05);
+            summary
+                .enforce_policy(QuantizationPolicy {
+                    min_compression_ratio: 3.0,
+                    max_abs_error: 0.05,
+                })
+                .expect("quality policy");
 
             // Verify encode/decode roundtrip is within 4x quantization error.
             let encoded = summary.quantizer.encode_vec(&vectors[0]);
@@ -2796,6 +2841,28 @@ pub mod quantize {
             let err =
                 train_quantizer(&[vec![1.0, 2.0], vec![3.0]], Method::Scalar8bit).unwrap_err();
             assert!(err.contains("dimensions differ"));
+        }
+
+        #[test]
+        fn quantization_policy_rejects_size_or_error_regressions() {
+            let vectors: Vec<Vec<f32>> = (0..20)
+                .map(|i| (0..8).map(|d| ((i * 7 + d * 3) as f32) / 50.0).collect())
+                .collect();
+            let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
+            let error = summary
+                .enforce_policy(QuantizationPolicy {
+                    min_compression_ratio: 100.0,
+                    max_abs_error: 1.0,
+                })
+                .expect_err("size gate");
+            assert!(error.contains("compression ratio"));
+            let error = summary
+                .enforce_policy(QuantizationPolicy {
+                    min_compression_ratio: 1.0,
+                    max_abs_error: 0.0,
+                })
+                .expect_err("error gate");
+            assert!(error.contains("reconstruction error"));
         }
     }
 }

@@ -78,14 +78,19 @@ ferro_run="$ferro_env $ferro_bin run --rm --network bridge --network-backend ipt
 # explicitly in the report; this is a warm-cache operation after preparation).
 # A cached image is sufficient for this benchmark.  Docker Hub rate limiting
 # must not make an otherwise reproducible local comparison impossible.
+image_prep_note="warm image cache"
 if ! docker pull "$image" >/dev/null 2>&1; then
   docker image inspect "$image" >/dev/null 2>&1 || {
     echo "image $image is unavailable locally and could not be pulled" >&2
     exit 1
   }
+  image_prep_note="Docker Hub pull unavailable; Docker used its cached image"
 fi
-eval "$ferro_env $ferro_bin pull '$image'" >/dev/null 2>&1 || true
-record "image pull (warm)" "docker pull '$image'" "$ferro_env $ferro_bin pull '$image'" "Docker uses its daemon store; Ferrocrate uses an isolated runtime store."
+ferro_pull_note="Ferrocrate uses its isolated runtime store"
+if ! eval "$ferro_env $ferro_bin pull '$image'" >/dev/null 2>&1; then
+  ferro_pull_note="Ferrocrate image pull unavailable; image-dependent rows may be SKIP"
+fi
+record "image pull (warm)" "docker pull '$image'" "$ferro_env $ferro_bin pull '$image'" "Docker uses its daemon store; $image_prep_note; $ferro_pull_note."
 
 # 2. Run and exit an OCI image.
 record "container run/exit" "$docker_run" "$ferro_run" "Both use the same OCI image and no network."

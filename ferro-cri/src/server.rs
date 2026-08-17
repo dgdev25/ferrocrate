@@ -443,6 +443,28 @@ fn sandbox_network_is_present(record: &SandboxRecord) -> bool {
         .is_some()
 }
 
+/// Reconcile kernel effects left behind when a daemon or host disappears
+/// between sandbox namespace creation and durable cleanup. CRI sandbox
+/// networks are owned by the persisted sandbox record, so a missing owned
+/// namespace authorizes removal of its host-side veth and bridge. Failures are
+/// deliberately retained for a later retry instead of deleting durable state.
+fn reconcile_persisted_sandbox_networks(sandboxes: &BTreeMap<String, SandboxRecord>) {
+    for record in sandboxes.values() {
+        let (Some(namespace), Some(network)) =
+            (record.netns_name.as_deref(), record.network.as_ref())
+        else {
+            continue;
+        };
+        if ferro_net::netns_path(namespace).exists() {
+            continue;
+        }
+        let Ok(config) = network.config(namespace) else {
+            continue;
+        };
+        let _ = ferro_net::sandbox::destroy_sandbox_network(&config);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ContainerSpecRecord {
     id: String,
@@ -560,6 +582,7 @@ impl CriRuntime {
             .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
         let runtime_dir = std::path::PathBuf::from(runtime_dir);
         let sandboxes = load_sandboxes(&runtime_dir);
+        reconcile_persisted_sandbox_networks(&sandboxes);
         let mut containers = load_containers(&runtime_dir);
         reconcile_persisted_container_bindings(&runtime_dir, &mut containers);
         Self {
@@ -579,6 +602,7 @@ impl CriRuntime {
     ) -> Self {
         let runtime_dir = runtime_dir.into();
         let sandboxes = load_sandboxes(&runtime_dir);
+        reconcile_persisted_sandbox_networks(&sandboxes);
         let mut containers = load_containers(&runtime_dir);
         reconcile_persisted_container_bindings(&runtime_dir, &mut containers);
         Self {
@@ -2265,6 +2289,9 @@ mod tests {
         ferro_net::destroy_netns(&netns_name).expect("simulate namespace loss");
         let reconciled =
             CriRuntime::with_runtime_dir(store, root.path(), test_surface_authorization());
+        assert!(ferro_net::observe_bridge_identity(&bridge_name)
+            .expect("bridge observation after restart reconciliation")
+            .is_none());
         let notready = reconciled
             .pod_sandbox_status(authenticated(PodSandboxStatusRequest {
                 pod_sandbox_id: sandbox_id.clone(),

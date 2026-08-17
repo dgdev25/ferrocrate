@@ -4555,6 +4555,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             }
             let env = parse_env_entries(env)?;
             parse_bind_mounts(bind_mounts)?;
+            validate_remote_volume_entries(volumes)?;
             parse_capabilities(cap_add)?;
             let _ = build_limits(*memory_max, *cpu_quota, *cpu_period, *pids_max)?;
             let health = build_health_config(
@@ -5726,6 +5727,20 @@ fn parse_publish(
         });
     }
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_remote_volume_entries(entries: &[String]) -> Result<(), String> {
+    for entry in entries {
+        let parts = entry.split(':').collect::<Vec<_>>();
+        if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+            return Err("run: volume must be source:target[:ro]".to_string());
+        }
+        if parts.len() > 2 && parts[2] != "ro" {
+            return Err("run: volume mode must be ro when specified".to_string());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -15629,6 +15644,20 @@ volumes:
             .expect("remote context should claim run")
             .expect_err("invalid bind mounts must be rejected");
         assert!(result.contains("bind mount"), "error={result}");
+
+        let invalid_volume = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "alpine",
+            "--volume",
+            "data-only",
+        ])
+        .expect("parse invalid remote volume")
+        .command;
+        let result = dispatch_remote_context(&invalid_volume)
+            .expect("remote context should claim run")
+            .expect_err("invalid volumes must be rejected");
+        assert!(result.contains("volume must be"), "error={result}");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },

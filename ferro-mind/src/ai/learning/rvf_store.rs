@@ -252,4 +252,35 @@ mod tests {
             .expect("query compressed store");
         assert_eq!(hits.len(), 1);
     }
+
+    #[test]
+    fn scalar_compression_preserves_a_thousand_vector_workload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("compressed-large.rvf");
+        let dimensions = 8;
+        {
+            let store = RvfStore::open_or_create_with_compression(
+                &path,
+                dimensions,
+                CompressionProfile::Scalar,
+            )
+            .expect("create compressed store");
+            for index in 0..1_000u32 {
+                let mut vector = [0.0_f32; 8];
+                vector[(index as usize) % dimensions] = 1.0;
+                vector[((index as usize) + 1) % dimensions] = (index + 1) as f32;
+                store
+                    .insert(Some(&format!("compressed-{index}")), &vector)
+                    .expect("insert compressed vector");
+            }
+            assert_eq!(store.len(), 1_000);
+        }
+
+        let reopened = RvfStore::open_or_create(&path, dimensions).expect("reopen compressed");
+        assert_eq!(reopened.len(), 1_000);
+        let hits = reopened
+            .search(&[1_000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], 10)
+            .expect("query compressed store");
+        assert_eq!(hits.len(), 10);
+    }
 }

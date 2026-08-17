@@ -49,8 +49,8 @@ section() {
 section "Platform Detection"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-    log_error "This script must run on macOS"
-    exit 1
+    log_warning "macOS compatibility suite skipped: this host is not macOS"
+    exit 77
 fi
 log_success "Running on macOS"
 

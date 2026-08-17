@@ -4,8 +4,9 @@ set -euo pipefail
 MAX_NS="${FERROCRATE_PERF_AI_OVERHEAD_MAX_NS:-1000000}"
 ENFORCE="${FERROCRATE_PERF_ENFORCE:-1}"
 ALLOW_SKIP="${FERROCRATE_PERF_ALLOW_SKIP:-0}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/ferrocrate-perf-target}"
 
-out="$(cargo run --release -p ferro-mind --example ai_overhead --quiet 2>/dev/null || true)"
+out="$(CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo run --release -p ferro-mind --example ai_overhead --quiet 2>/dev/null || true)"
 if [[ -z "$out" ]]; then
   if [[ "$ALLOW_SKIP" == "1" ]]; then
     printf 'perf.ai_overhead_skipped=1\nperf.ai_overhead_skip_reason=run_failed\n'

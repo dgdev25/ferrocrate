@@ -10252,7 +10252,7 @@ fn run_resource_monitor(
     store: SqliteContainerStore,
     id: String,
     cgroup_root: PathBuf,
-    memory_limit: u64,
+    mut memory_limit: u64,
     cancel: Arc<AtomicBool>,
 ) {
     use std::time::Instant;
@@ -10616,6 +10616,10 @@ fn run_resource_monitor(
                                     .with_evidence("action_enabled", "true");
                                     let _ = logger.log("ai_memory_adjustment", &trace);
                                 }
+                                // Keep subsequent normalization and predictions aligned
+                                // with the newly applied cgroup ceiling. Otherwise the
+                                // monitor would continue reasoning from a stale limit.
+                                memory_limit = adjusted_limit;
                                 predictor.set_memory_limit(adjusted_limit);
                             }
                             Err(e) => {

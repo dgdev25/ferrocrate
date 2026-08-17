@@ -892,12 +892,12 @@ impl RuntimeService for CriRuntime {
             .map_err(Status::internal)?;
             return Ok(Response::new(StartContainerResponse {}));
         }
-        let sandbox_uid = self
+        let (sandbox_uid, sandbox_network_mode) = self
             .sandboxes
             .lock()
             .map_err(|_| Status::internal("CRI sandbox state lock poisoned"))?
             .get(&record.sandbox_id)
-            .map(|sandbox| sandbox.uid.clone())
+            .map(|sandbox| (sandbox.uid.clone(), sandbox.network_mode.clone()))
             .ok_or_else(|| Status::failed_precondition("pod sandbox is not present"))?;
         let mut labels = std::collections::HashMap::new();
         labels.insert(
@@ -931,7 +931,7 @@ impl RuntimeService for CriRuntime {
                     None,
                     Some(&record.name),
                     &[],
-                    "none",
+                    &sandbox_network_mode,
                     ferro_net::NetworkBackend::Iptables,
                     None,
                 )

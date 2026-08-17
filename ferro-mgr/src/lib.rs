@@ -13,6 +13,7 @@ pub mod revocation;
 pub mod rotation;
 pub mod rpc;
 pub mod scheduler;
+pub mod service_discovery;
 pub mod store;
 
 pub mod proto {

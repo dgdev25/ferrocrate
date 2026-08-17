@@ -261,7 +261,11 @@ pub enum Commands {
     Rmi {
         image: String,
     },
-    ImagePrune,
+    ImagePrune {
+        /// Docker image-prune selector (`dangling=true|false` or `until=UNIX_SECONDS`).
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+    },
     #[cfg(target_os = "linux")]
     Volume {
         #[command(subcommand)]
@@ -2729,7 +2733,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &repository,
             ),
             Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
-            Commands::ImagePrune => handle_image_prune(&image_store, &surface_authorization),
+            Commands::ImagePrune { filters } => {
+                handle_image_prune(&image_store, &surface_authorization, &filters)
+            }
             Commands::Volume { command } => {
                 handle_volume(&runtime_dir, command, &surface_authorization)
             }
@@ -2931,7 +2937,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         match command {
             Commands::Images { format } => handle_images(&image_store, &format),
             Commands::Rmi { image } => handle_rmi(&image_store, &image),
-            Commands::ImagePrune => handle_image_prune(&image_store),
+            Commands::ImagePrune { filters } => handle_image_prune(&image_store, &filters),
             Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
             Commands::Push { image } => handle_push(&image_store, &image),
             Commands::Ai { command } => handle_ai(command),
@@ -4598,7 +4604,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 return Err("remote commit: container is required".to_string());
             }
             request("POST", remote_commit_path(container, repository)?)
-            .and_then(|body| print_json(body, "json"))
+                .and_then(|body| print_json(body, "json"))
         })(),
         Commands::Rmi { image } => (|| -> Result<(), String> {
             let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
@@ -4608,11 +4614,20 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             )
             .map(|_| ())
         })(),
-        Commands::ImagePrune => request("POST", "/images/prune".to_string()).map(|body| {
-            if !body.is_empty() {
-                println!("{}", String::from_utf8_lossy(&body));
-            }
-        }),
+        Commands::ImagePrune { filters } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_image_prune_filters(&parsed)?;
+            let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+            let path = format!(
+                "/images/prune?filters={}",
+                percent_encode_path_component(&encoded)
+            );
+            request("POST", path).map(|body| {
+                if !body.is_empty() {
+                    println!("{}", String::from_utf8_lossy(&body));
+                }
+            })
+        })(),
         Commands::Pull { image, lazy } => (|| -> Result<(), String> {
             let parsed = ferro_core::registry::parse_image_reference(image)
                 .map_err(|error| error.to_string())?;
@@ -6404,9 +6419,17 @@ fn execute_image_delete(
 fn handle_image_prune(
     store: &LocalImageStore,
     authorization: &SurfaceAuthorization,
+    filter_values: &[String],
 ) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-    let records = store.list_references().map_err(|error| error.to_string())?;
+    let filters = parse_cli_filters(filter_values)?;
+    validate_docker_image_prune_filters(&filters)?;
+    let records = store
+        .list_references()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| docker_image_prune_matches_filters(record, &filters))
+        .collect::<Vec<_>>();
     let permits = records
         .iter()
         .map(|record| {
@@ -10746,6 +10769,23 @@ fn parse_docker_filters(
     Ok(filters)
 }
 
+fn parse_cli_filters(values: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
+    let mut filters = HashMap::new();
+    for value in values {
+        let (key, filter_value) = value
+            .split_once('=')
+            .ok_or_else(|| format!("image prune: filter must use key=value syntax: {value}"))?;
+        if key.is_empty() || filter_value.is_empty() {
+            return Err("image prune: filter key and value must be non-empty".to_string());
+        }
+        filters
+            .entry(key.to_string())
+            .or_insert_with(Vec::new)
+            .push(filter_value.to_string());
+    }
+    Ok(filters)
+}
+
 fn docker_container_matches_filters(
     record: &ferro_core::container_store::ContainerRecord,
     filters: &HashMap<String, Vec<String>>,
@@ -11798,9 +11838,8 @@ mod tests {
         parse_docker_filters, parse_docker_limit_query, parse_docker_network_create_spec,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
         parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
-        read_docker_request_after_auth, read_http_request, read_merkle_leaves,
+        read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
         remote_docker_request, remote_docker_stream_request, should_desktop_forward,
-        remote_commit_path,
         split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_container_name, validate_docker_exec_command,
         validate_docker_image_prune_filters, validate_docker_network_filters,
@@ -12312,7 +12351,25 @@ volumes:
     fn parses_image_prune_command() {
         let cli = Cli::parse_from(["ferrocrate", "image-prune"]);
         match cli.command {
-            Commands::ImagePrune => {}
+            Commands::ImagePrune { filters } => assert!(filters.is_empty()),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_image_prune_filters() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "image-prune",
+            "--filter",
+            "dangling=true",
+            "--filter",
+            "until=100",
+        ]);
+        match cli.command {
+            Commands::ImagePrune { filters } => {
+                assert_eq!(filters, vec!["dangling=true", "until=100"]);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -12331,7 +12388,7 @@ volumes:
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
         let authorization = test_surface_authorization(temp.path());
-        handle_image_prune(&store, &authorization).expect("prune");
+        handle_image_prune(&store, &authorization, &[]).expect("prune");
     }
 
     #[test]
@@ -14928,7 +14985,9 @@ volumes:
             .expect("remote run --rm should succeed");
         let requests = worker.join().expect("remote run rm worker");
         assert!(String::from_utf8_lossy(&requests[0]).contains("POST /containers/create"));
-        assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-rm-id/start"));
+        assert!(
+            String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-rm-id/start")
+        );
         assert!(String::from_utf8_lossy(&requests[2])
             .contains("POST /containers/remote-rm-id/wait?condition=not-running"));
         assert!(String::from_utf8_lossy(&requests[3]).contains("DELETE /containers/remote-rm-id"));

@@ -3,6 +3,7 @@
 //! Tests for anomaly detection, restart policies, and vector memory.
 
 use ferro_mind::ai::learning::vector_memory::VectorMemory;
+use ferro_mind::ai::explain::DecisionTrace;
 use ferro_mind::ruv::types::{DistanceMetric, VectorEntry, VectorId};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -109,4 +110,32 @@ fn vector_memory_metadata_preserved() {
     } else {
         panic!("Expected metadata to be present");
     }
+}
+
+#[test]
+fn explainability_trace_preserves_inputs_model_confidence_and_action() {
+    let trace = DecisionTrace::new("trace-oom-1", "memory growth predicts OOM")
+        .with_model("resource-oom-predictor", "runtime-v1")
+        .with_decision("record-oom-prediction")
+        .with_evidence("container_id", "demo")
+        .with_evidence("current_memory_bytes", "768")
+        .with_evidence("memory_limit_bytes", "1024")
+        .with_evidence("confidence", "0.875");
+
+    let encoded = serde_json::to_value(&trace).expect("decision trace should serialize");
+    assert_eq!(encoded["model"], "resource-oom-predictor");
+    assert_eq!(encoded["model_version"], "runtime-v1");
+    assert_eq!(encoded["decision"], "record-oom-prediction");
+    assert_eq!(encoded["evidence"]["container_id"], "demo");
+    assert_eq!(encoded["evidence"]["confidence"], "0.875");
+}
+
+#[test]
+fn explainability_trace_orders_evidence_for_reproducible_audit() {
+    let trace = DecisionTrace::new("trace-repro", "restart decision")
+        .with_evidence("zeta", "last")
+        .with_evidence("alpha", "first");
+
+    let json = serde_json::to_string(&trace).expect("decision trace should serialize");
+    assert!(json.find("alpha").expect("alpha key") < json.find("zeta").expect("zeta key"));
 }

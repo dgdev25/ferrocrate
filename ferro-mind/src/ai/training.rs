@@ -281,6 +281,12 @@ pub enum TrainingError {
 
     #[error("training-data collection requires explicit operator consent")]
     DataCollectionDisabled,
+
+    #[error("model activation requires explicit operator approval")]
+    ApprovalRequired,
+
+    #[error("invalid model activation approval token")]
+    InvalidApproval,
 }
 
 impl From<String> for TrainingError {
@@ -374,6 +380,12 @@ pub struct TrainingPipeline {
     online_running: Arc<AtomicBool>,
     online_sample_cursor: HashMap<ModelType, usize>,
     online_retrain_delta: usize,
+}
+
+fn human_approval_required() -> bool {
+    std::env::var("FERROCRATE_AI_REQUIRE_APPROVAL")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 impl TrainingPipeline {
@@ -605,7 +617,10 @@ impl TrainingPipeline {
             }
         }
 
-        // Update version history
+        // Update version history. Operators may require an explicit approval
+        // step for candidates; the default remains backward-compatible
+        // automatic activation after the loss/digest gates above.
+        let approved = !human_approval_required();
         let model_version = ModelVersion {
             model_type: model_type.to_string(),
             version,
@@ -614,13 +629,15 @@ impl TrainingPipeline {
             loss: Some(trained.loss),
             path: model_path.clone(),
             artifact_sha256: artifact_sha256(&model_path)?,
-            active: true,
+            active: approved,
         };
 
         // Deactivate previous versions
         if let Some(versions) = self.versions.get_mut(&model_type) {
-            for v in versions.iter_mut() {
-                v.active = false;
+            if approved {
+                for v in versions.iter_mut() {
+                    v.active = false;
+                }
             }
             versions.push_back(model_version);
 
@@ -645,6 +662,48 @@ impl TrainingPipeline {
             loss: Some(trained.loss),
             model_path,
         })
+    }
+
+    /// Activate a pending candidate after an explicit operator approval.
+    ///
+    /// The token is intentionally bound to the exact model type, version, and
+    /// artifact digest: `model-type:version:sha256`. This prevents approval of
+    /// a different artifact after a candidate is replaced on disk.
+    pub fn approve_model(
+        &mut self,
+        model_type: ModelType,
+        version: u32,
+        approval_token: &str,
+    ) -> Result<ModelVersion, TrainingError> {
+        let versions = self
+            .versions
+            .get_mut(&model_type)
+            .ok_or(TrainingError::ModelNotFound(model_type.to_string()))?;
+        let candidate = versions
+            .iter()
+            .find(|entry| entry.version == version)
+            .ok_or(TrainingError::ModelNotFound(format!(
+                "{} v{version}",
+                model_type
+            )))?;
+        let digest = artifact_sha256(&candidate.path)?;
+        let expected = format!("{}:{}:{digest}", model_type, version);
+        if approval_token != expected {
+            return Err(TrainingError::InvalidApproval);
+        }
+        for entry in versions.iter_mut() {
+            entry.active = entry.version == version;
+        }
+        let approved = versions
+            .iter()
+            .find(|entry| entry.version == version)
+            .cloned()
+            .ok_or(TrainingError::ModelNotFound(format!(
+                "{} v{version}",
+                model_type
+            )))?;
+        self.save_versions(model_type)?;
+        Ok(approved)
     }
 
     /// Load training data from directory
@@ -2159,6 +2218,53 @@ mod tests {
         match previous_ai {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+    }
+
+    #[test]
+    fn human_approval_mode_keeps_candidate_inactive_until_exact_digest_approval() {
+        let _guard = AI_ENV_LOCK.lock().expect("AI env lock");
+        let (_temp, config) = setup_test_env();
+        let previous_ai = std::env::var("FERROCRATE_AI").ok();
+        let previous_approval = std::env::var("FERROCRATE_AI_REQUIRE_APPROVAL").ok();
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+            std::env::set_var("FERROCRATE_AI_REQUIRE_APPROVAL", "1");
+        }
+        let mut pipeline = TrainingPipeline::new(config).expect("pipeline");
+        let trained = pipeline
+            .train(ModelType::ResourcePredictor)
+            .expect("candidate trains");
+        assert!(pipeline
+            .get_active_version(ModelType::ResourcePredictor)
+            .is_none());
+        let digest = artifact_sha256(&trained.model_path).expect("candidate digest");
+        assert!(matches!(
+            pipeline.approve_model(ModelType::ResourcePredictor, trained.version, "wrong"),
+            Err(TrainingError::InvalidApproval)
+        ));
+        let approved = pipeline
+            .approve_model(
+                ModelType::ResourcePredictor,
+                trained.version,
+                &format!("resource-predictor:{}:{digest}", trained.version),
+            )
+            .expect("exact approval");
+        assert!(approved.active);
+        assert_eq!(
+            pipeline
+                .get_active_version(ModelType::ResourcePredictor)
+                .expect("approved model")
+                .version,
+            trained.version
+        );
+        match previous_ai {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+        match previous_approval {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI_REQUIRE_APPROVAL", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI_REQUIRE_APPROVAL") },
         }
     }
 

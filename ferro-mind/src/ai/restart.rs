@@ -116,6 +116,61 @@ impl AdaptiveRestartPolicy {
         }
     }
 
+    /// Load the portable restart-policy artifact produced by the training
+    /// pipeline. The learned success prior only adjusts the policy's bounded
+    /// probability estimate; retry ceilings and clean-exit safety rules remain
+    /// owned by this policy implementation.
+    pub fn from_model_artifact(path: &std::path::Path, container_id: &str) -> Result<Self, String> {
+        const MAX_ARTIFACT_BYTES: u64 = 1 << 20;
+        if std::fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_ARTIFACT_BYTES
+        {
+            return Err("restart model artifact exceeds 1 MiB".to_string());
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid restart model artifact: {error}"))?;
+        if value.get("model_type").and_then(serde_json::Value::as_str) != Some("restart-policy") {
+            return Err("restart model artifact has an unexpected model_type".to_string());
+        }
+        let artifact = value
+            .get("artifact")
+            .ok_or_else(|| "restart model artifact is missing artifact data".to_string())?;
+        let success_rate = artifact
+            .get("success_rate")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| "restart success rate is invalid".to_string())?
+            as f32;
+        let accuracy = artifact
+            .get("baseline_accuracy")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| "restart baseline accuracy is invalid".to_string())?
+            as f32;
+        for key in ["avg_uptime_success", "avg_uptime_failure"] {
+            let uptime = artifact
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| format!("restart {key} is invalid"))?;
+            if !uptime.is_finite() || uptime < 0.0 {
+                return Err(format!("restart {key} is outside supported bounds"));
+            }
+        }
+        if !success_rate.is_finite()
+            || !accuracy.is_finite()
+            || !(0.0..=1.0).contains(&success_rate)
+            || !(0.0..=1.0).contains(&accuracy)
+        {
+            return Err("restart model statistics are outside 0..=1".to_string());
+        }
+        let mut policy = Self::new(container_id);
+        let prior = success_rate.clamp(0.01, 0.99);
+        policy.decision_bias = (prior / (1.0 - prior)).ln();
+        policy.decision_learning_rate = (0.08 * accuracy.max(0.25)).clamp(0.02, 0.08);
+        Ok(policy)
+    }
+
     /// Set custom max retries
     pub fn with_max_retries(mut self, max: u32) -> Self {
         self.max_retries = max;
@@ -532,6 +587,44 @@ mod tests {
         let policy = AdaptiveRestartPolicy::new("test-container");
         assert_eq!(policy.get_pattern(), CrashPattern::Unknown);
         assert_eq!(policy.get_confidence(), 0.0);
+    }
+
+    #[test]
+    fn loads_trained_restart_artifact_and_preserves_safety_limits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "model_type": "restart-policy",
+                "artifact": {
+                    "success_rate": 0.1,
+                    "baseline_accuracy": 0.9,
+                    "avg_uptime_success": 120.0,
+                    "avg_uptime_failure": 5.0
+                }
+            })
+            .to_string(),
+        )
+        .expect("artifact");
+
+        let mut policy = AdaptiveRestartPolicy::from_model_artifact(&path, "test-container")
+            .expect("load model");
+        assert!(
+            policy.estimate_success_probability(&RestartSignal {
+                exit_code: 1,
+                recent_failures: 2,
+                uptime_secs: 5,
+            }) < 0.20
+        );
+        assert_eq!(
+            policy.decide(&RestartSignal {
+                exit_code: 1,
+                recent_failures: 5,
+                uptime_secs: 5,
+            }),
+            RestartDecision::DoNotRestart
+        );
     }
 
     #[test]

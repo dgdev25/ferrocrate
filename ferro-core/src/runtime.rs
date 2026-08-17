@@ -5264,7 +5264,43 @@ fn supervise_child(
     netns_name: Option<String>,
     seccomp_profile: Option<SeccompProfile>,
 ) {
+    let mut adaptive_model_version = "runtime-v1".to_string();
     let mut adaptive_policy = ferro_mind::ai::restart::AdaptiveRestartPolicy::new(&container_id);
+    if ai_enabled {
+        let active_model = match ferro_mind::ai::training::TrainingPipeline::new(
+            ferro_mind::ai::training::TrainingConfig::default(),
+        ) {
+            Ok(pipeline) => pipeline
+                .resolve_active_model(ferro_mind::ai::training::ModelType::RestartPolicy)
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        match active_model {
+            Ok(active) => {
+                match ferro_mind::ai::restart::AdaptiveRestartPolicy::from_model_artifact(
+                    &active.path,
+                    &container_id,
+                ) {
+                    Ok(model_policy) => {
+                        adaptive_policy = model_policy;
+                        adaptive_model_version = format!("active-v{}", active.version);
+                        info!(
+                            container = %container_id,
+                            model_version = %adaptive_model_version,
+                            artifact_sha256 = %active.artifact_sha256,
+                            "resolved active restart policy"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(container = %container_id, error = %error, "active restart model rejected; using runtime policy");
+                    }
+                }
+            }
+            Err(error) => {
+                info!(container = %container_id, error = %error, "no active restart model; using runtime policy");
+            }
+        }
+    }
     let mut restart_count: u32 = 0;
     let mut container_start_time = std::time::Instant::now();
 
@@ -5304,7 +5340,7 @@ fn supervise_child(
                     format!("ai-restart-{container_id}-{ts}"),
                     format!("Adaptive restart policy evaluated container {container_id}"),
                 )
-                .with_model("adaptive-restart-policy", "runtime-v1")
+                .with_model("adaptive-restart-policy", &adaptive_model_version)
                 .with_decision(format!("{decision:?}"))
                 .with_evidence("container_id", container_id.clone())
                 .with_evidence("exit_code", exit_code.to_string())

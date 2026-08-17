@@ -4530,8 +4530,6 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "--network-backend (remote Docker uses the daemon backend)",
                 ),
                 (!tmpfs_mounts.is_empty(), "--tmpfs"),
-                (*read_only_rootfs, "--read-only"),
-                (*no_new_privs, "--no-new-privileges"),
                 (*profile != "dev", "--profile"),
                 (!annotations.is_empty(), "--annotation"),
                 (!cap_add.is_empty(), "--cap-add"),
@@ -4597,6 +4595,12 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "Binds": binds,
                     "PortBindings": port_bindings,
                     "NetworkMode": network_mode,
+                    "ReadonlyRootfs": read_only_rootfs,
+                    "SecurityOpt": if *no_new_privs {
+                        vec!["no-new-privileges".to_string()]
+                    } else {
+                        Vec::new()
+                    },
                 },
             });
             let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
@@ -15537,13 +15541,13 @@ volumes:
             name: "remote".to_string(),
         })
         .expect("select context");
-        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine", "--read-only"])
+        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine", "--profile", "prod"])
             .expect("parse run")
             .command;
         let result = dispatch_remote_context(&command)
             .expect("remote context should claim run")
             .expect_err("local-only option must be rejected");
-        assert!(result.contains("--read-only"), "error={result}");
+        assert!(result.contains("--profile"), "error={result}");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
@@ -15596,6 +15600,8 @@ volumes:
             "tier=frontend",
             "--publish",
             "8080:80/tcp",
+            "--read-only",
+            "--no-new-privileges",
             "echo",
             "ready",
         ])
@@ -15609,6 +15615,8 @@ volumes:
         assert!(create.contains("POST /containers/create?name=web%2Fname"));
         assert!(create.contains("\"Image\":\"alpine:latest\""));
         assert!(create.contains("\"NetworkMode\":\"bridge\""));
+        assert!(create.contains("\"ReadonlyRootfs\":true"));
+        assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));
 

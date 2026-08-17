@@ -3,7 +3,15 @@
 //! This module produces an ordered, side-effect-free plan. Applying a plan
 //! still belongs to the authorized controller/agent reconciliation path.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
 
@@ -19,6 +27,97 @@ pub struct RolloutPolicy {
 pub struct RolloutStep {
     pub start: Vec<String>,
     pub stop: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolloutCheckpoint {
+    pub generation: u64,
+    pub step: usize,
+    pub plan_digest: [u8; 32],
+    pub completed_start: Vec<String>,
+    pub completed_stop: Vec<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum CheckpointError {
+    #[error("checkpoint I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("checkpoint is invalid")]
+    Invalid,
+    #[error("checkpoint exceeds the size limit")]
+    Oversized,
+    #[error("checkpoint serialization failed: {0}")]
+    Codec(#[from] serde_json::Error),
+}
+
+pub struct CheckpointStore {
+    path: PathBuf,
+}
+
+impl CheckpointStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn load(&self) -> Result<Option<RolloutCheckpoint>, CheckpointError> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let metadata = fs::symlink_metadata(&self.path)?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(CheckpointError::Invalid);
+        }
+        let bytes = fs::read(&self.path)?;
+        if bytes.len() > 256 * 1024 {
+            return Err(CheckpointError::Oversized);
+        }
+        let checkpoint: RolloutCheckpoint = serde_json::from_slice(&bytes)?;
+        validate_checkpoint(&checkpoint)?;
+        Ok(Some(checkpoint))
+    }
+
+    pub fn save(&self, checkpoint: &RolloutCheckpoint) -> Result<(), CheckpointError> {
+        validate_checkpoint(checkpoint)?;
+        let bytes = serde_json::to_vec(checkpoint)?;
+        if bytes.len() > 256 * 1024 {
+            return Err(CheckpointError::Oversized);
+        }
+        let parent = self.path.parent().ok_or(CheckpointError::Invalid)?;
+        fs::create_dir_all(parent)?;
+        let temporary = self.path.with_extension("tmp");
+        if temporary.exists() {
+            fs::remove_file(&temporary)?;
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &self.path)?;
+        sync_parent(parent)?;
+        Ok(())
+    }
+}
+
+fn validate_checkpoint(checkpoint: &RolloutCheckpoint) -> Result<(), CheckpointError> {
+    if checkpoint.completed_start.len() > 65_536 || checkpoint.completed_stop.len() > 65_536 {
+        return Err(CheckpointError::Invalid);
+    }
+    if checkpoint
+        .completed_start
+        .iter()
+        .chain(checkpoint.completed_stop.iter())
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(CheckpointError::Invalid);
+    }
+    Ok(())
+}
+
+fn sync_parent(parent: &Path) -> Result<(), std::io::Error> {
+    OpenOptions::new().read(true).open(parent)?.sync_all()
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -179,5 +278,51 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+    }
+
+    #[test]
+    fn checkpoint_store_round_trips_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(directory.path().join("rollout.json"));
+        let checkpoint = RolloutCheckpoint {
+            generation: 4,
+            step: 2,
+            plan_digest: [7; 32],
+            completed_start: ids(&["new-a"]),
+            completed_stop: ids(&["old-a"]),
+        };
+        store.save(&checkpoint).unwrap();
+        assert_eq!(store.load().unwrap(), Some(checkpoint));
+        let mode = std::fs::metadata(directory.path().join("rollout.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn checkpoint_store_rejects_symlinks_and_empty_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.json");
+        let link = directory.path().join("rollout.json");
+        std::fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            CheckpointStore::new(link).load(),
+            Err(CheckpointError::Invalid)
+        ));
+
+        let invalid = RolloutCheckpoint {
+            generation: 1,
+            step: 0,
+            plan_digest: [0; 32],
+            completed_start: vec![String::new()],
+            completed_stop: Vec::new(),
+        };
+        assert!(matches!(
+            CheckpointStore::new(directory.path().join("invalid.json")).save(&invalid),
+            Err(CheckpointError::Invalid)
+        ));
     }
 }

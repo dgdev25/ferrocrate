@@ -12731,7 +12731,8 @@ mod tests {
         docker_container_prune_matches_filters, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
+        docker_inspect_payload, docker_network_ipv6_config, docker_network_matches_filters,
+        docker_pending_inspect_payload,
         docker_pending_matches_filters, docker_pending_prune_matches_filters, docker_raw_stream,
         docker_runtime_healthcheck, docker_tail_logs, docker_top_payload,
         docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
@@ -15164,6 +15165,34 @@ volumes:
         let projected = docker_runtime_healthcheck(&health);
         assert_eq!(projected["Test"][0], "CMD");
         assert_eq!(projected["Test"][1], "/bin/check");
+    }
+
+    #[test]
+    fn docker_inspect_projects_persisted_runtime_resource_limits() {
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "running-limits",
+                "pid": 4242,
+                "image": "alpine:3.20",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "resource_limits": {
+                    "memory_max": 67108864,
+                    "cpu_quota": 50000,
+                    "cpu_period": 100000,
+                    "pids_max": 32
+                }
+            }))
+            .expect("running record");
+
+        let payload = docker_inspect_payload(&record);
+        assert_eq!(payload["HostConfig"]["Memory"], 67_108_864u64);
+        assert_eq!(payload["HostConfig"]["CpuQuota"], 50_000u64);
+        assert_eq!(payload["HostConfig"]["CpuPeriod"], 100_000u64);
+        assert_eq!(payload["HostConfig"]["PidsLimit"], 32u64);
     }
 
     #[test]

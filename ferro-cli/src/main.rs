@@ -9989,7 +9989,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut attach_hijack: Option<String> = None;
+    let mut attach_hijack: Option<(String, bool, bool)> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -10186,12 +10186,22 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/attach");
                 // Docker's attach query flags are validated even though the
-                // local runtime currently exposes its persisted combined log
-                // stream as stdout. This avoids silently accepting malformed
-                // client requests while keeping the response non-hijacking.
+                // local runtime exposes its persisted combined log stream as
+                // stdout. Keep the flags explicit so `logs=0` does not leak
+                // historical output into a new attach session.
                 for key in ["logs", "stream", "stdout", "stderr"] {
                     let _ = parse_docker_bool_query(query.get(key), key)?;
                 }
+                let logs_requested = query
+                    .get("logs")
+                    .map(|value| parse_docker_bool_query(Some(value), "logs"))
+                    .transpose()?
+                    .unwrap_or(false);
+                let stream_requested = query
+                    .get("stream")
+                    .map(|value| parse_docker_bool_query(Some(value), "stream"))
+                    .transpose()?
+                    .unwrap_or(false);
                 let pending_attach = runtime.logs(id).is_err();
                 if pending_attach {
                     let pending = state
@@ -10204,7 +10214,11 @@ fn handle_docker_compat_connection(
                     }
                 }
                 let logs = runtime.logs(id).unwrap_or_default();
-                let output = docker_raw_stream(&logs, "");
+                let output = if logs_requested {
+                    docker_raw_stream(&logs, "")
+                } else {
+                    Vec::new()
+                };
                 let upgraded = request.headers.get("connection").is_some_and(|value| {
                     value
                         .split(',')
@@ -10219,7 +10233,11 @@ fn handle_docker_compat_connection(
                     // immediately for that pending record so the client can
                     // issue `/start`; running records retain live streaming.
                     if !pending_attach {
-                        attach_hijack = Some(id.to_string());
+                        attach_hijack = Some((
+                            id.to_string(),
+                            logs_requested,
+                            stream_requested,
+                        ));
                     }
                     docker_hijack_headers()
                 } else {
@@ -11080,10 +11098,16 @@ fn handle_docker_compat_connection(
         stream_docker_stats(&mut stream, &follow_runtime, &id)?;
         return Ok(());
     }
-    if let Some(id) = attach_hijack {
+    if let Some((id, logs_requested, stream_requested)) = attach_hijack {
         let follow_runtime =
             ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
-        stream_docker_attach(&mut stream, &follow_runtime, &id)?;
+        stream_docker_attach(
+            &mut stream,
+            &follow_runtime,
+            &id,
+            logs_requested,
+            stream_requested,
+        )?;
         return Ok(());
     }
     if let Some((method, path, request_body)) = event_request {
@@ -12373,6 +12397,8 @@ fn stream_docker_attach(
     stream: &mut UnixStream,
     runtime: &ContainerRuntime,
     id: &str,
+    logs_requested: bool,
+    stream_requested: bool,
 ) -> Result<(), String> {
     // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
     // briefly for the pending record to become a real runtime record instead
@@ -12389,10 +12415,21 @@ fn stream_docker_attach(
         }
     };
     if record.pid == 0 {
-        let raw = runtime.logs(id).map_err(|error| error.to_string())?;
-        let frame = docker_raw_stream(&raw, "");
+        if logs_requested {
+            let raw = runtime.logs(id).map_err(|error| error.to_string())?;
+            let frame = docker_raw_stream(&raw, "");
+            stream.write_all(&frame).map_err(|error| error.to_string())?;
+            stream.flush().map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    let initial_logs = runtime.logs(id).map_err(|error| error.to_string())?;
+    if logs_requested && !initial_logs.is_empty() {
+        let frame = docker_raw_stream(&initial_logs, "");
         stream.write_all(&frame).map_err(|error| error.to_string())?;
         stream.flush().map_err(|error| error.to_string())?;
+    }
+    if !stream_requested {
         return Ok(());
     }
     let mut stdin = std::fs::OpenOptions::new()
@@ -12402,7 +12439,7 @@ fn stream_docker_attach(
     stream
         .set_read_timeout(Some(Duration::from_millis(250)))
         .map_err(|error| error.to_string())?;
-    let mut emitted = 0usize;
+    let mut emitted = initial_logs.len();
     let mut input = [0_u8; 16 * 1024];
     loop {
         match stream.read(&mut input) {

@@ -30,6 +30,13 @@ EOF
 cleanup() {
   if [[ -n "${ferro_daemon_pid:-}" ]] && kill -0 "$ferro_daemon_pid" 2>/dev/null; then
     kill "$ferro_daemon_pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$ferro_daemon_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 "$ferro_daemon_pid" 2>/dev/null; then
+      kill -KILL "$ferro_daemon_pid" 2>/dev/null || true
+    fi
     wait "$ferro_daemon_pid" 2>/dev/null || true
   fi
   rm -rf "$tmp_root"
@@ -98,9 +105,19 @@ record "network list" "docker network ls" "$ferro_env $ferro_bin network ls" "De
 
 # Start Ferrocrate's Docker-compatible socket for API measurements.
 mkdir -p "$ferro_runtime"
-eval "$ferro_env $ferro_bin daemon --docker-compat --socket '$ferro_socket'" >/dev/null 2>&1 &
+env FERROCRATE_RUNTIME_DIR="$ferro_runtime" HOME="$tmp_root" \
+  FERROCRATE_NETWORK_BACKEND=iptables "$ferro_bin" daemon \
+  --docker-compat --socket "$ferro_socket" >/dev/null 2>&1 &
 ferro_daemon_pid=$!
-for _ in $(seq 1 50); do [[ -S "$ferro_socket" ]] && break; sleep 0.1; done
+for _ in $(seq 1 50); do
+  [[ -S "$ferro_socket" ]] && break
+  if ! kill -0 "$ferro_daemon_pid" 2>/dev/null; then
+    echo "Ferrocrate Docker-compatible daemon exited before opening its socket" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+[[ -S "$ferro_socket" ]] || { echo "Ferrocrate Docker-compatible daemon did not open its socket" >&2; exit 1; }
 
 # 8-10. Three common Docker API calls over Unix sockets.
 record "API ping" "curl --silent --fail --unix-socket /var/run/docker.sock http://localhost/_ping" "curl --silent --fail --unix-socket '$ferro_socket' http://localhost/_ping" "Unix-socket API health check."

@@ -1224,6 +1224,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             capabilities: vec!["CAP_NET_BIND_SERVICE".to_string()],
+            resource_limits: None,
             health: None,
             health_status: "none".to_string(),
             health_failures: 0,
@@ -1358,6 +1359,7 @@ mod tests {
             labels: HashMap::new(),
             annotations: HashMap::new(),
             capabilities: Vec::new(),
+            resource_limits: None,
             health: None,
             health_status: "none".to_string(),
             health_failures: 0,

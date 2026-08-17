@@ -4495,7 +4495,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             bind_mounts,
             tmpfs_mounts,
             read_only_rootfs,
-            read_write_rootfs: _,
+            read_write_rootfs,
             no_new_privs,
             profile,
             env,
@@ -4549,6 +4549,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 ))
                 }
             };
+            let read_only = effective_readonly(profile, *read_only_rootfs, *read_write_rootfs)?;
             let env = parse_env_entries(env)?;
             let _ = build_limits(*memory_max, *cpu_quota, *cpu_period, *pids_max)?;
             let health = build_health_config(
@@ -4609,7 +4610,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                         "MaximumRetryCount": 0,
                     },
                     "Healthcheck": health.as_ref().map(docker_runtime_healthcheck),
-                    "ReadonlyRootfs": read_only_rootfs,
+                    "ReadonlyRootfs": read_only,
                     "CapAdd": cap_add,
                     "SecurityOpt": if *no_new_privs {
                         vec!["no-new-privileges".to_string()]
@@ -15567,6 +15568,20 @@ volumes:
             .expect("remote context should claim run")
             .expect_err("local-only option must be rejected");
         assert!(result.contains("--profile"), "error={result}");
+
+        let conflicting = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "alpine",
+            "--read-only",
+            "--read-write",
+        ])
+        .expect("parse conflicting rootfs flags")
+        .command;
+        let result = dispatch_remote_context(&conflicting)
+            .expect("remote context should claim run")
+            .expect_err("conflicting rootfs flags must be rejected");
+        assert!(result.contains("read-only and --read-write"), "error={result}");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },

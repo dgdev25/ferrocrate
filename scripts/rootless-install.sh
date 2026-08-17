@@ -44,8 +44,14 @@ if [[ -z "$binary" ]]; then
   candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/ferrocrate"
   [[ -x "$candidate" ]] && binary="$candidate"
 fi
+if [[ -z "$binary" ]]; then
+  # The workspace package is named ferro-cli and Cargo emits this binary;
+  # release packaging may rename it to ferrocrate, so support both layouts.
+  candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/ferro-cli"
+  [[ -x "$candidate" ]] && binary="$candidate"
+fi
 if [[ -z "$binary" || ! -x "$binary" ]]; then
-  echo "rootless-install: executable ferrocrate not found; pass --binary PATH" >&2
+  echo "rootless-install: ferrocrate/ferro-cli executable not found; pass --binary PATH" >&2
   exit 1
 fi
 if [[ "$binary" != /* || "$binary" == *[$'\t\n\r"%']* ]]; then

@@ -9184,6 +9184,14 @@ struct DockerHostConfig {
     network_mode: Option<String>,
     #[serde(rename = "AutoRemove", default)]
     auto_remove: bool,
+    #[serde(rename = "Memory")]
+    memory: Option<i64>,
+    #[serde(rename = "CpuQuota")]
+    cpu_quota: Option<i64>,
+    #[serde(rename = "CpuPeriod")]
+    cpu_period: Option<i64>,
+    #[serde(rename = "PidsLimit")]
+    pids_limit: Option<i64>,
 }
 
 #[cfg(target_os = "linux")]
@@ -9209,6 +9217,14 @@ struct DockerCreateSpec {
     #[serde(default)]
     auto_remove: bool,
     health: Option<DockerHealthSpec>,
+    #[serde(default)]
+    memory_max: Option<u64>,
+    #[serde(default)]
+    cpu_quota: Option<u64>,
+    #[serde(default)]
+    cpu_period: Option<u64>,
+    #[serde(default)]
+    pids_max: Option<u64>,
     #[serde(default)]
     created_at_unix: u64,
 }
@@ -10537,10 +10553,10 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    spec.memory_max,
+                    spec.cpu_quota,
+                    spec.cpu_period,
+                    spec.pids_max,
                     None,
                     None,
                     Some(id),
@@ -11934,6 +11950,10 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         port_bindings: None,
         network_mode: None,
         auto_remove: false,
+        memory: None,
+        cpu_quota: None,
+        cpu_period: None,
+        pids_limit: None,
     });
     let publish = port_bindings_to_publish(host_config.port_bindings)?;
     let network_mode = match host_config.network_mode.as_deref() {
@@ -11943,6 +11963,10 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         Some(other) => return Err(format!("docker: unsupported network mode {other}")),
     };
     let health = parse_docker_healthcheck(request.healthcheck)?;
+    let memory_max = normalize_docker_limit(host_config.memory, "Memory")?;
+    let cpu_quota = normalize_docker_limit(host_config.cpu_quota, "CpuQuota")?;
+    let cpu_period = normalize_docker_limit(host_config.cpu_period, "CpuPeriod")?;
+    let pids_max = normalize_docker_limit(host_config.pids_limit, "PidsLimit")?;
     Ok(DockerCreateSpec {
         image: request.image,
         cmd,
@@ -11956,11 +11980,25 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         network_mode,
         auto_remove: host_config.auto_remove,
         health,
+        memory_max,
+        cpu_quota,
+        cpu_period,
+        pids_max,
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(0),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_docker_limit(value: Option<i64>, field: &str) -> Result<Option<u64>, String> {
+    match value {
+        None | Some(0) => Ok(None),
+        Some(value) if value > 0 => Ok(Some(value as u64)),
+        Some(-1) if field == "PidsLimit" => Ok(None),
+        Some(_) => Err(format!("docker: {field} must be zero, positive, or -1 for PidsLimit")),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -12095,6 +12133,12 @@ fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_js
             "User": spec.user,
             "Labels": labels,
             "Healthcheck": spec.health.as_ref().map(docker_pending_healthcheck),
+        },
+        "HostConfig": {
+            "Memory": spec.memory_max.unwrap_or(0),
+            "CpuQuota": spec.cpu_quota.unwrap_or(0),
+            "CpuPeriod": spec.cpu_period.unwrap_or(0),
+            "PidsLimit": spec.pids_max.unwrap_or(0),
         },
         "State": {
             "Status": "created",
@@ -15030,6 +15074,31 @@ volumes:
     }
 
     #[test]
+    fn docker_create_spec_preserves_host_resource_limits() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"Memory":67108864,"CpuQuota":50000,"CpuPeriod":100000,"PidsLimit":32}}"#,
+            None,
+        )
+        .expect("resource limits");
+        assert_eq!(spec.memory_max, Some(67_108_864));
+        assert_eq!(spec.cpu_quota, Some(50_000));
+        assert_eq!(spec.cpu_period, Some(100_000));
+        assert_eq!(spec.pids_max, Some(32));
+
+        let unlimited = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"PidsLimit":-1}}"#,
+            None,
+        )
+        .expect("unlimited pids");
+        assert_eq!(unlimited.pids_max, None);
+        assert!(parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"Memory":-1}}"#,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn docker_inspect_projects_healthcheck_configuration() {
         let pending = DockerCreateSpec {
             image: "busybox".to_string(),
@@ -15050,6 +15119,10 @@ volumes:
                 retries: 3,
                 start_period_secs: 4,
             }),
+            memory_max: None,
+            cpu_quota: None,
+            cpu_period: None,
+            pids_max: None,
             created_at_unix: 0,
         };
         let payload = docker_pending_inspect_payload("pending", &pending);
@@ -15090,6 +15163,10 @@ volumes:
                 network_mode: "bridge".to_string(),
                 auto_remove: false,
                 health: None,
+                memory_max: None,
+                cpu_quota: None,
+                cpu_period: None,
+                pids_max: None,
                 created_at_unix: 0,
             },
         );
@@ -15128,6 +15205,10 @@ volumes:
             network_mode: "bridge".to_string(),
             auto_remove: false,
             health: None,
+            memory_max: None,
+            cpu_quota: None,
+            cpu_period: None,
+            pids_max: None,
             created_at_unix: 0,
         };
         let mut filters = HashMap::new();
@@ -15255,6 +15336,10 @@ volumes:
             network_mode: "bridge".to_string(),
             auto_remove: false,
             health: None,
+            memory_max: None,
+            cpu_quota: None,
+            cpu_period: None,
+            pids_max: None,
             created_at_unix: 10,
         };
         let labels = serde_json::from_value(serde_json::json!({

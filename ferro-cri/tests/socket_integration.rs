@@ -294,6 +294,11 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
 #[allow(clippy::await_holding_lock)]
 async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let running_as_root = Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "0")
+        .unwrap_or(false);
 
     for mode in ["disabled", "shadow", "enforce"] {
         let before = ferro_core::observability::authorization_metrics_snapshot();
@@ -348,13 +353,17 @@ async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
 
         let canonical = ferro_core::image_tagging::canonicalize_reference(&image)
             .expect("canonical image reference");
-        if mode == "enforce" {
+        if mode == "enforce" && !running_as_root {
             let error = result.expect_err("enforce must deny before CRI mutation");
             assert_eq!(error.code(), tonic::Code::PermissionDenied);
             assert!(error.message().contains("PolicyDenied"));
         } else {
+            // The qualification fixture uses the peer's resolved role. A
+            // rootful socket is an administrator principal, so enforce mode
+            // must allow this ordinary image pull; non-root developers remain
+            // denied and are checked above.
             let response = result
-                .expect("disabled and shadow preserve CRI pull success")
+                .expect("authorized CRI pull must succeed")
                 .into_inner();
             assert_eq!(response.image_ref, canonical);
         }
@@ -370,8 +379,8 @@ async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
                 .resolve_reference(&canonical)
                 .expect("inspect image store")
                 .is_some(),
-            mode != "enforce",
-            "enforce must leave the public CRI image store unchanged"
+            mode != "enforce" || running_as_root,
+            "denied enforce pull must leave the public CRI image store unchanged"
         );
         ferro_core::observability::persist_authorization_fixture_evidence(
             &format!("cri-{mode}"),

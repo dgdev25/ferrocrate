@@ -1829,6 +1829,22 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
+
+            let nested_bubblewrap = ferro_core::rootless::nested_bubblewrap_diagnostic();
+            checks.push(DoctorCheck {
+                id: "rootless_bwrap_nested".to_string(),
+                ok: nested_bubblewrap.is_ok(),
+                message: nested_bubblewrap.as_ref().map_or_else(
+                    |error| error.clone(),
+                    |_| "nested bubblewrap user+network namespace probe passed".to_string(),
+                ),
+                hint: nested_bubblewrap.as_ref().err().map(|_| {
+                    "rootless bridge networking requires a host that permits nested user+network namespaces; use slirp-disabled mode or a supported host"
+                        .to_string()
+                }),
+                remediated: false,
+                action: None,
+            });
         }
     }
 

@@ -48,6 +48,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/system/df",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/json",
         coverage: Coverage::Implemented,
         expected_status: 200,

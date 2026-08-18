@@ -10289,6 +10289,37 @@ fn handle_docker_compat_connection(
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
+            ("GET", "/system/df") => {
+                let containers = runtime.list().map_err(|err| err.to_string())?;
+                let images = store.list_references().map_err(|err| err.to_string())?;
+                let volumes = volume_store.list().map_err(|err| err.to_string())?;
+                let body = serde_json::json!({
+                    "LayersSize": 0,
+                    "Images": images.iter().map(|image| serde_json::json!({
+                        "Id": image.digest,
+                        "RepoTags": [image.reference],
+                        "Created": image.created_at_unix,
+                        "Size": 0,
+                        "SharedSize": 0,
+                        "Containers": containers.iter().filter(|container| container.image == image.reference).count(),
+                    })).collect::<Vec<_>>(),
+                    "Containers": containers.iter().map(|container| serde_json::json!({
+                        "Id": container.id,
+                        "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(),
+                        "Image": container.image,
+                        "ImageID": "",
+                        "SizeRw": 0,
+                        "SizeRootFs": 0,
+                    })).collect::<Vec<_>>(),
+                    "Volumes": volumes.iter().map(|volume| serde_json::json!({
+                        "Name": volume.name,
+                        "Mountpoint": volume.path,
+                        "UsageData": {"Size": 0, "RefCount": 0},
+                    })).collect::<Vec<_>>(),
+                    "BuildCache": [],
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("GET", "/containers/json") => {
                 let all = parse_docker_bool_query(query.get("all"), "all")?;
                 let limit = parse_docker_limit_query(query.get("limit"))?;

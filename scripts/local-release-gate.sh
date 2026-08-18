@@ -48,7 +48,9 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/test-reliability-matrix-preflight.sh \
   scripts/perf/check-docker-comparison.sh scripts/perf/test-check-docker-comparison.sh \
   scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \
+  scripts/verify-indie-release-plan.sh \
   scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh
+bash scripts/verify-indie-release-plan.sh
 bash scripts/test-rootless-install.sh
 bash scripts/test-rootless-subid-diagnostics.sh
 bash scripts/test-reliability-matrix-preflight.sh

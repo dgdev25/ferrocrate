@@ -35,7 +35,9 @@ implied by a successful unprivileged build.
 
 The latest host-local ten-feature comparison is in
 [`docs/evidence/performance/2026-08-18-docker-comparison.md`](docs/evidence/performance/2026-08-18-docker-comparison.md).
-It reports three-round medians and explicitly does not claim universal Docker
+The matching nftables run is in
+[`docs/evidence/performance/2026-08-18-docker-comparison-nftables.md`](docs/evidence/performance/2026-08-18-docker-comparison-nftables.md).
+Both report three-round medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.
 
 ## Development

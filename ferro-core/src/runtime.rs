@@ -9,7 +9,7 @@ use crate::authorization::{
 };
 #[cfg(target_os = "linux")]
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
-use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
+use crate::cgroups::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
 use crate::container_exec::{
     exec_in_container, exec_in_container_with_timeout, exec_in_rootless_rootfs,
 };
@@ -3792,6 +3792,57 @@ impl ContainerRuntime {
             if stop_existing { "restart" } else { "start" },
             LifecyclePhasePoint::SpawnPrepared,
         )?;
+
+        // A stopped container keeps its resource-limit contract, so reattach
+        // the replacement process before releasing its launch barrier.  The
+        // cgroup normally survives stop; recreate and configure it if a
+        // host-side cleanup removed it while the container was stopped.
+        if let Some(stored) = record.resource_limits.as_ref() {
+            let cpu_max = match (stored.cpu_quota, stored.cpu_period) {
+                (Some(quota), Some(period)) => Some(CpuMax { quota, period }),
+                (None, None) => None,
+                _ => {
+                    let _ = kill_pid(child_id);
+                    return Err(RuntimeError::InvalidState(
+                        "persisted resource limits contain an incomplete cpu quota".into(),
+                    ));
+                }
+            };
+            let limits = ResourceLimits {
+                memory_max: stored.memory_max,
+                cpu_max,
+                pids_max: stored.pids_max,
+            };
+            let manager = CgroupV2Manager::new(&self.cgroup_root);
+            let cgroup_name = format!("ferrocrate/{}", record.id);
+            let (group, created_group) = if self.cgroup_root.join(&cgroup_name).exists() {
+                (self.cgroup_root.join(&cgroup_name), false)
+            } else {
+                let group = match manager.create_group(&cgroup_name) {
+                    Ok(group) => group,
+                    Err(error) => {
+                        let _ = kill_pid(child_id);
+                        return Err(RuntimeError::Cgroup(error));
+                    }
+                };
+                (group, true)
+            };
+            if let Err(error) = manager.apply_limits(&group, &limits) {
+                let _ = kill_pid(child_id);
+                if created_group {
+                    let _ = fs::remove_dir(&group);
+                }
+                return Err(RuntimeError::Cgroup(error));
+            };
+            if let Err(error) = manager.add_pid(&group, child_id) {
+                let _ = kill_pid(child_id);
+                if created_group {
+                    let _ = fs::remove_dir(&group);
+                }
+                return Err(RuntimeError::Cgroup(error));
+            }
+        }
+
         if security_ebpf_monitor_enabled() {
             setup_security_ebpf_monitor(&record.id)?;
         }

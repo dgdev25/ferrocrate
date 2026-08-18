@@ -54,15 +54,11 @@ fn protected_write(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-fn provision_admission(auth_dir: &std::path::Path, id: [u8; 16]) {
-    let key = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
-    provision_admission_with_key(auth_dir, id, &key);
-}
-
 fn provision_admission_with_key(
     auth_dir: &std::path::Path,
     id: [u8; 16],
     key: &ed25519_dalek::SigningKey,
+    generation: u64,
 ) {
     use sha2::Digest;
     let now = SystemTime::now()
@@ -80,6 +76,59 @@ fn provision_admission_with_key(
     fs::create_dir(&admission).unwrap();
     fs::set_permissions(&admission, fs::Permissions::from_mode(0o700)).unwrap();
     let checkpoint_bytes = checkpoint.encode();
+    let checkpoint_digest: [u8; 32] = sha2::Sha256::digest(&checkpoint_bytes).into();
+    let journal =
+        ferro_core::witness::WitnessJournal::open(ferro_core::witness::JournalConfig::new(
+            auth_dir.join("witness-journal"),
+            id,
+            ferro_core::witness::JournalMode::Required,
+        ))
+        .unwrap();
+    journal
+        .append_checkpoint_publication(
+            checkpoint_digest,
+            ferro_core::witness::WitnessRecord {
+                epoch: 1,
+                sequence: 1,
+                previous_hash: [0; 32],
+                event_id: [0x54; 16],
+                request_id: [0x55; 16],
+                runtime_instance_id: [0x56; 16],
+                boot_id: [0x57; 16],
+                principal: ferro_core::witness::PrincipalSummary::pseudonymize(
+                    &[0x58; 32],
+                    b"qualification",
+                )
+                .unwrap(),
+                invocation: ferro_core::witness::Invocation::Manager,
+                action: ferro_core::witness::WitnessAction::CheckpointPublish,
+                resource_kind: ferro_core::witness::WitnessResourceKind::Administrative,
+                resource: ferro_core::witness::ResourceSummary::pseudonymize(
+                    &[0x59; 32],
+                    b"checkpoint",
+                )
+                .unwrap(),
+                resource_generation: 1,
+                policy_version: generation,
+                policy_digest: [0; 32],
+                decision_id: None,
+                rule: None,
+                decision: None,
+                reason: None,
+                request_digest: checkpoint_digest,
+                result_digest: Some(checkpoint_digest),
+                wall_time_ns: 0,
+                monotonic_ns: 0,
+                stage: ferro_core::witness::WitnessStage::CheckpointPublished,
+                outcome: ferro_core::witness::WitnessOutcome::Succeeded,
+                recovery_link: None,
+                path_class: None,
+                device_class: None,
+                correlation_digest: None,
+            },
+        )
+        .unwrap();
+    drop(journal);
     protected_write(&admission.join("minimum.bin"), &checkpoint_bytes);
     protected_write(&admission.join("checkpoint-0001.bin"), &checkpoint_bytes);
     let id_hex = id
@@ -106,7 +155,7 @@ fn provision_admission_with_key(
     let key_id = digest(key.verifying_key().as_bytes());
     let manifest = ferro_core::authorization::admission::AdmissionSnapshotManifest {
         schema: 1,
-        generation: 1,
+        generation,
         journal_id: id.iter().map(|byte| format!("{byte:02x}")).collect(),
         trust_bundle: ferro_core::authorization::admission::AdmissionArtifact {
             file: "trust.json".into(),
@@ -122,7 +171,7 @@ fn provision_admission_with_key(
         }],
         trust_key_ids: vec![key_id],
         latest_checkpoint: "checkpoint-0001.bin".into(),
-        latest_created_at_secs: now,
+        latest_created_at_secs: now.saturating_sub(1),
     };
     protected_write(
         &admission.join("manifest.json"),
@@ -170,7 +219,8 @@ fn policy_reload_rejects_rollback_without_exact_separate_approval() {
         &auth_dir.join("journal-id"),
         b"42424242424242424242424242424242\n",
     );
-    provision_admission(&auth_dir, [0x42; 16]);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
+    provision_admission_with_key(&auth_dir, [0x42; 16], &key, 9);
     let older = temp.path().join("older.toml");
     protected_write(
         &active,
@@ -308,7 +358,7 @@ fn checkpoint_show_and_verify_use_real_journal_and_explicit_trust() {
     let key = ferro_core::witness::KeyStore::new(&key_dir)
         .create("active")
         .unwrap();
-    provision_admission_with_key(&auth_dir, id, key.signing_key());
+    provision_admission_with_key(&auth_dir, id, key.signing_key(), 1);
     let public = key
         .verifying_key()
         .to_bytes()

@@ -242,6 +242,22 @@ fn public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() 
         .args(["volume", "create", "enforced-volume"])
         .output()
         .expect("execute public CLI mutation");
+    // The native root administrator is intentionally allowed by the policy;
+    // the denial assertion below exercises the non-administrator public path.
+    // Keep the privileged release gate honest by asserting the corresponding
+    // administrator success contract instead of treating it as a failure.
+    if nix::unistd::geteuid().is_root() {
+        assert!(
+            output.status.success(),
+            "root administrator must be allowed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let store =
+            ferro_core::volume_store::LocalVolumeStore::open(runtime.path().join("volumes"))
+                .expect("open production volume store");
+        assert!(store.get("enforced-volume").expect("read volume").is_some());
+        return;
+    }
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(

@@ -88,7 +88,10 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id": "00112233445566778899aabbccddeeff",
         "name": "web",
-        "pid": 1,
+        // A deliberately absent PID makes the stop phase fail consistently;
+        // PID 1 is signalable by root and would turn this into a false
+        // privilege-dependent success.
+        "pid": 4294967294u64,
         "image": "example/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "command": ["sleep", "60"],
         "created_at_unix": 1,
@@ -217,6 +220,19 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
         .unwrap();
+    if nix::unistd::geteuid().is_root() {
+        // Root is the native administrator and is intentionally allowed by
+        // the enforce policy; assert that administrator success contract.
+        reaper.join().unwrap();
+        assert!(
+            output.status.success(),
+            "root administrator must be allowed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
+        assert!(store.get(&record.id).unwrap().is_none());
+        return;
+    }
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("PolicyDenied"),

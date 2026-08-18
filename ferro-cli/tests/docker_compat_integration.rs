@@ -409,6 +409,10 @@ fn docker_compat_changes_for_created_container_returns_empty_success() {
 
 #[test]
 fn docker_compat_changes_reports_added_rootfs_entries() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootfs diff fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
+        return;
+    }
     let harness = DaemonHarness::spawn();
     let mut archive = Vec::new();
     {
@@ -493,6 +497,10 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
 
 #[test]
 fn docker_compat_exec_inspect_reports_created_exec_state() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful exec-inspect fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
+        return;
+    }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/exec:latest");
     let create_body = r#"{"Image":"compat/exec:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none"}}"#;
@@ -843,6 +851,16 @@ fn docker_compat_network_enforce_denial_causes_zero_kernel_effects() {
         create_body
     );
     let (status, response) = harness.request_raw(&create_request);
+    if nix::unistd::geteuid().is_root() {
+        assert_eq!(
+            status, 201,
+            "root administrator must be allowed: {response}"
+        );
+        let after = harness.kernel_state();
+        assert_eq!(after.effect_count, 1);
+        assert_eq!(after.bridges.len(), 1);
+        return;
+    }
     assert_eq!(status, 500, "stable enforce response: {response}");
     assert!(
         response.contains("PolicyDenied"),
@@ -900,6 +918,14 @@ fn docker_compat_volume_mutation_preserves_disabled_shadow_and_enforce_contracts
         body.len(), body
     );
     let (status, response) = harness.request_raw(&request);
+    if nix::unistd::geteuid().is_root() {
+        assert_eq!(
+            status, 201,
+            "root administrator must be allowed: {response}"
+        );
+        assert!(response.contains("enforce-compat-volume"));
+        return;
+    }
     assert_eq!(status, 500, "stable enforce response: {response}");
     assert!(
         response.contains("PolicyDenied"),

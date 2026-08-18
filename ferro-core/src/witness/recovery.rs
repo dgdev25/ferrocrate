@@ -186,6 +186,26 @@ impl RecoveryRecipe {
                 WitnessAction::RootlessMapping,
                 WitnessResourceKind::RootlessMapping,
                 WitnessAction::RootlessMapping
+            ) | (
+                WitnessAction::CheckpointPublish,
+                WitnessResourceKind::Administrative,
+                WitnessAction::CheckpointRecover
+            ) | (
+                WitnessAction::CheckpointRecover,
+                WitnessResourceKind::Administrative,
+                WitnessAction::CheckpointRecover
+            ) | (
+                WitnessAction::KeyRotate,
+                WitnessResourceKind::Administrative,
+                WitnessAction::KeyRotate
+            ) | (
+                WitnessAction::PolicyReload,
+                WitnessResourceKind::Administrative,
+                WitnessAction::PolicyReload
+            ) | (
+                WitnessAction::PolicyRollback,
+                WitnessResourceKind::Administrative,
+                WitnessAction::PolicyRollback
             )
         );
         if !valid {
@@ -262,6 +282,10 @@ impl RecoveryRecipe {
             15 => WitnessAction::VolumeUnmount,
             17 => WitnessAction::NetworkDelete,
             19 => WitnessAction::NetworkDetach,
+            21 => WitnessAction::PolicyReload,
+            22 => WitnessAction::PolicyRollback,
+            27 => WitnessAction::CheckpointRecover,
+            28 => WitnessAction::KeyRotate,
             29 => WitnessAction::RootlessMapping,
             _ => return None,
         };
@@ -313,6 +337,9 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         16 => Some(WitnessAction::NetworkCreate),
         17 => Some(WitnessAction::NetworkDelete),
         18 => Some(WitnessAction::NetworkAttach),
+        21 => Some(WitnessAction::PolicyReload),
+        22 => Some(WitnessAction::PolicyRollback),
+        23 => Some(WitnessAction::CheckpointPublish),
         24 => Some(WitnessAction::ImageBuild),
         25 => Some(WitnessAction::ImageTag),
         26 => Some(WitnessAction::ImageReferenceWrite),
@@ -329,6 +356,7 @@ fn resource_kind_from(value: u8) -> Option<WitnessResourceKind> {
         2 => Some(WitnessResourceKind::Image),
         3 => Some(WitnessResourceKind::Volume),
         4 => Some(WitnessResourceKind::Network),
+        7 => Some(WitnessResourceKind::Administrative),
         8 => Some(WitnessResourceKind::RootlessMapping),
         _ => None,
     }

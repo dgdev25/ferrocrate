@@ -15387,20 +15387,20 @@ volumes:
         use ferro_core::witness::{
             decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessOutcome, WitnessStage,
         };
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = configured_cli_runtime("shadow");
         let networks_dir = temp.path().join("networks");
         std::fs::create_dir_all(&networks_dir).expect("networks dir");
-        // Deny store publication after IdentityObserved; journal + kernel stay writable.
-        std::fs::set_permissions(&networks_dir, std::fs::Permissions::from_mode(0o555))
-            .expect("lock networks dir");
 
         super::reset_network_kernel_effect_count();
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let authorization = runtime
             .surface_authorization()
             .expect("surface authorization");
+        // Replace the parent with a regular file. This makes atomic store
+        // publication fail with ENOTDIR for every UID, including root, while
+        // leaving the lifecycle journal and kernel adapter writable.
+        std::fs::remove_dir(&networks_dir).expect("remove networks dir");
+        std::fs::write(&networks_dir, b"store-publication-fault").expect("seed fault path");
 
         let err = handle_network(
             temp.path(),
@@ -15449,9 +15449,10 @@ volumes:
             .expect("IdentityObserved retains exact kernel identity");
         assert!(observed.ifindex.is_some_and(|idx| idx != 0));
         // Do not reset the in-process kernel adapter: recovery must observe the
-        // same bridge the public create effect recorded.
-        std::fs::set_permissions(&networks_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("unlock networks dir");
+        // same bridge the public create effect recorded. Restore the directory
+        // shape before the replacement/recovery path.
+        std::fs::remove_file(&networks_dir).expect("remove fault path");
+        std::fs::create_dir(&networks_dir).expect("restore networks dir");
         let effects_before_replacement = super::network_kernel_effect_count();
         let replacement_err = handle_network(
             temp.path(),

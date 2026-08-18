@@ -36,10 +36,10 @@ implied by a successful unprivileged build.
 ## Docker comparison
 
 The latest three-round, no-skip host-local ten-feature comparison is summarized
-in [`docs/evidence/performance/2026-08-18-docker-comparison-current-head-6bfb264b-summary.md`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-6bfb264b-summary.md), with full
-[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-6bfb264b-iptables.md)
+in [`docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-summary.md`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-summary.md), with full
+[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-iptables.md)
 and
-[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-6bfb264b-nftables.md)
+[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-nftables.md)
 measurements.
 Both report three-round medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.

@@ -24,7 +24,7 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     fs::write(workspace.join("input"), b"rootless-compose\n").expect("input");
     fs::write(
         project.join("compose.yml"),
-        "services:\n  writer:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /data/input > /data/output; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    network_mode: host\n",
+        "services:\n  writer:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /data/input > /data/output; echo named-volume > /named/marker; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n      - named:/named\n    network_mode: host\nvolumes:\n  named: {}\n",
     )
     .expect("compose file");
 
@@ -85,5 +85,9 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     assert_eq!(
         fs::read_to_string(workspace.join("output")).expect("bind-mounted output"),
         "rootless-compose\n"
+    );
+    assert_eq!(
+        fs::read_to_string(runtime.join("volumes/named/marker")).expect("named volume output"),
+        "named-volume\n"
     );
 }

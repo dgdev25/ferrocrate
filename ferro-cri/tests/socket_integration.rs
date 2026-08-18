@@ -1115,7 +1115,7 @@ async fn cri_start_recovery_rebinds_runtime_after_mid_operation_crash() {
                 hostname: "crash-pod".into(),
                 log_directory: String::new(),
                 dns_config: String::new(),
-                network_namespace: "none".into(),
+                network_namespace: "bridge".into(),
             }),
             runtime_handler: String::new(),
         })
@@ -1176,6 +1176,32 @@ async fn cri_start_recovery_rebinds_runtime_after_mid_operation_crash() {
         status.state,
         ferro_cri::runtime::ContainerState::Exited as i32
     );
+
+    let runtime_records = ferro_core::runtime::ContainerRuntime::new(runtime.path())
+        .expect("open recovered container runtime")
+        .list()
+        .expect("list recovered runtime records");
+    let runtime_record = runtime_records
+        .iter()
+        .find(|record| {
+            record
+                .labels
+                .get("io.ferrocrate.cri-container-id")
+                .is_some_and(|value| value == &container)
+        })
+        .expect("recovered runtime record");
+    assert_eq!(runtime_record.status, "exited");
+    if let Some(bridge) = runtime_record
+        .network_ownership
+        .as_ref()
+        .and_then(|ownership| ownership.bridge.as_deref())
+    {
+        assert!(!std::process::Command::new("ip")
+            .args(["link", "show", bridge])
+            .status()
+            .expect("inspect recovered bridge")
+            .success());
+    }
 
     restarted.kill().expect("stop restarted CRI daemon");
     let _ = restarted.wait();

@@ -167,7 +167,7 @@ impl SurfaceAuthorization {
     }
 
     #[cfg(test)]
-    fn compatibility() -> Self {
+    pub(crate) fn compatibility() -> Self {
         let mut rng = rand::rng();
         Self {
             gate: Arc::new(AuthorizationGate::new(Arc::new(

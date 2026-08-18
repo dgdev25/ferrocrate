@@ -682,6 +682,58 @@ mod tests {
         assert!(listed.is_empty());
     }
 
+    #[test]
+    fn authorized_prune_removes_only_the_selected_inventory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("open store");
+        let selected = "registry.example/acme/selected:latest";
+        let selected_digest = format!("sha256:{}", "b".repeat(64));
+        let retained = "registry.example/acme/retained:latest";
+        let retained_digest = format!("sha256:{}", "c".repeat(64));
+        let authority = &crate::authorization::surface::SurfaceMutationAuthority::for_test();
+
+        store
+            .put_reference(
+                authority,
+                selected,
+                &selected_digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                "{\"schemaVersion\":2}",
+            )
+            .expect("selected record");
+        store
+            .put_reference(
+                authority,
+                retained,
+                &retained_digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                "{\"schemaVersion\":2}",
+            )
+            .expect("retained record");
+
+        let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
+        let permit = auth
+            .authorize_image_binding(
+                &crate::authorization::RequestOrigin::cli_current().expect("origin"),
+                crate::authorization::Action::ImageDelete,
+                selected,
+                &selected_digest,
+                1,
+            )
+            .expect("selected permit");
+
+        assert_eq!(
+            store
+                .prune_references_authorized(vec![permit], &[selected.to_string()])
+                .expect("selected prune"),
+            1
+        );
+        let remaining = store.list_references().expect("remaining records");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].reference, retained);
+        assert_eq!(remaining[0].digest, retained_digest);
+    }
+
     #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn migrates_legacy_sled_image_indexes_and_keeps_rollback_copy() {

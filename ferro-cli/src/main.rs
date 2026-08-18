@@ -740,6 +740,10 @@ pub enum ComposeCommands {
     Up {
         #[arg(long)]
         profile: Vec<String>,
+        /// Keep services running after the command returns (Docker-compatible;
+        /// Ferrocrate Compose is detached by design today).
+        #[arg(short = 'd', long, default_value_t = true)]
+        detach: bool,
     },
     Watch {
         #[arg(long)]
@@ -8497,7 +8501,7 @@ fn handle_compose(
     let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     match command {
-        ComposeCommands::Up { profile } => {
+        ComposeCommands::Up { profile, detach: _ } => {
             // Compose is a detached CLI operation: services must outlive the
             // short-lived `compose up` launcher just like Docker daemon
             // workloads. Without this lease override, the parent-death
@@ -8744,6 +8748,7 @@ fn handle_compose(
                     file,
                     ComposeCommands::Up {
                         profile: profile.clone(),
+                        detach: true,
                     },
                 )?;
                 loop {
@@ -13909,11 +13914,11 @@ volumes:
 
     #[test]
     fn parses_compose_command() {
-        let cli = Cli::parse_from(["ferrocrate", "compose", "up"]);
+        let cli = Cli::parse_from(["ferrocrate", "compose", "up", "-d"]);
         match cli.command {
             Commands::Compose { file, command } => {
                 assert!(file.is_none());
-                assert!(matches!(command, ComposeCommands::Up { profile } if profile.is_empty()));
+                assert!(matches!(command, ComposeCommands::Up { profile, detach } if profile.is_empty() && detach));
             }
             other => panic!("unexpected command: {other:?}"),
         }

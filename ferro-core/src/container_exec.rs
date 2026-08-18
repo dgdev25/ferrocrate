@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -15,6 +16,81 @@ pub enum ContainerExecError {
     EmptyCommand,
     #[error("failed to execute command: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Execute a command in a rootless container's bubblewrap boundary.
+///
+/// Rootless containers cannot reliably be re-entered with `nsenter`: the
+/// workload owns a private user namespace and an unprivileged caller cannot
+/// join its mount namespace after the fact. Recreating the same rootfs/mount
+/// boundary is the supported rootless exec path and keeps the operation
+/// unprivileged.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_in_rootless_rootfs(
+    rootfs: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tmpfs_mounts: &[(String, Option<String>)],
+    readonly_rootfs: bool,
+    timeout: Option<Duration>,
+) -> Result<ExecResult, ContainerExecError> {
+    if command.is_empty() {
+        return Err(ContainerExecError::EmptyCommand);
+    }
+    if !rootfs.is_dir() {
+        return Err(ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("rootfs does not exist: {}", rootfs.display()),
+        )));
+    }
+    let mut bwrap = Command::new("bwrap");
+    bwrap
+        .arg("--bind")
+        .arg(rootfs)
+        .arg("/")
+        .arg("--proc")
+        .arg("/proc")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--setenv")
+        .arg("PATH")
+        .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    for (source, target, read_only) in mounts {
+        bwrap
+            .arg(if *read_only { "--ro-bind" } else { "--bind" })
+            .arg(source)
+            .arg(format!("/{target}"));
+    }
+    for (target, size) in tmpfs_mounts {
+        if size.is_some() {
+            return Err(ContainerExecError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "rootless exec cannot apply sized tmpfs mounts",
+            )));
+        }
+        bwrap.arg("--tmpfs").arg(format!("/{target}"));
+    }
+    if readonly_rootfs {
+        bwrap.arg("--remount-ro").arg("/");
+    }
+    if let Some(workdir) = workdir {
+        bwrap.arg("--chdir").arg(workdir);
+    } else {
+        bwrap.arg("--chdir").arg("/");
+    }
+    for entry in env {
+        let (key, value) = entry.split_once('=').ok_or_else(|| {
+            ContainerExecError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "env var missing key",
+            ))
+        })?;
+        bwrap.arg("--setenv").arg(key).arg(value);
+    }
+    bwrap.arg(&command[0]).args(&command[1..]);
+    execute_process(bwrap, timeout)
 }
 
 /// Build nsenter arguments for executing a command in all namespaces of target pid.
@@ -86,6 +162,34 @@ fn execute_command_with_timeout(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn execute_process(
+    mut command: Command,
+    timeout: Option<Duration>,
+) -> Result<ExecResult, ContainerExecError> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(timeout) = timeout {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return collect_output(child, status.code().unwrap_or(-1));
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(ExecResult {
+                    exit_code: 124,
+                    stdout: String::new(),
+                    stderr: "command timed out".to_string(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let status = child.wait()?;
+    collect_output(child, status.code().unwrap_or(-1))
 }
 
 fn spawn_command(binary: &str, args: &[String]) -> Result<Child, ContainerExecError> {

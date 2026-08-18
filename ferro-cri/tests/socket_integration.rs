@@ -1530,13 +1530,18 @@ fn seed_runnable_fixture_image(runtime_dir: &Path) {
 #[allow(clippy::await_holding_lock)]
 async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
-    if Command::new("id")
+    let running_as_root = Command::new("id")
         .arg("-u")
         .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
-        .unwrap_or(true)
-    {
-        eprintln!("skipping real CRI rootfs fixture: root is required");
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "0")
+        .unwrap_or(false);
+    let rootless_opt_in = std::env::var("FERROCRATE_RUN_ROOTLESS_CRI_E2E")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !running_as_root && !rootless_opt_in {
+        eprintln!(
+            "skipping real CRI rootfs fixture: set FERROCRATE_RUN_ROOTLESS_CRI_E2E=1 for the opt-in rootless run"
+        );
         return;
     }
     let runtime = tempfile::tempdir().expect("runtime tempdir");
@@ -1630,7 +1635,12 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         .await
         .expect("exec sync")
         .into_inner();
-    assert_eq!(exec.exit_code, 0);
+    assert_eq!(
+        exec.exit_code, 0,
+        "rootfs exec failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&exec.stdout),
+        String::from_utf8_lossy(&exec.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&exec.stdout).trim(), "cri-ok");
     let timed_out = client
         .exec_sync(ferro_cri::runtime::ExecSyncRequest {

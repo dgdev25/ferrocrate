@@ -10,7 +10,9 @@ use crate::authorization::{
 #[cfg(target_os = "linux")]
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, ResourceLimits};
-use crate::container_exec::{exec_in_container, exec_in_container_with_timeout};
+use crate::container_exec::{
+    exec_in_container, exec_in_container_with_timeout, exec_in_rootless_rootfs,
+};
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
     ContainerTmpfsMountRecord, CreationProvenance, EbpfFilterOwnershipRecord,
@@ -3255,11 +3257,37 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let result = match timeout {
-            Some(timeout) => {
-                crate::container_exec::exec_in_container_with_timeout(record.pid, cmd, timeout)?
+        let result = if !nix::unistd::Uid::effective().is_root() {
+            let rootfs = self
+                .runtime_dir
+                .join("containers")
+                .join(id)
+                .join("rootfs");
+            let mounts = record
+                .mounts
+                .iter()
+                .map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only))
+                .collect::<Vec<_>>();
+            let tmpfs_mounts = record
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| (mount.target.clone(), mount.size.clone()))
+                .collect::<Vec<_>>();
+            exec_in_rootless_rootfs(
+                &rootfs,
+                cmd,
+                &record.env,
+                record.workdir.as_deref(),
+                &mounts,
+                &tmpfs_mounts,
+                record.readonly_rootfs,
+                timeout,
+            )?
+        } else {
+            match timeout {
+                Some(timeout) => exec_in_container_with_timeout(record.pid, cmd, timeout)?,
+                None => exec_in_container(record.pid, cmd)?,
             }
-            None => exec_in_container(record.pid, cmd)?,
         };
         let _ = log_event(
             &self.runtime_dir,

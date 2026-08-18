@@ -10663,6 +10663,14 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/changes");
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                    .contains_key(id);
+                if pending && runtime.inspect(id).is_err() {
+                    return Ok(http_response(200, b"[]", "application/json"));
+                }
                 let record = runtime.inspect(id).map_err(|error| error.to_string())?;
                 let rootfs = runtime_dir
                     .join("containers")

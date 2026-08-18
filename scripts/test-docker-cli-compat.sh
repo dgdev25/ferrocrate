@@ -95,10 +95,11 @@ timeout 5 docker -H "$host" events --since 0s --filter type=container \
   >"$events_file" 2>"$runtime_dir/events.stderr" &
 events_pid=$!
 sleep 0.2
-container_id="$(docker -H "$host" create --network none --name "$name" "$image" /bin/busybox true)"
+container_id="$(docker -H "$host" create --network none --name "$name" "$image" /bin/busybox sleep 30)"
 [[ -n "$container_id" ]] || { echo "docker create returned no ID" >&2; exit 1; }
 docker -H "$host" inspect "$name" >/dev/null
 docker -H "$host" start "$name" >/dev/null
+docker -H "$host" exec "$name" /bin/busybox true >/dev/null
 wait_status="$(docker -H "$host" wait "$name")"
 [[ "$wait_status" == "0" ]] || {
   echo "Docker CLI wait returned unexpected status: $wait_status" >&2
@@ -118,4 +119,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/create/start/wait/logs/diff/commit/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/create/start/wait/logs/diff/exec/commit/rm/events"

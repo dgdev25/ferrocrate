@@ -578,7 +578,7 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
 
     let exec_body = r#"{"Cmd":["/bin/busybox","true"]}"#;
     let exec_request = format!(
-        "POST /v1.45/containers/{container_id}/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /v1.45/containers/exec-inspect/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         exec_body.len(),
         exec_body
     );

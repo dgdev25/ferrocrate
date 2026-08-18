@@ -10631,6 +10631,7 @@ fn handle_docker_compat_connection(
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
     let mut attach_hijack: Option<(String, bool, bool, bool, bool, bool)> = None;
+    let mut exec_hijack_output: Option<Vec<u8>> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -11214,12 +11215,16 @@ fn handle_docker_compat_connection(
                 let container = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/exec");
+                let resolved_container = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    docker_resolve_id(&runtime, &pending, container)?
+                };
                 let request: DockerExecCreateRequest = serde_json::from_slice(&request.body)
                     .map_err(|error| format!("docker: invalid exec create payload: {error}"))?;
                 validate_docker_exec_command(&request.cmd)?;
-                runtime
-                    .inspect(container)
-                    .map_err(|error| error.to_string())?;
                 let id = docker_compat_id("e", &state.next_id);
                 state
                     .execs
@@ -11228,7 +11233,7 @@ fn handle_docker_compat_connection(
                     .insert(
                         id.clone(),
                         DockerExecSpec {
-                            container: container.to_string(),
+                            container: resolved_container,
                             cmd: request.cmd,
                             running: false,
                             exit_code: None,
@@ -11300,7 +11305,24 @@ fn handle_docker_compat_connection(
                         state.exit_code = Some(result.exit_code);
                     }
                 }
-                if start.detach {
+                let upgraded = request.headers.get("connection").is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+                }) && request
+                    .headers
+                    .get("upgrade")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
+                if upgraded {
+                    exec_hijack_output = Some(if start.detach {
+                        Vec::new()
+                    } else if start.tty {
+                        format!("{}{}", result.stdout, result.stderr).into_bytes()
+                    } else {
+                        docker_raw_stream(&result.stdout, &result.stderr)
+                    });
+                    docker_hijack_headers()
+                } else if start.detach {
                     http_response(200, &[], "application/vnd.docker.raw-stream")
                 } else if start.tty {
                     let output = format!("{}{}", result.stdout, result.stderr);
@@ -12110,6 +12132,10 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some(output) = exec_hijack_output {
+        stream.write_all(&output).map_err(|err| err.to_string())?;
+        return Ok(());
+    }
     if let Some(query) = event_follow_query {
         stream_docker_events(&mut stream, &state, &query)?;
         return Ok(());

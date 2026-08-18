@@ -43,9 +43,18 @@ if [[ "$strict" == 1 ]]; then
     echo "strict MAC check failed: AppArmor is enabled but apparmor_parser/aa-exec are unavailable" >&2
     exit 1
   fi
-  if truthy "$enabled_selinux" && (( selinux_tools == 0 )); then
-    echo "strict MAC check failed: SELinux is enabled but runcon is unavailable" >&2
-    exit 1
+  if truthy "$enabled_selinux"; then
+    if (( selinux_tools == 0 )); then
+      echo "strict MAC check failed: SELinux is enabled but runcon is unavailable" >&2
+      exit 1
+    fi
+    case "${selinux_mode,,}" in
+      enforcing|permissive) ;;
+      *)
+        echo "strict MAC check failed: SELinux is enabled but enforcement state is ${selinux_mode}" >&2
+        exit 1
+        ;;
+    esac
   fi
 fi
 

@@ -402,6 +402,7 @@ impl LocalImageStore {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub(crate) fn prune_references(
         &self,
         _authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,

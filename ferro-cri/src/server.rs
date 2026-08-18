@@ -1002,6 +1002,15 @@ impl RuntimeService for CriRuntime {
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?;
         let netns_name = record.netns_name.clone();
         let network = record.network.clone();
+        let tracks_network = netns_name.is_some() && network.is_some();
+        if tracks_network {
+            let mut pending = load_pending_sandbox_networks(&self.runtime_dir);
+            pending.insert(id.clone(), record.clone());
+            if let Err(error) = persist_pending_sandbox_networks(&self.runtime_dir, &pending) {
+                sandboxes.insert(id, record);
+                return Err(error);
+            }
+        }
         if let Err(error) = persist_sandboxes(&self.runtime_dir, &sandboxes) {
             sandboxes.insert(id, record);
             return Err(error);
@@ -1026,6 +1035,7 @@ impl RuntimeService for CriRuntime {
                         "remove CRI sandbox network: {error}{detail}"
                     )));
                 }
+                maybe_crash_at_start_boundary("after-sandbox-network-remove-effect");
             }
             if ferro_net::netns_path(&netns_name).exists() {
                 if let Err(error) = ferro_net::destroy_netns(&netns_name) {
@@ -1039,6 +1049,11 @@ impl RuntimeService for CriRuntime {
                     )));
                 }
             }
+        }
+        if tracks_network {
+            let mut pending = load_pending_sandbox_networks(&self.runtime_dir);
+            pending.remove(&id);
+            persist_pending_sandbox_networks(&self.runtime_dir, &pending)?;
         }
         Ok(Response::new(RemovePodSandboxResponse {}))
     }

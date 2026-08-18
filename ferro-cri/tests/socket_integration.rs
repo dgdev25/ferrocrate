@@ -918,6 +918,141 @@ async fn cri_network_effect_crash_is_cleaned_from_pending_state() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn cri_remove_sandbox_network_effect_crash_is_reconciled_on_restart() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
+        .unwrap_or(true)
+    {
+        eprintln!("skipping CRI remove network effect fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-remove-network-effect-crash.sock");
+    unsafe {
+        std::env::set_var(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "cri-fault-injection",
+        );
+        std::env::set_var(
+            "FERROCRATE_CRI_TEST_CRASH_POINT",
+            "after-sandbox-network-remove-effect",
+        );
+    }
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "remove-network-crash-pod".into(),
+                    uid: "remove-network-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "remove-network-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "bridge".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("run bridge sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let remove = client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await;
+    assert!(
+        remove.is_err(),
+        "fault injection must terminate after network removal"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon.try_wait().expect("poll CRI remove crash").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(daemon
+        .try_wait()
+        .expect("wait for CRI remove crash")
+        .is_some());
+    unsafe {
+        std::env::remove_var("FERROCRATE_CRI_TEST_CRASH_POINT");
+    }
+
+    let payload: Vec<u8> = rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+        .expect("open CRI state")
+        .query_row(
+            "SELECT payload FROM cri_state WHERE kind='pending-sandbox-networks'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pending remove network payload");
+    let pending: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&payload).expect("decode pending remove payload");
+    let record = pending.get(&sandbox).expect("pending removed sandbox");
+    let namespace = record["netns_name"]
+        .as_str()
+        .expect("pending namespace")
+        .to_string();
+    let bridge = record["network"]["bridge"]
+        .as_str()
+        .expect("pending bridge")
+        .to_string();
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    recovered
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("restarted CRI service ready");
+    let pending_after: Vec<u8> =
+        rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+            .expect("open recovered CRI state")
+            .query_row(
+                "SELECT payload FROM cri_state WHERE kind='pending-sandbox-networks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("recovered pending remove payload");
+    let pending_after: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&pending_after).expect("decode recovered pending remove payload");
+    assert!(
+        pending_after.is_empty(),
+        "removed sandbox pending state must be reclaimed"
+    );
+    assert!(!ferro_net::netns_path(&namespace).exists());
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe removed bridge")
+        .is_none());
+    let status = recovered
+        .pod_sandbox_status(PodSandboxStatusRequest {
+            pod_sandbox_id: sandbox,
+            verbose: false,
+        })
+        .await;
+    assert!(
+        status.is_err(),
+        "removed sandbox must stay removed after recovery"
+    );
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    unsafe {
+        std::env::remove_var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cri_process_kill_operation_matrix_reopens_each_durable_transition() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
     let runtime = tempfile::tempdir().expect("runtime tempdir");

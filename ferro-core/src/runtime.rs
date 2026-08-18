@@ -9109,6 +9109,42 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
         mac_enforcement_result("selinux", "runcon is required when FERROCRATE_SELINUX=1")?;
         return Ok(cmd.to_vec());
     }
+    if !command_available("getenforce") {
+        mac_enforcement_result(
+            "selinux",
+            "getenforce is required to verify SELinux enforcement state",
+        )?;
+        return Ok(cmd.to_vec());
+    }
+    let state = match execute_with_timeout("getenforce", &[], Duration::from_secs(5)) {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_ascii_lowercase()
+        }
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let message = if detail.is_empty() {
+                "getenforce failed".to_string()
+            } else {
+                format!("getenforce failed: {detail}")
+            };
+            mac_enforcement_result(
+                "selinux",
+                &message,
+            )?;
+            return Ok(cmd.to_vec());
+        }
+        Err(error) => {
+            mac_enforcement_result("selinux", &format!("getenforce failed: {error}"))?;
+            return Ok(cmd.to_vec());
+        }
+    };
+    if state != "enforcing" && state != "permissive" {
+        mac_enforcement_result(
+            "selinux",
+            &format!("getenforce reported unsupported state: {state}"),
+        )?;
+        return Ok(cmd.to_vec());
+    }
     let selinux_type =
         std::env::var("FERROCRATE_SELINUX_TYPE").unwrap_or_else(|_| "container_t".to_string());
     validate_selinux_type(&selinux_type)?;
@@ -13880,6 +13916,38 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let error = super::apply_selinux_if_enabled(&["true".into()])
             .expect_err("strict SELinux must fail without runcon");
         assert!(error.to_string().contains("runcon"));
+        unsafe {
+            std::env::remove_var("FERROCRATE_SELINUX");
+            if let Some(path) = previous_path {
+                std::env::set_var("PATH", path);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[test]
+    fn selinux_strict_mode_fails_closed_when_enforcement_is_unknown() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let previous_path = std::env::var_os("PATH");
+        let tools = tempfile::tempdir().expect("SELinux tool directory");
+        let runcon = tools.path().join("runcon");
+        let getenforce = tools.path().join("getenforce");
+        std::fs::write(&runcon, b"#!/bin/sh\nexec \"$@\"\n").expect("runcon fixture");
+        std::fs::write(&getenforce, b"#!/bin/sh\nprintf 'Unknown\\n'\n")
+            .expect("getenforce fixture");
+        for path in [&runcon, &getenforce] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("tool permissions");
+        }
+        unsafe {
+            std::env::set_var("FERROCRATE_SELINUX", "1");
+            std::env::remove_var("FERROCRATE_MAC_PERMISSIVE");
+            std::env::set_var("PATH", tools.path());
+        }
+        let error = super::apply_selinux_if_enabled(&["true".into()])
+            .expect_err("unknown SELinux state must fail closed");
+        assert!(error.to_string().contains("unsupported state"));
         unsafe {
             std::env::remove_var("FERROCRATE_SELINUX");
             if let Some(path) = previous_path {

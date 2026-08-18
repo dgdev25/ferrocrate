@@ -2,6 +2,8 @@ use crate::wasm::{WasmRegistry, WasmRequest};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use std::process::{Command, Stdio};
+
 #[derive(Debug, Clone)]
 pub struct Provider {
     pub name: String,
@@ -310,14 +312,7 @@ pub fn execute_routed_prompt(
         .ok_or(ExecutionError::NoProvider)?;
 
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(&endpoint.command)
-        .args(&endpoint.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| ExecutionError::Spawn(error.to_string()))?;
+    let mut child = spawn_provider_command(endpoint)?;
     let mut stdin = child
         .stdin
         .take()
@@ -357,6 +352,30 @@ pub fn execute_routed_prompt(
             None => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
+}
+
+/// Spawn a provider without shell interpolation. Overlay and network filesystems
+/// can briefly report `ETXTBSY` when a freshly-written executable is still being
+/// published; retry that transient only, with a small bounded budget.
+fn spawn_provider_command(
+    endpoint: &ProviderEndpoint,
+) -> Result<std::process::Child, ExecutionError> {
+    for attempt in 0..3 {
+        match Command::new(&endpoint.command)
+            .args(&endpoint.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(26) && attempt < 2 => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => return Err(ExecutionError::Spawn(error.to_string())),
+        }
+    }
+    Err(ExecutionError::Spawn("provider spawn retry exhausted".to_string()))
 }
 
 /// Select and execute one provider across local and HTTP adapter tiers.

@@ -16,7 +16,8 @@ evidence.
 Rootless image pull/run, slirp networking, cgroup discovery, and volume-store
 operations are qualified on matching hosts. Rootless workload-mounted volumes,
 Compose/CRI end-to-end behavior, other distributions, and live eBPF published-
-port checksum delivery remain qualification gates.
+port checksum delivery remain qualification gates. Published-port eBPF is
+fail-closed by default; use iptables or nftables for the supported path.
 
 ## Quick start
 

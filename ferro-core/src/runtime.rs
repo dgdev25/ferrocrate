@@ -6143,6 +6143,7 @@ fn setup_network(
     }
 
     ensure_bridge_backend_root(is_root, network_backend)?;
+    validate_ebpf_published_port_boundary(network_backend, port_mappings)?;
     let active_backend = resolve_network_backend(network_backend, &RuntimeBackendProbe)?;
     debug_assert_eq!(active_backend, network_backend);
     info!(
@@ -9735,6 +9736,21 @@ fn resolve_network_backend(
     Ok(requested)
 }
 
+fn validate_ebpf_published_port_boundary(
+    backend: NetworkBackend,
+    port_mappings: &[crate::container_store::PortMappingRecord],
+) -> Result<(), RuntimeError> {
+    if backend != NetworkBackend::Ebpf || port_mappings.is_empty() {
+        return Ok(());
+    }
+    if std::env::var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS").as_deref() == Ok("1") {
+        return Ok(());
+    }
+    Err(RuntimeError::Network(
+        "eBPF published-port forwarding is disabled pending live checksum qualification; use --network-backend iptables or nftables, or set FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1 for an explicit experimental override".to_string(),
+    ))
+}
+
 fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, prefix: u8) -> String {
     let prefix = prefix.min(128);
     let gateway_val = u128::from(*gateway);
@@ -13265,6 +13281,28 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             super::resolve_network_backend(ferro_net::NetworkBackend::Ebpf, &UnavailableProbe)
                 .expect_err("eBPF must not fall back");
         assert!(err.to_string().contains("eBPF backend unavailable"));
+    }
+
+    #[test]
+    fn ebpf_published_ports_fail_closed_without_explicit_override() {
+        let mapping = [PortMappingRecord {
+            host_port: 8080,
+            container_port: 80,
+            protocol: "tcp".into(),
+        }];
+        unsafe { std::env::remove_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS") };
+        let error = super::validate_ebpf_published_port_boundary(
+            NetworkBackend::Ebpf,
+            &mapping,
+        )
+        .expect_err("live eBPF published ports must remain gated");
+        assert!(error.to_string().contains("pending live checksum qualification"));
+        super::validate_ebpf_published_port_boundary(NetworkBackend::Iptables, &mapping)
+            .expect("iptables remains the explicit supported fallback");
+        unsafe { std::env::set_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS", "1") };
+        super::validate_ebpf_published_port_boundary(NetworkBackend::Ebpf, &mapping)
+            .expect("experimental override should be explicit");
+        unsafe { std::env::remove_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS") };
     }
 
     #[test]

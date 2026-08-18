@@ -2865,35 +2865,40 @@ impl ContainerRuntime {
             None
         };
 
-        for (index, mount) in mounts.iter().enumerate() {
-            self.kernel_ops.apply_bind(&rootfs_dir, mount)?;
-            self.phase_hook
-                .reached("run", LifecyclePhasePoint::BindKernelEffect)?;
-            {
-                rollback.mark_resource_applied(&format!("mount:{index}"), None)?;
+        let defer_rootless_mounts = rootless && (!mounts.is_empty()
+            || !tmpfs_mounts.is_empty()
+            || readonly_rootfs);
+        if !defer_rootless_mounts {
+            for (index, mount) in mounts.iter().enumerate() {
+                self.kernel_ops.apply_bind(&rootfs_dir, mount)?;
+                self.phase_hook
+                    .reached("run", LifecyclePhasePoint::BindKernelEffect)?;
+                {
+                    rollback.mark_resource_applied(&format!("mount:{index}"), None)?;
+                    rollback.mark_typed_resource(
+                        bind_plans[index],
+                        self.kernel_ops.identity(&rootfs_dir.join(&mount.target))?,
+                    )?;
+                }
+            }
+            for (index, mount) in tmpfs_mounts.iter().enumerate() {
+                self.kernel_ops.apply_tmpfs(&rootfs_dir, mount)?;
+                self.phase_hook
+                    .reached("run", LifecyclePhasePoint::TmpfsKernelEffect)?;
                 rollback.mark_typed_resource(
-                    bind_plans[index],
+                    tmpfs_plans[index],
                     self.kernel_ops.identity(&rootfs_dir.join(&mount.target))?,
                 )?;
             }
-        }
-        for (index, mount) in tmpfs_mounts.iter().enumerate() {
-            self.kernel_ops.apply_tmpfs(&rootfs_dir, mount)?;
-            self.phase_hook
-                .reached("run", LifecyclePhasePoint::TmpfsKernelEffect)?;
-            rollback.mark_typed_resource(
-                tmpfs_plans[index],
-                self.kernel_ops.identity(&rootfs_dir.join(&mount.target))?,
-            )?;
-        }
-        if readonly_rootfs {
-            self.kernel_ops.apply_readonly(&rootfs_dir)?;
-            self.phase_hook
-                .reached("run", LifecyclePhasePoint::ReadonlyKernelEffect)?;
-            rollback.mark_typed_resource(
-                readonly_plan.expect("readonly plan exists"),
-                self.kernel_ops.identity(&rootfs_dir)?,
-            )?;
+            if readonly_rootfs {
+                self.kernel_ops.apply_readonly(&rootfs_dir)?;
+                self.phase_hook
+                    .reached("run", LifecyclePhasePoint::ReadonlyKernelEffect)?;
+                rollback.mark_typed_resource(
+                    readonly_plan.expect("readonly plan exists"),
+                    self.kernel_ops.identity(&rootfs_dir)?,
+                )?;
+            }
         }
 
         validate_port_mapping_conflicts(&self.store, port_mappings)?;
@@ -2961,6 +2966,9 @@ impl ContainerRuntime {
             netns_name.as_deref(),
             unshare_netns,
             seccomp_profile.as_ref(),
+            mounts.to_vec(),
+            tmpfs_mounts.to_vec(),
+            readonly_rootfs,
         )
         .inspect_err(|_e| {
             // Kill any partially spawned process on error
@@ -3679,10 +3687,15 @@ impl ContainerRuntime {
         // Load seccomp profile for restarted container.
         // Uses the authority stored in the container record, if present.
         let seccomp_profile = resolve_seccomp_profile(record.ai_runtime.as_ref())?;
-        replay_persisted_mounts(
-            &self.runtime_dir.join("containers").join(id).join("rootfs"),
-            &record,
-        )?;
+        // Rootless mounts are materialized inside the bubblewrap execution
+        // boundary. Replaying them through the host kernel would both require
+        // privilege and violate the rootless isolation contract.
+        if nix::unistd::Uid::effective().is_root() {
+            replay_persisted_mounts(
+                &self.runtime_dir.join("containers").join(id).join("rootfs"),
+                &record,
+            )?;
+        }
 
         let child_id = spawn_process_with_logs(
             &record.command,
@@ -3702,6 +3715,24 @@ impl ContainerRuntime {
             record.netns.as_deref(),
             false,
             seccomp_profile.as_ref(),
+            record
+                .mounts
+                .iter()
+                .map(|mount| BindMount {
+                    source: PathBuf::from(&mount.source),
+                    target: PathBuf::from(&mount.target),
+                    read_only: mount.read_only,
+                })
+                .collect(),
+            record
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| TmpfsMount {
+                    target: PathBuf::from(&mount.target),
+                    size: mount.size.clone(),
+                })
+                .collect(),
+            record.readonly_rootfs,
         )?;
         self.phase_hook.reached(
             if stop_existing { "restart" } else { "start" },
@@ -4151,12 +4182,22 @@ fn validate_rootless_mount_capability(
     tmpfs_mounts: &[TmpfsMount],
     readonly_rootfs: bool,
 ) -> Result<(), RuntimeError> {
-    if rootless && (!mounts.is_empty() || !tmpfs_mounts.is_empty() || readonly_rootfs) {
+    if rootless
+        && (!mounts.is_empty() || !tmpfs_mounts.is_empty() || readonly_rootfs)
+        && (!command_available("bwrap") || !rootless_mount_namespace_available())
+    {
         return Err(RuntimeError::InvalidCommand(
-            "rootless workload mounts and read-only rootfs require a mount-capable user namespace; this host path cannot apply them safely".to_string(),
+            "rootless workload mounts and read-only rootfs require bubblewrap plus a mount-capable user namespace; this host path cannot apply them safely".to_string(),
         ));
     }
     Ok(())
+}
+
+fn rootless_mount_namespace_available() -> bool {
+    std::process::Command::new("unshare")
+        .args(["--user", "--mount", "--fork", "--propagation", "unchanged", "true"])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Resolve the cgroup-v2 directory where this runtime may create child
@@ -4997,6 +5038,9 @@ fn spawn_process_with_logs(
     netns_name: Option<&str>,
     unshare_netns: bool,
     seccomp_profile: Option<&SeccompProfile>,
+    mounts: Vec<BindMount>,
+    tmpfs_mounts: Vec<TmpfsMount>,
+    readonly_rootfs: bool,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -5009,6 +5053,9 @@ fn spawn_process_with_logs(
         netns_name,
         unshare_netns,
         seccomp_profile,
+        &mounts,
+        &tmpfs_mounts,
+        readonly_rootfs,
     )?;
     let (child_id, child, pidfd) =
         spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
@@ -5043,10 +5090,62 @@ fn spawn_process_with_logs(
             user,
             netns_name,
             seccomp_for_restart,
+            mounts,
+            tmpfs_mounts,
+            readonly_rootfs,
         );
     });
 
     Ok(child_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_bwrap_command(
+    rootfs: &Path,
+    cmd: &[String],
+    mounts: &[BindMount],
+    tmpfs_mounts: &[TmpfsMount],
+    readonly_rootfs: bool,
+) -> Result<Command, RuntimeError> {
+    if !command_available("bwrap") {
+        return Err(RuntimeError::InvalidCommand(
+            "rootfs execution requires bubblewrap (bwrap) for rootless mounts".to_string(),
+        ));
+    }
+    let mut bwrap = Command::new("bwrap");
+    let root_cmd = resolve_rootfs_command(rootfs, &cmd[0]);
+    bwrap
+        .arg("--bind")
+        .arg(rootfs)
+        .arg("/")
+        .arg("--proc")
+        .arg("/proc")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--chdir")
+        .arg("/")
+        .arg("--setenv")
+        .arg("PATH")
+        .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    for mount in mounts {
+        bwrap.arg(if mount.read_only { "--ro-bind" } else { "--bind" });
+        bwrap
+            .arg(&mount.source)
+            .arg(format!("/{}", mount.target.display()));
+    }
+    for mount in tmpfs_mounts {
+        if mount.size.is_some() {
+            return Err(RuntimeError::InvalidCommand(
+                "rootless tmpfs size limits require a mount-capable user namespace implementation".to_string(),
+            ));
+        }
+        bwrap.arg("--tmpfs").arg(format!("/{}", mount.target.display()));
+    }
+    if readonly_rootfs {
+        bwrap.arg("--remount-ro").arg("/");
+    }
+    bwrap.arg(root_cmd).args(&cmd[1..]);
+    Ok(bwrap)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5061,6 +5160,9 @@ fn build_command(
     netns_name: Option<&str>,
     unshare_netns: bool,
     seccomp_profile: Option<&SeccompProfile>,
+    mounts: &[BindMount],
+    tmpfs_mounts: &[TmpfsMount],
+    readonly_rootfs: bool,
 ) -> Result<Command, RuntimeError> {
     let running_as_root = nix::unistd::Uid::effective().is_root();
     let direct_container_setup = running_as_root && (netns_name.is_some() || rootfs_dir.is_some());
@@ -5104,7 +5206,13 @@ fn build_command(
             "kill -STOP $$; exec \"$@\""
         };
         unshare_cmd.args(["sh", "-c", script, "ferrocrate-rootless"]);
-        unshare_cmd.args(cmd);
+        if let Some(rootfs) = rootfs_dir.filter(|_| !running_as_root) {
+            let inner = build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs)?;
+            unshare_cmd.arg(inner.get_program());
+            unshare_cmd.args(inner.get_args());
+        } else {
+            unshare_cmd.args(cmd);
+        }
         unshare_cmd
     } else if let Some(rootfs) = rootfs_dir {
         if running_as_root {
@@ -5114,24 +5222,7 @@ fn build_command(
             chroot_cmd.args(&cmd[1..]);
             chroot_cmd
         } else if command_available("bwrap") {
-            let mut bwrap_cmd = Command::new("bwrap");
-            let root_cmd = resolve_rootfs_command(rootfs, &cmd[0]);
-            bwrap_cmd
-                .arg("--bind")
-                .arg(rootfs)
-                .arg("/")
-                .arg("--proc")
-                .arg("/proc")
-                .arg("--dev")
-                .arg("/dev")
-                .arg("--chdir")
-                .arg("/")
-                .arg("--setenv")
-                .arg("PATH")
-                .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-            bwrap_cmd.arg(root_cmd);
-            bwrap_cmd.args(&cmd[1..]);
-            bwrap_cmd
+            build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs)?
         } else {
             return Err(RuntimeError::InvalidCommand(
                 "rootfs execution requires root (chroot) or bubblewrap (bwrap)".to_string(),
@@ -5464,6 +5555,9 @@ fn supervise_child(
     user: Option<String>,
     netns_name: Option<String>,
     seccomp_profile: Option<SeccompProfile>,
+    mounts: Vec<BindMount>,
+    tmpfs_mounts: Vec<TmpfsMount>,
+    readonly_rootfs: bool,
 ) {
     let mut adaptive_model_version = "runtime-v1".to_string();
     let mut adaptive_policy = ferro_mind::ai::restart::AdaptiveRestartPolicy::new(&container_id);
@@ -5596,6 +5690,9 @@ fn supervise_child(
             netns_name.as_deref(),
             false,
             seccomp_profile.as_ref(),
+            &mounts,
+            &tmpfs_mounts,
+            readonly_rootfs,
         ) {
             Ok(cmd) => cmd,
             Err(_) => {
@@ -13213,11 +13310,43 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             target: PathBuf::from("data"),
             read_only: false,
         };
-        let error = super::validate_rootless_mount_capability(true, &[mount], &[], false)
-            .expect_err("rootless bind mount must fail closed before setup");
-        assert!(error.to_string().contains("mount-capable user namespace"));
+        let result = super::validate_rootless_mount_capability(true, &[mount], &[], false);
+        if super::command_available("bwrap") && super::rootless_mount_namespace_available() {
+            result.expect("capable hosts should admit rootless bind mounts");
+        } else {
+            let error = result.expect_err("rootless bind mount must fail closed before setup");
+            assert!(error.to_string().contains("mount-capable user namespace"));
+        }
         super::validate_rootless_mount_capability(false, &[], &[], true)
             .expect("rootful read-only rootfs remains supported");
+    }
+
+    #[test]
+    fn rootless_bwrap_command_contains_mount_and_readonly_boundary() {
+        if !super::command_available("bwrap") {
+            return;
+        }
+        let command = super::build_bwrap_command(
+            Path::new("/"),
+            &["/bin/true".into()],
+            &[BindMount {
+                source: PathBuf::from("/tmp"),
+                target: PathBuf::from("data"),
+                read_only: true,
+            }],
+            &[],
+            true,
+        )
+        .expect("bubblewrap command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(3).any(|window| {
+            window == ["--ro-bind", "/tmp", "/data"]
+        }));
+        assert!(args.windows(2).any(|window| window == ["--remount-ro", "/"]));
+        assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
     }
 
     #[test]
@@ -13233,6 +13362,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             None,
             true,
             None,
+            &[],
+            &[],
+            false,
         )
         .expect("rootless command");
         let args = command
@@ -13265,6 +13397,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             None,
             true,
             None,
+            &[],
+            &[],
+            false,
         )
         .expect("rootless command");
         let args = command
@@ -14005,6 +14140,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             None,
             false,
             None,
+            &[],
+            &[],
+            false,
         )
         .unwrap();
         let (pid, mut child, _pidfd) =
@@ -14167,6 +14305,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             None,
             false,
             None,
+            &[],
+            &[],
+            false,
         )
         .unwrap();
         let (pid, _child, _pidfd) = super::spawn_child_with_logs(

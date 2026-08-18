@@ -10,6 +10,15 @@ done
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 output_dir="${FERROCRATE_RELIABILITY_OUTPUT_DIR:-$repo_root/target/reliability-matrix}"
+if [[ -e "$output_dir" && ! -d "$output_dir" ]]; then
+  echo "reliability matrix blocked: output path is not a directory: $output_dir" >&2
+  exit 77
+fi
+if [[ -d "$output_dir" && ! -w "$output_dir" ]]; then
+  echo "reliability matrix blocked: output directory is not writable: $output_dir" >&2
+  echo "reliability matrix remediation: choose FERROCRATE_RELIABILITY_OUTPUT_DIR with caller ownership or run with an isolated target/output directory" >&2
+  exit 77
+fi
 mkdir -p "$output_dir"
 manifest="$output_dir/manifest.tsv"
 : >"$manifest"

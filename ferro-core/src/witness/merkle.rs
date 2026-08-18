@@ -128,7 +128,11 @@ fn append_frontier(
 
 fn frontier_root(frontier: &[Option<[u8; 32]>], leaf_count: u64) -> Result<[u8; 32], MerkleError> {
     if leaf_count == 0 || leaf_count as usize > MAX_LEAVES {
-        return Err(if leaf_count == 0 { MerkleError::Empty } else { MerkleError::TooManyLeaves });
+        return Err(if leaf_count == 0 {
+            MerkleError::Empty
+        } else {
+            MerkleError::TooManyLeaves
+        });
     }
     let mut current = None;
     let mut current_level = 0usize;
@@ -381,7 +385,10 @@ mod tests {
         let records = leaves(9);
         let mut proof = frontier_consistency_proof(&records, 4).expect("proof");
         proof.appended_leaves[0][0] ^= 1;
-        assert_eq!(verify_frontier_consistency(&proof), Err(MerkleError::RootMismatch));
+        assert_eq!(
+            verify_frontier_consistency(&proof),
+            Err(MerkleError::RootMismatch)
+        );
     }
 
     #[test]

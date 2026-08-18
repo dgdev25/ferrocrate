@@ -70,11 +70,11 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 #[cfg(target_os = "linux")]
+use std::io::Cursor;
+#[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
-#[cfg(target_os = "linux")]
-use std::io::Cursor;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
@@ -2800,7 +2800,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|error| error.to_string())?;
                 let containers = runtime.list().map_err(|error| error.to_string())?;
-                let images = image_store.list_references().map_err(|error| error.to_string())?;
+                let images = image_store
+                    .list_references()
+                    .map_err(|error| error.to_string())?;
                 let volumes = volume_store.list().map_err(|error| error.to_string())?;
                 let body = serde_json::json!({
                     "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
@@ -2809,7 +2811,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0}})).collect::<Vec<_>>(),
                     "BuildCache": [],
                 });
-                if format == "json" { println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())); } else { println!("{}", body); }
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+                    );
+                } else {
+                    println!("{}", body);
+                }
                 Ok(())
             }
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
@@ -4392,7 +4401,9 @@ fn context_endpoint_is_local(endpoint: &str) -> bool {
         return false;
     };
     let path = Path::new(path);
-    if path == runtime_dir().join("ferrocrate.sock") || path == Path::new("/var/run/ferrocrate.sock") {
+    if path == runtime_dir().join("ferrocrate.sock")
+        || path == Path::new("/var/run/ferrocrate.sock")
+    {
         return true;
     }
     std::env::var_os("FERROCRATE_ROOTLESS_SOCKET")
@@ -4826,33 +4837,109 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             Ok(())
         })(),
         Commands::Build {
-            dockerfile, ferrofile, tag, compress, image_format, embed_model, platform,
-            cache_from, cache_to, build_context, secret,
-        } => (|| -> Result<(), String> {
-            if ferrofile.is_some() { return Err("remote build: --ferrofile is not representable by the Docker transport".to_string()); }
-            if compress != "gzip" { return Err("remote build: --compress is not representable by the Docker transport".to_string()); }
-            if image_format != "oci" || embed_model.is_some() { return Err("remote build: native RVF output is not representable by the Docker transport".to_string()); }
-            if cache_from.is_some() || cache_to.is_some() { return Err("remote build: cache options are not representable by the Docker transport".to_string()); }
-            if let Some(platform) = platform.as_deref() { validate_build_platform(Some(platform))?; }
-            if !build_context.is_empty() || !secret.is_empty() { return Err("remote build: named contexts and secrets are not supported by this transport yet".to_string()); }
-            let dockerfile = dockerfile.as_deref().unwrap_or("Dockerfile");
-            let dockerfile_path = if Path::new(dockerfile).is_absolute() { PathBuf::from(dockerfile) } else { std::env::current_dir().map_err(|error| format!("remote build: failed to get current directory: {error}"))?.join(dockerfile) };
-            if !dockerfile_path.is_file() { return Err(format!("remote build: Dockerfile does not exist: {}", dockerfile_path.display())); }
-            let context_dir = dockerfile_path.parent().unwrap_or_else(|| Path::new("."));
-            let mut archive = tar::Builder::new(Vec::new());
-            archive.append_dir_all(".", context_dir).map_err(|error| format!("remote build: archive context failed: {error}"))?;
-            let archive = archive.into_inner().map_err(|error| format!("remote build: finalize context failed: {error}"))?;
-            let filename = dockerfile_path.file_name().and_then(|name| name.to_str()).unwrap_or("Dockerfile");
-            let mut path = format!("/build?dockerfile={}", percent_encode_path_component(filename));
-            if let Some(tag) = tag { parse_image_reference(tag).map_err(|error| error.to_string())?; path.push_str("&t="); path.push_str(&percent_encode_path_component(tag)); }
-            if let Some(platform) = platform { path.push_str("&platform="); path.push_str(&percent_encode_path_component(&platform)); }
-            let (status, body) = remote_docker_request_with_content_type(&endpoint, "POST", &path, Some(&archive), Some("application/x-tar"))?;
-            if !(200..300).contains(&status) { return Err(format!("remote context request returned HTTP {status}: {}", String::from_utf8_lossy(&body))); }
-            if !body.is_empty() { print_json(body, "json")?; }
-            Ok(())
-        })(),
-        Commands::SystemDf { format } => request("GET", "/system/df".to_string())
-            .and_then(|body| print_json(body, format)),
+            dockerfile,
+            ferrofile,
+            tag,
+            compress,
+            image_format,
+            embed_model,
+            platform,
+            cache_from,
+            cache_to,
+            build_context,
+            secret,
+        } => {
+            (|| -> Result<(), String> {
+                if ferrofile.is_some() {
+                    return Err(
+                        "remote build: --ferrofile is not representable by the Docker transport"
+                            .to_string(),
+                    );
+                }
+                if compress != "gzip" {
+                    return Err(
+                        "remote build: --compress is not representable by the Docker transport"
+                            .to_string(),
+                    );
+                }
+                if image_format != "oci" || embed_model.is_some() {
+                    return Err("remote build: native RVF output is not representable by the Docker transport".to_string());
+                }
+                if cache_from.is_some() || cache_to.is_some() {
+                    return Err(
+                        "remote build: cache options are not representable by the Docker transport"
+                            .to_string(),
+                    );
+                }
+                if let Some(platform) = platform.as_deref() {
+                    validate_build_platform(Some(platform))?;
+                }
+                if !build_context.is_empty() || !secret.is_empty() {
+                    return Err("remote build: named contexts and secrets are not supported by this transport yet".to_string());
+                }
+                let dockerfile = dockerfile.as_deref().unwrap_or("Dockerfile");
+                let dockerfile_path = if Path::new(dockerfile).is_absolute() {
+                    PathBuf::from(dockerfile)
+                } else {
+                    std::env::current_dir()
+                        .map_err(|error| {
+                            format!("remote build: failed to get current directory: {error}")
+                        })?
+                        .join(dockerfile)
+                };
+                if !dockerfile_path.is_file() {
+                    return Err(format!(
+                        "remote build: Dockerfile does not exist: {}",
+                        dockerfile_path.display()
+                    ));
+                }
+                let context_dir = dockerfile_path.parent().unwrap_or_else(|| Path::new("."));
+                let mut archive = tar::Builder::new(Vec::new());
+                archive
+                    .append_dir_all(".", context_dir)
+                    .map_err(|error| format!("remote build: archive context failed: {error}"))?;
+                let archive = archive
+                    .into_inner()
+                    .map_err(|error| format!("remote build: finalize context failed: {error}"))?;
+                let filename = dockerfile_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Dockerfile");
+                let mut path = format!(
+                    "/build?dockerfile={}",
+                    percent_encode_path_component(filename)
+                );
+                if let Some(tag) = tag {
+                    parse_image_reference(tag).map_err(|error| error.to_string())?;
+                    path.push_str("&t=");
+                    path.push_str(&percent_encode_path_component(tag));
+                }
+                if let Some(platform) = platform {
+                    path.push_str("&platform=");
+                    path.push_str(&percent_encode_path_component(&platform));
+                }
+                let (status, body) = remote_docker_request_with_content_type(
+                    &endpoint,
+                    "POST",
+                    &path,
+                    Some(&archive),
+                    Some("application/x-tar"),
+                )?;
+                if !(200..300).contains(&status) {
+                    return Err(format!(
+                        "remote context request returned HTTP {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    ));
+                }
+                if !body.is_empty() {
+                    print_json(body, "json")?;
+                }
+                Ok(())
+            })()
+        }
+        Commands::SystemDf { format } => {
+            request("GET", "/system/df".to_string()).and_then(|body| print_json(body, format))
+        }
         Commands::Images { format, filters } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_filters(&parsed)?;
@@ -6013,15 +6100,16 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
         .entries()
         .map_err(|error| format!("docker build: invalid tar context: {error}"))?
     {
-        let mut entry = entry.map_err(|error| format!("docker build: invalid tar entry: {error}"))?;
+        let mut entry =
+            entry.map_err(|error| format!("docker build: invalid tar entry: {error}"))?;
         let path = entry
             .path()
             .map_err(|error| format!("docker build: invalid context path: {error}"))?
             .into_owned();
         if path.is_absolute()
-            || path.components().any(|component| {
-                matches!(component, Component::ParentDir | Component::Prefix(_))
-            })
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
         {
             return Err(format!(
                 "docker build: context path escapes archive root: {}",
@@ -6030,8 +6118,9 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
         }
         let target = destination.join(&path);
         match entry.header().entry_type() {
-            tar::EntryType::Directory => std::fs::create_dir_all(&target)
-                .map_err(|error| format!("docker build: create context directory failed: {error}"))?,
+            tar::EntryType::Directory => std::fs::create_dir_all(&target).map_err(|error| {
+                format!("docker build: create context directory failed: {error}")
+            })?,
             tar::EntryType::Regular => {
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(|error| {
@@ -6042,9 +6131,12 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
                     .write(true)
                     .create_new(true)
                     .open(&target)
-                    .map_err(|error| format!("docker build: create context file failed: {error}"))?;
-                std::io::copy(&mut entry, &mut output)
-                    .map_err(|error| format!("docker build: extract context file failed: {error}"))?;
+                    .map_err(|error| {
+                        format!("docker build: create context file failed: {error}")
+                    })?;
+                std::io::copy(&mut entry, &mut output).map_err(|error| {
+                    format!("docker build: extract context file failed: {error}")
+                })?;
             }
             kind => {
                 return Err(format!(
@@ -6060,7 +6152,12 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
 fn docker_manifest_layer_size(manifest_json: &str) -> u64 {
     serde_json::from_str::<serde_json::Value>(manifest_json)
         .ok()
-        .and_then(|manifest| manifest.get("layers").and_then(serde_json::Value::as_array).cloned())
+        .and_then(|manifest| {
+            manifest
+                .get("layers")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
         .unwrap_or_default()
         .into_iter()
         .filter_map(|layer| layer.get("size").and_then(serde_json::Value::as_u64))
@@ -9317,7 +9414,7 @@ fn compose_service_execution_digest(
             Some(instance),
             &ports,
             network,
-        configured_network_backend,
+            configured_network_backend,
         )
         .map_err(|error| error.to_string())?;
     Ok((image.to_string(), digest))
@@ -9422,12 +9519,9 @@ fn compose_service_mounts(
                 return Err(format!("compose: invalid volume entry {entry}"));
             }
             if source.starts_with('.') || source.contains('/') {
-                let resolved = project_dir
-                    .join(source)
-                    .canonicalize()
-                    .map_err(|error| {
-                        format!("compose: bind source {source} cannot be resolved: {error}")
-                    })?;
+                let resolved = project_dir.join(source).canonicalize().map_err(|error| {
+                    format!("compose: bind source {source} cannot be resolved: {error}")
+                })?;
                 let mode = parts.next().unwrap_or("");
                 if mode.is_empty() {
                     out.push(format!("{}:{target}", resolved.display()));
@@ -10065,10 +10159,7 @@ fn docker_event_response_attributes(response: &[u8]) -> BTreeMap<String, String>
                 }
             }
         }
-        if let Some(labels) = config
-            .get("Labels")
-            .and_then(serde_json::Value::as_object)
-        {
+        if let Some(labels) = config.get("Labels").and_then(serde_json::Value::as_object) {
             for (key, value) in labels.iter().take(MAX_ATTRIBUTES) {
                 if attributes.len() >= MAX_ATTRIBUTES {
                     break;
@@ -10407,22 +10498,15 @@ fn handle_docker_compat_connection(
                 // Docker CLI advertises JSONL/NDJSON explicitly but does not
                 // add a `follow=1` query parameter, while the repository's
                 // finite socket fixtures intentionally omit that header.
-                let accepts_event_stream = request
-                    .headers
-                    .get("accept")
-                    .is_some_and(|value| {
-                        value
-                            .split(',')
-                            .any(|item| {
-                                let item = item.trim().to_ascii_lowercase();
-                                item.contains("jsonl")
-                                    || item.contains("ndjson")
-                                    || item.contains("json-seq")
-                            })
-                    });
-                if query.get("follow").is_some_and(|value| value == "1")
-                    || accepts_event_stream
-                {
+                let accepts_event_stream = request.headers.get("accept").is_some_and(|value| {
+                    value.split(',').any(|item| {
+                        let item = item.trim().to_ascii_lowercase();
+                        item.contains("jsonl")
+                            || item.contains("ndjson")
+                            || item.contains("json-seq")
+                    })
+                });
+                if query.get("follow").is_some_and(|value| value == "1") || accepts_event_stream {
                     event_follow_query = Some(query.clone());
                     docker_chunked_headers(200, "application/x-ndjson")
                 } else {
@@ -10900,11 +10984,9 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/rename");
-                let name = query
-                    .get("name")
-                    .ok_or_else(|| {
-                        "docker: rename requires the name query parameter".to_string()
-                    })?;
+                let name = query.get("name").ok_or_else(|| {
+                    "docker: rename requires the name query parameter".to_string()
+                })?;
                 validate_docker_container_name(name)?;
                 runtime
                     .rename(id, name)
@@ -11130,10 +11212,7 @@ fn handle_docker_compat_connection(
                                 return Err(format!("container {id} is still running"));
                             }
                             runtime
-                                .kill_with_signal(
-                                    id,
-                                    Some(nix::sys::signal::Signal::SIGKILL),
-                                )
+                                .kill_with_signal(id, Some(nix::sys::signal::Signal::SIGKILL))
                                 .map_err(|error| error.to_string())?;
                         }
                     }
@@ -11177,12 +11256,17 @@ fn handle_docker_compat_connection(
                         matches!(component, Component::ParentDir | Component::Prefix(_))
                     })
                 {
-                    return Err("docker build: Dockerfile path must stay within the build context".to_string());
+                    return Err(
+                        "docker build: Dockerfile path must stay within the build context"
+                            .to_string(),
+                    );
                 }
                 let temp = tempfile::Builder::new()
                     .prefix("api-build-")
                     .tempdir_in(runtime_dir.as_ref())
-                    .map_err(|error| format!("docker build: create context directory failed: {error}"))?;
+                    .map_err(|error| {
+                        format!("docker build: create context directory failed: {error}")
+                    })?;
                 extract_docker_build_context(&request.body, temp.path())?;
                 let dockerfile_path = temp.path().join(dockerfile_path);
                 if !dockerfile_path.is_file() {
@@ -11193,7 +11277,11 @@ fn handle_docker_compat_connection(
                     &store,
                     &origin,
                     &surface_authorization,
-                    Some(dockerfile_path.to_str().ok_or_else(|| "docker build: Dockerfile path is not UTF-8".to_string())?),
+                    Some(
+                        dockerfile_path.to_str().ok_or_else(|| {
+                            "docker build: Dockerfile path is not UTF-8".to_string()
+                        })?,
+                    ),
                     None,
                     tag,
                     "gzip",
@@ -11205,8 +11293,12 @@ fn handle_docker_compat_connection(
                     &[],
                     &[],
                 )?;
-                http_response(200, br#"{"stream":"Successfully built"}
-"#, "application/json")
+                http_response(
+                    200,
+                    br#"{"stream":"Successfully built"}
+"#,
+                    "application/json",
+                )
             }
             ("GET", "/networks") => {
                 let filters = parse_docker_filters(&query)?;
@@ -12262,7 +12354,11 @@ fn docker_volume_matches_filters(
     filters: &HashMap<String, Vec<String>>,
 ) -> bool {
     if let Some(names) = filters.get("name") {
-        if !names.is_empty() && !names.iter().any(|candidate| record.name.contains(candidate)) {
+        if !names.is_empty()
+            && !names
+                .iter()
+                .any(|candidate| record.name.contains(candidate))
+        {
             return false;
         }
     }
@@ -12294,11 +12390,9 @@ fn docker_network_matches_filters(
     record: &DockerNetworkView<'_>,
     filters: &HashMap<String, Vec<String>>,
 ) -> bool {
-    let name_matches = filters
-        .get("name")
-        .is_none_or(|values| {
-            values.is_empty() || values.iter().any(|value| record.name.contains(value))
-        });
+    let name_matches = filters.get("name").is_none_or(|values| {
+        values.is_empty() || values.iter().any(|value| record.name.contains(value))
+    });
     let driver_matches = filters.get("driver").is_none_or(|values| {
         values.is_empty() || values.iter().any(|value| value == record.driver)
     });
@@ -12479,7 +12573,9 @@ fn normalize_docker_limit(value: Option<i64>, field: &str) -> Result<Option<u64>
         None | Some(0) => Ok(None),
         Some(value) if value > 0 => Ok(Some(value as u64)),
         Some(-1) if field == "PidsLimit" => Ok(None),
-        Some(_) => Err(format!("docker: {field} must be zero, positive, or -1 for PidsLimit")),
+        Some(_) => Err(format!(
+            "docker: {field} must be zero, positive, or -1 for PidsLimit"
+        )),
     }
 }
 
@@ -13066,7 +13162,9 @@ fn stream_docker_attach(
                 if stdout_requested { &stdout } else { "" },
                 if stderr_requested { &stderr } else { "" },
             );
-            stream.write_all(&frame).map_err(|error| error.to_string())?;
+            stream
+                .write_all(&frame)
+                .map_err(|error| error.to_string())?;
             stream.flush().map_err(|error| error.to_string())?;
         }
         return Ok(());
@@ -13075,10 +13173,20 @@ fn stream_docker_attach(
         runtime.logs_split(id).map_err(|error| error.to_string())?;
     if logs_requested && (!initial_stdout.is_empty() || !initial_stderr.is_empty()) {
         let frame = docker_raw_stream(
-            if stdout_requested { &initial_stdout } else { "" },
-            if stderr_requested { &initial_stderr } else { "" },
+            if stdout_requested {
+                &initial_stdout
+            } else {
+                ""
+            },
+            if stderr_requested {
+                &initial_stderr
+            } else {
+                ""
+            },
         );
-        stream.write_all(&frame).map_err(|error| error.to_string())?;
+        stream
+            .write_all(&frame)
+            .map_err(|error| error.to_string())?;
         stream.flush().map_err(|error| error.to_string())?;
     }
     if !stream_requested {
@@ -13122,8 +13230,16 @@ fn stream_docker_attach(
         }
         if stdout.len() > emitted_stdout || stderr.len() > emitted_stderr {
             let frame = docker_raw_stream(
-                if stdout_requested { &stdout[emitted_stdout..] } else { "" },
-                if stderr_requested { &stderr[emitted_stderr..] } else { "" },
+                if stdout_requested {
+                    &stdout[emitted_stdout..]
+                } else {
+                    ""
+                },
+                if stderr_requested {
+                    &stderr[emitted_stderr..]
+                } else {
+                    ""
+                },
             );
             stream
                 .write_all(&frame)
@@ -13231,7 +13347,10 @@ mod tests {
 
     #[test]
     fn docker_status_for_running_container_delete_is_conflict() {
-        assert_eq!(super::docker_status_for_error("container c1 is still running"), 409);
+        assert_eq!(
+            super::docker_status_for_error("container c1 is still running"),
+            409
+        );
     }
 
     #[test]
@@ -13242,26 +13361,23 @@ mod tests {
 
     use super::{
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
-        extract_docker_build_context,
         context_endpoint_available, context_endpoint_is_local, decode_docker_raw_stream,
-        desktop_forward_enabled,
-        discover_rootless_socket, dispatch, dispatch_remote_context, docker_chunked_headers,
-        docker_container_apply_time_bounds, docker_container_matches_filters,
-        docker_container_prune_matches_filters, docker_event_payload, docker_event_resource,
+        desktop_forward_enabled, discover_rootless_socket, dispatch, dispatch_remote_context,
+        docker_chunked_headers, docker_container_apply_time_bounds,
+        docker_container_matches_filters, docker_container_prune_matches_filters,
+        docker_directory_usage, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
-        docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_directory_usage,
-        docker_manifest_layer_size,
-        docker_inspect_payload, docker_network_ipv6_config, docker_network_matches_filters,
-        docker_pending_inspect_payload,
-        docker_pending_matches_filters, docker_pending_prune_matches_filters, docker_raw_stream,
-        docker_runtime_healthcheck, docker_tail_logs, docker_top_payload,
-        docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
-        handle_build, handle_containers, handle_context, handle_events, handle_exec,
-        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
-        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
+        docker_image_matches_filters, docker_image_prune_matches_filters, docker_inspect_payload,
+        docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
+        docker_pending_inspect_payload, docker_pending_matches_filters,
+        docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
+        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
+        ensure_context_routing_available, extract_docker_build_context, handle_build,
+        handle_containers, handle_context, handle_events, handle_exec, handle_image_prune,
+        handle_images, handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report,
+        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
+        handle_rmi, handle_run, handle_stats, handle_stop, handle_top, handle_unpause,
+        handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
         parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_kill_signal, parse_docker_limit_query,
@@ -13932,7 +14048,9 @@ volumes:
         match cli.command {
             Commands::Compose { file, command } => {
                 assert!(file.is_none());
-                assert!(matches!(command, ComposeCommands::Up { profile, detach } if profile.is_empty() && detach));
+                assert!(
+                    matches!(command, ComposeCommands::Up { profile, detach } if profile.is_empty() && detach)
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -13987,14 +14105,15 @@ volumes:
         ]);
         match cli.command {
             Commands::Ai {
-                command: AiCommands::Sign {
-                    model_type,
-                    version,
-                    signer_key_id,
-                    key,
-                    models_dir,
-                    format,
-                },
+                command:
+                    AiCommands::Sign {
+                        model_type,
+                        version,
+                        signer_key_id,
+                        key,
+                        models_dir,
+                        format,
+                    },
             } => {
                 assert_eq!(model_type, "resource-predictor");
                 assert_eq!(version, 7);
@@ -15541,13 +15660,14 @@ volumes:
             header.set_link_name("/tmp/escape").expect("link");
             header.set_size(0);
             header.set_cksum();
-            builder
-                .append(&header, &[][..])
-                .expect("append symlink");
+            builder.append(&header, &[][..]).expect("append symlink");
             builder.finish().expect("finish");
         }
         let error = extract_docker_build_context(&bytes, temp.path()).expect_err("symlink");
-        assert!(error.contains("unsupported context entry type"), "error={error}");
+        assert!(
+            error.contains("unsupported context entry type"),
+            "error={error}"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -16599,7 +16719,10 @@ volumes:
         let temp = tempfile::tempdir().expect("rootless socket fixture");
         let socket = temp.path().join("custom-ferrocrate.sock");
         unsafe { std::env::set_var("FERROCRATE_ROOTLESS_SOCKET", &socket) };
-        assert!(context_endpoint_is_local(&format!("unix://{}", socket.display())));
+        assert!(context_endpoint_is_local(&format!(
+            "unix://{}",
+            socket.display()
+        )));
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_ROOTLESS_SOCKET", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_ROOTLESS_SOCKET") },
@@ -16641,17 +16764,37 @@ volumes:
         let worker = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept remote df request");
             let mut request = Vec::new();
-            stream.read_to_end(&mut request).expect("read remote df request");
+            stream
+                .read_to_end(&mut request)
+                .expect("read remote df request");
             assert!(String::from_utf8_lossy(&request).contains("GET /system/df"));
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").expect("respond");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .expect("respond");
         });
-        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()); }
-        handle_context(ContextCommands::Create { name: "remote".to_string(), endpoint: format!("unix://{}", socket.display()) }).expect("create context");
-        handle_context(ContextCommands::Use { name: "remote".to_string() }).expect("use context");
-        let command = Cli::try_parse_from(["ferrocrate", "system-df"]).expect("parse df").command;
-        dispatch_remote_context(&command).expect("remote context should claim system df").expect("remote df should succeed");
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+        }
+        handle_context(ContextCommands::Create {
+            name: "remote".to_string(),
+            endpoint: format!("unix://{}", socket.display()),
+        })
+        .expect("create context");
+        handle_context(ContextCommands::Use {
+            name: "remote".to_string(),
+        })
+        .expect("use context");
+        let command = Cli::try_parse_from(["ferrocrate", "system-df"])
+            .expect("parse df")
+            .command;
+        dispatch_remote_context(&command)
+            .expect("remote context should claim system df")
+            .expect("remote df should succeed");
         worker.join().expect("remote df worker");
-        match previous { Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) }, None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") } }
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -16802,29 +16945,22 @@ volumes:
             .expect_err("local-only option must be rejected");
         assert!(result.contains("--profile"), "error={result}");
 
-        let conflicting = Cli::try_parse_from([
-            "ferrocrate",
-            "run",
-            "alpine",
-            "--read-only",
-            "--read-write",
-        ])
-        .expect("parse conflicting rootfs flags")
-        .command;
+        let conflicting =
+            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--read-only", "--read-write"])
+                .expect("parse conflicting rootfs flags")
+                .command;
         let result = dispatch_remote_context(&conflicting)
             .expect("remote context should claim run")
             .expect_err("conflicting rootfs flags must be rejected");
-        assert!(result.contains("read-only and --read-write"), "error={result}");
+        assert!(
+            result.contains("read-only and --read-write"),
+            "error={result}"
+        );
 
-        let invalid_name = Cli::try_parse_from([
-            "ferrocrate",
-            "run",
-            "alpine",
-            "--name",
-            "bad/name",
-        ])
-        .expect("parse invalid remote name")
-        .command;
+        let invalid_name =
+            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--name", "bad/name"])
+                .expect("parse invalid remote name")
+                .command;
         let result = dispatch_remote_context(&invalid_name)
             .expect("remote context should claim run")
             .expect_err("invalid Docker names must be rejected");
@@ -16844,29 +16980,19 @@ volumes:
             .expect_err("invalid capabilities must be rejected");
         assert!(result.contains("unknown capability"), "error={result}");
 
-        let invalid_bind = Cli::try_parse_from([
-            "ferrocrate",
-            "run",
-            "alpine",
-            "--bind",
-            "/host-only",
-        ])
-        .expect("parse invalid remote bind")
-        .command;
+        let invalid_bind =
+            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--bind", "/host-only"])
+                .expect("parse invalid remote bind")
+                .command;
         let result = dispatch_remote_context(&invalid_bind)
             .expect("remote context should claim run")
             .expect_err("invalid bind mounts must be rejected");
         assert!(result.contains("bind mount"), "error={result}");
 
-        let invalid_volume = Cli::try_parse_from([
-            "ferrocrate",
-            "run",
-            "alpine",
-            "--volume",
-            "data-only",
-        ])
-        .expect("parse invalid remote volume")
-        .command;
+        let invalid_volume =
+            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--volume", "data-only"])
+                .expect("parse invalid remote volume")
+                .command;
         let result = dispatch_remote_context(&invalid_volume)
             .expect("remote context should claim run")
             .expect_err("invalid volumes must be rejected");
@@ -16993,17 +17119,44 @@ volumes:
             let mut request = Vec::new();
             stream.read_to_end(&mut request).expect("read");
             let request = String::from_utf8_lossy(&request);
-            assert!(request.contains("POST /build?dockerfile=Dockerfile&t=example%2Fapp%3Adev&platform=linux%2F"));
+            assert!(request.contains(
+                "POST /build?dockerfile=Dockerfile&t=example%2Fapp%3Adev&platform=linux%2F"
+            ));
             assert!(request.contains("Content-Type: application/x-tar"));
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").expect("respond");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .expect("respond");
         });
-        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()); }
-        handle_context(ContextCommands::Create { name: "remote".to_string(), endpoint: format!("unix://{}", socket.display()) }).expect("create context");
-        handle_context(ContextCommands::Use { name: "remote".to_string() }).expect("use context");
-        let command = Cli::try_parse_from(["ferrocrate", "build", "--dockerfile", context.join("Dockerfile").to_str().unwrap(), "--tag", "example/app:dev", "--platform", platform.as_str()]).unwrap().command;
+        unsafe {
+            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+        }
+        handle_context(ContextCommands::Create {
+            name: "remote".to_string(),
+            endpoint: format!("unix://{}", socket.display()),
+        })
+        .expect("create context");
+        handle_context(ContextCommands::Use {
+            name: "remote".to_string(),
+        })
+        .expect("use context");
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "build",
+            "--dockerfile",
+            context.join("Dockerfile").to_str().unwrap(),
+            "--tag",
+            "example/app:dev",
+            "--platform",
+            platform.as_str(),
+        ])
+        .unwrap()
+        .command;
         dispatch_remote_context(&command).unwrap().unwrap();
         worker.join().unwrap();
-        match previous { Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) }, None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") } }
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
     }
 
     #[test]

@@ -549,8 +549,9 @@ impl RegistryClient {
 }
 
 fn request_origin(url: &str) -> Result<String, RegistryError> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|error| RegistryError::InvalidReference(format!("invalid registry URL: {error}")))?;
+    let parsed = reqwest::Url::parse(url).map_err(|error| {
+        RegistryError::InvalidReference(format!("invalid registry URL: {error}"))
+    })?;
     let host = parsed
         .host_str()
         .ok_or_else(|| RegistryError::InvalidReference("registry URL has no host".to_string()))?;
@@ -826,8 +827,8 @@ fn append_digest_query(upload_url: &str, digest: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_digest_query, normalize_location, parse_image_reference, ReferenceSeparator,
-        request_origin, RegistryAuth, RegistryClient,
+        append_digest_query, normalize_location, parse_image_reference, request_origin,
+        ReferenceSeparator, RegistryAuth, RegistryClient,
     };
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;

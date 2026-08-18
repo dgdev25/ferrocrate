@@ -253,11 +253,7 @@ impl ResourcePredictor {
     /// Timestamps are stored as ages relative to the newest sample because
     /// `Instant` is intentionally not portable across process restarts.
     /// The snapshot is written create-new, synced, and atomically renamed.
-    pub fn save_snapshot(
-        &self,
-        path: &std::path::Path,
-        container_id: &str,
-    ) -> Result<(), String> {
+    pub fn save_snapshot(&self, path: &std::path::Path, container_id: &str) -> Result<(), String> {
         const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
         const SCHEMA: u32 = 1;
         let newest = self.window.back().map(|sample| sample.timestamp);
@@ -293,7 +289,9 @@ impl ResourcePredictor {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         let temp = parent.join(format!(
             ".{}.tmp-{}-{}",
-            path.file_name().and_then(|name| name.to_str()).unwrap_or("resource"),
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("resource"),
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -322,17 +320,19 @@ impl ResourcePredictor {
     }
 
     /// Restore a sample window only when its container identity matches.
-    pub fn from_snapshot(path: &std::path::Path, expected_container_id: &str) -> Result<Self, String> {
+    pub fn from_snapshot(
+        path: &std::path::Path,
+        expected_container_id: &str,
+    ) -> Result<Self, String> {
         const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024;
         const SCHEMA: u32 = 1;
         let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
         if metadata.len() > MAX_SNAPSHOT_BYTES {
             return Err("resource snapshot exceeds 64 KiB".to_string());
         }
-        let snapshot: ResourceSnapshot = serde_json::from_slice(
-            &std::fs::read(path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| format!("invalid resource snapshot: {error}"))?;
+        let snapshot: ResourceSnapshot =
+            serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid resource snapshot: {error}"))?;
         if snapshot.schema != SCHEMA {
             return Err("unsupported resource snapshot schema".to_string());
         }
@@ -746,8 +746,7 @@ pub fn cpu_percent_from_delta(
         return 0.0;
     }
     let usage_delta = current_usage_usec - previous_usage_usec;
-    ((usage_delta as f64 / elapsed_usec) * 100.0)
-        .clamp(0.0, 100.0) as f32
+    ((usage_delta as f64 / elapsed_usec) * 100.0).clamp(0.0, 100.0) as f32
 }
 
 /// Read cgroup v2 metrics from the cgroup filesystem.
@@ -809,23 +808,30 @@ mod tests {
 
     #[test]
     fn cpu_percent_from_delta_uses_elapsed_wall_time() {
-        assert!((cpu_percent_from_delta(1_000, 501_000, Duration::from_secs(1)) - 50.0).abs() < 0.01);
+        assert!(
+            (cpu_percent_from_delta(1_000, 501_000, Duration::from_secs(1)) - 50.0).abs() < 0.01
+        );
         // A cgroup can consume more than one CPU; ResourceSample exposes a
         // bounded percentage so anomaly features remain in their documented range.
-        assert_eq!(cpu_percent_from_delta(0, 2_000_000, Duration::from_secs(1)), 100.0);
+        assert_eq!(
+            cpu_percent_from_delta(0, 2_000_000, Duration::from_secs(1)),
+            100.0
+        );
     }
 
     #[test]
     fn cpu_percent_from_delta_fails_closed_on_reset_or_zero_interval() {
-        assert_eq!(cpu_percent_from_delta(500, 400, Duration::from_secs(1)), 0.0);
+        assert_eq!(
+            cpu_percent_from_delta(500, 400, Duration::from_secs(1)),
+            0.0
+        );
         assert_eq!(cpu_percent_from_delta(500, 1_500, Duration::ZERO), 0.0);
     }
 
     #[test]
     fn read_cgroup_metrics_reads_cpu_usage_usec_for_runtime_sampling() {
         let directory = tempfile::tempdir().expect("temporary cgroup");
-        std::fs::write(directory.path().join("memory.current"), "4096\n")
-            .expect("memory.current");
+        std::fs::write(directory.path().join("memory.current"), "4096\n").expect("memory.current");
         std::fs::write(directory.path().join("memory.max"), "8192\n").expect("memory.max");
         std::fs::write(directory.path().join("pids.current"), "3\n").expect("pids.current");
         std::fs::write(
@@ -899,8 +905,8 @@ mod tests {
         predictor
             .save_snapshot(&path, "container-a")
             .expect("save snapshot");
-        let restored = ResourcePredictor::from_snapshot(&path, "container-a")
-            .expect("restore snapshot");
+        let restored =
+            ResourcePredictor::from_snapshot(&path, "container-a").expect("restore snapshot");
         assert_eq!(restored.sample_count(), 3);
         assert_eq!(restored.memory_limit, 4096);
         assert!(ResourcePredictor::from_snapshot(&path, "container-b").is_err());

@@ -433,7 +433,9 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         header.set_path("Dockerfile").expect("dockerfile path");
         header.set_size(dockerfile.len() as u64);
         header.set_cksum();
-        builder.append(&header, &dockerfile[..]).expect("append dockerfile");
+        builder
+            .append(&header, &dockerfile[..])
+            .expect("append dockerfile");
         let app = b"hello";
         let mut header = tar::Header::new_gnu();
         header.set_path("app").expect("app path");
@@ -450,7 +452,10 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         &archive,
     );
     assert_eq!(status, 200, "build response: {body}");
-    assert!(body.contains("Successfully built"), "build response: {body}");
+    assert!(
+        body.contains("Successfully built"),
+        "build response: {body}"
+    );
 }
 
 #[test]

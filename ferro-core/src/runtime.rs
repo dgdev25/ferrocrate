@@ -2867,9 +2867,8 @@ impl ContainerRuntime {
             None
         };
 
-        let defer_rootless_mounts = rootless && (!mounts.is_empty()
-            || !tmpfs_mounts.is_empty()
-            || readonly_rootfs);
+        let defer_rootless_mounts =
+            rootless && (!mounts.is_empty() || !tmpfs_mounts.is_empty() || readonly_rootfs);
         if !defer_rootless_mounts {
             for (index, mount) in mounts.iter().enumerate() {
                 self.kernel_ops.apply_bind(&rootfs_dir, mount)?;
@@ -3257,11 +3256,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let rootfs = self
-            .runtime_dir
-            .join("containers")
-            .join(id)
-            .join("rootfs");
+        let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
         let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             let mounts = record
                 .mounts
@@ -3898,11 +3893,7 @@ impl ContainerRuntime {
         let records = self.store.list()?;
         cleanup_network(Some((_proof, intent)), &record, &records)?;
         let container_dir = self.runtime_dir.join("containers").join(id);
-        if let Err(error) = detach_persisted_mounts(
-            &self.kernel_ops,
-            &container_dir,
-            &record,
-        ) {
+        if let Err(error) = detach_persisted_mounts(&self.kernel_ops, &container_dir, &record) {
             // Keep the durable record available for a later retry. Removing a
             // directory while one of its mountpoints is still attached leaks
             // the mount and leaves the container permanently stuck.
@@ -4227,7 +4218,14 @@ fn validate_rootless_mount_capability(
 
 fn rootless_mount_namespace_available() -> bool {
     std::process::Command::new("unshare")
-        .args(["--user", "--mount", "--fork", "--propagation", "unchanged", "true"])
+        .args([
+            "--user",
+            "--mount",
+            "--fork",
+            "--propagation",
+            "unchanged",
+            "true",
+        ])
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -4996,10 +4994,19 @@ fn detach_persisted_mounts(
     let mut targets = record
         .mounts
         .iter()
-        .map(|mount| (PathBuf::from(&mount.target), Some(mount.source.as_str()), false))
-        .chain(record.tmpfs_mounts.iter().map(|mount| {
-            (PathBuf::from(&mount.target), None, true)
-        }))
+        .map(|mount| {
+            (
+                PathBuf::from(&mount.target),
+                Some(mount.source.as_str()),
+                false,
+            )
+        })
+        .chain(
+            record
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| (PathBuf::from(&mount.target), None, true)),
+        )
         .collect::<Vec<_>>();
     // Detach nested mounts first and avoid attempting the same target twice.
     targets.sort_by(|left, right| {
@@ -5025,7 +5032,9 @@ fn detach_persisted_mounts(
         if is_tmpfs {
             let kind = mountinfo_for_path(&absolute)?
                 .map(|(_, kind, _)| kind)
-                .ok_or_else(|| RuntimeError::InvalidState("persisted tmpfs mount disappeared".into()))?;
+                .ok_or_else(|| {
+                    RuntimeError::InvalidState("persisted tmpfs mount disappeared".into())
+                })?;
             if kind != "tmpfs" {
                 return Err(RuntimeError::InvalidState(format!(
                     "refusing to detach non-tmpfs mount at {}",
@@ -5047,9 +5056,7 @@ fn detach_persisted_mounts(
 
     if record.readonly_rootfs {
         let parent_mount_id = mount_id_for_path(container_dir)?;
-        if root_mount_id.is_some()
-            && parent_mount_id.is_some()
-            && parent_mount_id != root_mount_id
+        if root_mount_id.is_some() && parent_mount_id.is_some() && parent_mount_id != root_mount_id
         {
             let expected = kernel_ops.identity(&rootfs)?;
             kernel_ops.detach_owned(&rootfs, Path::new("."), &expected)?;
@@ -5171,7 +5178,11 @@ fn build_bwrap_command(
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     for mount in mounts {
-        bwrap.arg(if mount.read_only { "--ro-bind" } else { "--bind" });
+        bwrap.arg(if mount.read_only {
+            "--ro-bind"
+        } else {
+            "--bind"
+        });
         bwrap
             .arg(&mount.source)
             .arg(format!("/{}", mount.target.display()));
@@ -5179,10 +5190,13 @@ fn build_bwrap_command(
     for mount in tmpfs_mounts {
         if mount.size.is_some() {
             return Err(RuntimeError::InvalidCommand(
-                "rootless tmpfs size limits require a mount-capable user namespace implementation".to_string(),
+                "rootless tmpfs size limits require a mount-capable user namespace implementation"
+                    .to_string(),
             ));
         }
-        bwrap.arg("--tmpfs").arg(format!("/{}", mount.target.display()));
+        bwrap
+            .arg("--tmpfs")
+            .arg(format!("/{}", mount.target.display()));
     }
     if readonly_rootfs {
         bwrap.arg("--remount-ro").arg("/");
@@ -9258,9 +9272,9 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
         return Ok(cmd.to_vec());
     }
     let state = match execute_with_timeout("getenforce", &[], Duration::from_secs(5)) {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_ascii_lowercase()
-        }
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_ascii_lowercase(),
         Ok(output) => {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let message = if detail.is_empty() {
@@ -9268,10 +9282,7 @@ fn apply_selinux_if_enabled(cmd: &[String]) -> Result<Vec<String>, RuntimeError>
             } else {
                 format!("getenforce failed: {detail}")
             };
-            mac_enforcement_result(
-                "selinux",
-                &message,
-            )?;
+            mac_enforcement_result("selinux", &message)?;
             return Ok(cmd.to_vec());
         }
         Err(error) => {
@@ -10231,7 +10242,11 @@ fn cleanup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError>
 }
 
 fn security_monitor_audit_message(phase: &str, events: &[String]) -> String {
-    let bounded = events.iter().take(32).map(String::as_str).collect::<Vec<_>>();
+    let bounded = events
+        .iter()
+        .take(32)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     format!("phase={phase} events={}", bounded.join(","))
 }
 
@@ -10777,21 +10792,19 @@ fn run_resource_monitor(
         }
     }
     let anomaly_snapshot_path = ai_anomaly_snapshot_path(&id);
-    let mut anomaly_training_samples = match ferro_mind::ai::anomaly::load_training_snapshot(
-        &anomaly_snapshot_path,
-        &id,
-    ) {
-        Ok(samples) => samples,
-        Err(error) if anomaly_snapshot_path.exists() => {
-            info!(
-                container = %id,
-                error = %error,
-                "anomaly training snapshot rejected; starting a fresh baseline"
-            );
-            Vec::new()
-        }
-        Err(_) => Vec::new(),
-    };
+    let mut anomaly_training_samples =
+        match ferro_mind::ai::anomaly::load_training_snapshot(&anomaly_snapshot_path, &id) {
+            Ok(samples) => samples,
+            Err(error) if anomaly_snapshot_path.exists() => {
+                info!(
+                    container = %id,
+                    error = %error,
+                    "anomaly training snapshot rejected; starting a fresh baseline"
+                );
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        };
     let anomaly_train_after = 20usize; // Train after 20 samples of normal behavior
     if !anomaly_detector.is_trained() && anomaly_training_samples.len() >= anomaly_train_after {
         anomaly_training_samples.truncate(anomaly_train_after);
@@ -10800,8 +10813,8 @@ fn run_resource_monitor(
 
     let sample_interval = Duration::from_secs(30);
     let oom_horizon = Duration::from_secs(1200); // 20 minutes
-    // cpu.stat reports cumulative CPU time. Retain only the previous sample
-    // so anomaly and prediction features use the actual cgroup CPU delta.
+                                                 // cpu.stat reports cumulative CPU time. Retain only the previous sample
+                                                 // so anomaly and prediction features use the actual cgroup CPU delta.
     let mut previous_cpu_sample: Option<(u64, Instant)> = None;
     let mut observed_memory_peak = 1u64;
 
@@ -11083,10 +11096,10 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_restart_delay, associated_network_name, BindMount, ContainerRuntime,
-        immutable_image_reference, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
-        NetworkBackend,
-        NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
+        adaptive_restart_delay, associated_network_name, immutable_image_reference, BindMount,
+        ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
+        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
+        TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -13339,12 +13352,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             protocol: "tcp".into(),
         }];
         unsafe { std::env::remove_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS") };
-        let error = super::validate_ebpf_published_port_boundary(
-            NetworkBackend::Ebpf,
-            &mapping,
-        )
-        .expect_err("live eBPF published ports must remain gated");
-        assert!(error.to_string().contains("pending live checksum qualification"));
+        let error = super::validate_ebpf_published_port_boundary(NetworkBackend::Ebpf, &mapping)
+            .expect_err("live eBPF published ports must remain gated");
+        assert!(error
+            .to_string()
+            .contains("pending live checksum qualification"));
         super::validate_ebpf_published_port_boundary(NetworkBackend::Iptables, &mapping)
             .expect("iptables remains the explicit supported fallback");
         unsafe { std::env::set_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS", "1") };
@@ -13428,10 +13440,12 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args.windows(3).any(|window| {
-            window == ["--ro-bind", "/tmp", "/data"]
-        }));
-        assert!(args.windows(2).any(|window| window == ["--remount-ro", "/"]));
+        assert!(args
+            .windows(3)
+            .any(|window| { window == ["--ro-bind", "/tmp", "/data"] }));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--remount-ro", "/"]));
         assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
     }
 
@@ -13857,9 +13871,20 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn security_ebpf_audit_message_is_bounded_and_deterministic() {
-        let events = (0..40).map(|index| format!("event{index}" )).collect::<Vec<_>>();
+        let events = (0..40)
+            .map(|index| format!("event{index}"))
+            .collect::<Vec<_>>();
         let message = super::security_monitor_audit_message("attached", &events);
-        assert_eq!(message, format!("phase=attached events={}", (0..32).map(|index| format!("event{index}")).collect::<Vec<_>>().join(",")));
+        assert_eq!(
+            message,
+            format!(
+                "phase=attached events={}",
+                (0..32)
+                    .map(|index| format!("event{index}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        );
         assert!(!message.contains("event32"));
     }
 
@@ -14039,7 +14064,12 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         }
         super::cleanup_ai_container_snapshots(dir.path(), "container-a");
         for kind in ["restart", "resource", "anomaly"] {
-            assert!(!dir.path().join("ai").join(kind).join("container-a.json").exists());
+            assert!(!dir
+                .path()
+                .join("ai")
+                .join(kind)
+                .join("container-a.json")
+                .exists());
         }
     }
 
@@ -14509,12 +14539,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 target: PathBuf::from("tmp-target"),
                 size: Some("1m".into()),
             }];
-            let (run_mounts, run_tmpfs, run_readonly) =
-                if nix::unistd::Uid::effective().is_root() {
-                    (&mounts[..], &tmpfs[..], true)
-                } else {
-                    (&[][..], &[][..], false)
-                };
+            let (run_mounts, run_tmpfs, run_readonly) = if nix::unistd::Uid::effective().is_root() {
+                (&mounts[..], &tmpfs[..], true)
+            } else {
+                (&[][..], &[][..], false)
+            };
             let result = runtime.run(
                 "alpine:latest",
                 &["sh".into(), "-c".into(), format!("touch {marker}")],
@@ -14574,16 +14603,16 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             let phases: &[&str] = if action == "run" {
                 if nix::unistd::Uid::effective().is_root() {
                     &[
-                    "bind-effect",
-                    "tmpfs-effect",
-                    "readonly-effect",
-                    "network-effect",
-                    "network-resources-before-ownership",
-                    "network",
-                    "cgroup-effect",
-                    "cgroup",
-                    "spawn",
-                    "identity",
+                        "bind-effect",
+                        "tmpfs-effect",
+                        "readonly-effect",
+                        "network-effect",
+                        "network-resources-before-ownership",
+                        "network",
+                        "cgroup-effect",
+                        "cgroup",
+                        "spawn",
+                        "identity",
                     ]
                 } else {
                     // Rootless mount admission is intentionally fail-closed

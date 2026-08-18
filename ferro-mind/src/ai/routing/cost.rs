@@ -375,7 +375,9 @@ fn spawn_provider_command(
             Err(error) => return Err(ExecutionError::Spawn(error.to_string())),
         }
     }
-    Err(ExecutionError::Spawn("provider spawn retry exhausted".to_string()))
+    Err(ExecutionError::Spawn(
+        "provider spawn retry exhausted".to_string(),
+    ))
 }
 
 /// Select and execute one provider across local and HTTP adapter tiers.
@@ -441,18 +443,12 @@ pub fn execute_routed_prompt_with_adapters_failover(
             ProviderAdapter::Command(endpoint) => {
                 execute_routed_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
             }
-            ProviderAdapter::Http(endpoint) => execute_routed_http_prompt(
-                std::slice::from_ref(endpoint),
-                policy,
-                prompt,
-                timeout,
-            ),
-            ProviderAdapter::Wasm(endpoint) => execute_routed_wasm_prompt(
-                std::slice::from_ref(endpoint),
-                policy,
-                prompt,
-                timeout,
-            ),
+            ProviderAdapter::Http(endpoint) => {
+                execute_routed_http_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+            }
+            ProviderAdapter::Wasm(endpoint) => {
+                execute_routed_wasm_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+            }
         };
         match result {
             Ok(response) => return Ok(response),
@@ -507,8 +503,12 @@ pub fn execute_routed_prompt_with_adapters_metered(
             (provider, response, response_tokens)
         }
         ProviderAdapter::Wasm(endpoint) => {
-            let (provider, response) =
-                execute_routed_wasm_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)?;
+            let (provider, response) = execute_routed_wasm_prompt(
+                std::slice::from_ref(endpoint),
+                policy,
+                prompt,
+                timeout,
+            )?;
             let response_tokens = estimate_tokens(&response);
             (provider, response, response_tokens)
         }
@@ -991,8 +991,11 @@ mod tests {
         let failing = temp.path().join("failing.sh");
         let healthy = temp.path().join("healthy.sh");
         std::fs::write(&failing, "#!/bin/sh\nexit 9\n").expect("failing script");
-        std::fs::write(&healthy, "#!/bin/sh\nread prompt\nprintf 'fallback:%s' \"$prompt\"\n")
-            .expect("healthy script");
+        std::fs::write(
+            &healthy,
+            "#!/bin/sh\nread prompt\nprintf 'fallback:%s' \"$prompt\"\n",
+        )
+        .expect("healthy script");
         for path in [&failing, &healthy] {
             let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
             permissions.set_mode(0o755);
@@ -1062,7 +1065,10 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert!(matches!(error, ExecutionError::NonZeroExit { status: 7, .. }));
+        assert!(matches!(
+            error,
+            ExecutionError::NonZeroExit { status: 7, .. }
+        ));
     }
 
     #[cfg(unix)]
@@ -1094,7 +1100,10 @@ mod tests {
         };
         let budget = TokenBudget::new(4);
         let result = execute_routed_prompt_with_adapters_metered_failover(
-            &[make("preferred", 0.99, failing), make("fallback", 0.8, healthy)],
+            &[
+                make("preferred", 0.99, failing),
+                make("fallback", 0.8, healthy),
+            ],
             &RoutingPolicy::default(),
             "hello",
             std::time::Duration::from_secs(5),
@@ -1103,7 +1112,10 @@ mod tests {
         )
         .expect("fallback response within budget");
         assert_eq!(result, ("fallback".into(), "ok".into(), 3));
-        assert_eq!(budget.used_tokens(), estimate_tokens("hello") + estimate_tokens("ok"));
+        assert_eq!(
+            budget.used_tokens(),
+            estimate_tokens("hello") + estimate_tokens("ok")
+        );
     }
 
     #[cfg(unix)]
@@ -1170,7 +1182,10 @@ mod tests {
             &budget,
         )
         .unwrap_err();
-        assert!(matches!(error, ExecutionError::NonZeroExit { status: 9, .. }));
+        assert!(matches!(
+            error,
+            ExecutionError::NonZeroExit { status: 9, .. }
+        ));
         assert_eq!(budget.used_tokens(), estimate_tokens("hello"));
     }
 
@@ -1350,8 +1365,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains("\"model\":\"claude-test\""));
             assert!(request.contains("anthropic prompt"));
-            let body =
-                r#"{"content":[{"type":"text","text":"anthropic reply"}],"usage":{"input_tokens":2,"output_tokens":1}}"#;
+            let body = r#"{"content":[{"type":"text","text":"anthropic reply"}],"usage":{"input_tokens":2,"output_tokens":1}}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

@@ -258,16 +258,16 @@ mod tests {
             "trap 'exit 0' TERM; : > '{}'; while :; do sleep 1; done",
             marker_text
         );
-        let mut proc = ManagedProcess::start(
-            shell_path(),
-            &["-c", &command],
-        )
-        .expect("process starts");
+        let mut proc =
+            ManagedProcess::start(shell_path(), &["-c", &command]).expect("process starts");
         let ready_deadline = Instant::now() + Duration::from_secs(1);
         while !marker.exists() && Instant::now() < ready_deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(marker.exists(), "graceful-stop fixture did not become ready");
+        assert!(
+            marker.exists(),
+            "graceful-stop fixture did not become ready"
+        );
         let status = proc.stop(Duration::MAX).expect("unbounded stop");
         let _ = std::fs::remove_file(&marker);
         assert!(status.success());

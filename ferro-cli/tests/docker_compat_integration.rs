@@ -143,7 +143,13 @@ impl DaemonHarness {
         (code, body)
     }
 
-    fn request_bytes(&self, method: &str, path: &str, content_type: &str, body: &[u8]) -> (u16, String) {
+    fn request_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, String) {
         let header = format!(
             "{method} {path} HTTP/1.1\r\nHost: docker\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -156,7 +162,15 @@ impl DaemonHarness {
         stream.read_to_end(&mut response).expect("read response");
         let text = String::from_utf8_lossy(&response);
         let (headers, body) = text.split_once("\r\n\r\n").expect("response headers");
-        let code = headers.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        let code = headers
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
         (code, body.to_string())
     }
 }
@@ -331,7 +345,10 @@ fn docker_compat_logs_for_created_container_returns_empty_success() {
         .to_string();
     let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/logs"));
     assert_eq!(status, 200, "logs response={response}");
-    assert!(response.is_empty(), "created container logs should be empty");
+    assert!(
+        response.is_empty(),
+        "created container logs should be empty"
+    );
 }
 
 #[test]
@@ -352,10 +369,8 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
         .expect("created id")
         .to_string();
 
-    let (status, response) = harness.request(
-        "POST",
-        &format!("/v1.45/containers/{container_id}/start"),
-    );
+    let (status, response) =
+        harness.request("POST", &format!("/v1.45/containers/{container_id}/start"));
     assert_eq!(status, 204, "container start response={response}");
 
     let exec_body = r#"{"Cmd":["true"]}"#;
@@ -387,7 +402,11 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
     assert_eq!(status, 200, "exec inspect after start response={response}");
     let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("exec inspect JSON");
     assert_eq!(inspect["Running"], false);
-    assert!(inspect["ExitCode"].is_i64(), "exit code={}", inspect["ExitCode"]);
+    assert!(
+        inspect["ExitCode"].is_i64(),
+        "exit code={}",
+        inspect["ExitCode"]
+    );
 }
 
 #[test]
@@ -403,9 +422,14 @@ fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .expect("set event stream read timeout");
     let mut response = [0u8; 512];
-    let read = stream.read(&mut response).expect("read event stream headers");
+    let read = stream
+        .read(&mut response)
+        .expect("read event stream headers");
     let headers = String::from_utf8_lossy(&response[..read]);
-    assert!(headers.contains("Transfer-Encoding: chunked"), "headers={headers}");
+    assert!(
+        headers.contains("Transfer-Encoding: chunked"),
+        "headers={headers}"
+    );
 }
 
 #[test]

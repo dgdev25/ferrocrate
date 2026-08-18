@@ -1415,7 +1415,10 @@ async fn cri_stop_recovery_reconciles_runtime_after_effect_crash() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(daemon.try_wait().expect("wait for CRI stop crash").is_some());
+    assert!(daemon
+        .try_wait()
+        .expect("wait for CRI stop crash")
+        .is_some());
     unsafe {
         std::env::remove_var("FERROCRATE_CRI_TEST_CRASH_POINT");
     }
@@ -1433,7 +1436,10 @@ async fn cri_stop_recovery_reconciles_runtime_after_effect_crash() {
         .into_inner()
         .status
         .expect("recovered container");
-    assert_eq!(status.state, ferro_cri::runtime::ContainerState::Exited as i32);
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Exited as i32
+    );
     recovered
         .remove_container(RemoveContainerRequest {
             container_id: container,
@@ -1636,7 +1642,8 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         .expect("exec sync")
         .into_inner();
     assert_eq!(
-        exec.exit_code, 0,
+        exec.exit_code,
+        0,
         "rootfs exec failed: stdout={:?} stderr={:?}",
         String::from_utf8_lossy(&exec.stdout),
         String::from_utf8_lossy(&exec.stderr)

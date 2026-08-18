@@ -135,7 +135,8 @@ impl MeteredModelProxy {
         F: FnOnce(&str) -> Result<(String, u64), String>,
     {
         self.counter.record(prompt_tokens)?;
-        let (response, completion_tokens) = backend(prompt).map_err(AiRuntimeError::ModelBackend)?;
+        let (response, completion_tokens) =
+            backend(prompt).map_err(AiRuntimeError::ModelBackend)?;
         self.counter.record(completion_tokens)?;
         Ok(response)
     }
@@ -288,7 +289,9 @@ mod tests {
         let error = proxy
             .invoke("hello", 3, |_| Err("provider unavailable".to_string()))
             .unwrap_err();
-        assert!(matches!(error, AiRuntimeError::ModelBackend(message) if message == "provider unavailable"));
+        assert!(
+            matches!(error, AiRuntimeError::ModelBackend(message) if message == "provider unavailable")
+        );
         assert_eq!(proxy.used_tokens(), 3);
     }
 

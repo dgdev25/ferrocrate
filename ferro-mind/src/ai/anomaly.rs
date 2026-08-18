@@ -356,13 +356,15 @@ pub fn save_training_snapshot(
     samples: &[Vec<f32>],
 ) -> Result<(), String> {
     const MAX_BYTES: usize = 64 * 1024;
-    if samples.len() > 64 || samples.iter().any(|sample| {
-        sample.is_empty()
-            || sample.len() > 16
-            || sample
-                .iter()
-                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
-    }) {
+    if samples.len() > 64
+        || samples.iter().any(|sample| {
+            sample.is_empty()
+                || sample.len() > 16
+                || sample
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        })
+    {
         return Err("anomaly training snapshot sample bounds are invalid".to_string());
     }
     let snapshot = AnomalyTrainingSnapshot {
@@ -378,7 +380,9 @@ pub fn save_training_snapshot(
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let temp = parent.join(format!(
         ".{}.tmp-{}-{}",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("anomaly"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("anomaly"),
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -416,10 +420,9 @@ pub fn load_training_snapshot(
     if metadata.len() > MAX_BYTES {
         return Err("anomaly training snapshot exceeds 64 KiB".to_string());
     }
-    let snapshot: AnomalyTrainingSnapshot = serde_json::from_slice(
-        &std::fs::read(path).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("invalid anomaly training snapshot: {error}"))?;
+    let snapshot: AnomalyTrainingSnapshot =
+        serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("invalid anomaly training snapshot: {error}"))?;
     if snapshot.schema != 1 {
         return Err("unsupported anomaly training snapshot schema".to_string());
     }

@@ -15,7 +15,10 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
         return;
     }
-    assert!(!nix::unistd::Uid::effective().is_root(), "run this fixture as a non-root user");
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
 
     let root = tempfile::tempdir().expect("root tempdir");
     let project = root.path().join("project");

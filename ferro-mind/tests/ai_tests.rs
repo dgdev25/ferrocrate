@@ -2,8 +2,8 @@
 //!
 //! Tests for anomaly detection, restart policies, and vector memory.
 
-use ferro_mind::ai::learning::vector_memory::VectorMemory;
 use ferro_mind::ai::explain::DecisionTrace;
+use ferro_mind::ai::learning::vector_memory::VectorMemory;
 use ferro_mind::ruv::types::{DistanceMetric, VectorEntry, VectorId};
 use serde_json::Value;
 use std::collections::HashMap;

@@ -111,8 +111,7 @@ impl CgroupV2Manager {
                 .parent()
                 .filter(|path| path.join(CGROUP_CONTROLLERS).exists())
                 .unwrap_or(&self.root);
-            let available = fs::read_to_string(parent.join(CGROUP_CONTROLLERS))
-                .unwrap_or_default();
+            let available = fs::read_to_string(parent.join(CGROUP_CONTROLLERS)).unwrap_or_default();
             if controllers
                 .iter()
                 .any(|controller| !available.split_whitespace().any(|item| item == *controller))
@@ -342,7 +341,9 @@ mod tests {
         fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
 
         let manager = CgroupV2Manager::new(root);
-        let group = manager.create_group("containers/test").expect("group created");
+        let group = manager
+            .create_group("containers/test")
+            .expect("group created");
         manager
             .apply_limits(
                 &group,
@@ -353,7 +354,10 @@ mod tests {
                 },
             )
             .expect("available limits applied");
-        assert_eq!(fs::read_to_string(root.join("cgroup.subtree_control")).unwrap(), "+memory +pids\n");
+        assert_eq!(
+            fs::read_to_string(root.join("cgroup.subtree_control")).unwrap(),
+            "+memory +pids\n"
+        );
     }
 
     #[test]
@@ -364,7 +368,9 @@ mod tests {
         fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
 
         let manager = CgroupV2Manager::new(root);
-        let group = manager.create_group("containers/test").expect("group created");
+        let group = manager
+            .create_group("containers/test")
+            .expect("group created");
         let error = manager
             .apply_limits(
                 &group,

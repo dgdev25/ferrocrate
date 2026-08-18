@@ -258,8 +258,8 @@ impl AdaptiveRestartPolicy {
         let base_backoff = self.base_backoff_secs.saturating_mul(multiplier);
 
         // Apply learned adjustment
-        let adjusted = (base_backoff as f64 * self.backoff_adjustment as f64)
-            .min(u64::MAX as f64) as u64;
+        let adjusted =
+            (base_backoff as f64 * self.backoff_adjustment as f64).min(u64::MAX as f64) as u64;
 
         // Cap at maximum
         adjusted.min(self.max_backoff_secs)

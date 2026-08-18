@@ -136,6 +136,27 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/containers/missing/top",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/missing/attach",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/missing/rename?name=renamed-container",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/missing/changes",
         coverage: Coverage::Implemented,
         expected_status: 404,
@@ -151,6 +172,13 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "GET",
         path: "/containers/missing/archive?path=%2Fetc%2Fhosts",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        path: "/exec/missing/json",
         coverage: Coverage::Implemented,
         expected_status: 404,
         body: "",

@@ -58,6 +58,7 @@ echo "[gate] release-readiness and compatibility checks"
 bash scripts/verify-release-readiness.sh
 
 echo "[gate] public release build and channel verification"
+bash scripts/test-release-provenance.sh
 bash scripts/build-release-artifacts.sh \
   --version "$version" --channel public --output-dir "$artifact_dir"
 bash scripts/verify-release-channel-artifacts.sh \

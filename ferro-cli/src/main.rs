@@ -10200,6 +10200,10 @@ fn run_daemon(
     if !docker_compat {
         return Err("daemon: --docker-compat is required".to_string());
     }
+    // A daemon owns the request thread independently of each workload. Keep
+    // launched containers alive after the Docker API request returns; the
+    // short-lived CLI path sets the same policy for detached operations.
+    unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
     let socket_path = Path::new(socket);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -12820,6 +12824,7 @@ fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
         204 => "204 No Content",
         400 => "400 Bad Request",
         404 => "404 Not Found",
+        409 => "409 Conflict",
         500 => "500 Internal Server Error",
         _ => "200 OK",
     };
@@ -13186,6 +13191,12 @@ mod tests {
     #[test]
     fn docker_status_for_running_container_delete_is_conflict() {
         assert_eq!(super::docker_status_for_error("container c1 is still running"), 409);
+    }
+
+    #[test]
+    fn docker_http_response_preserves_conflict_status() {
+        let response = super::http_response(409, br#"{"message":"conflict"}"#, "application/json");
+        assert!(response.starts_with(b"HTTP/1.1 409 Conflict\r\n"));
     }
 
     use super::{

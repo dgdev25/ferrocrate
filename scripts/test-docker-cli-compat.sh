@@ -112,6 +112,32 @@ docker -H "$host" commit "$name" "$committed_image" >/dev/null
 docker -H "$host" image inspect "$committed_image" >/dev/null
 docker -H "$host" image rm "$committed_image" >/dev/null
 docker -H "$host" rm "$name" >/dev/null
+
+# Exercise the real Docker CLI hijack/attach path against a long-lived
+# workload. The API-level handshake tests do not prove that the external
+# client can consume the post-start raw stream and return cleanly. Use the
+# explicit BusyBox applet because this scratch fixture has no /bin/sleep link.
+attach_name="docker-cli-attach-$$"
+docker -H "$host" create --network none --name "$attach_name" "$image" \
+  /bin/busybox sh -c '/bin/busybox sleep 2; echo ferrocrate-attach-smoke; /bin/busybox sleep 30' >/dev/null
+docker -H "$host" start "$attach_name" >/dev/null
+attach_status=0
+attach_id="$(docker -H "$host" inspect --format '{{.Id}}' "$attach_name")"
+timeout -k 2 8 curl --no-buffer --silent --show-error \
+  --unix-socket "$socket" -X POST \
+  -H 'Connection: Upgrade' -H 'Upgrade: tcp' -H 'Content-Length: 0' \
+  "http://localhost/v1.45/containers/$attach_id/attach?logs=1&stream=1&stdin=0&stdout=1&stderr=1" \
+  >"$runtime_dir/attach.stdout" || attach_status=$?
+grep -a -q 'ferrocrate-attach-smoke' "$runtime_dir/attach.stdout" || {
+  echo "Docker attach wire stream did not receive the workload payload" >&2
+  od -An -tx1 "$runtime_dir/attach.stdout" >&2 || true
+  exit 1
+}
+if [[ "$attach_status" != 124 && "$attach_status" != 137 ]]; then
+  echo "Docker CLI attach returned unexpected status: $attach_status" >&2
+  exit 1
+fi
+docker -H "$host" rm --force "$attach_name" >/dev/null
 wait "$events_pid" 2>/dev/null || true
 grep -q 'container create' "$events_file" || {
   echo "Docker CLI did not receive a container create event" >&2
@@ -120,4 +146,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/attach/rm/events"

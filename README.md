@@ -35,13 +35,13 @@ implied by a successful unprivileged build.
 
 ## Docker comparison
 
-The latest three-round, no-skip host-local ten-feature comparison is summarized
-in [`docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-summary.md`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-summary.md), with full
-[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-iptables.md)
+The latest three-round, no-skip host-local ten-feature comparison uses the
+Docker Hub-independent `quay.io/libpod/alpine:latest` fixture. Full
+[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-dd3b2122-quay-iptables.md)
 and
-[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-31d64967-nftables.md)
-measurements.
-Both report three-round medians and explicitly do not claim universal Docker
+[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-0d09e42e-quay-nftables.md)
+measurements are archived with host, backend, image, and round metadata.
+Both report command-path medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.
 
 ## Development

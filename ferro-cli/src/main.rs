@@ -6050,6 +6050,7 @@ fn docker_manifest_layer_size(manifest_json: &str) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_build(
     store: &LocalImageStore,
     origin: &RequestOrigin,

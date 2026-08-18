@@ -1266,12 +1266,19 @@ mod tests {
 
     #[test]
     fn executes_anthropic_http_provider_and_reports_http_errors() {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
         let address = listener.local_addr().expect("address");
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("request");
+            // Consume the request before closing the connection.  Under the
+            // full workspace test load, replying and dropping the socket
+            // before the client's request body is read can produce an
+            // indistinguishable connection reset instead of the intended
+            // HTTP 503 assertion.
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request).expect("request bytes");
             let body = r#"{"error":"upstream unavailable"}"#;
             write!(
                 stream,

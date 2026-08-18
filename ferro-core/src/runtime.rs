@@ -7789,19 +7789,30 @@ fn capture_ebpf_pins(root: &Path) -> Result<Vec<EbpfPinOwnershipRecord>, Runtime
     Ok(records)
 }
 
+fn validate_orphaned_ebpf_state(
+    root: &Path,
+    filters_before: &[EbpfFilterOwnershipRecord],
+) -> Result<(), RuntimeError> {
+    if !filters_before.is_empty() {
+        return Err(RuntimeError::Network(format!(
+            "eBPF pin path has live classifiers before attach: {}",
+            root.display(),
+        )));
+    }
+    if !root.exists() {
+        return Ok(());
+    }
+    Ok(())
+}
+
 fn recover_orphaned_ebpf_pins(
     network_id: &str,
     filters_before: &[EbpfFilterOwnershipRecord],
 ) -> Result<(), RuntimeError> {
     let root = Path::new(FERRO_NETWORK_ROOT).join(network_id);
+    validate_orphaned_ebpf_state(&root, filters_before)?;
     if !root.exists() {
         return Ok(());
-    }
-    if !filters_before.is_empty() {
-        return Err(RuntimeError::Network(format!(
-            "eBPF pin path already exists and has live classifiers: {}",
-            root.display()
-        )));
     }
     let pins = capture_ebpf_pins(&root)?;
     let expected = BTreeSet::from([
@@ -13291,6 +13302,26 @@ mod tests {
         replacement = owned.clone();
         replacement.interface_ifindex = Some(2);
         assert_ne!(owned, replacement);
+    }
+
+    #[test]
+    fn orphaned_ebpf_state_rejects_live_filters_without_a_pin_root() {
+        let root = tempfile::tempdir().unwrap();
+        let filter = crate::container_store::EbpfFilterOwnershipRecord {
+            interface: Some("lo".to_string()),
+            interface_ifindex: Some(1),
+            direction: "ingress".to_string(),
+            priority: 49_152,
+            handle: "0x1".to_string(),
+            program_id: Some(71),
+            program_tag: Some("aabbccdd".to_string()),
+        };
+
+        let error = super::validate_orphaned_ebpf_state(root.path(), &[filter])
+            .expect_err("live classifiers without pins must fail closed");
+        assert!(error.to_string().contains("live classifiers"));
+        super::validate_orphaned_ebpf_state(root.path(), &[])
+            .expect("an empty pin root with no live classifiers is safe");
     }
 
     #[test]

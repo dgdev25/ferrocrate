@@ -3257,12 +3257,12 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let result = if !nix::unistd::Uid::effective().is_root() {
-            let rootfs = self
-                .runtime_dir
-                .join("containers")
-                .join(id)
-                .join("rootfs");
+        let rootfs = self
+            .runtime_dir
+            .join("containers")
+            .join(id)
+            .join("rootfs");
+        let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             let mounts = record
                 .mounts
                 .iter()

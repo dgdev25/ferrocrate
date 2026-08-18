@@ -12412,8 +12412,17 @@ fn parse_docker_event_filters(
     let object = value
         .as_object()
         .ok_or_else(|| "docker: filters must be a JSON object".to_string())?;
+    // Keep the event contract fail-closed.  Silently accepting a selector we
+    // do not evaluate is worse than returning an unsupported-filter error:
+    // callers would believe the stream was narrowed when it was not.
+    const SUPPORTED: &[&str] = &[
+        "container", "event", "image", "label", "network", "scope", "type", "volume",
+    ];
     let mut filters = HashMap::new();
     for (key, value) in object {
+        if !SUPPORTED.contains(&key.as_str()) {
+            return Err(format!("docker: unsupported event filter `{key}`"));
+        }
         let values = match value {
             serde_json::Value::Array(values) => values
                 .iter()
@@ -17030,6 +17039,21 @@ volumes:
             .query(&query)
             .expect_err("malformed event filters must fail");
         assert!(error.contains("boolean object"), "error={error}");
+    }
+
+    #[test]
+    fn docker_event_query_rejects_unknown_filters_instead_of_ignoring_them() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_string(),
+            r#"{"service":["web"]}"#.to_string(),
+        );
+        let error = store
+            .query(&query)
+            .expect_err("unknown event filters must fail closed");
+        assert!(error.contains("unsupported event filter `service`"), "error={error}");
     }
 
     #[test]

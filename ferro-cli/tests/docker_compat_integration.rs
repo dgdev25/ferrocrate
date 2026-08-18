@@ -286,6 +286,62 @@ fn docker_compat_create_persists_host_resource_limits_before_start() {
 }
 
 #[test]
+fn docker_compat_exec_inspect_reports_created_exec_state() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create_request = format!(
+        "POST /v1.45/containers/create?name=exec-inspect HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create_request);
+    assert_eq!(status, 201, "create response={response}");
+    let container_id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create response JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("created id")
+        .to_string();
+
+    let (status, response) = harness.request(
+        "POST",
+        &format!("/v1.45/containers/{container_id}/start"),
+    );
+    assert_eq!(status, 204, "container start response={response}");
+
+    let exec_body = r#"{"Cmd":["true"]}"#;
+    let exec_request = format!(
+        "POST /v1.45/containers/{container_id}/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        exec_body.len(),
+        exec_body
+    );
+    let (status, response) = harness.request_raw(&exec_request);
+    assert_eq!(status, 201, "exec create response={response}");
+    let exec_id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("exec create response JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("exec id")
+        .to_string();
+
+    let (status, response) = harness.request("GET", &format!("/v1.45/exec/{exec_id}/json"));
+    assert_eq!(status, 200, "exec inspect response={response}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("exec inspect JSON");
+    assert_eq!(inspect["ID"], exec_id);
+    assert_eq!(inspect["ContainerID"], container_id);
+    assert_eq!(inspect["Running"], false);
+    assert_eq!(inspect["ExitCode"], serde_json::Value::Null);
+
+    let (status, response) = harness.request("POST", &format!("/v1.45/exec/{exec_id}/start"));
+    assert_eq!(status, 200, "exec start response={response}");
+    let (status, response) = harness.request("GET", &format!("/v1.45/exec/{exec_id}/json"));
+    assert_eq!(status, 200, "exec inspect after start response={response}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("exec inspect JSON");
+    assert_eq!(inspect["Running"], false);
+    assert!(inspect["ExitCode"].is_i64(), "exit code={}", inspect["ExitCode"]);
+}
+
+#[test]
 fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
     let harness = DaemonHarness::spawn();
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect event stream");

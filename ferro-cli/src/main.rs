@@ -9529,6 +9529,8 @@ struct DockerHealthSpec {
 struct DockerExecSpec {
     container: String,
     cmd: Vec<String>,
+    running: bool,
+    exit_code: Option<i32>,
 }
 
 #[cfg(target_os = "linux")]
@@ -10769,10 +10771,35 @@ fn handle_docker_compat_connection(
                         DockerExecSpec {
                             container: container.to_string(),
                             cmd: request.cmd,
+                            running: false,
+                            exit_code: None,
                         },
                     );
                 let body = serde_json::json!({"Id": id});
                 http_response(201, body.to_string().as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/exec/") && path.ends_with("/json") => {
+                let id = path.trim_start_matches("/exec/").trim_end_matches("/json");
+                let spec = state
+                    .execs
+                    .lock()
+                    .map_err(|error| format!("docker: exec lock poisoned: {error}"))?
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| "not found".to_string())?;
+                let body = serde_json::json!({
+                    "ID": id,
+                    "ContainerID": spec.container,
+                    "Running": spec.running,
+                    "ExitCode": spec.exit_code,
+                    "Pid": 0,
+                    "OpenStdin": false,
+                    "OpenStderr": true,
+                    "OpenStdout": true,
+                    "CanRemove": false,
+                    "ProcessConfig": {"entrypoint": spec.cmd.first().cloned().unwrap_or_default(), "arguments": spec.cmd},
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("POST", path) if path.starts_with("/exec/") && path.ends_with("/start") => {
                 let id = path.trim_start_matches("/exec/").trim_end_matches("/start");
@@ -10782,15 +10809,38 @@ fn handle_docker_compat_connection(
                     serde_json::from_slice(&request.body)
                         .map_err(|error| format!("docker: invalid exec start payload: {error}"))?
                 };
-                let spec = state
-                    .execs
-                    .lock()
-                    .map_err(|error| format!("docker: exec lock poisoned: {error}"))?
-                    .remove(id)
-                    .ok_or_else(|| format!("docker: exec not found: {id}"))?;
-                let result = runtime
-                    .exec(&spec.container, &spec.cmd)
-                    .map_err(|error| error.to_string())?;
+                let spec = {
+                    let mut execs = state
+                        .execs
+                        .lock()
+                        .map_err(|error| format!("docker: exec lock poisoned: {error}"))?;
+                    let spec = execs
+                        .get_mut(id)
+                        .ok_or_else(|| format!("docker: exec not found: {id}"))?;
+                    if spec.running {
+                        return Err(format!("docker: exec already running: {id}"));
+                    }
+                    spec.running = true;
+                    spec.clone()
+                };
+                let result = match runtime.exec(&spec.container, &spec.cmd) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Ok(mut execs) = state.execs.lock() {
+                            if let Some(state) = execs.get_mut(id) {
+                                state.running = false;
+                                state.exit_code = Some(-1);
+                            }
+                        }
+                        return Err(error.to_string());
+                    }
+                };
+                if let Ok(mut execs) = state.execs.lock() {
+                    if let Some(state) = execs.get_mut(id) {
+                        state.running = false;
+                        state.exit_code = Some(result.exit_code);
+                    }
+                }
                 if start.detach {
                     http_response(200, &[], "application/vnd.docker.raw-stream")
                 } else if start.tty {

@@ -11068,7 +11068,7 @@ fn handle_docker_compat_connection(
             }
             ("DELETE", path) if path.starts_with("/containers/") => {
                 let id = path.trim_start_matches("/containers/");
-                let _force = parse_docker_bool_query(query.get("force"), "force")?;
+                let force = parse_docker_bool_query(query.get("force"), "force")?;
                 let removed_pending = state
                     .pending
                     .lock()
@@ -11079,6 +11079,19 @@ fn handle_docker_compat_connection(
                     state.persist_pending()?;
                     http_response(204, &[], "text/plain")
                 } else {
+                    if let Ok(record) = runtime.inspect(id) {
+                        if record.status == "running" {
+                            if !force {
+                                return Err(format!("container {id} is still running"));
+                            }
+                            runtime
+                                .kill_with_signal(
+                                    id,
+                                    Some(nix::sys::signal::Signal::SIGKILL),
+                                )
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
                     runtime.remove(id).map_err(|err| err.to_string())?;
                     http_response(204, &[], "text/plain")
                 }
@@ -11652,6 +11665,9 @@ fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_status_for_error(err: &str) -> u16 {
     let lowered = err.to_lowercase();
+    if lowered.contains("still running") {
+        return 409;
+    }
     if lowered.contains("not found")
         || lowered.contains("unknown image")
         || lowered.contains("unknown container")
@@ -13143,6 +13159,11 @@ mod tests {
     use std::time::Duration;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn docker_status_for_running_container_delete_is_conflict() {
+        assert_eq!(super::docker_status_for_error("container c1 is still running"), 409);
+    }
 
     use super::{
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,

@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ebpf_abi::{
@@ -884,6 +886,81 @@ pub struct SecurityMonitorConfig {
     pub events: Vec<String>,
 }
 
+/// Maximum number of decoded security-monitor events retained in memory.
+/// Kernel delivery must never be able to grow a daemon process without bound.
+pub const SECURITY_MONITOR_MAX_BUFFER_EVENTS: usize = 1024;
+const SECURITY_MONITOR_MAX_PAYLOAD_BYTES: usize = 4096;
+
+/// Stable, bounded representation of one syscall tracepoint notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityMonitorEvent {
+    pub event: String,
+    pub pid: u32,
+    pub uid: u32,
+    pub timestamp_ns: u64,
+    pub payload: String,
+}
+
+impl SecurityMonitorEvent {
+    pub fn new(
+        event: &str,
+        pid: u32,
+        uid: u32,
+        timestamp_ns: u64,
+        payload: impl Into<String>,
+    ) -> Result<Self, ExecError> {
+        let event = sanitize_event(event)?;
+        let payload = payload.into();
+        if payload.len() > SECURITY_MONITOR_MAX_PAYLOAD_BYTES {
+            return Err(ExecError::CommandFailed {
+                cmd: format!("event={event}"),
+                stderr: "security monitor payload exceeds bounded size".to_string(),
+            });
+        }
+        Ok(Self {
+            event,
+            pid,
+            uid,
+            timestamp_ns,
+            payload,
+        })
+    }
+}
+
+/// Fixed-capacity event queue for the eventual ring-buffer consumer.
+/// Overflow drops the oldest record and increments a visible counter.
+#[derive(Debug, Default)]
+pub struct SecurityMonitorBuffer {
+    events: VecDeque<SecurityMonitorEvent>,
+    dropped: u64,
+}
+
+impl SecurityMonitorBuffer {
+    pub fn push(&mut self, event: SecurityMonitorEvent) {
+        if self.events.len() == SECURITY_MONITOR_MAX_BUFFER_EVENTS {
+            self.events.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.events.push_back(event);
+    }
+
+    pub fn pop(&mut self) -> Option<SecurityMonitorEvent> {
+        self.events.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+}
+
 pub fn build_bpftool_load_cmd(program: &EbpfProgram, pin_path: &str) -> Vec<String> {
     vec![
         "bpftool".into(),
@@ -1067,7 +1144,8 @@ mod lifecycle_tests {
     use super::{
         build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
         hex_bytes, normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
-        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
+        SecurityMonitorBuffer, SecurityMonitorEvent, EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
+        SECURITY_MONITOR_MAX_BUFFER_EVENTS,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1114,6 +1192,30 @@ mod lifecycle_tests {
         assert!(error
             .to_string()
             .contains("too many security monitor events"));
+    }
+
+    #[test]
+    fn security_monitor_event_schema_is_normalized_and_payload_bounded() {
+        let event =
+            SecurityMonitorEvent::new(" Execve ", 42, 1000, 7, "ok").expect("valid bounded event");
+        assert_eq!(event.event, "execve");
+        assert_eq!(event.pid, 42);
+        let oversized = "x".repeat(4097);
+        let error = SecurityMonitorEvent::new("open", 1, 1, 1, oversized)
+            .expect_err("oversized payload must fail closed");
+        assert!(error.to_string().contains("payload exceeds bounded size"));
+    }
+
+    #[test]
+    fn security_monitor_buffer_drops_oldest_with_visible_count() {
+        let mut buffer = SecurityMonitorBuffer::default();
+        for pid in 0..=SECURITY_MONITOR_MAX_BUFFER_EVENTS as u32 {
+            buffer.push(SecurityMonitorEvent::new("open", pid, 1000, pid as u64, "x").unwrap());
+        }
+        assert_eq!(buffer.len(), SECURITY_MONITOR_MAX_BUFFER_EVENTS);
+        assert_eq!(buffer.dropped(), 1);
+        assert_eq!(buffer.pop().unwrap().pid, 1);
+        assert!(!buffer.is_empty());
     }
 
     struct FakeKernel {

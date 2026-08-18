@@ -41,6 +41,38 @@ fn load_kernel_state(path: &Path) -> KernelStateFile {
     serde_json::from_str(&raw).expect("parse kernel state file")
 }
 
+fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let dockerfile = b"FROM scratch\nCOPY busybox /bin/busybox\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("Dockerfile").expect("dockerfile path");
+        header.set_size(dockerfile.len() as u64);
+        header.set_cksum();
+        builder
+            .append(&header, &dockerfile[..])
+            .expect("append dockerfile");
+        let busybox = fs::read("/bin/busybox").expect("host busybox fixture");
+        let mut header = tar::Header::new_gnu();
+        header.set_path("busybox").expect("busybox path");
+        header.set_size(busybox.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append(&header, &busybox[..])
+            .expect("append busybox");
+        builder.finish().expect("finish image context");
+    }
+    let encoded_tag = tag
+        .replace('%', "%25")
+        .replace('/', "%2F")
+        .replace(':', "%3A");
+    let path = format!("/v1.45/build?dockerfile=Dockerfile&t={encoded_tag}");
+    let (status, body) = harness.request_bytes("POST", &path, "application/x-tar", &archive);
+    assert_eq!(status, 200, "local image build response={body}");
+}
+
 struct DaemonHarness {
     child: Child,
     _runtime_dir: tempfile::TempDir,
@@ -462,7 +494,8 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
 #[test]
 fn docker_compat_exec_inspect_reports_created_exec_state() {
     let harness = DaemonHarness::spawn();
-    let create_body = r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"NetworkMode":"none"}}"#;
+    build_local_busybox_image(&harness, "compat/exec:latest");
+    let create_body = r#"{"Image":"compat/exec:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none"}}"#;
     let create_request = format!(
         "POST /v1.45/containers/create?name=exec-inspect HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         create_body.len(),
@@ -481,7 +514,7 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
         harness.request("POST", &format!("/v1.45/containers/{container_id}/start"));
     assert_eq!(status, 204, "container start response={response}");
 
-    let exec_body = r#"{"Cmd":["true"]}"#;
+    let exec_body = r#"{"Cmd":["/bin/busybox","true"]}"#;
     let exec_request = format!(
         "POST /v1.45/containers/{container_id}/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         exec_body.len(),

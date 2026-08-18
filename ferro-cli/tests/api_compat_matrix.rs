@@ -68,6 +68,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/images/missing/json",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/build",
         // The route has a dedicated valid tar-context probe below; this matrix

@@ -11526,9 +11526,9 @@ fn handle_docker_compat_connection(
                 let body = serde_json::json!({
                     "Id": reference.digest,
                     "RepoTags": vec![reference.reference],
-                    "Created": reference.created_at_unix,
-                    "Size": 0,
-                    "VirtualSize": 0
+                    "Created": docker_timestamp(reference.created_at_unix),
+                    "Size": docker_manifest_layer_size(&reference.manifest_json),
+                    "VirtualSize": docker_manifest_layer_size(&reference.manifest_json)
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }

@@ -31,6 +31,15 @@ run_check() {
   fi
 }
 
+count_matches() {
+  local pattern="$1"
+  local path="$2"
+  # rg exits 1 for a valid zero-match result; normalize that status so a
+  # complete matrix with no partial or unsupported rows still reaches the
+  # evidence writer under `set -euo pipefail`.
+  (rg -n "$pattern" "$path" || true) | wc -l | tr -d ' '
+}
+
 echo "[compat] collecting compatibility evidence..."
 os_name="$(uname -s)"
 docker_api_skip_reason=""
@@ -59,10 +68,10 @@ else
 fi
 
 if [[ -f "ferro-cli/tests/api_compat_matrix.rs" ]]; then
-  docker_api_total="$(rg -n "coverage: Coverage::" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
-  docker_api_implemented="$(rg -n "Coverage::Implemented" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
-  docker_api_partial="$(rg -n "Coverage::Partial" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
-  docker_api_unsupported="$(rg -n "Coverage::Unsupported" ferro-cli/tests/api_compat_matrix.rs | wc -l | tr -d ' ')"
+  docker_api_total="$(count_matches "coverage: Coverage::" ferro-cli/tests/api_compat_matrix.rs)"
+  docker_api_implemented="$(count_matches "Coverage::Implemented" ferro-cli/tests/api_compat_matrix.rs)"
+  docker_api_partial="$(count_matches "Coverage::Partial" ferro-cli/tests/api_compat_matrix.rs)"
+  docker_api_unsupported="$(count_matches "Coverage::Unsupported" ferro-cli/tests/api_compat_matrix.rs)"
 fi
 
 if [[ -f "ferro-cli/tests/dockerfile_parity_integration.rs" ]]; then

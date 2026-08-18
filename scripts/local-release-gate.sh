@@ -41,6 +41,12 @@ else
   echo "[gate] cargo fmt --check (SKIPPED by request)"
 fi
 
+echo "[gate] rootless installer/uninstall lifecycle checks"
+bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
+  scripts/uninstall.sh scripts/test-uninstall.sh
+bash scripts/test-rootless-install.sh
+bash scripts/test-uninstall.sh
+
 if (( ! skip_workspace )); then
   echo "[gate] serialized all-features workspace tests"
   cargo test --workspace --all-features --offline -- --test-threads=1

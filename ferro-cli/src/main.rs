@@ -2792,8 +2792,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let images = image_store.list_references().map_err(|error| error.to_string())?;
                 let volumes = volume_store.list().map_err(|error| error.to_string())?;
                 let body = serde_json::json!({
-                    "LayersSize": 0,
-                    "Images": images.iter().map(|image| serde_json::json!({"Id": image.digest, "RepoTags": [image.reference], "Created": image.created_at_unix, "Size": 0, "SharedSize": 0, "Containers": containers.iter().filter(|container| container.image == image.reference).count()})).collect::<Vec<_>>(),
+                    "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
+                    "Images": images.iter().map(|image| serde_json::json!({"Id": image.digest, "RepoTags": [image.reference], "Created": image.created_at_unix, "Size": docker_manifest_layer_size(&image.manifest_json), "SharedSize": 0, "Containers": containers.iter().filter(|container| container.image == image.reference).count()})).collect::<Vec<_>>(),
                     "Containers": containers.iter().map(|container| serde_json::json!({"Id": container.id, "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(), "Image": container.image, "ImageID": "", "SizeRw": 0, "SizeRootFs": 0})).collect::<Vec<_>>(),
                     "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": 0, "RefCount": 0}})).collect::<Vec<_>>(),
                     "BuildCache": [],
@@ -6037,6 +6037,17 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_manifest_layer_size(manifest_json: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(manifest_json)
+        .ok()
+        .and_then(|manifest| manifest.get("layers").and_then(serde_json::Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|layer| layer.get("size").and_then(serde_json::Value::as_u64))
+        .fold(0u64, u64::saturating_add)
 }
 
 fn handle_build(
@@ -10369,12 +10380,12 @@ fn handle_docker_compat_connection(
                 let images = store.list_references().map_err(|err| err.to_string())?;
                 let volumes = volume_store.list().map_err(|err| err.to_string())?;
                 let body = serde_json::json!({
-                    "LayersSize": 0,
+                    "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
                     "Images": images.iter().map(|image| serde_json::json!({
                         "Id": image.digest,
                         "RepoTags": [image.reference],
                         "Created": image.created_at_unix,
-                        "Size": 0,
+                        "Size": docker_manifest_layer_size(&image.manifest_json),
                         "SharedSize": 0,
                         "Containers": containers.iter().filter(|container| container.image == image.reference).count(),
                     })).collect::<Vec<_>>(),
@@ -13040,6 +13051,7 @@ mod tests {
         docker_container_prune_matches_filters, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_manifest_layer_size,
         docker_inspect_payload, docker_network_ipv6_config, docker_network_matches_filters,
         docker_pending_inspect_payload,
         docker_pending_matches_filters, docker_pending_prune_matches_filters, docker_raw_stream,
@@ -15292,6 +15304,14 @@ volumes:
         }
         let error = extract_docker_build_context(&bytes, temp.path()).expect_err("symlink");
         assert!(error.contains("unsupported context entry type"), "error={error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_system_df_sums_manifest_layer_sizes() {
+        let manifest = r#"{"layers":[{"size":7},{"size":11}],"config":{"size":3}}"#;
+        assert_eq!(docker_manifest_layer_size(manifest), 18);
+        assert_eq!(docker_manifest_layer_size("{}"), 0);
     }
 
     #[test]

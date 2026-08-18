@@ -16,6 +16,14 @@ cargo test -p ferro-cri --test socket_integration --offline -- --test-threads=1
 echo "[release] validating security enforcement tests"
 cargo test -p ferro-core --test security_tests --offline -- --nocapture
 bash scripts/verify-mac-policy.sh target/release-readiness/mac-policy.txt
+cargo test -p ferro-net --offline --lib security_monitor -- --test-threads=1
+if [[ "$(id -u)" == 0 ]] && command -v aa-status >/dev/null 2>&1 \
+  && aa-status --enabled >/dev/null 2>&1; then
+  echo "[release] validating AppArmor allow/deny enforcement"
+  bash scripts/test-apparmor-enforcement.sh
+else
+  echo "[release] AppArmor enforcement fixture skipped (requires root and enabled AppArmor)"
+fi
 
 echo "[release] recording rootless prerequisite diagnostics"
 mkdir -p target/release-readiness

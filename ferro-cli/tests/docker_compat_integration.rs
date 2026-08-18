@@ -3,6 +3,7 @@
 #[path = "cli_integration.rs"]
 mod cli_fixture;
 
+use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -75,6 +76,7 @@ impl DaemonHarness {
                 "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
                 format!("docker-{mode}"),
             )
+            .env("FERROCRATE_NETWORK_BACKEND", "iptables")
             .args([
                 "daemon",
                 "--docker-compat",
@@ -371,6 +373,90 @@ fn docker_compat_changes_for_created_container_returns_empty_success() {
     let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/changes"));
     assert_eq!(status, 200, "changes response={response}");
     assert_eq!(response, "[]");
+}
+
+#[test]
+fn docker_compat_changes_reports_added_rootfs_entries() {
+    let harness = DaemonHarness::spawn();
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let dockerfile = b"FROM scratch\nCOPY busybox /bin/busybox\nCOPY app /app\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("Dockerfile").expect("dockerfile path");
+        header.set_size(dockerfile.len() as u64);
+        header.set_cksum();
+        builder
+            .append(&header, &dockerfile[..])
+            .expect("append dockerfile");
+        let busybox = fs::read("/bin/busybox").expect("host busybox fixture");
+        let mut header = tar::Header::new_gnu();
+        header.set_path("busybox").expect("busybox path");
+        header.set_size(busybox.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append(&header, &busybox[..])
+            .expect("append busybox");
+        let app = b"baseline";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("app").expect("app path");
+        header.set_size(app.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &app[..]).expect("append app");
+        builder.finish().expect("finish context");
+    }
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/build?dockerfile=Dockerfile&t=compat%2Fchanges%3Alatest",
+        "application/x-tar",
+        &archive,
+    );
+    assert_eq!(status, 200, "build response={body}");
+
+    let create_body = r#"{"Image":"compat/changes:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=changes-added HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, body) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response={body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+
+    // The runtime materializes an image rootfs at the first lifecycle
+    // transition; this scratch fixture intentionally has no executable, so
+    // the start result itself is not part of this diff contract.
+    let start = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(start.0, 204, "start response={}", start.1);
+
+    let rootfs = harness
+        ._runtime_dir
+        .path()
+        .join("containers")
+        .join(&id)
+        .join("rootfs");
+    assert!(
+        rootfs.is_dir(),
+        "created rootfs missing: {}",
+        rootfs.display()
+    );
+    fs::write(rootfs.join("added"), b"new").expect("write added rootfs entry");
+
+    let (status, body) = harness.request("GET", &format!("/v1.45/containers/{id}/changes"));
+    assert_eq!(status, 200, "changes response={body}");
+    let changes = serde_json::from_str::<Vec<serde_json::Value>>(&body).expect("changes JSON");
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["Path"] == "/added" && change["Kind"] == 1),
+        "added entry missing from changes: {changes:?}"
+    );
 }
 
 #[test]

@@ -26,9 +26,22 @@ pub type RootfsSnapshot = BTreeMap<String, RootfsEntry>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RootfsChange {
+    #[serde(rename = "Path", serialize_with = "serialize_docker_path")]
     pub path: String,
     /// Docker's change kinds: 0 modified, 1 added, 2 deleted.
+    #[serde(rename = "Kind")]
     pub kind: u8,
+}
+
+fn serialize_docker_path<S>(path: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if path.starts_with('/') {
+        serializer.serialize_str(path)
+    } else {
+        serializer.serialize_str(&format!("/{path}"))
+    }
 }
 
 pub fn capture(root: &Path, excluded: &[PathBuf]) -> io::Result<RootfsSnapshot> {

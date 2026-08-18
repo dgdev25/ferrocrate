@@ -9170,7 +9170,7 @@ fn run_compose_service(
     let publish = compose_service_ports(service);
     let configured_network_backend =
         std::env::var("FERROCRATE_NETWORK_BACKEND").unwrap_or_else(|_| "ebpf".to_string());
-    let bind_mounts = compose_service_mounts(volume_store, service)?;
+    let bind_mounts = compose_service_mounts(project_dir, volume_store, service)?;
     let restart = service.restart.as_deref().unwrap_or("no");
     let restart = match restart {
         "always" => "always",
@@ -9272,7 +9272,7 @@ fn compose_service_execution_digest(
     let labels = parse_key_values("label", &label_entries)?;
     let publish = compose_service_ports(service);
     let ports = parse_publish(&publish)?;
-    let mount_entries = compose_service_mounts(volume_store, service)?;
+    let mount_entries = compose_service_mounts(project_dir, volume_store, service)?;
     let mounts = parse_bind_mounts(&mount_entries)?;
     let configured_network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
         .unwrap_or_else(|_| "ebpf".to_string())
@@ -9408,6 +9408,7 @@ fn compose_service_ports(service: &ComposeService) -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 fn compose_service_mounts(
+    project_dir: &Path,
     volume_store: &LocalVolumeStore,
     service: &ComposeService,
 ) -> Result<Vec<String>, String> {
@@ -9421,7 +9422,18 @@ fn compose_service_mounts(
                 return Err(format!("compose: invalid volume entry {entry}"));
             }
             if source.starts_with('.') || source.contains('/') {
-                out.push(entry.clone());
+                let resolved = project_dir
+                    .join(source)
+                    .canonicalize()
+                    .map_err(|error| {
+                        format!("compose: bind source {source} cannot be resolved: {error}")
+                    })?;
+                let mode = parts.next().unwrap_or("");
+                if mode.is_empty() {
+                    out.push(format!("{}:{target}", resolved.display()));
+                } else {
+                    out.push(format!("{}:{target}:{mode}", resolved.display()));
+                }
                 continue;
             }
             let record = volume_store

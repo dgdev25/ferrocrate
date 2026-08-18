@@ -4527,6 +4527,7 @@ fn normalize_run_request(
     ports: &[PortMappingRecord],
     authorization_mode: crate::authorization::AuthorizationMode,
 ) -> Result<NormalizedRunRequest, RuntimeError> {
+    let rootless = !nix::unistd::Uid::effective().is_root();
     let mut handles = Vec::with_capacity(mounts.len());
     let mut normalized_mounts = Vec::with_capacity(mounts.len());
     let mut mount_facts = Vec::with_capacity(mounts.len() + tmpfs_mounts.len());
@@ -4584,8 +4585,18 @@ fn normalize_run_request(
             open_flags: u64::from(mount.read_only),
             target_digest: mount_target_digest(&target),
         });
+        // Rootful authorized mounts use an O_PATH fd so the kernel executor
+        // binds the exact object that was admitted. Rootless bubblewrap runs
+        // in a separate process and cannot access CLOEXEC authorization fds;
+        // retain the canonical source path instead, still bound to the same
+        // metadata captured above before execution.
+        let source = if rootless {
+            mount.source.canonicalize()?
+        } else {
+            PathBuf::from(format!("/proc/self/fd/{fd}"))
+        };
         normalized_mounts.push(BindMount {
-            source: PathBuf::from(format!("/proc/self/fd/{fd}")),
+            source,
             target,
             read_only: mount.read_only,
         });

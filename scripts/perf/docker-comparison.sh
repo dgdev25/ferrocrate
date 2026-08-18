@@ -11,6 +11,10 @@ ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
 network_backend="${FERROCRATE_COMPARISON_NETWORK_BACKEND:-iptables}"
+if [[ ! "$image" =~ ^[A-Za-z0-9._/@:-]+$ ]]; then
+  echo "invalid FERROCRATE_COMPARISON_IMAGE=$image" >&2
+  exit 2
+fi
 case "$network_backend" in
   iptables|nftables) ;;
   *) echo "unsupported FERROCRATE_COMPARISON_NETWORK_BACKEND=$network_backend (use iptables or nftables)" >&2; exit 2 ;;
@@ -31,8 +35,8 @@ ferro_runtime="$tmp_root/ferro-runtime"
 context="$tmp_root/context"
 ferro_socket="$tmp_root/ferro.sock"
 mkdir -p "$context"
-cat >"$context/Dockerfile" <<'EOF'
-FROM alpine:3.20
+cat >"$context/Dockerfile" <<EOF
+FROM $image
 RUN printf 'ferrocrate-docker-benchmark\n' >/benchmark-marker
 EOF
 

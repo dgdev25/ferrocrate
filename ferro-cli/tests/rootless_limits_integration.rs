@@ -6,7 +6,7 @@
 //! `FERROCRATE_RUN_ROOTLESS_LIMITS_E2E=1 cargo test -p ferro-cli --test
 //! rootless_limits_integration -- --nocapture`.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 
 #[test]
@@ -58,11 +58,16 @@ fn rootless_run_attaches_before_workload_and_applies_limits() {
         .expect("spawn rootless run");
 
     let stdout = run.stdout.take().expect("run stdout");
+    let mut stderr = run.stderr.take().expect("run stderr");
     let mut lines = BufReader::new(stdout).lines();
-    let line = lines
-        .next()
-        .expect("run output line")
-        .expect("read run output");
+    let line = match lines.next() {
+        Some(line) => line.expect("read run output"),
+        None => {
+            let mut error = String::new();
+            stderr.read_to_string(&mut error).expect("read run error");
+            panic!("run output line missing: {error}");
+        }
+    };
     let pid = line
         .split_whitespace()
         .find_map(|field| field.strip_prefix("pid=")?.parse::<u32>().ok())
@@ -99,5 +104,101 @@ fn rootless_run_attaches_before_workload_and_applies_limits() {
     );
 
     run.kill().expect("stop rootless run");
+    let _ = run.wait();
+}
+
+#[test]
+fn rootless_run_reports_pid_limit_exhaustion() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_LIMITS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("runtime tempdir");
+    let runtime = root.path().join("runtime");
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let image = std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE")
+        .unwrap_or_else(|_| "alpine:3.20".to_string());
+    let pull = Command::new(binary)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .args(["pull", &image])
+        .output()
+        .expect("pull rootless test image");
+    assert!(
+        pull.status.success(),
+        "rootless pull failed: {}",
+        String::from_utf8_lossy(&pull.stderr)
+    );
+
+    let mut run = Command::new(binary)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--name",
+            "rootless-pid-exhaustion",
+            "--pids-max",
+            "64",
+            &image,
+            "sh",
+            "-c",
+            r#"i=0; while [ "$i" -lt 128 ]; do sleep 30 & i=$((i+1)); done; wait"#,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rootless exhaustion run");
+
+    let stdout = run.stdout.take().expect("run stdout");
+    let mut stderr = run.stderr.take().expect("run stderr");
+    let mut lines = BufReader::new(stdout).lines();
+    let line = match lines.next() {
+        Some(line) => line.expect("read run output"),
+        None => {
+            let mut error = String::new();
+            stderr.read_to_string(&mut error).expect("read run error");
+            panic!("run output line missing: {error}");
+        }
+    };
+    let pid = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("pid=")?.parse::<u32>().ok())
+        .expect("container pid in run output");
+    let relative = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .expect("container cgroup membership")
+        .lines()
+        .find_map(|entry| entry.strip_prefix("0::"))
+        .expect("unified cgroup membership")
+        .trim_start_matches('/')
+        .to_string();
+    let cgroup = std::path::Path::new("/sys/fs/cgroup").join(relative);
+    let events = cgroup.join("pids.events");
+    let mut exhausted = false;
+    for _ in 0..100 {
+        if std::fs::read_to_string(&events)
+            .ok()
+            .and_then(|value| {
+                value.lines().find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    (fields.next() == Some("max")).then(|| fields.next()?.parse::<u64>().ok())?
+                })
+            })
+            .is_some_and(|count| count > 0)
+        {
+            exhausted = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        exhausted,
+        "pids.max exhaustion was not observed in {}: {}",
+        events.display(),
+        std::fs::read_to_string(&events).unwrap_or_else(|error| error.to_string())
+    );
+    run.kill().expect("stop rootless exhaustion run");
     let _ = run.wait();
 }

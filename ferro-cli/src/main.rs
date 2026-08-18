@@ -8498,6 +8498,12 @@ fn handle_compose(
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
     match command {
         ComposeCommands::Up { profile } => {
+            // Compose is a detached CLI operation: services must outlive the
+            // short-lived `compose up` launcher just like Docker daemon
+            // workloads. Without this lease override, the parent-death
+            // safeguard kills valid services before a subsequent `compose
+            // down` can reconcile them.
+            unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
             let order = compose_up(&project).map_err(|err| err.to_string())?;
             let enabled = build_compose_enabled_set(&project, &profile)?;
             let selected_services: Vec<_> = order
@@ -9155,6 +9161,8 @@ fn run_compose_service(
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
     let publish = compose_service_ports(service);
+    let configured_network_backend =
+        std::env::var("FERROCRATE_NETWORK_BACKEND").unwrap_or_else(|_| "ebpf".to_string());
     let bind_mounts = compose_service_mounts(volume_store, service)?;
     let restart = service.restart.as_deref().unwrap_or("no");
     let restart = match restart {
@@ -9201,7 +9209,7 @@ fn run_compose_service(
             &image,
             &cmd,
             network_mode,
-            "ebpf",
+            &configured_network_backend,
             &bind_mounts,
             &[],
             &[],
@@ -9259,6 +9267,10 @@ fn compose_service_execution_digest(
     let ports = parse_publish(&publish)?;
     let mount_entries = compose_service_mounts(volume_store, service)?;
     let mounts = parse_bind_mounts(&mount_entries)?;
+    let configured_network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
+        .unwrap_or_else(|_| "ebpf".to_string())
+        .parse::<NetworkBackend>()
+        .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
     let network = match service.network_mode.as_deref() {
         None | Some("bridge") => "bridge",
@@ -9298,7 +9310,7 @@ fn compose_service_execution_digest(
             Some(instance),
             &ports,
             network,
-            NetworkBackend::Ebpf,
+        configured_network_backend,
         )
         .map_err(|error| error.to_string())?;
     Ok((image.to_string(), digest))

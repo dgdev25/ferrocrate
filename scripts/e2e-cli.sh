@@ -23,6 +23,10 @@ trap cleanup EXIT
 
 TMP_DIR="$(mktemp -d)"
 export FERROCRATE_RUNTIME_DIR="${TMP_DIR}/runtime"
+# This generic CLI smoke is intentionally independent of the privileged eBPF
+# qualification. Use the typed firewall fallback so a temporary runtime cannot
+# leave shared bpffs classifiers behind between repeated runs.
+export FERROCRATE_NETWORK_BACKEND="iptables"
 mkdir -p "${FERROCRATE_RUNTIME_DIR}"
 COMPOSE_FILE="${TMP_DIR}/compose.yml"
 DOCKERFILE="${TMP_DIR}/Dockerfile"
@@ -70,14 +74,14 @@ run "${BIN}" stop "${CID}"
 run "${BIN}" rm "${CID}"
 
 # 2) Build + run
-cat > "${DOCKERFILE}" <<'DOCKER_EOF'
-FROM scratch
+cat > "${DOCKERFILE}" <<DOCKER_EOF
+FROM ${PULL_IMAGE}
 COPY ./hello.txt /hello.txt
 DOCKER_EOF
 
 echo "hi" > "${HELLO_FILE}"
-run "${BIN}" build "${DOCKERFILE}" --tag local/test:dev
-OUT=$("${BIN}" run local/test:dev cat /hello.txt | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+run "${BIN}" build --dockerfile "${DOCKERFILE}" --tag local/test:dev
+OUT=$("${BIN}" run local/test:dev /bin/cat /hello.txt | awk -F'container_id=' '{print $2}' | awk '{print $1}')
 if [[ -z "${OUT}" ]]; then
   echo "Failed to run built image" >&2
   exit 1

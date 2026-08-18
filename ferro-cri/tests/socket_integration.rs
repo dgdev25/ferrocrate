@@ -21,6 +21,7 @@ use ferro_cri::server::{
 use httptest::matchers::request;
 use httptest::responders::status_code;
 use httptest::{Expectation, Server};
+use hyper_util::rt::TokioIo;
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -400,7 +401,7 @@ async fn connect_channel(socket_path: std::path::PathBuf) -> Channel {
         .expect("endpoint")
         .connect_with_connector(service_fn(move |_| {
             let socket_path = socket_path.clone();
-            async move { UnixStream::connect(socket_path).await }
+            async move { UnixStream::connect(socket_path).await.map(TokioIo::new) }
         }))
         .await
         .expect("connect channel")

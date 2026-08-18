@@ -142,6 +142,23 @@ impl DaemonHarness {
 
         (code, body)
     }
+
+    fn request_bytes(&self, method: &str, path: &str, content_type: &str, body: &[u8]) -> (u16, String) {
+        let header = format!(
+            "{method} {path} HTTP/1.1\r\nHost: docker\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = UnixStream::connect(&self.socket_path).expect("connect daemon socket");
+        stream.write_all(header.as_bytes()).expect("write headers");
+        stream.write_all(body).expect("write body");
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        let text = String::from_utf8_lossy(&response);
+        let (headers, body) = text.split_once("\r\n\r\n").expect("response headers");
+        let code = headers.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        (code, body.to_string())
+    }
 }
 
 #[test]
@@ -176,6 +193,36 @@ fn docker_compat_unknown_route_returns_docker_json_error() {
     let (status, body) = harness.request("GET", "/v1.45/does-not-exist");
     assert_eq!(status, 404);
     assert!(body.contains("\"message\":\"not found\""), "body={body}");
+}
+
+#[test]
+fn docker_compat_build_accepts_secure_tar_context() {
+    let harness = DaemonHarness::spawn();
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let dockerfile = b"FROM scratch\nCOPY app /app\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("Dockerfile").unwrap();
+        header.set_size(dockerfile.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &dockerfile[..]).unwrap();
+        let app = b"hello";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("app").unwrap();
+        header.set_size(app.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &app[..]).unwrap();
+        builder.finish().unwrap();
+    }
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/build?dockerfile=Dockerfile&t=compat%2Fbuild%3Alatest",
+        "application/x-tar",
+        &archive,
+    );
+    assert_eq!(status, 200, "body={body}");
+    assert!(body.contains("Successfully built"), "body={body}");
 }
 
 #[test]

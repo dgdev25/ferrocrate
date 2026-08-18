@@ -84,6 +84,8 @@ use std::net::Ipv4Addr;
 use std::net::TcpListener;
 #[cfg(target_os = "macos")]
 use std::net::TcpStream;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::FileTypeExt;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::net::UnixListener;
 #[cfg(all(unix, target_os = "linux"))]
@@ -13638,10 +13640,19 @@ fn stream_docker_attach(
         return Ok(());
     }
     let mut stdin = if stdin_requested {
+        if record.status != "running" {
+            return Err("docker: container stdin is unavailable after exit".to_string());
+        }
+        let path = runtime.stdin_path(id);
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("docker: container stdin is unavailable: {error}"))?;
+        if !metadata.file_type().is_fifo() {
+            return Err("docker: container stdin is not an owned FIFO".to_string());
+        }
         Some(
             std::fs::OpenOptions::new()
                 .write(true)
-                .open(format!("/proc/{}/fd/0", record.pid))
+                .open(path)
                 .map_err(|error| format!("docker: container stdin is unavailable: {error}"))?,
         )
     } else {

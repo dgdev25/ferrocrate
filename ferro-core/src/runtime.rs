@@ -87,7 +87,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -3360,6 +3360,14 @@ impl ContainerRuntime {
         Ok((stdout, stderr))
     }
 
+    /// Return the authorization-scoped FIFO used for a running container's
+    /// Docker-compatible stdin channel. Callers must still validate the
+    /// container record before opening it for writes.
+    #[inline]
+    pub fn stdin_path(&self, id: &str) -> PathBuf {
+        self.runtime_dir.join("containers").join(id).join("stdin")
+    }
+
     #[inline]
     pub fn list(&self) -> Result<Vec<ContainerRecord>, RuntimeError> {
         Ok(self.store.list()?)
@@ -5639,7 +5647,17 @@ fn spawn_child_with_logs(
             .truncate(true)
             .open(stderr_path)?
     };
+    let stdin_path = stdin_fifo_path(stdout_path);
+    ensure_stdin_fifo(&stdin_path)?;
+    // Open the FIFO read/write in the launcher so child creation never blocks
+    // waiting for an attach client. The descriptor is inherited as the
+    // workload's stdin; attach opens the same owned FIFO for writes.
+    let stdin_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&stdin_path)?;
     let child = command
+        .stdin(Stdio::from(stdin_file))
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .spawn()?;
@@ -5651,6 +5669,33 @@ fn spawn_child_with_logs(
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
     wait_until_launch_stopped(child_id)?;
     Ok((child_id, child, pidfd))
+}
+
+fn stdin_fifo_path(stdout_path: &Path) -> PathBuf {
+    stdout_path
+        .parent()
+        .and_then(Path::parent)
+        .map(|container_dir| container_dir.join("stdin"))
+        .unwrap_or_else(|| stdout_path.with_file_name("stdin"))
+}
+
+fn ensure_stdin_fifo(path: &Path) -> Result<(), RuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_fifo() {
+                return Err(RuntimeError::InvalidState(format!(
+                    "container stdin path is not a FIFO: {}",
+                    path.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                .map_err(|error| RuntimeError::Io(io::Error::from_raw_os_error(error as i32)))?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn wait_until_launch_stopped(pid: u32) -> Result<(), RuntimeError> {

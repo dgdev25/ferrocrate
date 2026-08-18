@@ -45,7 +45,7 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
     let mut archive = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut archive);
-        let dockerfile = b"FROM scratch\nCOPY busybox /bin/busybox\n";
+        let dockerfile = b"FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n";
         let mut header = tar::Header::new_gnu();
         header.set_path("Dockerfile").expect("dockerfile path");
         header.set_size(dockerfile.len() as u64);
@@ -58,6 +58,8 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
         header.set_path("busybox").expect("busybox path");
         header.set_size(busybox.len() as u64);
         header.set_mode(0o755);
+        header.set_uid(nix::unistd::geteuid().as_raw() as u64);
+        header.set_gid(nix::unistd::getegid().as_raw() as u64);
         header.set_cksum();
         builder
             .append(&header, &busybox[..])
@@ -715,6 +717,96 @@ fn docker_compat_attach_validates_stdin_flag() {
         response.contains("stdin must be a boolean"),
         "body={response}"
     );
+}
+
+#[test]
+fn docker_compat_attach_forwards_stdin_over_hijacked_socket() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful attach-stdin fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/attach-stdin:latest");
+    let create_body = r#"{"Image":"compat/attach-stdin:latest","Cmd":["/bin/busybox","sh","-c","read line; echo received:$line; sleep 2"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=attach-stdin-wire HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+
+    let start = harness.request("POST", "/v1.45/containers/attach-stdin-wire/start");
+    assert_eq!(start.0, 204, "start response: {}", start.1);
+    let inspect = harness.request("GET", "/v1.45/containers/attach-stdin-wire/json");
+    assert_eq!(inspect.0, 200, "inspect response: {}", inspect.1);
+    let id = serde_json::from_str::<serde_json::Value>(&inspect.1)
+        .expect("inspect JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    stream
+        .write_all(
+            format!(
+                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write attach handshake");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set attach timeout");
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("read attach headers");
+        headers.push(byte[0]);
+        assert!(headers.len() < 4096, "attach headers are unbounded");
+    }
+    let header_text = String::from_utf8_lossy(&headers);
+    assert!(
+        header_text.starts_with("HTTP/1.1 101"),
+        "headers={header_text}"
+    );
+
+    stream
+        .write_all(b"ferrocrate-fifo\n")
+        .expect("write attach stdin");
+    stream.flush().expect("flush attach stdin");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut output = Vec::new();
+    while Instant::now() < deadline
+        && !output
+            .windows(b"received:ferrocrate-fifo".len())
+            .any(|window| window == b"received:ferrocrate-fifo")
+    {
+        let mut chunk = [0_u8; 4096];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(size) => output.extend_from_slice(&chunk[..size]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("read attach output: {error}"),
+        }
+    }
+    assert!(
+        output
+            .windows(b"received:ferrocrate-fifo".len())
+            .any(|window| window == b"received:ferrocrate-fifo"),
+        "attach output did not include stdin payload: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+
+    let (status, body) =
+        harness.request("DELETE", "/v1.45/containers/attach-stdin-wire?force=true");
+    assert_eq!(status, 204, "remove response: {body}");
 }
 
 #[test]

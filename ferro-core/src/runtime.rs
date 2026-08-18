@@ -9942,6 +9942,21 @@ fn setup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {
         container_id,
         installed
     );
+    let runtime_root = PathBuf::from(
+        std::env::var("FERROCRATE_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string()),
+    );
+    let _ = log_audit_event(
+        &runtime_root,
+        make_audit_event(
+            "security_ebpf_monitor",
+            "ferrocrate-security",
+            Some(container_id),
+            None,
+            Some("attached"),
+            Some(&security_monitor_audit_message("attached", &installed)),
+        ),
+    );
     Ok(())
 }
 
@@ -9989,7 +10004,28 @@ fn cleanup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError>
         return Ok(());
     }
     cleanup_security_monitor(&config)
-        .map_err(|error| RuntimeError::Network(format!("security ebpf cleanup failed: {error}")))
+        .map_err(|error| RuntimeError::Network(format!("security ebpf cleanup failed: {error}")))?;
+    let runtime_root = PathBuf::from(
+        std::env::var("FERROCRATE_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string()),
+    );
+    let _ = log_audit_event(
+        &runtime_root,
+        make_audit_event(
+            "security_ebpf_monitor",
+            "ferrocrate-security",
+            Some(container_id),
+            None,
+            Some("detached"),
+            Some(&security_monitor_audit_message("detached", &config.events)),
+        ),
+    );
+    Ok(())
+}
+
+fn security_monitor_audit_message(phase: &str, events: &[String]) -> String {
+    let bounded = events.iter().take(32).map(String::as_str).collect::<Vec<_>>();
+    format!("phase={phase} events={}", bounded.join(","))
 }
 
 fn validate_security_ebpf_config(
@@ -13531,6 +13567,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         )
         .expect_err("case-insensitive duplicate events must be rejected");
         assert!(error.to_string().contains("must be unique"));
+    }
+
+    #[test]
+    fn security_ebpf_audit_message_is_bounded_and_deterministic() {
+        let events = (0..40).map(|index| format!("event{index}" )).collect::<Vec<_>>();
+        let message = super::security_monitor_audit_message("attached", &events);
+        assert_eq!(message, format!("phase=attached events={}", (0..32).map(|index| format!("event{index}")).collect::<Vec<_>>().join(",")));
+        assert!(!message.contains("event32"));
     }
 
     #[test]

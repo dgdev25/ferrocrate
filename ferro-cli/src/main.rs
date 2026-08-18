@@ -1818,9 +1818,10 @@ fn handle_doctor(
             checks.push(DoctorCheck {
                 id: "rootless_bwrap".to_string(),
                 ok: bubblewrap.is_ok(),
-                message: bubblewrap
-                    .as_ref()
-                    .map_or_else(|error| error.clone(), |message| message.clone()),
+                message: bubblewrap.as_ref().map_or_else(
+                    |error| error.clone(),
+                    |_| "bubblewrap helper is available".to_string(),
+                ),
                 hint: bubblewrap.as_ref().err().map(|_| {
                     "install a trusted bubblewrap (bwrap) package before using rootless mounts or a read-only rootfs"
                         .to_string()

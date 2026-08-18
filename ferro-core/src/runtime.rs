@@ -45,6 +45,8 @@ use crate::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
 use crate::rootfs_diff;
 #[cfg(target_os = "linux")]
+use crate::rootless::nested_bubblewrap_diagnostic;
+#[cfg(target_os = "linux")]
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
 };
@@ -2694,6 +2696,9 @@ impl ContainerRuntime {
         ensure_kernel_min_version()?;
         let rootless = !nix::unistd::Uid::effective().is_root();
         validate_rootless_mount_capability(rootless, mounts, tmpfs_mounts, readonly_rootfs)?;
+        if rootless && network_mode == "bridge" && rootless_netns_enabled() {
+            nested_bubblewrap_diagnostic().map_err(RuntimeError::InvalidCommand)?;
+        }
         verify_image_signature(image).map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
         let mut config_json = None;
         if let Ok(Some(config_path)) =

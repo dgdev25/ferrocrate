@@ -14214,6 +14214,12 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 target: PathBuf::from("tmp-target"),
                 size: Some("1m".into()),
             }];
+            let (run_mounts, run_tmpfs, run_readonly) =
+                if nix::unistd::Uid::effective().is_root() {
+                    (&mounts[..], &tmpfs[..], true)
+                } else {
+                    (&[][..], &[][..], false)
+                };
             let result = runtime.run(
                 "alpine:latest",
                 &["sh".into(), "-c".into(), format!("touch {marker}")],
@@ -14224,9 +14230,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 RestartPolicy::No,
                 &[],
                 Some(&limits),
-                &mounts,
-                &tmpfs,
-                true,
+                run_mounts,
+                run_tmpfs,
+                run_readonly,
                 false,
                 None,
                 None,
@@ -14271,7 +14277,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
         for action in ["run", "restart"] {
             let phases: &[&str] = if action == "run" {
-                &[
+                if nix::unistd::Uid::effective().is_root() {
+                    &[
                     "bind-effect",
                     "tmpfs-effect",
                     "readonly-effect",
@@ -14282,7 +14289,20 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                     "cgroup",
                     "spawn",
                     "identity",
-                ]
+                    ]
+                } else {
+                    // Rootless mount admission is intentionally fail-closed
+                    // until a mount-capable user namespace is available.
+                    &[
+                        "network-effect",
+                        "network-resources-before-ownership",
+                        "network",
+                        "cgroup-effect",
+                        "cgroup",
+                        "spawn",
+                        "identity",
+                    ]
+                }
             } else {
                 &["network", "old-stopped", "spawn", "identity"]
             };

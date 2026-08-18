@@ -126,7 +126,7 @@ else
   prerequisite_failures=1
 fi
 if command -v unshare >/dev/null 2>&1 && \
-  unshare --user --mount --fork --propagation unchanged --map-root-user true >/dev/null 2>&1; then
+  unshare --user --mount --fork --propagation unchanged true >/dev/null 2>&1; then
   echo "rootless.install.userns_mount=pass"
 else
   echo "rootless.install.userns_mount=missing"

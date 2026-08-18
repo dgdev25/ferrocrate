@@ -15,13 +15,15 @@ fi
 
 # The sysctl only expresses policy. Probe the namespace operation that the
 # rootless workload launcher actually needs so a host cannot pass diagnostics
-# while its user+mount namespace or root mapping is denied by a container/LSM
-# boundary. Keep mount propagation unchanged: changing the caller's root
-# propagation is an optional host setup detail and must not turn into a false
-# negative for an otherwise usable user namespace. This probe is side-effect
-# free: it launches `true` and exits.
+# while its user+mount namespace creation is denied by a container/LSM
+# boundary. FerroCrate creates the user namespace first and applies the
+# subordinate UID/GID maps through the authenticated newuidmap/newgidmap path;
+# requiring util-linux's `--map-root-user` here would test a different mapping
+# mechanism and reject hosts that the production path supports. Keep mount
+# propagation unchanged: changing the caller's root propagation is optional.
+# This probe is side-effect free: it launches `true` and exits.
 if command -v unshare >/dev/null 2>&1 && \
-  unshare --user --mount --fork --propagation unchanged --map-root-user true >/dev/null 2>&1; then
+  unshare --user --mount --fork --propagation unchanged true >/dev/null 2>&1; then
   echo "rootless.userns_mount=pass"
 else
   echo "rootless.userns_mount=missing"

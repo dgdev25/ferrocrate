@@ -31,6 +31,19 @@ else
   missing=1
 fi
 
+# Bridge-mode workloads create the user+network namespace first and then use
+# bubblewrap for the rootfs/mount boundary. A host can permit the standalone
+# mount probe above while denying that nested combination, so report it
+# separately instead of letting Compose fail after container state is created.
+if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
+  unshare --user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
+  echo "rootless.bwrap_nested=pass"
+else
+  echo "rootless.bwrap_nested=missing"
+  echo "warning: bridge-mode rootless workloads may be unavailable because nested bubblewrap user namespaces are denied" >&2
+  missing=1
+fi
+
 user=$(id -un)
 if grep -q "^${user}:" /etc/subuid 2>/dev/null; then
   echo "rootless.subuid=pass"

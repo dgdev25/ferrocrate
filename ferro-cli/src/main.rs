@@ -10547,6 +10547,16 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/logs");
                 let tail = query.get("tail").cloned();
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                    .contains_key(id);
+                if pending && runtime.inspect(id).is_err() {
+                    // Docker exposes an empty log stream for a created
+                    // container before it has a runtime log file.
+                    return Ok(http_response(200, &[], "text/plain"));
+                }
                 if query.get("follow").is_some_and(|value| value == "1") {
                     // Validate the container and tail before committing to a
                     // long-lived chunked response.

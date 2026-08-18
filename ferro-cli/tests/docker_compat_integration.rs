@@ -313,6 +313,28 @@ fn docker_compat_inspect_uses_rfc3339_started_at() {
 }
 
 #[test]
+fn docker_compat_logs_for_created_container_returns_empty_success() {
+    let harness = DaemonHarness::spawn();
+    let body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=logs-created HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+    let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/logs"));
+    assert_eq!(status, 200, "logs response={response}");
+    assert!(response.is_empty(), "created container logs should be empty");
+}
+
+#[test]
 fn docker_compat_exec_inspect_reports_created_exec_state() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"NetworkMode":"none"}}"#;

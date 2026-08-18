@@ -95,7 +95,7 @@ check_helper() {
   fi
   echo "rootless.install.$helper=pass"
 }
-for helper in newuidmap newgidmap slirp4netns; do
+for helper in newuidmap newgidmap slirp4netns bwrap; do
   if ! check_helper "$helper"; then
     prerequisite_failures=1
   fi

@@ -22,6 +22,7 @@ grep -q '^rootless.install.subgid=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.cgroup_v2=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.user_namespaces=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.userns_mount=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.bwrap=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
 run_installer >"$tmp_home/install.txt"
@@ -82,7 +83,7 @@ test ! -e "$strict_home/config/systemd/user/ferrocrate.service"
 
 unsafe_bin="$tmp_home/unsafe-bin"
 mkdir -p "$unsafe_bin"
-for helper in newuidmap newgidmap slirp4netns; do
+for helper in newuidmap newgidmap slirp4netns bwrap; do
   ln -s /bin/true "$unsafe_bin/$helper"
 done
 if PATH="$unsafe_bin:/usr/bin:/bin" HOME="$tmp_home" \

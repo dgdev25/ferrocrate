@@ -2941,7 +2941,11 @@ impl ContainerRuntime {
         let netns_name = network_setup.netns_name.clone();
         let container_ip = network_setup.container_ip.clone();
         let container_ipv6 = network_setup.container_ipv6.clone();
-        let unshare_netns = rootless && network_mode != "host" && rootless_netns_enabled();
+        // `none` intentionally has no network namespace setup. Only bridge
+        // mode needs the user+network namespace and slirp handoff; sending
+        // `none` through that launcher creates an unnecessary nested sandbox
+        // and can fail on hosts that deny nested user namespaces.
+        let unshare_netns = rootless && network_mode == "bridge" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
 
         // Load seccomp profile for container isolation.

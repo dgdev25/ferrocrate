@@ -12218,7 +12218,12 @@ mod tests {
             crate::authorization::AuthorizationMode::Disabled,
         )
         .unwrap();
-        assert!(request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
+        if nix::unistd::Uid::effective().is_root() {
+            assert!(request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
+        } else {
+            assert!(!request.bind_mounts[0].source.starts_with("/proc/self/fd/"));
+            assert!(request.bind_mounts[0].source.is_absolute());
+        }
         assert_eq!(request.facts.mounts.len(), 2);
         assert_ne!(request.facts.mounts[0].target_digest, [0; 32]);
         assert_ne!(

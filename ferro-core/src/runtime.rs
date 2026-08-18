@@ -1748,9 +1748,7 @@ impl ContainerRuntime {
         let _reconciliation_lock =
             LifecycleLock::acquire(&runtime_dir.join("reconciliation.lock"))?;
         let store = SqliteContainerStore::open(runtime_dir.join("containers.db"))?;
-        let cgroup_root = std::env::var("FERROCRATE_CGROUP_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup"));
+        let cgroup_root = configured_cgroup_root();
         let runtime = Self {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
@@ -4142,6 +4140,40 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+/// Resolve the cgroup-v2 directory where this runtime may create child
+/// controllers. Rootful daemons use the hierarchy mount; an unprivileged
+/// daemon must stay inside its delegated cgroup (typically a systemd user
+/// scope), otherwise resource-limited rootless runs fail with `EPERM` even
+/// when the host has delegated controllers available.
+fn configured_cgroup_root() -> PathBuf {
+    if let Ok(root) = std::env::var("FERROCRATE_CGROUP_ROOT") {
+        return PathBuf::from(root);
+    }
+
+    let hierarchy = PathBuf::from("/sys/fs/cgroup");
+    if nix::unistd::Uid::effective().is_root() {
+        return hierarchy;
+    }
+
+    let relative = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|contents| current_cgroup_relative_path(&contents));
+    relative
+        .map(|path| hierarchy.join(path.trim_start_matches('/')))
+        .unwrap_or(hierarchy)
+}
+
+fn current_cgroup_relative_path(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let _hierarchy = fields.next()?;
+        let _controllers = fields.next()?;
+        let path = fields.next()?;
+        (!path.is_empty() && path.starts_with('/') && !path.contains(".."))
+            .then_some(path.to_string())
+    })
 }
 
 fn validate_container_name(name: &str) -> Result<(), RuntimeError> {
@@ -11646,6 +11678,34 @@ mod tests {
         unsafe {
             std::env::remove_var("FERROCRATE_CGROUP_ROOT");
         }
+    }
+
+    #[test]
+    fn configured_cgroup_root_honors_explicit_override() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let override_root = tempfile::tempdir().expect("cgroup root");
+        unsafe {
+            std::env::set_var("FERROCRATE_CGROUP_ROOT", override_root.path());
+        }
+        assert_eq!(super::configured_cgroup_root(), override_root.path());
+        unsafe {
+            std::env::remove_var("FERROCRATE_CGROUP_ROOT");
+        }
+    }
+
+    #[test]
+    fn current_cgroup_relative_path_accepts_v2_and_rejects_traversal() {
+        assert_eq!(
+            super::current_cgroup_relative_path(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice\n"
+            ),
+            Some("/user.slice/user-1000.slice/user@1000.service/app.slice".to_string())
+        );
+        assert_eq!(
+            super::current_cgroup_relative_path("0::/user.slice/../escape\n"),
+            None
+        );
+        assert_eq!(super::current_cgroup_relative_path(""), None);
     }
 
     #[test]

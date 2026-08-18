@@ -206,6 +206,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/missing/restart?t=invalid",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/missing/kill?signal=not-a-signal",
         coverage: Coverage::Implemented,
         expected_status: 400,
@@ -228,6 +235,13 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "POST",
         path: "/containers/missing/unpause",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "DELETE",
+        path: "/containers/missing",
         coverage: Coverage::Implemented,
         expected_status: 404,
         body: "",

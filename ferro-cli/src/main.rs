@@ -16224,6 +16224,30 @@ volumes:
         assert_eq!(percent_encode_path_component("web/name"), "web%2Fname");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn remote_system_df_routes_to_docker_endpoint() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("remote df config");
+        let socket = temp.path().join("remote-df.sock");
+        let listener = UnixListener::bind(&socket).expect("bind remote df socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept remote df request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read remote df request");
+            assert!(String::from_utf8_lossy(&request).contains("GET /system/df"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").expect("respond");
+        });
+        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()); }
+        handle_context(ContextCommands::Create { name: "remote".to_string(), endpoint: format!("unix://{}", socket.display()) }).expect("create context");
+        handle_context(ContextCommands::Use { name: "remote".to_string() }).expect("use context");
+        let command = Cli::try_parse_from(["ferrocrate", "system-df"]).expect("parse df").command;
+        dispatch_remote_context(&command).expect("remote context should claim system df").expect("remote df should succeed");
+        worker.join().expect("remote df worker");
+        match previous { Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) }, None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") } }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn remote_commit_path_preserves_repository_and_tag() {

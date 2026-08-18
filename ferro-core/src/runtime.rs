@@ -2969,6 +2969,37 @@ impl ContainerRuntime {
         // Guest authority uses the restricted guest profile; others use the default.
         let seccomp_profile = resolve_seccomp_profile(ai_config)?;
 
+        // Provision and configure the cgroup before launching the workload.
+        // Applying limits after spawn leaves a race in which short-lived
+        // processes can run outside their requested boundary (and is
+        // especially visible for rootless delegated cgroups).  The child is
+        // attached immediately after spawn below, before it can perform any
+        // user-visible work beyond the exec boundary.
+        let cgroup_path = if let Some(limits) = limits {
+            let manager = CgroupV2Manager::new(&self.cgroup_root);
+            let cgroup_name = format!("ferrocrate/{container_id}");
+            let group = manager.create_group(&cgroup_name)?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::CgroupKernelEffect)?;
+            rollback.track_cgroup(cgroup_name)?;
+            let cgroup_metadata = fs::metadata(&group)?;
+            rollback.mark_typed_resource(
+                cgroup_plan.expect("cgroup plan exists"),
+                ResourceIdentity::Cgroup {
+                    device: cgroup_metadata.dev(),
+                    inode: cgroup_metadata.ino(),
+                },
+            )?;
+            manager
+                .apply_limits(&group, limits)
+                .map_err(RuntimeError::Cgroup)?;
+            self.phase_hook
+                .reached("run", LifecyclePhasePoint::CgroupApplied)?;
+            Some(group)
+        } else {
+            None
+        };
+
         let child_id = spawn_process_with_logs(
             &exec_cmd,
             &merged_env,
@@ -3007,40 +3038,20 @@ impl ContainerRuntime {
         self.phase_hook
             .reached("run", LifecyclePhasePoint::SpawnPrepared)?;
 
+        if let Some(group) = cgroup_path.as_ref() {
+            let manager = CgroupV2Manager::new(&self.cgroup_root);
+            if let Err(error) = manager.add_pid(group, child_id) {
+                let _ = kill_pid(child_id);
+                rollback.rollback();
+                return Err(RuntimeError::Cgroup(error));
+            }
+        }
+
         if security_ebpf_monitor_enabled() {
             if let Err(e) = setup_security_ebpf_monitor(&container_id) {
                 let _ = kill_pid(child_id);
                 rollback.rollback();
                 return Err(e);
-            }
-        }
-
-        if let Some(limits) = limits {
-            let manager = CgroupV2Manager::new(&self.cgroup_root);
-            let cgroup_name = format!("ferrocrate/{container_id}");
-            let group = manager.create_group(&cgroup_name)?;
-            self.phase_hook
-                .reached("run", LifecyclePhasePoint::CgroupKernelEffect)?;
-            rollback.track_cgroup(cgroup_name)?;
-            let cgroup_metadata = fs::metadata(&group)?;
-            rollback.mark_typed_resource(
-                cgroup_plan.expect("cgroup plan exists"),
-                ResourceIdentity::Cgroup {
-                    device: cgroup_metadata.dev(),
-                    inode: cgroup_metadata.ino(),
-                },
-            )?;
-            self.phase_hook
-                .reached("run", LifecyclePhasePoint::CgroupApplied)?;
-            if let Err(e) = manager.apply_limits(&group, limits) {
-                let _ = kill_pid(child_id);
-                rollback.rollback();
-                return Err(RuntimeError::Cgroup(e));
-            }
-            if let Err(e) = manager.add_pid(&group, child_id) {
-                let _ = kill_pid(child_id);
-                rollback.rollback();
-                return Err(RuntimeError::Cgroup(e));
             }
         }
 

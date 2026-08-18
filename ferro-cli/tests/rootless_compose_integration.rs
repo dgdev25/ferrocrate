@@ -94,3 +94,87 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
         "named-volume\n"
     );
 }
+
+#[test]
+fn rootless_run_mounts_bind_and_named_volumes() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("input"), b"rootless-run\n").expect("input");
+    let runtime = root.path().join("runtime");
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let pull = Command::new(binary)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .args(["pull", "alpine:3.20"])
+        .output()
+        .expect("pull alpine");
+    assert!(
+        pull.status.success(),
+        "rootless pull failed: {}",
+        String::from_utf8_lossy(&pull.stderr)
+    );
+
+    let bind = Command::new(binary)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--volume",
+            &format!("{}:/data", workspace.display()),
+            "alpine:3.20",
+            "sh",
+            "-c",
+            "cat /data/input > /data/output",
+        ])
+        .output()
+        .expect("rootless bind run");
+    assert!(
+        bind.status.success(),
+        "rootless bind run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&bind.stdout),
+        String::from_utf8_lossy(&bind.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("output")).expect("bind output"),
+        "rootless-run\n"
+    );
+
+    let named = Command::new(binary)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--volume",
+            "named:/data",
+            "alpine:3.20",
+            "sh",
+            "-c",
+            "echo named-run > /data/output",
+        ])
+        .output()
+        .expect("rootless named-volume run");
+    assert!(
+        named.status.success(),
+        "rootless named-volume run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&named.stdout),
+        String::from_utf8_lossy(&named.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(runtime.join("volumes/named/output")).expect("named output"),
+        "named-run\n"
+    );
+}

@@ -26,7 +26,8 @@ export FERROCRATE_RUNTIME_DIR="${TMP_DIR}/runtime"
 # This generic CLI smoke is intentionally independent of the privileged eBPF
 # qualification. Use the typed firewall fallback so a temporary runtime cannot
 # leave shared bpffs classifiers behind between repeated runs.
-export FERROCRATE_NETWORK_BACKEND="iptables"
+network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
+export FERROCRATE_NETWORK_BACKEND="${network_backend}"
 mkdir -p "${FERROCRATE_RUNTIME_DIR}"
 COMPOSE_FILE="${TMP_DIR}/compose.yml"
 DOCKERFILE="${TMP_DIR}/Dockerfile"
@@ -56,7 +57,7 @@ if [[ -z "${PULL_IMAGE}" ]]; then
   exit 1
 fi
 
-CID=$("${BIN}" run "${PULL_IMAGE}" sh -c "echo hello; sleep 1" | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+CID=$("${BIN}" run --network-backend "${network_backend}" "${PULL_IMAGE}" sh -c "echo hello; sleep 1" | awk -F'container_id=' '{print $2}' | awk '{print $1}')
 if [[ -z "${CID}" ]]; then
   echo "Failed to capture container id" >&2
   exit 1
@@ -81,7 +82,7 @@ DOCKER_EOF
 
 echo "hi" > "${HELLO_FILE}"
 run "${BIN}" build --dockerfile "${DOCKERFILE}" --tag local/test:dev
-OUT=$("${BIN}" run local/test:dev /bin/cat /hello.txt | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+OUT=$("${BIN}" run --network-backend "${network_backend}" local/test:dev /bin/cat /hello.txt | awk -F'container_id=' '{print $2}' | awk '{print $1}')
 if [[ -z "${OUT}" ]]; then
   echo "Failed to run built image" >&2
   exit 1

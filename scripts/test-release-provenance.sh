@@ -35,6 +35,28 @@ PY
 bash "$repo_root/scripts/verify-release-channel-artifacts.sh" \
   --channel public --version v0.0.1 --artifact-dir "$tmp_dir"
 
+# Exercise the signed-channel verifier with an isolated ephemeral key.  This
+# proves the release gate, while keeping real publication keys out of tests and
+# the repository.  Hosts without GPG still retain the checksum/provenance gate.
+if command -v gpg >/dev/null 2>&1; then
+  export GNUPGHOME="$tmp_dir/gnupg"
+  mkdir -m 700 "$GNUPGHOME"
+  cat >"$tmp_dir/keyparams" <<'KEY'
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: Ferrocrate Fixture
+Name-Email: fixture@example.invalid
+Expire-Date: 0
+%no-protection
+%commit
+KEY
+  gpg --batch --generate-key "$tmp_dir/keyparams" >/dev/null 2>&1
+  gpg --batch --yes --armor --detach-sign "$tmp_dir/$archive"
+  bash "$repo_root/scripts/verify-release-channel-artifacts.sh" \
+    --channel public --version v0.0.1 --artifact-dir "$tmp_dir" \
+    --require-signatures
+fi
+
 python3 - "$tmp_dir/$archive.provenance.json" <<'PY'
 import json
 import sys

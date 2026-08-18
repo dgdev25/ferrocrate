@@ -6911,6 +6911,53 @@ fn append_commit_rootfs<W: Write>(
 }
 
 #[cfg(target_os = "linux")]
+fn append_export_rootfs<W: Write>(
+    builder: &mut tar::Builder<W>,
+    rootfs: &Path,
+    excluded_targets: &[PathBuf],
+) -> Result<(), std::io::Error> {
+    append_export_rootfs_dir(builder, rootfs, rootfs, Path::new("."), excluded_targets)
+}
+
+#[cfg(target_os = "linux")]
+fn append_export_rootfs_dir<W: Write>(
+    builder: &mut tar::Builder<W>,
+    rootfs: &Path,
+    directory: &Path,
+    archive_directory: &Path,
+    excluded_targets: &[PathBuf],
+) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("proc" | "sys" | "dev" | "run")) && directory == rootfs {
+            continue;
+        }
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(rootfs)
+            .expect("rootfs traversal path must remain beneath rootfs");
+        if excluded_targets
+            .iter()
+            .any(|target| relative == target || relative.starts_with(target))
+        {
+            continue;
+        }
+        let archive_name = archive_directory.join(&name);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir() {
+            builder.append_dir(&archive_name, &path)?;
+            append_export_rootfs_dir(builder, rootfs, &path, &archive_name, excluded_targets)?;
+        } else if metadata.file_type().is_symlink() {
+            append_commit_symlink(builder, &path, &archive_name)?;
+        } else {
+            builder.append_path_with_name(&path, &archive_name)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn append_commit_rootfs_dir<W: Write>(
     builder: &mut tar::Builder<W>,
     directory: &Path,
@@ -10705,12 +10752,6 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/export");
                 let record = runtime.inspect(id).map_err(|error| error.to_string())?;
-                if !record.mounts.is_empty() || !record.tmpfs_mounts.is_empty() {
-                    return Err(
-                        "docker: container export with bind or tmpfs mounts is unsupported; remove mounts before exporting"
-                            .to_string(),
-                    );
-                }
                 let rootfs = runtime_dir
                     .join("containers")
                     .join(&record.id)
@@ -10724,7 +10765,18 @@ fn handle_docker_compat_connection(
                 let mut archive = Vec::new();
                 {
                     let mut builder = tar::Builder::new(&mut archive);
-                    append_commit_rootfs(&mut builder, &rootfs)
+                    let excluded_targets = record
+                        .mounts
+                        .iter()
+                        .map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
+                        .chain(
+                            record
+                                .tmpfs_mounts
+                                .iter()
+                                .map(|mount| PathBuf::from(mount.target.trim_start_matches('/'))),
+                        )
+                        .collect::<Vec<_>>();
+                    append_export_rootfs(&mut builder, &rootfs, &excluded_targets)
                         .map_err(|error| format!("docker: export rootfs: {error}"))?;
                     builder
                         .finish()
@@ -13437,10 +13489,10 @@ mod tests {
     }
 
     use super::{
-        bind_run_network, build_error_is_retryable, build_health_config, build_limits,
-        context_endpoint_available, context_endpoint_is_local, decode_docker_raw_stream,
-        desktop_forward_enabled, discover_rootless_socket, dispatch, dispatch_remote_context,
-        docker_chunked_headers, docker_container_apply_time_bounds,
+        append_export_rootfs, bind_run_network, build_error_is_retryable, build_health_config,
+        build_limits, context_endpoint_available, context_endpoint_is_local,
+        decode_docker_raw_stream, desktop_forward_enabled, discover_rootless_socket, dispatch,
+        dispatch_remote_context, docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_container_prune_matches_filters,
         docker_directory_usage, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
@@ -15745,6 +15797,37 @@ volumes:
             error.contains("unsupported context entry type"),
             "error={error}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_export_omits_persisted_mount_targets() {
+        let temp = tempfile::tempdir().expect("rootfs root");
+        std::fs::create_dir_all(temp.path().join("mounted")).expect("mount target");
+        std::fs::write(temp.path().join("mounted/host-secret"), b"secret").expect("secret");
+        std::fs::write(temp.path().join("included"), b"included").expect("included");
+        let mut archive = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut archive);
+            append_export_rootfs(&mut builder, temp.path(), &[PathBuf::from("mounted")])
+                .expect("export rootfs");
+            builder.finish().expect("finish archive");
+        }
+        let mut reader = tar::Archive::new(std::io::Cursor::new(archive));
+        let names = reader
+            .entries()
+            .expect("archive entries")
+            .map(|entry| {
+                entry
+                    .expect("archive entry")
+                    .path()
+                    .expect("archive path")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name.ends_with("included")));
+        assert!(!names.iter().any(|name| name.contains("host-secret")));
     }
 
     #[cfg(target_os = "linux")]

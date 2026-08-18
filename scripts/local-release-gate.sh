@@ -45,12 +45,14 @@ echo "[gate] rootless installer/uninstall lifecycle checks"
 bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/uninstall.sh scripts/test-uninstall.sh \
   scripts/perf/check-docker-comparison.sh scripts/perf/test-check-docker-comparison.sh \
+  scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \
   scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh
 bash scripts/test-rootless-install.sh
 bash scripts/test-uninstall.sh
 bash scripts/test-rootless-cri-oci.sh
 bash scripts/test-e2e-cli-backend.sh
 bash scripts/perf/test-check-docker-comparison.sh
+bash scripts/perf/test-check-benchmark-register.sh
 bash scripts/test-generate-changelog.sh
 bash scripts/test-shell-out-audit.sh
 

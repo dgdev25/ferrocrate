@@ -21,6 +21,14 @@ if [[ ! -x "$bin" ]]; then
   echo "docker CLI compatibility smoke skipped (missing Ferrocrate binary: $bin)"
   exit 0
 fi
+if [[ "$bin" -ot "$repo_root/ferro-cli/src/main.rs" ]]; then
+  if [[ "$strict" == "1" || "$strict" == "true" ]]; then
+    echo "Ferrocrate binary is older than the Docker-compatible source; rebuild it before the strict smoke" >&2
+    exit 1
+  fi
+  echo "docker CLI compatibility smoke skipped (stale Ferrocrate binary: $bin)"
+  exit 0
+fi
 
 runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-docker-cli.XXXXXX")"
 socket="$runtime_dir/docker.sock"

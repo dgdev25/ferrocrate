@@ -2688,6 +2688,8 @@ impl ContainerRuntime {
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         ensure_kernel_min_version()?;
+        let rootless = !nix::unistd::Uid::effective().is_root();
+        validate_rootless_mount_capability(rootless, mounts, tmpfs_mounts, readonly_rootfs)?;
         verify_image_signature(image).map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
         let mut config_json = None;
         if let Ok(Some(config_path)) =
@@ -2896,7 +2898,6 @@ impl ContainerRuntime {
 
         validate_port_mapping_conflicts(&self.store, port_mappings)?;
 
-        let rootless = !nix::unistd::Uid::effective().is_root();
         let existing_records = self.store.list()?;
         let kernel_ops = Arc::clone(&self.kernel_ops);
         let mut network_setup = kernel_ops.setup_network(
@@ -4142,6 +4143,20 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+fn validate_rootless_mount_capability(
+    rootless: bool,
+    mounts: &[BindMount],
+    tmpfs_mounts: &[TmpfsMount],
+    readonly_rootfs: bool,
+) -> Result<(), RuntimeError> {
+    if rootless && (!mounts.is_empty() || !tmpfs_mounts.is_empty() || readonly_rootfs) {
+        return Err(RuntimeError::InvalidCommand(
+            "rootless workload mounts and read-only rootfs require a mount-capable user namespace; this host path cannot apply them safely".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the cgroup-v2 directory where this runtime may create child
@@ -13153,6 +13168,20 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn rootless_bridge_accepts_slirp_without_privileged_mutations() {
         super::validate_rootless_bridge_network(true, &[], NetworkBackend::Nftables)
             .expect("enabled slirp bridge should be admitted");
+    }
+
+    #[test]
+    fn rootless_mount_requests_fail_before_kernel_mutation() {
+        let mount = BindMount {
+            source: PathBuf::from("/tmp/source"),
+            target: PathBuf::from("data"),
+            read_only: false,
+        };
+        let error = super::validate_rootless_mount_capability(true, &[mount], &[], false)
+            .expect_err("rootless bind mount must fail closed before setup");
+        assert!(error.to_string().contains("mount-capable user namespace"));
+        super::validate_rootless_mount_capability(false, &[], &[], true)
+            .expect("rootful read-only rootfs remains supported");
     }
 
     #[test]

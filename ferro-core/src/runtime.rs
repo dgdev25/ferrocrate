@@ -3834,6 +3834,17 @@ impl ContainerRuntime {
         let records = self.store.list()?;
         cleanup_network(Some((_proof, intent)), &record, &records)?;
         let container_dir = self.runtime_dir.join("containers").join(id);
+        if let Err(error) = detach_persisted_mounts(
+            &self.kernel_ops,
+            &container_dir,
+            &record,
+        ) {
+            // Keep the durable record available for a later retry. Removing a
+            // directory while one of its mountpoints is still attached leaks
+            // the mount and leaves the container permanently stuck.
+            let _ = self.update_reserved_status(id, "removed-pending", intent);
+            return Err(error);
+        }
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
         }
@@ -4858,6 +4869,92 @@ fn replay_persisted_mounts(rootfs: &Path, record: &ContainerRecord) -> Result<()
     }
     if !tmpfs_mounts.is_empty() {
         apply_tmpfs_mounts(rootfs, &tmpfs_mounts)?;
+    }
+    Ok(())
+}
+
+/// Detach the mounts recorded for a container before removing its directory.
+///
+/// Mounts outlive their directory tree, so `remove_dir_all` alone cannot clean
+/// up a stopped container with a bind or tmpfs mount.  Every target is checked
+/// against the container root mount and its recorded source/type before the
+/// identity-checked kernel detach is attempted.
+fn detach_persisted_mounts(
+    kernel_ops: &Arc<dyn KernelResourceOps>,
+    container_dir: &Path,
+    record: &ContainerRecord,
+) -> Result<(), RuntimeError> {
+    let rootfs = container_dir.join("rootfs");
+    if !rootfs.exists() {
+        return Ok(());
+    }
+    // A plain rootfs directory usually inherits its parent mount and therefore
+    // has no exact mountinfo entry. In that case `root_mount_id` is `None`, and
+    // any explicitly recorded target with a concrete mount ID is still safe to
+    // consider; the target list is the durable ownership boundary.
+    let root_mount_id = mount_id_for_path(&rootfs)?;
+
+    let mut targets = record
+        .mounts
+        .iter()
+        .map(|mount| (PathBuf::from(&mount.target), Some(mount.source.as_str()), false))
+        .chain(record.tmpfs_mounts.iter().map(|mount| {
+            (PathBuf::from(&mount.target), None, true)
+        }))
+        .collect::<Vec<_>>();
+    // Detach nested mounts first and avoid attempting the same target twice.
+    targets.sort_by(|left, right| {
+        right
+            .0
+            .components()
+            .count()
+            .cmp(&left.0.components().count())
+            .then_with(|| right.0.cmp(&left.0))
+    });
+    targets.dedup_by(|left, right| left.0 == right.0);
+
+    for (target, source, is_tmpfs) in targets {
+        let target = normalize_mount_target(&target)?;
+        let absolute = rootfs.join(&target);
+        let Some(mount_id) = mount_id_for_path(&absolute)? else {
+            continue;
+        };
+        if Some(mount_id) == root_mount_id {
+            continue;
+        }
+        let metadata = fs::metadata(&absolute)?;
+        if is_tmpfs {
+            let kind = mountinfo_for_path(&absolute)?
+                .map(|(_, kind, _)| kind)
+                .ok_or_else(|| RuntimeError::InvalidState("persisted tmpfs mount disappeared".into()))?;
+            if kind != "tmpfs" {
+                return Err(RuntimeError::InvalidState(format!(
+                    "refusing to detach non-tmpfs mount at {}",
+                    target.display()
+                )));
+            }
+        } else if let Some(source) = source {
+            let source_metadata = fs::metadata(source)?;
+            if metadata.dev() != source_metadata.dev() || metadata.ino() != source_metadata.ino() {
+                return Err(RuntimeError::InvalidState(format!(
+                    "persisted bind mount identity changed at {}",
+                    target.display()
+                )));
+            }
+        }
+        let expected = kernel_ops.identity(&absolute)?;
+        kernel_ops.detach_owned(&rootfs, &target, &expected)?;
+    }
+
+    if record.readonly_rootfs {
+        let parent_mount_id = mount_id_for_path(container_dir)?;
+        if root_mount_id.is_some()
+            && parent_mount_id.is_some()
+            && parent_mount_id != root_mount_id
+        {
+            let expected = kernel_ops.identity(&rootfs)?;
+            kernel_ops.detach_owned(&rootfs, Path::new("."), &expected)?;
+        }
     }
     Ok(())
 }

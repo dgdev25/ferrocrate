@@ -52,8 +52,8 @@ record() {
 }
 
 record "volume create/write/read/remove" \
-  'name="ferrocrate-bench-docker-$BASHPID"; docker volume create "$name" >/dev/null; docker run --rm -v "$name:/data" '"$image"' sh -c "printf volume-io >/data/value && test -s /data/value"; docker volume rm "$name" >/dev/null' \
-  "name=ferrocrate-bench-ferro-\$BASHPID; $ferro_env '$ferro_bin' volume create \"\$name\" >/dev/null; $ferro_env '$ferro_bin' run --rm --volume \"\$name:/data\" '$image' sh -c 'printf volume-io >/data/value && test -s /data/value'; $ferro_env '$ferro_bin' volume rm \"\$name\" >/dev/null"
+  'name="ferrocrate-bench-docker-$BASHPID"; docker volume create "$name" >/dev/null; docker run --rm --network none -v "$name:/data" '"$image"' sh -c "printf volume-io >/data/value && test -s /data/value"; docker volume rm "$name" >/dev/null' \
+  "name=ferrocrate-bench-ferro-\$BASHPID; $ferro_env '$ferro_bin' volume create \"\$name\" >/dev/null; $ferro_env '$ferro_bin' run --rm --network none --volume \"\$name:/data\" '$image' sh -c 'printf volume-io >/data/value && test -s /data/value'; $ferro_env '$ferro_bin' volume rm \"\$name\" >/dev/null"
 
 mkdir -p "$(dirname -- "$out")"
 {

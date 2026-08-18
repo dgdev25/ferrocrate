@@ -45,17 +45,27 @@ else
 fi
 
 user=$(id -un)
-if grep -q "^${user}:" /etc/subuid 2>/dev/null; then
+user_id=$(id -u)
+group_id=$(id -g)
+subuid_file="${FERROCRATE_ROOTLESS_SUBUID_FILE:-/etc/subuid}"
+subgid_file="${FERROCRATE_ROOTLESS_SUBGID_FILE:-/etc/subgid}"
+has_subid_entry() {
+  local path="$1" name="$2" numeric_id="$3"
+  [[ -r "$path" ]] || return 1
+  awk -F: -v name="$name" -v numeric_id="$numeric_id" \
+    '$1 == name || $1 == numeric_id { found=1 } END { exit !found }' "$path"
+}
+if has_subid_entry "$subuid_file" "$user" "$user_id"; then
   echo "rootless.subuid=pass"
 else
   echo "rootless.subuid=missing"
-  echo "warning: no /etc/subuid entry for $(id -un); rootless will use 1:1 mapping" >&2
+  echo "warning: no $subuid_file entry for $(id -un) or UID $user_id; rootless will use 1:1 mapping" >&2
 fi
-if grep -q "^${user}:" /etc/subgid 2>/dev/null; then
+if has_subid_entry "$subgid_file" "$user" "$group_id"; then
   echo "rootless.subgid=pass"
 else
   echo "rootless.subgid=missing"
-  echo "warning: no /etc/subgid entry for $(id -un); rootless will use 1:1 mapping" >&2
+  echo "warning: no $subgid_file entry for $(id -un) or GID $group_id; rootless will use 1:1 mapping" >&2
 fi
 
 for helper in newuidmap newgidmap; do

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
@@ -97,9 +98,8 @@ pub fn verify_image_signature(image: &str) -> Result<(), String> {
     if !signature_verification_enabled() {
         return Ok(());
     }
-    if !command_exists("cosign") {
-        return Err("signature verification requires cosign".to_string());
-    }
+    let cosign = resolve_command("cosign")
+        .ok_or_else(|| "signature verification requires cosign".to_string())?;
 
     // Validate image reference format (SEC-01)
     validate_image_reference(image)?;
@@ -109,7 +109,7 @@ pub fn verify_image_signature(image: &str) -> Result<(), String> {
         .map_err(|_| "signature verification requires FERROCRATE_SIGNATURE_KEY".to_string())?;
 
     // Security: Use "--" delimiter to prevent flag injection from malicious image names
-    let mut child = Command::new("cosign")
+    let mut child = Command::new(cosign)
         .args(["verify", "--key", &key, "--", image])
         .spawn()
         .map_err(|_| "failed to execute cosign verification".to_string())?;
@@ -129,33 +129,64 @@ fn signature_verification_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn command_exists(bin: &str) -> bool {
-    if Command::new(bin).arg("--version").output().is_ok() {
-        return true;
+    resolve_command(bin).is_some()
+}
+
+/// Resolve a helper without executing it. Probing a user-controlled PATH by
+/// running `helper --version` is itself an unintended side effect and can
+/// execute an attacker-supplied program before authorization reaches the real
+/// verification boundary.
+fn resolve_command(bin: &str) -> Option<PathBuf> {
+    if bin.is_empty() || bin.contains('/') {
+        return None;
     }
 
-    // Tests and restricted environments may temporarily clear PATH.
-    // Fall back to standard Unix binary locations for deterministic behavior.
-    #[cfg(unix)]
-    {
-        for dir in [
-            "/usr/local/sbin",
-            "/usr/local/bin",
-            "/usr/sbin",
-            "/usr/bin",
-            "/sbin",
-            "/bin",
-        ] {
-            let candidate = format!("{dir}/{bin}");
-            if std::path::Path::new(&candidate).exists()
-                && Command::new(&candidate).arg("--version").output().is_ok()
-            {
-                return true;
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join(bin);
+            if is_executable(&candidate) {
+                return Some(candidate);
             }
         }
     }
 
-    false
+    // Restricted test/service environments may clear PATH. Keep the bounded
+    // system fallback, but still inspect metadata rather than executing code.
+    for directory in [
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ] {
+        let candidate = Path::new(directory).join(bin);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +413,36 @@ esac
     fn command_exists_returns_false_for_missing_command() {
         // A command that definitely shouldn't exist
         assert!(!command_exists("ferrocrate-nonexistent-command-xyz123"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_probe_does_not_execute_path_helper() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let directory = tempfile::tempdir().expect("helper directory");
+        let helper = directory.path().join("ferrocrate-probe-helper");
+        let marker = directory.path().join("executed");
+        fs::write(
+            &helper,
+            format!("#!/bin/sh\nprintf x > {}\n", marker.display()),
+        )
+        .expect("helper");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("executable");
+        let old_path = env::var_os("PATH");
+        env::set_var("PATH", directory.path());
+
+        assert!(command_exists("ferrocrate-probe-helper"));
+        assert!(
+            !marker.exists(),
+            "capability probing must not execute helpers"
+        );
+
+        if let Some(path) = old_path {
+            env::set_var("PATH", path);
+        } else {
+            env::remove_var("PATH");
+        }
     }
 
     #[test]

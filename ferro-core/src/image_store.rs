@@ -422,35 +422,64 @@ impl LocalImageStore {
     pub fn prune_references_authorized(
         &self,
         permits: Vec<crate::authorization::surface::SurfacePermit>,
+        selected_references: &[String],
     ) -> Result<usize, ImageStoreError> {
         let records = self.list_references()?;
-        if records.len() != permits.len() {
+        if selected_references.len() != permits.len() {
             return Err(ImageStoreError::Authorization(
-                "image prune authorization set does not match current inventory".to_string(),
+                "image prune authorization set does not match selected inventory".to_string(),
             ));
         }
-        for (record, permit) in records.iter().zip(&permits) {
-            crate::authorization::surface::SurfaceAuthorization::validate_execution(
-                permit,
-                crate::authorization::Action::ImageDelete,
-                crate::authorization::ResourceKind::Image,
-                &record.reference,
-                1,
-            )
-            .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
-            if permit.proof().canonical().image_digest() != Some(record.digest.as_str()) {
-                return Err(ImageStoreError::Authorization(
-                    "image prune digest does not match executor".to_string(),
-                ));
-            }
-        }
-        if permits.is_empty() {
+        let selected = selected_references
+            .iter()
+            .zip(&permits)
+            .map(|(reference, permit)| {
+                records
+                    .iter()
+                    .find(|record| &record.reference == reference)
+                    .ok_or_else(|| {
+                        ImageStoreError::Authorization(
+                            "image prune selection changed during authorization".to_string(),
+                        )
+                    })
+                    .and_then(|record| {
+                        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+                            permit,
+                            crate::authorization::Action::ImageDelete,
+                            crate::authorization::ResourceKind::Image,
+                            &record.reference,
+                            1,
+                        )
+                        .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+                        if permit.proof().canonical().image_digest() != Some(record.digest.as_str())
+                        {
+                            return Err(ImageStoreError::Authorization(
+                                "image prune digest does not match executor".to_string(),
+                            ));
+                        }
+                        Ok(record.reference.clone())
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if selected.is_empty() {
             return Ok(0);
         }
-        let result = {
-            let authority = permits[0].mutation_authority();
-            self.prune_references(&authority)
-        };
+        let result = (|| {
+            let mut db = self
+                .db
+                .lock()
+                .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+            let transaction = db.transaction()?;
+            let mut removed = 0;
+            for reference in &selected {
+                removed += transaction.execute(
+                    "DELETE FROM image_references WHERE reference = ?1",
+                    params![reference],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(removed)
+        })();
         match result {
             Ok(removed) => {
                 for permit in permits {

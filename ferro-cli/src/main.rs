@@ -7173,7 +7173,13 @@ fn handle_image_prune(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let removed = store
-        .prune_references_authorized(permits)
+        .prune_references_authorized(
+            permits,
+            &records
+                .iter()
+                .map(|record| record.reference.clone())
+                .collect::<Vec<_>>(),
+        )
         .map_err(|err| err.to_string())?;
     println!("image prune: removed={removed}");
     Ok(())
@@ -11976,7 +11982,7 @@ fn handle_docker_compat_connection(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let removed = store
-                    .prune_references_authorized(permits)
+                    .prune_references_authorized(permits, &deleted)
                     .map_err(|error| error.to_string())?;
                 let body = serde_json::json!({
                     "ImagesDeleted": deleted,

@@ -90,6 +90,7 @@ docker -H "$host" history "$image" >/dev/null
 docker -H "$host" tag "$image" "$tagged_image"
 docker -H "$host" image inspect "$tagged_image" >/dev/null
 docker -H "$host" image rm "$tagged_image" >/dev/null
+docker -H "$host" image prune --force >/dev/null
 events_file="$runtime_dir/events.jsonl"
 timeout 5 docker -H "$host" events --since 0s --filter type=container \
   >"$events_file" 2>"$runtime_dir/events.stderr" &
@@ -119,4 +120,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/create/start/wait/logs/diff/exec/commit/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/rm/events"

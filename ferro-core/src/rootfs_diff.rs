@@ -1,6 +1,7 @@
 //! Bounded filesystem baselines for Docker-compatible container change views.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_ENTRIES: usize = 100_000;
 const MAX_PATH_BYTES: usize = 4096;
+const MAX_DIGEST_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RootfsEntry {
@@ -16,6 +18,8 @@ pub struct RootfsEntry {
     pub size: u64,
     pub mode: u32,
     pub mtime: i64,
+    #[serde(default)]
+    pub digest: Option<String>,
 }
 
 pub type RootfsSnapshot = BTreeMap<String, RootfsEntry>;
@@ -116,6 +120,11 @@ fn walk(
         } else {
             1
         };
+        let digest = if file_type.is_file() && metadata.size() <= MAX_DIGEST_BYTES {
+            Some(file_digest(&path)?)
+        } else {
+            None
+        };
         output.insert(
             relative,
             RootfsEntry {
@@ -123,6 +132,7 @@ fn walk(
                 size: metadata.size(),
                 mode: metadata.mode(),
                 mtime: metadata.mtime(),
+                digest,
             },
         );
         if file_type.is_dir() {
@@ -130,6 +140,13 @@ fn walk(
         }
     }
     Ok(())
+}
+
+fn file_digest(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -147,7 +164,7 @@ mod tests {
         let baseline = capture(root.path(), &[root.path().join("mount")]).expect("snapshot");
         let baseline_path = root.path().parent().unwrap().join("baseline.json");
         write_baseline(&baseline_path, &baseline).expect("write baseline");
-        fs::write(root.path().join("modify"), b"new-content").expect("modify");
+        fs::write(root.path().join("modify"), b"new").expect("modify");
         fs::remove_file(root.path().join("delete")).expect("delete");
         fs::write(root.path().join("added"), b"added").expect("added");
         fs::write(root.path().join("mount/changed"), b"ignored").expect("ignored");

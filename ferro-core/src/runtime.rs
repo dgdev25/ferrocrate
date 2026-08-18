@@ -11701,7 +11701,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -11741,7 +11741,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -11785,7 +11785,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -11838,7 +11838,7 @@ mod tests {
                 Some("named"),
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -11894,7 +11894,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -11962,7 +11962,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -12153,7 +12153,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");
@@ -12271,7 +12271,7 @@ mod tests {
                 None,
                 &[],
                 "bridge",
-                NetworkBackend::Ebpf,
+                NetworkBackend::Iptables,
                 None,
             )
             .expect("run");

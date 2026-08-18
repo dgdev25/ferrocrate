@@ -10566,7 +10566,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut attach_hijack: Option<(String, bool, bool, bool, bool)> = None;
+    let mut attach_hijack: Option<(String, bool, bool, bool, bool, bool)> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -10943,7 +10943,7 @@ fn handle_docker_compat_connection(
                 // local runtime exposes its persisted combined log stream as
                 // stdout. Keep the flags explicit so `logs=0` does not leak
                 // historical output into a new attach session.
-                for key in ["logs", "stream", "stdout", "stderr"] {
+                for key in ["logs", "stream", "stdin", "stdout", "stderr"] {
                     let _ = parse_docker_bool_query(query.get(key), key)?;
                 }
                 let logs_requested = query
@@ -10954,6 +10954,11 @@ fn handle_docker_compat_connection(
                 let stream_requested = query
                     .get("stream")
                     .map(|value| parse_docker_bool_query(Some(value), "stream"))
+                    .transpose()?
+                    .unwrap_or(false);
+                let stdin_requested = query
+                    .get("stdin")
+                    .map(|value| parse_docker_bool_query(Some(value), "stdin"))
                     .transpose()?
                     .unwrap_or(false);
                 let stdout_requested = query
@@ -11004,6 +11009,7 @@ fn handle_docker_compat_connection(
                             id.to_string(),
                             logs_requested,
                             stream_requested,
+                            stdin_requested,
                             stdout_requested,
                             stderr_requested,
                         ));
@@ -11993,8 +11999,14 @@ fn handle_docker_compat_connection(
         stream_docker_stats(&mut stream, &follow_runtime, &id)?;
         return Ok(());
     }
-    if let Some((id, logs_requested, stream_requested, stdout_requested, stderr_requested)) =
-        attach_hijack
+    if let Some((
+        id,
+        logs_requested,
+        stream_requested,
+        stdin_requested,
+        stdout_requested,
+        stderr_requested,
+    )) = attach_hijack
     {
         let follow_runtime =
             ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
@@ -12004,6 +12016,7 @@ fn handle_docker_compat_connection(
             &id,
             logs_requested,
             stream_requested,
+            stdin_requested,
             stdout_requested,
             stderr_requested,
         )?;
@@ -12066,6 +12079,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("unsupported")
         || lowered.contains("too large")
         || lowered.contains("bad request")
+        || lowered.contains("must be a boolean")
         || lowered.contains("requires ")
     {
         return 400;
@@ -13388,6 +13402,7 @@ fn stream_docker_attach(
     id: &str,
     logs_requested: bool,
     stream_requested: bool,
+    stdin_requested: bool,
     stdout_requested: bool,
     stderr_requested: bool,
 ) -> Result<(), String> {
@@ -13442,10 +13457,16 @@ fn stream_docker_attach(
     if !stream_requested {
         return Ok(());
     }
-    let mut stdin = std::fs::OpenOptions::new()
-        .write(true)
-        .open(format!("/proc/{}/fd/0", record.pid))
-        .map_err(|error| format!("docker: container stdin is unavailable: {error}"))?;
+    let mut stdin = if stdin_requested {
+        Some(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(format!("/proc/{}/fd/0", record.pid))
+                .map_err(|error| format!("docker: container stdin is unavailable: {error}"))?,
+        )
+    } else {
+        None
+    };
     stream
         .set_read_timeout(Some(Duration::from_millis(250)))
         .map_err(|error| error.to_string())?;
@@ -13457,12 +13478,14 @@ fn stream_docker_attach(
             Ok(0) => return Ok(()),
             Ok(size) => {
                 use std::io::Write as _;
-                stdin
-                    .write_all(&input[..size])
-                    .map_err(|error| format!("docker: writing container stdin: {error}"))?;
-                stdin
-                    .flush()
-                    .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
+                if let Some(stdin) = stdin.as_mut() {
+                    stdin
+                        .write_all(&input[..size])
+                        .map_err(|error| format!("docker: writing container stdin: {error}"))?;
+                    stdin
+                        .flush()
+                        .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
+                }
             }
             Err(error)
                 if matches!(

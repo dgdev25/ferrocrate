@@ -591,6 +591,35 @@ fn docker_compat_attach_logs_zero_does_not_emit_history() {
 }
 
 #[test]
+fn docker_compat_attach_validates_stdin_flag() {
+    let harness = DaemonHarness::spawn();
+    let body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=attach-stdin-validation HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+
+    let (status, response) = harness.request(
+        "POST",
+        &format!("/v1.45/containers/{id}/attach?stdin=maybe"),
+    );
+    assert_eq!(status, 400, "invalid stdin must fail closed: {response}");
+    assert!(
+        response.contains("stdin must be a boolean"),
+        "body={response}"
+    );
+}
+
+#[test]
 fn docker_compat_listing_accepts_docker_cli_boolean_keyed_filters() {
     let harness = DaemonHarness::spawn();
     for path in [

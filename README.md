@@ -33,6 +33,12 @@ Use `scripts/verify-rootless.sh` to check rootless prerequisites. Privileged
 network and host-matrix checks require a disposable Linux host and are not
 implied by a successful unprivileged build.
 
+AI behavior is local and bounded: `FERROCRATE_AI=0` disables inference,
+monitoring, and adaptive lifecycle paths; predictive signals do not perform
+general-purpose scheduling, and automatic cgroup changes require the separate
+operator gate `FERROCRATE_AI_ACT=1` plus a configured ceiling. Training and
+online data collection have independent consent and approval gates.
+
 ## Docker comparison
 
 The latest three-round, no-skip host-local ten-feature comparison uses the

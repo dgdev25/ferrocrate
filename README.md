@@ -43,9 +43,9 @@ online data collection have independent consent and approval gates.
 
 The latest three-round, no-skip host-local ten-feature comparison uses the
 `alpine:3.20` fixture. The current-head
-[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-eeaaf70b-iptables.md)
+[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-7307c43c-iptables.md)
 and
-[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-eeaaf70b-nftables.md)
+[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-7307c43c-nftables.md)
 measurements are archived with host, backend, image, and round metadata.
 Both report command-path medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.

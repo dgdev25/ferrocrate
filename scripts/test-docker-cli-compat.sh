@@ -66,6 +66,7 @@ docker -H "$host" images >/dev/null
 name="docker-cli-compat-$$"
 image="docker-cli-compat-image-$$:latest"
 tagged_image="docker-cli-compat-tag-$$:latest"
+committed_image="docker-cli-compat-commit-$$:latest"
 context_dir="$runtime_dir/context"
 mkdir -p "$context_dir"
 printf 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n' >"$context_dir/Dockerfile"
@@ -105,6 +106,9 @@ wait_status="$(docker -H "$host" wait "$name")"
 }
 docker -H "$host" logs "$name" >/dev/null
 docker -H "$host" diff "$name" >/dev/null
+docker -H "$host" commit "$name" "$committed_image" >/dev/null
+docker -H "$host" image inspect "$committed_image" >/dev/null
+docker -H "$host" image rm "$committed_image" >/dev/null
 docker -H "$host" rm "$name" >/dev/null
 wait "$events_pid" 2>/dev/null || true
 grep -q 'container create' "$events_file" || {
@@ -114,4 +118,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/create/start/wait/logs/diff/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/create/start/wait/logs/diff/commit/rm/events"

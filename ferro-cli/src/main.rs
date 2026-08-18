@@ -2795,7 +2795,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
                     "Images": images.iter().map(|image| serde_json::json!({"Id": image.digest, "RepoTags": [image.reference], "Created": image.created_at_unix, "Size": docker_manifest_layer_size(&image.manifest_json), "SharedSize": 0, "Containers": containers.iter().filter(|container| container.image == image.reference).count()})).collect::<Vec<_>>(),
                     "Containers": containers.iter().map(|container| serde_json::json!({"Id": container.id, "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(), "Image": container.image, "ImageID": "", "SizeRw": 0, "SizeRootFs": 0})).collect::<Vec<_>>(),
-                    "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": 0, "RefCount": 0}})).collect::<Vec<_>>(),
+                    "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0}})).collect::<Vec<_>>(),
                     "BuildCache": [],
                 });
                 if format == "json" { println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())); } else { println!("{}", body); }
@@ -6047,6 +6047,29 @@ fn docker_manifest_layer_size(manifest_json: &str) -> u64 {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|layer| layer.get("size").and_then(serde_json::Value::as_u64))
+        .fold(0u64, u64::saturating_add)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_directory_usage(root: &Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() {
+        return 0;
+    }
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| docker_directory_usage(&entry.path()))
         .fold(0u64, u64::saturating_add)
 }
 
@@ -10401,7 +10424,7 @@ fn handle_docker_compat_connection(
                     "Volumes": volumes.iter().map(|volume| serde_json::json!({
                         "Name": volume.name,
                         "Mountpoint": volume.path,
-                        "UsageData": {"Size": 0, "RefCount": 0},
+                        "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0},
                     })).collect::<Vec<_>>(),
                     "BuildCache": [],
                 });
@@ -13052,6 +13075,7 @@ mod tests {
         docker_container_prune_matches_filters, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_directory_usage,
         docker_manifest_layer_size,
         docker_inspect_payload, docker_network_ipv6_config, docker_network_matches_filters,
         docker_pending_inspect_payload,
@@ -15313,6 +15337,16 @@ volumes:
         let manifest = r#"{"layers":[{"size":7},{"size":11}],"config":{"size":3}}"#;
         assert_eq!(docker_manifest_layer_size(manifest), 18);
         assert_eq!(docker_manifest_layer_size("{}"), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_system_df_reports_regular_volume_bytes_and_skips_symlinks() {
+        let temp = tempfile::tempdir().expect("volume usage root");
+        std::fs::write(temp.path().join("payload"), b"12345").expect("payload");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("payload", temp.path().join("link")).expect("symlink");
+        assert_eq!(docker_directory_usage(temp.path()), 5);
     }
 
     #[test]

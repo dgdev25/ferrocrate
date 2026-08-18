@@ -81,6 +81,29 @@ fi
 grep -q 'strict prerequisite check failed' "$tmp_home/strict.txt"
 test ! -e "$strict_home/config/systemd/user/ferrocrate.service"
 
+# --enable must fail before mutation when a user service manager is not
+# available. This guards against leaving a binary/unit behind after a late
+# systemd failure.
+no_systemd="$tmp_home/no-systemd"
+mkdir -p "$no_systemd"
+cat >"$no_systemd/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod 0755 "$no_systemd/systemctl"
+enable_home="$tmp_home/enable-home"
+mkdir -p "$enable_home"
+if PATH="$no_systemd:/usr/bin:/bin" HOME="$enable_home" \
+  XDG_CONFIG_HOME="$enable_home/config" XDG_RUNTIME_DIR="$runtime_dir" \
+  "$installer" --binary /bin/true --socket "$runtime_dir/enable.sock" --enable \
+  >"$tmp_home/enable.txt" 2>&1; then
+  echo "--enable unexpectedly succeeded without a user service manager" >&2
+  exit 1
+fi
+grep -q 'no files were changed' "$tmp_home/enable.txt"
+test ! -e "$enable_home/.local/bin/ferrocrate"
+test ! -e "$enable_home/config/systemd/user/ferrocrate.service"
+
 unsafe_bin="$tmp_home/unsafe-bin"
 mkdir -p "$unsafe_bin"
 for helper in newuidmap newgidmap slirp4netns bwrap; do

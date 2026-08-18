@@ -176,6 +176,17 @@ if ((dry_run)); then
   exit 0
 fi
 
+# Check service-manager availability before mutating either installation
+# artifact. Without this preflight, --enable could install a binary and unit,
+# then fail to start the user service, leaving a half-successful installation
+# that the caller must discover and clean up manually.
+if ((enable)); then
+  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user daemon-reload; then
+    echo "rootless-install: --enable requested but systemd --user is unavailable; no files were changed" >&2
+    exit 1
+  fi
+fi
+
 install -d -m 0755 "$HOME/.local/bin" "$unit_dir"
 binary_tmp="$(mktemp "$HOME/.local/bin/.ferrocrate.new.XXXXXX")"
 unit_tmp="$(mktemp "$unit_dir/.ferrocrate.service.new.XXXXXX")"

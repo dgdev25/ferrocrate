@@ -12567,10 +12567,33 @@ fn docker_inspect_payload(
             "Status": record.status,
             "Pid": record.pid,
             "ExitCode": record.last_exit_code,
-            "StartedAt": record.created_at_unix,
+            "StartedAt": docker_timestamp(record.created_at_unix),
             "Health": health,
         }
     })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_timestamp(unix_seconds: u64) -> String {
+    // Convert Unix seconds without adding a formatting dependency to the CLI.
+    // The date conversion follows the proleptic Gregorian civil calendar.
+    let seconds = unix_seconds.min(i64::MAX as u64) as i64;
+    let days = seconds / 86_400;
+    let day_seconds = seconds % 86_400;
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.000000000Z")
 }
 
 #[cfg(target_os = "linux")]
@@ -12603,7 +12626,7 @@ fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_js
             "Status": "created",
             "Pid": 0,
             "ExitCode": 0,
-            "StartedAt": 0,
+            "StartedAt": docker_timestamp(0),
             "Health": serde_json::Value::Null,
         }
     })

@@ -9770,6 +9770,21 @@ struct DockerCreateSpec {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_pending_id(
+    pending: &std::collections::HashMap<String, DockerCreateSpec>,
+    requested: &str,
+) -> Option<String> {
+    pending
+        .get_key_value(requested)
+        .or_else(|| {
+            pending
+                .iter()
+                .find(|(_, spec)| spec.name.as_deref() == Some(requested))
+        })
+        .map(|(id, _)| id.clone())
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DockerHealthSpec {
     cmd: String,
@@ -10803,15 +10818,16 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/changes") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/changes");
                 let pending = state
                     .pending
                     .lock()
-                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
-                    .contains_key(id);
-                if pending && runtime.inspect(id).is_err() {
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let pending_id = docker_pending_id(&pending, requested_id);
+                let id = pending_id.as_deref().unwrap_or(requested_id);
+                if pending_id.is_some() && runtime.inspect(id).is_err() {
                     return Ok(http_response(200, b"[]", "application/json"));
                 }
                 let record = runtime.inspect(id).map_err(|error| error.to_string())?;
@@ -10946,16 +10962,17 @@ fn handle_docker_compat_connection(
                 http_response(200, &archive, "application/x-tar")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/logs");
                 let tail = query.get("tail").cloned();
                 let pending = state
                     .pending
                     .lock()
-                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
-                    .contains_key(id);
-                if pending && runtime.inspect(id).is_err() {
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let pending_id = docker_pending_id(&pending, requested_id);
+                let id = pending_id.as_deref().unwrap_or(requested_id);
+                if pending_id.is_some() && runtime.inspect(id).is_err() {
                     // Docker exposes an empty log stream for a created
                     // container before it has a runtime log file.
                     return Ok(http_response(200, &[], "text/plain"));
@@ -11409,9 +11426,17 @@ fn handle_docker_compat_connection(
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/wait") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/wait");
+                let id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    docker_pending_id(&pending, requested_id)
+                        .unwrap_or_else(|| requested_id.to_string())
+                };
                 let condition = query
                     .get("condition")
                     .map(String::as_str)
@@ -11442,7 +11467,7 @@ fn handle_docker_compat_connection(
                     .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
                 let mut observed = false;
                 loop {
-                    match runtime.inspect(id) {
+                    match runtime.inspect(&id) {
                         Ok(_) => {
                             observed = true;
                             if condition != "removed" {
@@ -11456,7 +11481,7 @@ fn handle_docker_compat_connection(
                                 .map_err(|lock_error| {
                                     format!("docker: pending lock poisoned: {lock_error}")
                                 })?
-                                .contains_key(id);
+                                .contains_key(&id);
                             if condition != "removed" && !pending {
                                 // A missing container cannot ever satisfy a
                                 // non-removal wait condition. Return the
@@ -11486,9 +11511,9 @@ fn handle_docker_compat_connection(
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
-                let record = runtime.inspect(id).ok();
+                let record = runtime.inspect(&id).ok();
                 if condition != "removed" {
-                    wait_for_container_exit_with_timeout(&runtime, id, timeout)?;
+                    wait_for_container_exit_with_timeout(&runtime, &id, timeout)?;
                 }
                 let body = serde_json::json!({
                     "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),

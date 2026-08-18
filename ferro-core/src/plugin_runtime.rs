@@ -477,6 +477,12 @@ fn execute_plugin_inner(
     stdin: &[u8],
     cgroup_root: Option<&Path>,
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
+    // Tests in other modules intentionally manipulate PATH to exercise
+    // fail-closed capability checks. Serialize the command lookup/spawn path
+    // in test builds so those process-global changes cannot race this launch.
+    #[cfg(test)]
+    let _test_env_guard = crate::test_support::acquire_env_lock();
+
     verify_plugin_signature(manifest, trust_root)
         .map_err(|error| PluginExecutionError::Signature(error.to_string()))?;
     let metadata = std::fs::symlink_metadata(&manifest.entrypoint)?;

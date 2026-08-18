@@ -61,6 +61,20 @@ pub mod sqlite_container_store;
 pub mod volume_store;
 pub mod witness;
 
+// Unit tests that exercise environment-driven capability discovery must share
+// one process-wide lock. Rust test threads otherwise race while changing PATH
+// and FERROCRATE_* variables, producing order-dependent false failures.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub fn acquire_env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub mod capabilities;
 #[cfg(target_os = "linux")]

@@ -11595,8 +11595,8 @@ mod tests {
         }
     }
 
-    static CGROUP_ENV_LOCK: Mutex<()> = Mutex::new(());
     static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK as CGROUP_ENV_LOCK;
 
     struct ProcessBarrier {
         action: String,
@@ -13486,6 +13486,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn rootless_mount_requests_fail_before_kernel_mutation() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let mount = BindMount {
             source: PathBuf::from("/tmp/source"),
             target: PathBuf::from("data"),
@@ -14681,6 +14682,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn public_run_and_restart_survive_real_sigkill_at_resource_and_launch_barriers() {
+        let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
         for action in ["run", "restart"] {
             let phases: &[&str] = if action == "run" {

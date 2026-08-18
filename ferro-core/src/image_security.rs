@@ -192,13 +192,10 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use std::env;
     use std::fs;
     use std::io::Write;
-    use std::sync::Mutex;
-
-    // Mutex to prevent environment variable pollution between tests
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // Helper to create a temporary fake cosign binary
     struct FakeCosign {
@@ -542,6 +539,7 @@ esac
 
     #[test]
     fn run_with_timeout_returns_error_on_timeout() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Create a long-running process
         let mut child = Command::new("sleep")
             .arg("100")
@@ -561,6 +559,7 @@ esac
 
     #[test]
     fn run_with_timeout_returns_output_for_quick_process() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Create a quick process
         let mut child = if cfg!(unix) {
             Command::new("true").spawn().expect("true should spawn")
@@ -581,6 +580,7 @@ esac
 
     #[test]
     fn run_with_timeout_handles_immediate_exit() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Create a process that exits immediately
         let mut child = if cfg!(unix) {
             Command::new("false").spawn().expect("false should spawn")

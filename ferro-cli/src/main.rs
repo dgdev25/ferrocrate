@@ -4832,7 +4832,8 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             if ferrofile.is_some() { return Err("remote build: --ferrofile is not representable by the Docker transport".to_string()); }
             if compress != "gzip" { return Err("remote build: --compress is not representable by the Docker transport".to_string()); }
             if image_format != "oci" || embed_model.is_some() { return Err("remote build: native RVF output is not representable by the Docker transport".to_string()); }
-            if platform.is_some() || cache_from.is_some() || cache_to.is_some() { return Err("remote build: platform/cache options are not representable by the Docker transport".to_string()); }
+            if cache_from.is_some() || cache_to.is_some() { return Err("remote build: cache options are not representable by the Docker transport".to_string()); }
+            if let Some(platform) = platform.as_deref() { validate_build_platform(Some(platform))?; }
             if !build_context.is_empty() || !secret.is_empty() { return Err("remote build: named contexts and secrets are not supported by this transport yet".to_string()); }
             let dockerfile = dockerfile.as_deref().unwrap_or("Dockerfile");
             let dockerfile_path = if Path::new(dockerfile).is_absolute() { PathBuf::from(dockerfile) } else { std::env::current_dir().map_err(|error| format!("remote build: failed to get current directory: {error}"))?.join(dockerfile) };
@@ -4844,6 +4845,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             let filename = dockerfile_path.file_name().and_then(|name| name.to_str()).unwrap_or("Dockerfile");
             let mut path = format!("/build?dockerfile={}", percent_encode_path_component(filename));
             if let Some(tag) = tag { parse_image_reference(tag).map_err(|error| error.to_string())?; path.push_str("&t="); path.push_str(&percent_encode_path_component(tag)); }
+            if let Some(platform) = platform { path.push_str("&platform="); path.push_str(&percent_encode_path_component(&platform)); }
             let (status, body) = remote_docker_request_with_content_type(&endpoint, "POST", &path, Some(&archive), Some("application/x-tar"))?;
             if !(200..300).contains(&status) { return Err(format!("remote context request returned HTTP {status}: {}", String::from_utf8_lossy(&body))); }
             if !body.is_empty() { print_json(body, "json")?; }
@@ -16971,6 +16973,7 @@ volumes:
         let context = temp.path().join("context");
         std::fs::create_dir(&context).expect("create context");
         std::fs::write(context.join("Dockerfile"), b"FROM scratch\n").expect("write Dockerfile");
+        let platform = format!("linux/{}", host_build_arch());
         let socket = temp.path().join("remote-build.sock");
         let listener = UnixListener::bind(&socket).expect("bind socket");
         let worker = std::thread::spawn(move || {
@@ -16978,14 +16981,14 @@ volumes:
             let mut request = Vec::new();
             stream.read_to_end(&mut request).expect("read");
             let request = String::from_utf8_lossy(&request);
-            assert!(request.contains("POST /build?dockerfile=Dockerfile&t=example%2Fapp%3Adev"));
+            assert!(request.contains("POST /build?dockerfile=Dockerfile&t=example%2Fapp%3Adev&platform=linux%2F"));
             assert!(request.contains("Content-Type: application/x-tar"));
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").expect("respond");
         });
         unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()); }
         handle_context(ContextCommands::Create { name: "remote".to_string(), endpoint: format!("unix://{}", socket.display()) }).expect("create context");
         handle_context(ContextCommands::Use { name: "remote".to_string() }).expect("use context");
-        let command = Cli::try_parse_from(["ferrocrate", "build", "--dockerfile", context.join("Dockerfile").to_str().unwrap(), "--tag", "example/app:dev"]).unwrap().command;
+        let command = Cli::try_parse_from(["ferrocrate", "build", "--dockerfile", context.join("Dockerfile").to_str().unwrap(), "--tag", "example/app:dev", "--platform", platform.as_str()]).unwrap().command;
         dispatch_remote_context(&command).unwrap().unwrap();
         worker.join().unwrap();
         match previous { Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) }, None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") } }

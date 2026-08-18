@@ -65,6 +65,7 @@ docker -H "$host" images >/dev/null
 
 name="docker-cli-compat-$$"
 image="docker-cli-compat-image-$$:latest"
+tagged_image="docker-cli-compat-tag-$$:latest"
 context_dir="$runtime_dir/context"
 mkdir -p "$context_dir"
 printf 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n' >"$context_dir/Dockerfile"
@@ -84,6 +85,10 @@ curl --fail --silent --show-error --unix-socket "$socket" \
   --data-binary "@$runtime_dir/context.tar" \
   "http://localhost/v1.45/build?dockerfile=Dockerfile&t=${image//:/%3A}" \
   >"$runtime_dir/build.jsonl"
+docker -H "$host" history "$image" >/dev/null
+docker -H "$host" tag "$image" "$tagged_image"
+docker -H "$host" image inspect "$tagged_image" >/dev/null
+docker -H "$host" image rm "$tagged_image" >/dev/null
 events_file="$runtime_dir/events.jsonl"
 timeout 5 docker -H "$host" events --since 0s --filter type=container \
   >"$events_file" 2>"$runtime_dir/events.stderr" &
@@ -109,4 +114,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/create/start/wait/logs/diff/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/create/start/wait/logs/diff/rm/events"

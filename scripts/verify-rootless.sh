@@ -15,9 +15,13 @@ fi
 
 # The sysctl only expresses policy. Probe the namespace operation that the
 # rootless workload launcher actually needs so a host cannot pass diagnostics
-# while its user+mount namespace creation is denied by a container or LSM
-# boundary. This probe is side-effect free: it launches `true` and exits.
-if command -v unshare >/dev/null 2>&1 && unshare --user --mount --fork true >/dev/null 2>&1; then
+# while its user+mount namespace or root mapping is denied by a container/LSM
+# boundary. Keep mount propagation unchanged: changing the caller's root
+# propagation is an optional host setup detail and must not turn into a false
+# negative for an otherwise usable user namespace. This probe is side-effect
+# free: it launches `true` and exits.
+if command -v unshare >/dev/null 2>&1 && \
+  unshare --user --mount --fork --propagation unchanged --map-root-user true >/dev/null 2>&1; then
   echo "rootless.userns_mount=pass"
 else
   echo "rootless.userns_mount=missing"

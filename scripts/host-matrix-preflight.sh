@@ -9,7 +9,18 @@ output_file="${1:-}"
 
 tool_path() {
   case "$1" in
-    cargo) printf '%s' "${FERROCRATE_CARGO_BIN:-$(command -v cargo || true)}" ;;
+    cargo)
+      if [[ -n "${FERROCRATE_CARGO_BIN:-}" ]]; then
+        printf '%s' "$FERROCRATE_CARGO_BIN"
+      else
+        # Prefer rustup's shim over a concrete toolchain Cargo. This keeps
+        # build.rs toolchain selection deterministic when PATH contains a
+        # stable toolchain directory before ~/.cargo/bin.
+        rustup_bin="$(command -v rustup || true)"
+        shim="${rustup_bin%/*}/cargo"
+        if [[ -x "$shim" ]]; then printf '%s' "$shim"; else command -v cargo || true; fi
+      fi
+      ;;
     rustc) printf '%s' "${FERROCRATE_RUSTC_BIN:-$(command -v rustc || true)}" ;;
     *) command -v "$1" || true ;;
   esac

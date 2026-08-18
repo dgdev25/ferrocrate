@@ -233,6 +233,20 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/missing/restart",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/commit?container=missing&repo=example%2Fmissing",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/events",
         coverage: Coverage::Implemented,

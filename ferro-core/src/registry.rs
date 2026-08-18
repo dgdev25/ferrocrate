@@ -3,6 +3,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{
     HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE,
 };
+use reqwest::Certificate;
 use reqwest::Method;
 use std::fs::File;
 use std::io::{copy, Read};
@@ -105,9 +106,11 @@ impl RegistryClient {
 
     /// Create a registry client with custom configuration for rate limiting and retries
     pub fn with_config(config: RegistryClientConfig) -> Result<Self, RegistryError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .build()?;
+        let mut builder = Client::builder().timeout(Duration::from_secs(config.timeout_secs));
+        if let Some(certificate) = registry_ca_certificate()? {
+            builder = builder.add_root_certificate(certificate);
+        }
+        let client = builder.build()?;
         Ok(Self {
             client,
             config,
@@ -738,14 +741,7 @@ fn is_valid_digest(digest: &str) -> bool {
 }
 
 fn manifest_url(image_ref: &ImageReference) -> String {
-    let scheme = if image_ref.registry.starts_with("localhost")
-        || image_ref.registry.starts_with("127.")
-        || image_ref.registry.contains(":")
-    {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = registry_scheme(&image_ref.registry);
 
     format!(
         "{scheme}://{}/v2/{}/manifests/{}",
@@ -754,14 +750,7 @@ fn manifest_url(image_ref: &ImageReference) -> String {
 }
 
 fn blob_url(image_ref: &ImageReference, digest: &str) -> String {
-    let scheme = if image_ref.registry.starts_with("localhost")
-        || image_ref.registry.starts_with("127.")
-        || image_ref.registry.contains(":")
-    {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = registry_scheme(&image_ref.registry);
 
     format!(
         "{scheme}://{}/v2/{}/blobs/{}",
@@ -770,14 +759,7 @@ fn blob_url(image_ref: &ImageReference, digest: &str) -> String {
 }
 
 fn upload_url(image_ref: &ImageReference) -> String {
-    let scheme = if image_ref.registry.starts_with("localhost")
-        || image_ref.registry.starts_with("127.")
-        || image_ref.registry.contains(":")
-    {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = registry_scheme(&image_ref.registry);
 
     format!(
         "{scheme}://{}/v2/{}/blobs/uploads/",
@@ -786,14 +768,7 @@ fn upload_url(image_ref: &ImageReference) -> String {
 }
 
 fn ping_url(image_ref: &ImageReference) -> String {
-    let scheme = if image_ref.registry.starts_with("localhost")
-        || image_ref.registry.starts_with("127.")
-        || image_ref.registry.contains(":")
-    {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = registry_scheme(&image_ref.registry);
 
     format!("{scheme}://{}/v2/", image_ref.registry)
 }
@@ -803,20 +778,57 @@ fn normalize_location(location: &str, image_ref: &ImageReference) -> String {
         return location.to_string();
     }
 
-    let scheme = if image_ref.registry.starts_with("localhost")
-        || image_ref.registry.starts_with("127.")
-        || image_ref.registry.contains(":")
-    {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = registry_scheme(&image_ref.registry);
 
     if location.starts_with('/') {
         format!("{scheme}://{}{}", image_ref.registry, location)
     } else {
         format!("{scheme}://{}/{}", image_ref.registry, location)
     }
+}
+
+/// Local registries default to HTTP for disposable development fixtures, but
+/// production qualification can opt them into TLS without changing image
+/// reference syntax. Remote registries are always HTTPS.
+fn registry_scheme(registry: &str) -> &'static str {
+    let force_tls = std::env::var("FERROCRATE_REGISTRY_TLS")
+        .map(|value| value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    registry_scheme_with_override(registry, force_tls)
+}
+
+fn registry_scheme_with_override(registry: &str, force_tls: bool) -> &'static str {
+    let local =
+        registry.starts_with("localhost") || registry.starts_with("127.") || registry.contains(":");
+    if local && force_tls {
+        "https"
+    } else if local {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn registry_ca_certificate() -> Result<Option<Certificate>, RegistryError> {
+    let Some(path) = std::env::var_os("FERROCRATE_REGISTRY_CA_CERT") else {
+        return Ok(None);
+    };
+    let path = Path::new(&path);
+    let metadata = std::fs::symlink_metadata(path).map_err(RegistryError::Io)?;
+    if !metadata.file_type().is_file() {
+        return Err(RegistryError::InvalidReference(
+            "FERROCRATE_REGISTRY_CA_CERT must reference a regular file".to_string(),
+        ));
+    }
+    let pem = std::fs::read(path).map_err(RegistryError::Io)?;
+    if pem.is_empty() || pem.len() > 1024 * 1024 {
+        return Err(RegistryError::InvalidReference(
+            "FERROCRATE_REGISTRY_CA_CERT is empty or exceeds the 1 MiB limit".to_string(),
+        ));
+    }
+    Certificate::from_pem(&pem)
+        .map(Some)
+        .map_err(RegistryError::ClientBuild)
 }
 
 fn append_digest_query(upload_url: &str, digest: &str) -> String {
@@ -827,8 +839,9 @@ fn append_digest_query(upload_url: &str, digest: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_digest_query, normalize_location, parse_image_reference, request_origin,
-        ReferenceSeparator, RegistryAuth, RegistryClient,
+        append_digest_query, normalize_location, parse_image_reference,
+        registry_scheme_with_override, request_origin, ReferenceSeparator, RegistryAuth,
+        RegistryClient,
     };
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
@@ -1070,5 +1083,21 @@ mod tests {
             "http://localhost:5000/v2/team/cache/blobs/uploads/uuid?_state=opaque&digest=sha256:abc"
         );
         assert!(!completed.contains("?_state=opaque?digest"));
+    }
+
+    #[test]
+    fn local_registry_tls_override_uses_https() {
+        assert_eq!(
+            registry_scheme_with_override("localhost:5443", true),
+            "https"
+        );
+        assert_eq!(
+            registry_scheme_with_override("127.0.0.1:5443", true),
+            "https"
+        );
+        assert_eq!(
+            registry_scheme_with_override("registry.example", false),
+            "https"
+        );
     }
 }

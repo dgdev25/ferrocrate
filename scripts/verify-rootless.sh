@@ -90,6 +90,7 @@ fi
 
 if [[ "$strict" == 1 && "$missing" != 0 ]]; then
   echo "rootless prerequisites are incomplete (strict mode)" >&2
+  echo "rootless remediation: enable unprivileged user+mount namespaces, configure /etc/subuid and /etc/subgid, install newuidmap/newgidmap, slirp4netns, and bubblewrap, and provide a writable XDG_RUNTIME_DIR" >&2
   exit 1
 fi
 

@@ -127,7 +127,7 @@ record "network list" "docker network ls" "$ferro_env $ferro_bin network ls" "De
 # Start Ferrocrate's Docker-compatible socket for API measurements.
 mkdir -p "$ferro_runtime"
 env FERROCRATE_RUNTIME_DIR="$ferro_runtime" HOME="$tmp_root" \
-  FERROCRATE_NETWORK_BACKEND=iptables "$ferro_bin" daemon \
+  FERROCRATE_NETWORK_BACKEND="$network_backend" "$ferro_bin" daemon \
   --docker-compat --socket "$ferro_socket" >/dev/null 2>&1 &
 ferro_daemon_pid=$!
 for _ in $(seq 1 50); do

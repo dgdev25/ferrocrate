@@ -4388,7 +4388,11 @@ fn context_endpoint_is_local(endpoint: &str) -> bool {
         return false;
     };
     let path = Path::new(path);
-    path == runtime_dir().join("ferrocrate.sock") || path == Path::new("/var/run/ferrocrate.sock")
+    if path == runtime_dir().join("ferrocrate.sock") || path == Path::new("/var/run/ferrocrate.sock") {
+        return true;
+    }
+    std::env::var_os("FERROCRATE_ROOTLESS_SOCKET")
+        .is_some_and(|explicit| path == Path::new(&explicit))
 }
 
 /// Context records are already persisted and inspected, but the CLI command
@@ -13093,7 +13097,8 @@ mod tests {
     use super::{
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
         extract_docker_build_context,
-        context_endpoint_available, decode_docker_raw_stream, desktop_forward_enabled,
+        context_endpoint_available, context_endpoint_is_local, decode_docker_raw_stream,
+        desktop_forward_enabled,
         discover_rootless_socket, dispatch, dispatch_remote_context, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters,
         docker_container_prune_matches_filters, docker_event_payload, docker_event_resource,
@@ -16438,6 +16443,21 @@ volumes:
             socket.display()
         )));
         assert!(!context_endpoint_available("tcp://127.0.0.1:2375"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_rootless_socket_is_classified_as_local_context() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET");
+        let temp = tempfile::tempdir().expect("rootless socket fixture");
+        let socket = temp.path().join("custom-ferrocrate.sock");
+        unsafe { std::env::set_var("FERROCRATE_ROOTLESS_SOCKET", &socket) };
+        assert!(context_endpoint_is_local(&format!("unix://{}", socket.display())));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_ROOTLESS_SOCKET", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_ROOTLESS_SOCKET") },
+        }
     }
 
     #[cfg(unix)]

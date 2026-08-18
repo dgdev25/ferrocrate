@@ -4,6 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Release probes are often launched through sudo, whose secure_path may omit
+# the operator's ripgrep installation.  The expressions below use only grep's
+# extended-regexp-compatible flags, so retain the fast rg path when available
+# and fall back without weakening the evidence checks.
+if ! command -v rg >/dev/null 2>&1; then
+  rg() {
+    grep -E "$@"
+  }
+fi
+
 OUT_DIR="${ROOT_DIR}/target/compat"
 mkdir -p "$OUT_DIR"
 

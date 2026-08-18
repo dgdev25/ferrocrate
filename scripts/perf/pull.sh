@@ -43,9 +43,13 @@ after=$(du -sb "$BLOB_DIR" | awk '{print $1}')
 bytes=$((after - before))
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 if [ "$elapsed_ms" -gt 0 ]; then
-  mbps=$(( bytes * 1000 / 1024 / 1024 / elapsed_ms ))
+  # Preserve sub-MiB/s precision. Integer truncation made small but real
+  # throughput differences invisible and caused evidence to report `1` for
+  # measurements such as 1.06 MiB/s.
+  mbps=$(awk -v bytes="$bytes" -v elapsed_ms="$elapsed_ms" \
+    'BEGIN { printf "%.2f", (bytes * 1000) / (1024 * 1024 * elapsed_ms) }')
 else
-  mbps=0
+  mbps="0.00"
 fi
 
 echo "perf.pull_bytes=${bytes}"
@@ -68,7 +72,8 @@ if [ "${bytes}" -le 0 ]; then
   exit 1
 fi
 
-if [ "${ENFORCE}" = "1" ] && [ "${mbps}" -lt "${MIN_PULL_MIB_PER_S}" ]; then
+if [ "${ENFORCE}" = "1" ] && awk -v measured="$mbps" -v minimum="$MIN_PULL_MIB_PER_S" \
+  'BEGIN { exit !(measured < minimum) }'; then
   echo "error: pull throughput SLO violation (${mbps}MiB/s < ${MIN_PULL_MIB_PER_S}MiB/s)" >&2
   exit 1
 fi

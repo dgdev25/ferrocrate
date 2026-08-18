@@ -42,11 +42,11 @@ online data collection have independent consent and approval gates.
 ## Docker comparison
 
 The latest three-round, no-skip host-local ten-feature comparison uses the
-`alpine:3.20` fixture. The
-[`summary`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-a0c76963-summary.md),
-[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-a0c76963-iptables.md),
+`quay.io/libpod/alpine:latest` fixture. The
+[`summary`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-3d9a45cf-summary.md),
+[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-3d9a45cf-iptables.md),
 and
-[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-a0c76963-nftables.md)
+[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-bfeae51d-nftables.md)
 measurements are archived with host, backend, image, and round metadata.
 Both report command-path medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.

@@ -74,6 +74,8 @@ use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 #[cfg(target_os = "linux")]
+use std::io::Cursor;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 #[cfg(target_os = "linux")]
@@ -84,7 +86,7 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixListener;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::str::FromStr;
 #[cfg(target_os = "linux")]
@@ -5987,6 +5989,56 @@ fn build_limits(
 
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "linux")]
+fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<(), String> {
+    let mut archive = tar::Archive::new(Cursor::new(archive));
+    for entry in archive
+        .entries()
+        .map_err(|error| format!("docker build: invalid tar context: {error}"))?
+    {
+        let mut entry = entry.map_err(|error| format!("docker build: invalid tar entry: {error}"))?;
+        let path = entry
+            .path()
+            .map_err(|error| format!("docker build: invalid context path: {error}"))?
+            .into_owned();
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(component, Component::ParentDir | Component::Prefix(_))
+            })
+        {
+            return Err(format!(
+                "docker build: context path escapes archive root: {}",
+                path.display()
+            ));
+        }
+        let target = destination.join(&path);
+        match entry.header().entry_type() {
+            tar::EntryType::Directory => std::fs::create_dir_all(&target)
+                .map_err(|error| format!("docker build: create context directory failed: {error}"))?,
+            tar::EntryType::Regular => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        format!("docker build: create context parent failed: {error}")
+                    })?;
+                }
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map_err(|error| format!("docker build: create context file failed: {error}"))?;
+                std::io::copy(&mut entry, &mut output)
+                    .map_err(|error| format!("docker build: extract context file failed: {error}"))?;
+            }
+            kind => {
+                return Err(format!(
+                    "docker build: unsupported context entry type {kind:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn handle_build(
     store: &LocalImageStore,
     origin: &RequestOrigin,
@@ -10944,6 +10996,48 @@ fn handle_docker_compat_connection(
                     .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
                 http_response(200, json.as_bytes(), "application/json")
             }
+            ("POST", "/build") => {
+                let dockerfile = query
+                    .get("dockerfile")
+                    .map(String::as_str)
+                    .unwrap_or("Dockerfile");
+                let dockerfile_path = Path::new(dockerfile);
+                if dockerfile_path.is_absolute()
+                    || dockerfile_path.components().any(|component| {
+                        matches!(component, Component::ParentDir | Component::Prefix(_))
+                    })
+                {
+                    return Err("docker build: Dockerfile path must stay within the build context".to_string());
+                }
+                let temp = tempfile::Builder::new()
+                    .prefix("api-build-")
+                    .tempdir_in(runtime_dir.as_ref())
+                    .map_err(|error| format!("docker build: create context directory failed: {error}"))?;
+                extract_docker_build_context(&request.body, temp.path())?;
+                let dockerfile_path = temp.path().join(dockerfile_path);
+                if !dockerfile_path.is_file() {
+                    return Err(format!("docker build: Dockerfile not found: {dockerfile}"));
+                }
+                let tag = query.get("t").map(String::as_str);
+                handle_build(
+                    &store,
+                    &origin,
+                    &surface_authorization,
+                    Some(dockerfile_path.to_str().ok_or_else(|| "docker build: Dockerfile path is not UTF-8".to_string())?),
+                    None,
+                    tag,
+                    "gzip",
+                    "oci",
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    &[],
+                )?;
+                http_response(200, br#"{"stream":"Successfully built"}
+"#, "application/json")
+            }
             ("GET", "/networks") => {
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_network_filters(&filters)?;
@@ -12939,6 +13033,7 @@ mod tests {
 
     use super::{
         bind_run_network, build_error_is_retryable, build_health_config, build_limits,
+        extract_docker_build_context,
         context_endpoint_available, decode_docker_raw_stream, desktop_forward_enabled,
         discover_rootless_socket, dispatch, dispatch_remote_context, docker_chunked_headers,
         docker_container_apply_time_bounds, docker_container_matches_filters,
@@ -15175,6 +15270,28 @@ volumes:
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_build_context_extraction_rejects_symlink_entries() {
+        let temp = tempfile::tempdir().expect("context destination");
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("escape").expect("path");
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_link_name("/tmp/escape").expect("link");
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append(&header, &[][..])
+                .expect("append symlink");
+            builder.finish().expect("finish");
+        }
+        let error = extract_docker_build_context(&bytes, temp.path()).expect_err("symlink");
+        assert!(error.contains("unsupported context entry type"), "error={error}");
     }
 
     #[test]

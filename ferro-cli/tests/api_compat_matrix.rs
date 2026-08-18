@@ -69,6 +69,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/build",
+        coverage: Coverage::Partial,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/create",
         coverage: Coverage::Partial,
         expected_status: 400,

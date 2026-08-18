@@ -10258,10 +10258,18 @@ fn docker_event_kind(method: &str, path: &str) -> Option<(&'static str, String)>
     } else {
         return None;
     };
-    Some((
-        event_type,
-        path.rsplit('/').next().unwrap_or("request").to_string(),
-    ))
+    let action = if method == "DELETE" {
+        // Docker reports resource deletion as a semantic action rather than
+        // leaking the deleted identifier into the event's Action field.
+        if event_type == "image" {
+            "untag"
+        } else {
+            "destroy"
+        }
+    } else {
+        path.rsplit('/').next().unwrap_or("request")
+    };
+    Some((event_type, action.to_string()))
 }
 
 #[cfg(target_os = "linux")]
@@ -13576,7 +13584,7 @@ mod tests {
         decode_docker_raw_stream, desktop_forward_enabled, discover_rootless_socket, dispatch,
         dispatch_remote_context, docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_container_prune_matches_filters,
-        docker_directory_usage, docker_event_payload, docker_event_resource,
+        docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
         docker_image_matches_filters, docker_image_prune_matches_filters, docker_inspect_payload,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
@@ -16030,6 +16038,26 @@ volumes:
         assert_eq!(
             docker_event_resource("/volumes/volume-a"),
             Some("volume-a".to_string())
+        );
+    }
+
+    #[test]
+    fn docker_event_delete_routes_use_docker_actions() {
+        assert_eq!(
+            docker_event_kind("DELETE", "/containers/c1"),
+            Some(("container", "destroy".to_string()))
+        );
+        assert_eq!(
+            docker_event_kind("DELETE", "/networks/n1"),
+            Some(("network", "destroy".to_string()))
+        );
+        assert_eq!(
+            docker_event_kind("DELETE", "/volumes/v1"),
+            Some(("volume", "destroy".to_string()))
+        );
+        assert_eq!(
+            docker_event_kind("DELETE", "/images/i1"),
+            Some(("image", "untag".to_string()))
         );
     }
 

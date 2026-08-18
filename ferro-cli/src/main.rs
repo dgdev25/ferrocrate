@@ -9785,6 +9785,22 @@ fn docker_pending_id(
 }
 
 #[cfg(target_os = "linux")]
+fn docker_resolve_id(
+    runtime: &ContainerRuntime,
+    pending: &std::collections::HashMap<String, DockerCreateSpec>,
+    requested: &str,
+) -> Result<String, String> {
+    if runtime.inspect(requested).is_ok() {
+        return Ok(requested.to_string());
+    }
+    if let Ok(id) = resolve_container_id(runtime, requested) {
+        return Ok(id);
+    }
+    docker_pending_id(pending, requested)
+        .ok_or_else(|| format!("docker: container not found: {requested}"))
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DockerHealthSpec {
     cmd: String,
@@ -10825,12 +10841,11 @@ fn handle_docker_compat_connection(
                     .pending
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                let pending_id = docker_pending_id(&pending, requested_id);
-                let id = pending_id.as_deref().unwrap_or(requested_id);
-                if pending_id.is_some() && runtime.inspect(id).is_err() {
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                if pending.contains_key(&id) && runtime.inspect(&id).is_err() {
                     return Ok(http_response(200, b"[]", "application/json"));
                 }
-                let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
                 let rootfs = runtime_dir
                     .join("containers")
                     .join(&record.id)
@@ -10970,9 +10985,8 @@ fn handle_docker_compat_connection(
                     .pending
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                let pending_id = docker_pending_id(&pending, requested_id);
-                let id = pending_id.as_deref().unwrap_or(requested_id);
-                if pending_id.is_some() && runtime.inspect(id).is_err() {
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                if pending.contains_key(&id) && runtime.inspect(&id).is_err() {
                     // Docker exposes an empty log stream for a created
                     // container before it has a runtime log file.
                     return Ok(http_response(200, &[], "text/plain"));
@@ -10980,13 +10994,13 @@ fn handle_docker_compat_connection(
                 if query.get("follow").is_some_and(|value| value == "1") {
                     // Validate the container and tail before committing to a
                     // long-lived chunked response.
-                    let raw = runtime.logs(id).map_err(|err| err.to_string())?;
+                    let raw = runtime.logs(&id).map_err(|err| err.to_string())?;
                     let _ = docker_tail_logs(&raw, tail.as_deref())?;
                     log_follow = Some((id.to_string(), tail));
                     docker_chunked_headers(200, "text/plain")
                 } else {
                     let logs = docker_tail_logs(
-                        &runtime.logs(id).map_err(|err| err.to_string())?,
+                        &runtime.logs(&id).map_err(|err| err.to_string())?,
                         tail.as_deref(),
                     )?;
                     http_response(200, logs.as_bytes(), "text/plain")
@@ -11434,8 +11448,7 @@ fn handle_docker_compat_connection(
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                    docker_pending_id(&pending, requested_id)
-                        .unwrap_or_else(|| requested_id.to_string())
+                    docker_resolve_id(&runtime, &pending, requested_id)?
                 };
                 let condition = query
                     .get("condition")

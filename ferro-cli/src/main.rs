@@ -1782,6 +1782,26 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
+
+            let mount_namespace = ferro_core::rootless::mount_namespace_diagnostic();
+            checks.push(DoctorCheck {
+                id: "rootless_mount_namespace".to_string(),
+                ok: mount_namespace.is_ok(),
+                message: match &mount_namespace {
+                    Ok(()) => {
+                        "rootless mount-capable user namespace is available".to_string()
+                    }
+                    Err(error) => format!(
+                        "rootless mount-capable user namespace unavailable: {error}"
+                    ),
+                },
+                hint: mount_namespace.as_ref().err().map(|_| {
+                    "rootless bind, tmpfs, and read-only-rootfs workloads require host support for user+mount namespaces; use a supported host or omit mount-dependent features"
+                        .to_string()
+                }),
+                remediated: false,
+                action: None,
+            });
         }
     }
 
@@ -4918,7 +4938,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 }
                 if let Some(platform) = platform {
                     path.push_str("&platform=");
-                    path.push_str(&percent_encode_path_component(&platform));
+                    path.push_str(&percent_encode_path_component(platform));
                 }
                 let (status, body) = remote_docker_request_with_content_type(
                     &endpoint,

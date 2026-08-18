@@ -14608,12 +14608,12 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             };
             let source = root.join("mount-source");
             std::fs::create_dir_all(&source).unwrap();
-            let mounts = vec![BindMount {
+            let mounts = [BindMount {
                 source,
                 target: PathBuf::from("bind-target"),
                 read_only: false,
             }];
-            let tmpfs = vec![TmpfsMount {
+            let tmpfs = [TmpfsMount {
                 target: PathBuf::from("tmp-target"),
                 size: Some("1m".into()),
             }];

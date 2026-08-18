@@ -82,6 +82,40 @@ pub fn user_namespace_available() -> bool {
     }
 }
 
+/// Probe whether the caller can create the user+mount namespace pair required
+/// for rootless bind/tmpfs/read-only-rootfs execution. The probe is isolated
+/// in a short-lived `unshare` child and never changes the caller's namespaces.
+///
+/// Unlike [`user_namespace_available`], this returns a bounded diagnostic so
+/// CLI/operator surfaces can distinguish an absent helper, a host policy
+/// denial, and a non-zero helper exit without exposing unbounded stderr.
+pub fn mount_namespace_diagnostic() -> Result<(), String> {
+    let output = Command::new("unshare")
+        .args([
+            "--user",
+            "--mount",
+            "--fork",
+            "--propagation",
+            "unchanged",
+            "true",
+        ])
+        .output()
+        .map_err(|error| format!("could not launch unshare: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(240)
+        .collect::<String>();
+    if detail.is_empty() {
+        Err(format!("unshare exited with {}", output.status))
+    } else {
+        Err(format!("unshare exited with {}: {detail}", output.status))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RootlessError {
     #[error("failed to resolve current user")]

@@ -33,4 +33,53 @@ fi
 test "$(cat "$install_dir/ferrocrate")" = updated
 test ! -e "$install_dir/.ferrocrate.previous"
 
+# Exercise the same checksum and provenance verification used by the network
+# installer, but against a deterministic local release fixture.
+release_root="$tmp_dir/releases"
+download_dir="$tmp_dir/download"
+version="v1.2.3"
+release_dir="$release_root/$version"
+release_archive="$release_dir/ferrocrate-${version}-linux-x86_64.tar.gz"
+mkdir -p "$release_dir"
+cp "$tmp_dir/v2.tar.gz" "$release_archive"
+archive_digest="$(sha256sum "$release_archive" | awk '{print $1}')"
+printf '%s  %s\n' "$archive_digest" "$(basename "$release_archive")" \
+  >"$release_dir/ferrocrate-${version}-checksums.txt"
+python3 - "$release_dir/ferrocrate-${version}-linux-x86_64.tar.gz.provenance.json" "$version" "$archive_digest" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "schema": "ferrocrate-release-provenance-v1",
+            "version": sys.argv[2],
+            "archive": f"ferrocrate-{sys.argv[2]}-linux-x86_64.tar.gz",
+            "sha256": sys.argv[3],
+        },
+        sort_keys=True,
+    ),
+    encoding="utf-8",
+)
+PY
+GITHUB_RELEASE_BASE="file://$release_root" \
+  FERROCRATE_VERSION="$version" \
+  download_linux_release x86_64 "$version" "$download_dir" \
+  >"$tmp_dir/downloaded-path.txt"
+test -f "$(tail -n 1 "$tmp_dir/downloaded-path.txt")"
+
+# A changed archive must fail closed even when the release has a provenance
+# document, preventing an attacker from swapping bytes after publication.
+printf 'tampered\n' >>"$release_archive"
+if bash -c '
+  source "$1"
+  GITHUB_RELEASE_BASE="$2" download_linux_release x86_64 "$3" "$4"
+' _ "$repo_root/scripts/install.sh" "file://$release_root" "$version" \
+  "$tmp_dir/tampered-download" >"$tmp_dir/tampered-output.txt" 2>&1; then
+  echo "tampered release unexpectedly verified" >&2
+  exit 1
+fi
+grep -q 'Release checksum verification failed\|checksum' "$tmp_dir/tampered-output.txt"
+
 echo "installer upgrade/rollback regression checks passed"

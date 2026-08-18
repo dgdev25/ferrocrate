@@ -68,6 +68,8 @@ pub mod linux_namespaces;
 #[cfg(target_os = "linux")]
 pub mod rootfs;
 #[cfg(target_os = "linux")]
+pub mod rootfs_diff;
+#[cfg(target_os = "linux")]
 pub mod rootfs_prep;
 #[cfg(target_os = "linux")]
 pub mod rootless;

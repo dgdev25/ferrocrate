@@ -43,6 +43,8 @@ use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
+use crate::rootfs_diff;
+#[cfg(target_os = "linux")]
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
 };
@@ -2799,6 +2801,20 @@ impl ContainerRuntime {
         } else {
             fs::create_dir_all(&rootfs_dir)?;
         }
+        let baseline_excluded = mounts
+            .iter()
+            .map(|mount| rootfs_dir.join(&mount.target))
+            .chain(
+                tmpfs_mounts
+                    .iter()
+                    .map(|mount| rootfs_dir.join(&mount.target)),
+            )
+            .collect::<Vec<_>>();
+        let rootfs_baseline = rootfs_diff::capture(&rootfs_dir, &baseline_excluded)?;
+        rootfs_diff::write_baseline(
+            &container_dir.join("rootfs-baseline.json"),
+            &rootfs_baseline,
+        )?;
         rollback.mark_resource_applied("rootfs", kernel_path_identity(&rootfs_dir).ok())?;
         rollback.mark_typed_resource(rootfs_plan, path_resource_identity(&rootfs_dir)?)?;
 

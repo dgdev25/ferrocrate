@@ -39,6 +39,8 @@ use ferro_core::registry::{parse_image_reference, RegistryClient};
 #[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
+use ferro_core::rootfs_diff;
+#[cfg(target_os = "linux")]
 use ferro_core::runtime::ContainerRuntime;
 use ferro_core::runtime::NetworkBackend;
 #[cfg(target_os = "linux")]
@@ -10656,6 +10658,39 @@ fn handle_docker_compat_connection(
                     }
                 };
                 http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/changes") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/changes");
+                let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+                let rootfs = runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("rootfs");
+                let baseline = runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("rootfs-baseline.json");
+                let excluded = record
+                    .mounts
+                    .iter()
+                    .map(|mount| rootfs.join(&mount.target))
+                    .chain(
+                        record
+                            .tmpfs_mounts
+                            .iter()
+                            .map(|mount| rootfs.join(&mount.target)),
+                    )
+                    .collect::<Vec<_>>();
+                let changes = if rootfs.is_dir() && baseline.is_file() {
+                    rootfs_diff::diff(&rootfs, &baseline, &excluded)
+                        .map_err(|error| format!("docker: container diff failed: {error}"))?
+                } else {
+                    Vec::new()
+                };
+                let body = serde_json::to_string(&changes).map_err(|error| error.to_string())?;
+                http_response(200, body.as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
                 let id = path

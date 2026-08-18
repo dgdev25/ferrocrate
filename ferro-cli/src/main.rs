@@ -13413,6 +13413,9 @@ fn stream_docker_stats(
 }
 
 #[cfg(target_os = "linux")]
+// Docker's attach wire contract has independent stream/channel flags; keeping
+// them explicit prevents accidental conflation while adapting the socket API.
+#[allow(clippy::too_many_arguments)]
 fn stream_docker_attach(
     stream: &mut UnixStream,
     runtime: &ContainerRuntime,

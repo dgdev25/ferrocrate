@@ -64,7 +64,10 @@ if [[ "$socket" != /* || "$socket" == *[$'\t\n\r "%']* ]]; then
 fi
 
 uid="$(id -u)"
+gid="$(id -g)"
 user="$(id -un)"
+subuid_file="${FERROCRATE_ROOTLESS_SUBUID_FILE:-/etc/subuid}"
+subgid_file="${FERROCRATE_ROOTLESS_SUBGID_FILE:-/etc/subgid}"
 echo "rootless.install.user=$user"
 echo "rootless.install.uid=$uid"
 echo "rootless.install.binary=$binary"
@@ -101,13 +104,13 @@ for helper in newuidmap newgidmap slirp4netns bwrap; do
   fi
 done
 
-if awk -F: -v user="$user" '$1 == user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 { found=1 } END { exit !found }' /etc/subuid 2>/dev/null; then
+if awk -F: -v user="$user" -v uid="$uid" '$1 == user || $1 == uid { if ($2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0) found=1 } END { exit !found }' "$subuid_file" 2>/dev/null; then
   echo "rootless.install.subuid=pass"
 else
   echo "rootless.install.subuid=missing"
   prerequisite_failures=1
 fi
-if awk -F: -v user="$user" '$1 == user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 { found=1 } END { exit !found }' /etc/subgid 2>/dev/null; then
+if awk -F: -v user="$user" -v gid="$gid" '$1 == user || $1 == gid { if ($2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0) found=1 } END { exit !found }' "$subgid_file" 2>/dev/null; then
   echo "rootless.install.subgid=pass"
 else
   echo "rootless.install.subgid=missing"

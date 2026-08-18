@@ -25,6 +25,16 @@ grep -q '^rootless.install.userns_mount=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.bwrap=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
+# Numeric UID/GID subordinate-ID entries are valid system configuration and
+# must produce the same installer result as username entries.
+printf '%s:200000:65536\n' "$(id -u)" >"$tmp_home/numeric-subuid"
+printf '%s:200000:65536\n' "$(id -g)" >"$tmp_home/numeric-subgid"
+FERROCRATE_ROOTLESS_SUBUID_FILE="$tmp_home/numeric-subuid" \
+FERROCRATE_ROOTLESS_SUBGID_FILE="$tmp_home/numeric-subgid" \
+  run_installer --dry-run >"$tmp_home/numeric-dry-run.txt"
+grep -q '^rootless.install.subuid=pass$' "$tmp_home/numeric-dry-run.txt"
+grep -q '^rootless.install.subgid=pass$' "$tmp_home/numeric-dry-run.txt"
+
 run_installer >"$tmp_home/install.txt"
 test -x "$tmp_home/.local/bin/ferrocrate"
 test -f "$tmp_home/config/systemd/user/ferrocrate.service"

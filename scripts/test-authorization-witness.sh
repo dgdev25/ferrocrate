@@ -68,8 +68,13 @@ run public-docker-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=docker 
 run public-compose-mutation env FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE=compose cargo test -p ferro-cli --test compose_down_integration public_compose_down_preserves_disabled_shadow_and_enforce_contracts -- --exact
 run public-cri-delegation cargo test -p ferro-cri --test socket_integration cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering -- --exact --test-threads=1
 run public-cri-mutation cargo test -p ferro-cri --test socket_integration public_cri_pull_preserves_disabled_shadow_and_enforce_contracts -- --exact --test-threads=1
-if ! unshare -Ur true >/dev/null 2>&1; then
-  printf 'authorization qualification blocked: user namespaces are unavailable for the rootless public fixture\n' >&2
+# FerroCrate creates the user namespace first and applies subordinate maps via
+# the authenticated newuidmap/newgidmap path inside the fixture. Do not use
+# util-linux's `-Ur` shortcut here; it exercises a different mapping path and
+# is denied on hosts where the production helper flow is valid. Keep mount
+# propagation unchanged so the probe remains side-effect free.
+if ! unshare --user --mount --fork --propagation unchanged true >/dev/null 2>&1; then
+  printf 'authorization qualification blocked: user+mount namespaces are unavailable for the rootless public fixture\n' >&2
   exit 77
 fi
 run public-rootless-mutation cargo test -p ferro-core --test rootless_isolation rootless_configuration_mutates_the_real_runtime_namespaces -- --exact

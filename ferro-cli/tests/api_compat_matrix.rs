@@ -478,6 +478,13 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         inspect["Size"].as_u64().is_some_and(|size| size > 0),
         "Size={inspect}"
     );
+    let (status, body) = harness.request("GET", "/images/matrix%2Fbuild%3Alatest/history", "");
+    assert_eq!(status, 200, "image history response: {body}");
+    let history = serde_json::from_str::<serde_json::Value>(&body).expect("image history JSON");
+    assert!(
+        history.as_array().is_some_and(|layers| !layers.is_empty()),
+        "history={history}"
+    );
 }
 
 #[test]

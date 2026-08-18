@@ -11534,10 +11534,11 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/images/") && path.ends_with("/history") => {
-                let name = path
+                let encoded_name = path
                     .trim_start_matches("/images/")
                     .trim_end_matches("/history");
-                let reference = resolve_reference(&store, name)
+                let name = percent_decode_query_component(encoded_name)?;
+                let reference = resolve_reference(&store, &name)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: unknown image {name}"))?;
                 let manifest = parse_image_manifest(&reference.manifest_json)

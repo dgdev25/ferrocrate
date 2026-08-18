@@ -137,6 +137,51 @@ pub fn mount_namespace_diagnostic() -> Result<(), String> {
     }
 }
 
+/// Return whether the bubblewrap helper required for rootless rootfs and
+/// mounted workloads is available as a regular executable.
+pub fn bubblewrap_available() -> bool {
+    bubblewrap_path().is_some()
+}
+
+/// Report a bounded operator-facing bubblewrap prerequisite diagnostic without
+/// executing anything discovered through `PATH`.
+pub fn bubblewrap_diagnostic() -> Result<(), String> {
+    bubblewrap_path()
+        .map(|_| ())
+        .ok_or_else(|| {
+            "bubblewrap (bwrap) executable is unavailable; rootless rootfs and mounted workloads require it"
+                .to_string()
+        })
+}
+
+fn bubblewrap_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("bwrap"))
+        .chain([
+            PathBuf::from("/usr/local/bin/bwrap"),
+            PathBuf::from("/usr/bin/bwrap"),
+            PathBuf::from("/bin/bwrap"),
+        ])
+        .find(|candidate| {
+            let Ok(metadata) = fs::metadata(candidate) else {
+                return false;
+            };
+            if !metadata.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        })
+}
+
 #[derive(Debug, Error)]
 pub enum RootlessError {
     #[error("failed to resolve current user")]

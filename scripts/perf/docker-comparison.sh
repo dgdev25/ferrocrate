@@ -101,8 +101,12 @@ if ! eval "$ferro_env $ferro_bin pull '$image'" >/dev/null 2>&1; then
 fi
 record "image pull (warm)" "docker pull '$image'" "$ferro_env $ferro_bin pull '$image'" "Docker uses its daemon store; $image_prep_note; $ferro_pull_note."
 
-# 2. Run and exit an OCI image.
-record "container run/exit" "$docker_run" "$ferro_run" "Both use the same OCI image and the default bridge network."
+# 2. Run and exit an OCI image.  Use the isolated `none` network so Docker's
+# bridge firewall state cannot interfere with Ferrocrate's independent bridge
+# lifecycle between median rounds; network setup is measured separately below.
+docker_run="docker run --rm --network none $image true"
+ferro_run="$ferro_env $ferro_bin run --rm --network none --network-backend $network_backend $image true"
+record "container run/exit" "$docker_run" "$ferro_run" "Both use the same OCI image with networking disabled; bridge/network setup is measured separately."
 
 # 3. Build the same minimal Dockerfile/context.
 record "Dockerfile build" "docker build -q -t ferrocrate-bench:docker '$context'" "$ferro_env $ferro_bin build --dockerfile '$context/Dockerfile' --tag ferrocrate-bench:ferro" "Minimal single-stage Dockerfile; local base image is cached."

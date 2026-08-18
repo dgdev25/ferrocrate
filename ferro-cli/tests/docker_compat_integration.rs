@@ -517,6 +517,11 @@ fn docker_compat_removes_created_container_by_name_before_start() {
         .expect("created id")
         .to_string();
 
+    let (status, response) = harness.request("GET", "/v1.45/containers/pending-name/json");
+    assert_eq!(status, 200, "name inspect response={response}");
+    let inspected = serde_json::from_str::<serde_json::Value>(&response).expect("inspect JSON");
+    assert_eq!(inspected["Id"], id, "inspect must preserve provisional ID");
+
     let (status, response) = harness.request("DELETE", "/v1.45/containers/pending-name");
     assert_eq!(status, 204, "name removal response={response}");
     let (status, response) = harness.request("DELETE", &format!("/v1.45/containers/{id}"));

@@ -63,6 +63,7 @@ events_pid=$!
 sleep 0.2
 container_id="$(docker -H "$host" create --name "$name" busybox true)"
 [[ -n "$container_id" ]] || { echo "docker create returned no ID" >&2; exit 1; }
+docker -H "$host" inspect "$name" >/dev/null
 docker -H "$host" rm "$name" >/dev/null
 wait "$events_pid" 2>/dev/null || true
 grep -q 'container create' "$events_file" || {

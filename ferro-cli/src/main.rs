@@ -10789,8 +10789,15 @@ fn handle_docker_compat_connection(
                         let pending = state.pending.lock().map_err(|lock_error| {
                             format!("docker: pending lock poisoned: {lock_error}")
                         })?;
-                        let spec = pending.get(id).ok_or_else(|| error.to_string())?;
-                        docker_pending_inspect_payload(id, spec)
+                        let (pending_id, spec) = pending
+                            .get_key_value(id)
+                            .or_else(|| {
+                                pending
+                                    .iter()
+                                    .find(|(_, spec)| spec.name.as_deref() == Some(id))
+                            })
+                            .ok_or_else(|| error.to_string())?;
+                        docker_pending_inspect_payload(pending_id, spec)
                     }
                 };
                 http_response(200, body.to_string().as_bytes(), "application/json")

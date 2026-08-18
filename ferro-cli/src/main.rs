@@ -242,6 +242,11 @@ pub enum Commands {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Report Docker-compatible image, container, and volume usage summary.
+    SystemDf {
+        #[arg(long, default_value = "json", value_parser = validate_output_format)]
+        format: String,
+    },
     ImageInspect {
         image: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -2778,6 +2783,22 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &secret,
             ),
             Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
+            Commands::SystemDf { format } => {
+                let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                    .map_err(|error| error.to_string())?;
+                let containers = runtime.list().map_err(|error| error.to_string())?;
+                let images = image_store.list_references().map_err(|error| error.to_string())?;
+                let volumes = volume_store.list().map_err(|error| error.to_string())?;
+                let body = serde_json::json!({
+                    "LayersSize": 0,
+                    "Images": images.iter().map(|image| serde_json::json!({"Id": image.digest, "RepoTags": [image.reference], "Created": image.created_at_unix, "Size": 0, "SharedSize": 0, "Containers": containers.iter().filter(|container| container.image == image.reference).count()})).collect::<Vec<_>>(),
+                    "Containers": containers.iter().map(|container| serde_json::json!({"Id": container.id, "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(), "Image": container.image, "ImageID": "", "SizeRw": 0, "SizeRootFs": 0})).collect::<Vec<_>>(),
+                    "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": 0, "RefCount": 0}})).collect::<Vec<_>>(),
+                    "BuildCache": [],
+                });
+                if format == "json" { println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())); } else { println!("{}", body); }
+                Ok(())
+            }
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
             Commands::ImageInspect { image, format } => {
                 handle_image_inspect(&image_store, &image, &format)
@@ -4811,6 +4832,8 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             if !body.is_empty() { print_json(body, "json")?; }
             Ok(())
         })(),
+        Commands::SystemDf { format } => request("GET", "/system/df".to_string())
+            .and_then(|body| print_json(body, format)),
         Commands::Images { format, filters } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_filters(&parsed)?;
@@ -13499,6 +13522,13 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_system_df_command() {
+        let cli = Cli::try_parse_from(["ferrocrate", "system-df", "--format", "json"])
+            .expect("parse system df");
+        assert!(matches!(cli.command, Commands::SystemDf { format } if format == "json"));
     }
 
     #[test]

@@ -21,6 +21,7 @@ IFS=. read -r kernel_major kernel_minor _ <<<"$(uname -r)"
 export FERRO_EBPF_TEST_NETWORK_ID="ferro-qualify-$$"
 export FERROCRATE_E2E_NETWORK_BACKEND=ebpf
 export FERROCRATE_EBPF_SNAT_PORT_RANGE="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
+pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)"
 before_iptables="$(mktemp)"
 before_nft="$(mktemp)"
 after_iptables="$(mktemp)"
@@ -55,9 +56,19 @@ cleanup() {
   if [[ "$reserved_ports_changed" -eq 1 ]]; then
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi
+  if [[ -n "${FERROCRATE_BRIDGE_NAME:-}" ]]; then
+    ip link delete "$FERROCRATE_BRIDGE_NAME" 2>/dev/null || true
+  fi
   rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" \
     "$redirect_diagnostics" "$packet_capture" "$loopback_ingress_capture" "$loopback_egress_capture"
-  rm -rf "/sys/fs/bpf/ferrocrate/${FERRO_EBPF_TEST_NETWORK_ID}" || true
+  while IFS= read -r pin_name; do
+    [[ -n "$pin_name" ]] || continue
+    if ! grep -Fqx "$pin_name" <<<"$pin_root_before"; then
+      pin_path="/sys/fs/bpf/ferrocrate/$pin_name"
+      find "$pin_path" -type f -delete 2>/dev/null || true
+      find "$pin_path" -depth -type d -empty -delete 2>/dev/null || true
+    fi
+  done < <(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
 }
 trap cleanup EXIT
 
@@ -81,6 +92,17 @@ sample_redirect_diagnostics() {
 dump_redirect_diagnostics() {
   printf '%s\n' '--- eBPF redirect diagnostics sampled during qualification ---' >&2
   tail -n 300 "$redirect_diagnostics" >&2 || true
+  printf '%s\n' '--- eBPF decision counters ---' >&2
+  if command -v bpftool >/dev/null 2>&1; then
+    while IFS= read -r counters_path; do
+      pin_name="$(basename "$(dirname "$(dirname "$counters_path")")")"
+      if grep -Fqx "$pin_name" <<<"$pin_root_before"; then
+        continue
+      fi
+      printf 'counter map %s:\n' "$counters_path" >&2
+      bpftool map dump pinned "$counters_path" 2>&1 || true
+    done < <(find /sys/fs/bpf/ferrocrate -mindepth 3 -maxdepth 3 -path '*/maps/FERRO_COUNTERS' -type f 2>/dev/null)
+  fi
   printf '%s\n' '--- packet/checksum diagnostics ---' >&2
   printf 'TcpInCsumErrors before=%s after=%s\n' "$checksum_errors_before" \
     "$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')" >&2
@@ -141,6 +163,11 @@ iptables-save >"$after_iptables" 2>/dev/null || true
 nft list ruleset >"$after_nft" 2>/dev/null || true
 cmp -s "$before_iptables" "$after_iptables" || fail "iptables state changed in eBPF mode"
 cmp -s "$before_nft" "$after_nft" || fail "nftables state changed in eBPF mode"
-[[ ! -e "/sys/fs/bpf/ferrocrate/${FERRO_EBPF_TEST_NETWORK_ID}" ]] || fail "owned eBPF pins leaked"
+while IFS= read -r pin_name; do
+  [[ -n "$pin_name" ]] || continue
+  if ! grep -Fqx "$pin_name" <<<"$pin_root_before"; then
+    fail "owned eBPF pins leaked: $pin_name"
+  fi
+done < <(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
 
 printf 'eBPF networking qualification passed\n'

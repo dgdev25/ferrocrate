@@ -746,6 +746,72 @@ fn published_port_dnat_carries_endpoint_mac_and_reverse_tuple() {
 }
 
 #[test]
+fn localhost_published_port_request_on_loopback_egress_redirects_to_endpoint() {
+    let localhost = [127, 0, 0, 1];
+    let endpoint_address = [10, 44, 1, 2];
+    let request = tcp_packet(localhost, 51_000, localhost, 8080);
+    let mut state = FixtureState {
+        external: Some(ExternalNetwork {
+            address: [203, 0, 113, 8],
+            bridge_gateway: [10, 44, 1, 1],
+            ifindex: 9,
+            loopback_ifindex: 1,
+            next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            snat_port_start: 55_000,
+            snat_port_end: 55_031,
+            snat_range_reserved: true,
+        }),
+        ..FixtureState::default()
+    };
+    state.ports.push((
+        (request.protocol, 8080),
+        PortTarget {
+            address: endpoint_address,
+            port: 80,
+        },
+    ));
+    state.endpoints.push((
+        endpoint_address,
+        Endpoint {
+            ifindex: 17,
+            mac: [2, 0, 0, 0, 0, 17],
+            flags: 0,
+        },
+    ));
+
+    let decision = decide_egress(&request, &state).unwrap();
+
+    assert_eq!(decision.action, Action::Redirect);
+    assert_eq!(decision.ifindex, Some(17));
+    assert_eq!(
+        decision.destination,
+        Socket {
+            address: endpoint_address,
+            port: 80
+        }
+    );
+    assert_eq!(decision.source.address, [10, 44, 1, 1]);
+    assert_eq!(decision.translation, Translation::SourceAndDestination);
+    assert_eq!(decision.destination_mac, Some([2, 0, 0, 0, 0, 17]));
+    assert_eq!(
+        decision.reverse_conntrack,
+        Some(ConntrackRecord {
+            key: FlowKey {
+                protocol: request.protocol,
+                source: endpoint_address,
+                destination: [10, 44, 1, 1],
+                source_port: 80,
+                destination_port: 51_000,
+            },
+            target: NatTarget {
+                address: localhost,
+                port: 8080,
+            },
+        })
+    );
+}
+
+#[test]
 fn localhost_published_port_response_returns_through_loopback() {
     let localhost = [127, 0, 0, 1];
     let endpoint_address = [10, 44, 1, 2];

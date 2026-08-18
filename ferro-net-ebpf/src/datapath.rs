@@ -577,6 +577,43 @@ pub fn decide_egress<S: DatapathState>(
     enforce_policy(packet, Direction::Egress, state)?;
     let mut decision = Decision::pass(packet);
 
+    // Locally generated requests to a published localhost port traverse the
+    // loopback egress classifier (not ingress). Apply the same hairpin DNAT
+    // as the ingress path: route through the bridge gateway so the endpoint's
+    // reply can be translated back and re-enter host loopback.
+    if packet.source.address[0] == 127 && packet.destination.address[0] == 127 {
+        if let Some(target) = state.published_port(packet.protocol, packet.destination.port) {
+            if !valid_target(target.address, target.port) {
+                return Err(DecisionError::InvalidTranslation);
+            }
+            let external = state
+                .external_network()
+                .ok_or(DecisionError::EndpointMissing)?;
+            decision.source = Socket {
+                address: external.bridge_gateway,
+                port: packet.source.port,
+            };
+            decision.destination = Socket {
+                address: target.address,
+                port: target.port,
+            };
+            decision.translation = Translation::SourceAndDestination;
+            decision.reverse_conntrack = Some(ConntrackRecord {
+                key: FlowKey {
+                    protocol: packet.protocol,
+                    source: target.address,
+                    destination: external.bridge_gateway,
+                    source_port: target.port,
+                    destination_port: packet.source.port,
+                },
+                target: NatTarget {
+                    address: packet.destination.address,
+                    port: packet.destination.port,
+                },
+            });
+        }
+    }
+
     let mut conntrack_target = None;
     if let Some(target) = state.conntrack(FlowKey::from_packet(packet)) {
         if !valid_target(target.address, target.port) {

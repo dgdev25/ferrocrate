@@ -3069,16 +3069,38 @@ fn setup_build_namespace_root() -> io::Result<()> {
 fn apply_user_namespace_map() -> io::Result<()> {
     let host_uid = nix::unistd::Uid::current().as_raw();
     let host_gid = nix::unistd::Gid::current().as_raw();
+    let pid = std::process::id().to_string();
     // Kernel requires setgroups to be disabled before writing gid_map in userns.
     if let Err(err) = fs::write("/proc/self/setgroups", "deny") {
         if err.kind() != io::ErrorKind::NotFound {
             return Err(io::Error::other(format!("setgroups: {err}")));
         }
     }
-    fs::write("/proc/self/uid_map", format!("0 {host_uid} 1"))
-        .map_err(|err| io::Error::other(format!("uid_map: {err}")))?;
-    fs::write("/proc/self/gid_map", format!("0 {host_gid} 1"))
-        .map_err(|err| io::Error::other(format!("gid_map: {err}")))
+    if let Err(err) = fs::write("/proc/self/uid_map", format!("0 {host_uid} 1")) {
+        if !matches!(err.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput) {
+            return Err(io::Error::other(format!("uid_map: {err}")));
+        }
+        let status = Command::new("newuidmap")
+            .args([pid.as_str(), "0", &host_uid.to_string(), "1"])
+            .status()
+            .map_err(|helper| io::Error::other(format!("uid_map newuidmap: {helper}")))?;
+        if !status.success() {
+            return Err(io::Error::other("uid_map newuidmap rejected mapping"));
+        }
+    }
+    if let Err(err) = fs::write("/proc/self/gid_map", format!("0 {host_gid} 1")) {
+        if !matches!(err.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput) {
+            return Err(io::Error::other(format!("gid_map: {err}")));
+        }
+        let status = Command::new("newgidmap")
+            .args([pid.as_str(), "0", &host_gid.to_string(), "1"])
+            .status()
+            .map_err(|helper| io::Error::other(format!("gid_map newgidmap: {helper}")))?;
+        if !status.success() {
+            return Err(io::Error::other("gid_map newgidmap rejected mapping"));
+        }
+    }
+    Ok(())
 }
 
 fn enter_build_rootfs(rootfs: &Path, workdir: Option<&str>) -> io::Result<()> {

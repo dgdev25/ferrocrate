@@ -28,7 +28,11 @@ after_nft="$(mktemp)"
 redirect_diagnostics="$(mktemp)"
 redirect_sampler_pid=""
 packet_capture="$(mktemp)"
+loopback_ingress_capture="$(mktemp)"
+loopback_egress_capture="$(mktemp)"
 packet_capture_pid=""
+loopback_ingress_capture_pid=""
+loopback_egress_capture_pid=""
 checksum_errors_before="$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')"
 reserved_ports_path="/proc/sys/net/ipv4/ip_local_reserved_ports"
 reserved_ports_before="$(cat "$reserved_ports_path" 2>/dev/null || true)"
@@ -42,10 +46,17 @@ cleanup() {
     kill "$packet_capture_pid" 2>/dev/null || true
     wait "$packet_capture_pid" 2>/dev/null || true
   fi
+  for capture_pid in "$loopback_ingress_capture_pid" "$loopback_egress_capture_pid"; do
+    if [[ -n "$capture_pid" ]]; then
+      kill "$capture_pid" 2>/dev/null || true
+      wait "$capture_pid" 2>/dev/null || true
+    fi
+  done
   if [[ "$reserved_ports_changed" -eq 1 ]]; then
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi
-  rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" "$redirect_diagnostics" "$packet_capture"
+  rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" \
+    "$redirect_diagnostics" "$packet_capture" "$loopback_ingress_capture" "$loopback_egress_capture"
   rm -rf "/sys/fs/bpf/ferrocrate/${FERRO_EBPF_TEST_NETWORK_ID}" || true
 }
 trap cleanup EXIT
@@ -76,6 +87,14 @@ dump_redirect_diagnostics() {
   if [[ -s "$packet_capture" ]]; then
     tail -n 120 "$packet_capture" >&2 || true
   fi
+  if [[ -s "$loopback_ingress_capture" ]]; then
+    printf '%s\n' '--- loopback ingress capture ---' >&2
+    tail -n 120 "$loopback_ingress_capture" >&2 || true
+  fi
+  if [[ -s "$loopback_egress_capture" ]]; then
+    printf '%s\n' '--- loopback egress capture ---' >&2
+    tail -n 120 "$loopback_egress_capture" >&2 || true
+  fi
 }
 
 # The eBPF loader refuses to allocate a SNAT port unless the complete range is
@@ -103,8 +122,15 @@ cargo test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke
 sample_redirect_diagnostics >"$redirect_diagnostics" 2>&1 &
 redirect_sampler_pid=$!
 if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1; then
-  tcpdump -i any -nn -vvv -l -s 0 'tcp and (host 127.0.0.1 or net 10.0.0.0/24)' >"$packet_capture" 2>&1 &
+  capture_filter='tcp and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0) and (host 127.0.0.1 or net 10.0.0.0/24)'
+  tcpdump -i any -nn -vvv -l -s 0 "$capture_filter" >"$packet_capture" 2>&1 &
   packet_capture_pid=$!
+  # Split loopback direction so a translated SYN-ACK observed on `any` can be
+  # classified as ingress stack delivery versus egress redirect re-entry.
+  tcpdump -Q in -i lo -nn -vvv -l -s 0 'tcp and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0) and host 127.0.0.1' >"$loopback_ingress_capture" 2>&1 &
+  loopback_ingress_capture_pid=$!
+  tcpdump -Q out -i lo -nn -vvv -l -s 0 'tcp and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0) and host 127.0.0.1' >"$loopback_egress_capture" 2>&1 &
+  loopback_egress_capture_pid=$!
 fi
 if ! cargo test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
   dump_redirect_diagnostics

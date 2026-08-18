@@ -10700,6 +10700,38 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_string(&changes).map_err(|error| error.to_string())?;
                 http_response(200, body.as_bytes(), "application/json")
             }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/export") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/export");
+                let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+                if !record.mounts.is_empty() || !record.tmpfs_mounts.is_empty() {
+                    return Err(
+                        "docker: container export with bind or tmpfs mounts is unsupported; remove mounts before exporting"
+                            .to_string(),
+                    );
+                }
+                let rootfs = runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("rootfs");
+                if !rootfs.is_dir() {
+                    return Err(format!(
+                        "docker: container rootfs is unavailable: {}",
+                        rootfs.display()
+                    ));
+                }
+                let mut archive = Vec::new();
+                {
+                    let mut builder = tar::Builder::new(&mut archive);
+                    append_commit_rootfs(&mut builder, &rootfs)
+                        .map_err(|error| format!("docker: export rootfs: {error}"))?;
+                    builder
+                        .finish()
+                        .map_err(|error| format!("docker: finish export archive: {error}"))?;
+                }
+                http_response(200, &archive, "application/x-tar")
+            }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
                 let id = path
                     .trim_start_matches("/containers/")

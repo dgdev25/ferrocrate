@@ -4,6 +4,25 @@ set -euo pipefail
 fail() { printf 'eBPF networking qualification failed: %s\n' "$*" >&2; exit 1; }
 [[ "$(uname -s)" == Linux ]] || fail "Linux is required"
 [[ "${EUID}" -eq 0 ]] || fail "run with sudo"
+
+# sudo's secure_path commonly hides the operator's Rustup shim. Resolve the
+# invoking user's Cargo explicitly so the privileged fixture does not fail
+# before it reaches any kernel qualification, while still allowing callers to
+# choose a pinned binary through FERROCRATE_CARGO_BIN.
+if [[ -z "${FERROCRATE_CARGO_BIN:-}" ]]; then
+  if command -v cargo >/dev/null 2>&1; then
+    FERROCRATE_CARGO_BIN="$(command -v cargo)"
+  elif [[ -n "${SUDO_USER:-}" ]] && command -v getent >/dev/null 2>&1; then
+    operator_home="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+    if [[ -n "${operator_home}" && -x "${operator_home}/.cargo/bin/cargo" ]]; then
+      FERROCRATE_CARGO_BIN="${operator_home}/.cargo/bin/cargo"
+      export CARGO_HOME="${CARGO_HOME:-${operator_home}/.cargo}"
+      export RUSTUP_HOME="${RUSTUP_HOME:-${operator_home}/.rustup}"
+    fi
+  fi
+fi
+[[ -n "${FERROCRATE_CARGO_BIN:-}" && -x "${FERROCRATE_CARGO_BIN}" ]] \
+  || fail "cargo is required (set FERROCRATE_CARGO_BIN or expose the operator's Rustup shim)"
 command -v tc >/dev/null || fail "tc is required"
 mountpoint -q /sys/fs/bpf || fail "bpffs must be mounted at /sys/fs/bpf"
 
@@ -139,8 +158,8 @@ esac
 iptables-save >"$before_iptables" 2>/dev/null || true
 nft list ruleset >"$before_nft" 2>/dev/null || true
 
-cargo test -p ferro-net --test kernel_compat -- --ignored
-cargo test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
+"${FERROCRATE_CARGO_BIN}" test -p ferro-net --test kernel_compat -- --ignored
+"${FERROCRATE_CARGO_BIN}" test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
 sample_redirect_diagnostics >"$redirect_diagnostics" 2>&1 &
 redirect_sampler_pid=$!
 if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1; then
@@ -154,7 +173,7 @@ if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1
   tcpdump -Q out -i lo -nn -vvv -l -s 0 'tcp and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0) and host 127.0.0.1' >"$loopback_egress_capture" 2>&1 &
   loopback_egress_capture_pid=$!
 fi
-if ! cargo test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
+if ! "${FERROCRATE_CARGO_BIN}" test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
   dump_redirect_diagnostics
   exit 1
 fi

@@ -13,10 +13,11 @@ fi
 # toolchain as blocked, not as a failed network qualification. Root commonly
 # has a separate HOME/rustup configuration from the operator running the
 # matrix; callers can provide RUSTUP_HOME/CARGO_HOME explicitly.
-if ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; then
+auth_cargo="${FERROCRATE_CARGO_BIN:-$(command -v cargo || true)}"
+if [[ -z "$auth_cargo" ]] || ! "$auth_cargo" --version >/dev/null 2>&1; then
   echo "authenticated two-host qualification requires a usable cargo toolchain" >&2
   exit 77
 fi
 
-cargo test -p ferro-mgr --test real_two_host_qualification \
+"$auth_cargo" test -p ferro-mgr --test real_two_host_qualification \
   --offline -- --ignored --nocapture

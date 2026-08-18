@@ -7,11 +7,20 @@ set -euo pipefail
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 output_file="${1:-}"
 
-have() { command -v "$1" >/dev/null 2>&1; }
+tool_path() {
+  case "$1" in
+    cargo) printf '%s' "${FERROCRATE_CARGO_BIN:-$(command -v cargo || true)}" ;;
+    rustc) printf '%s' "${FERROCRATE_RUSTC_BIN:-$(command -v rustc || true)}" ;;
+    *) command -v "$1" || true ;;
+  esac
+}
+have() { [[ -n "$(tool_path "$1")" ]]; }
 version_line() {
-  local output
+  local output bin
   have "$1" || { printf 'missing'; return; }
-  if output=$("$@" 2>/dev/null); then
+  bin="$(tool_path "$1")"
+  shift
+  if output=$("$bin" "$@" 2>/dev/null); then
     printf '%s' "$output" | head -1
   else
     printf 'missing'

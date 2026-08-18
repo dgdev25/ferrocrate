@@ -11517,10 +11517,11 @@ fn handle_docker_compat_connection(
                 http_response(204, &[], "text/plain")
             }
             ("GET", path) if path.starts_with("/images/") && path.ends_with("/json") => {
-                let name = path
+                let encoded_name = path
                     .trim_start_matches("/images/")
                     .trim_end_matches("/json");
-                let reference = resolve_reference(&store, name)
+                let name = percent_decode_query_component(encoded_name)?;
+                let reference = resolve_reference(&store, &name)
                     .map_err(|err| err.to_string())?
                     .ok_or_else(|| format!("docker: unknown image {name}"))?;
                 let body = serde_json::json!({

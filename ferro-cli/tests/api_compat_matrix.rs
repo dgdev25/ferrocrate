@@ -470,6 +470,14 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         body.contains("Successfully built"),
         "build response: {body}"
     );
+    let (status, body) = harness.request("GET", "/images/matrix%2Fbuild%3Alatest/json", "");
+    assert_eq!(status, 200, "image inspect response: {body}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("image inspect JSON");
+    assert!(inspect["Created"].as_str().is_some(), "Created={inspect}");
+    assert!(
+        inspect["Size"].as_u64().is_some_and(|size| size > 0),
+        "Size={inspect}"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@ use crate::image_manifest::{parse_image_index, parse_image_manifest};
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::ImageTaggingError;
 use crate::registry::parse_image_reference;
-use crate::registry::RegistryClient;
+use crate::registry::{RegistryAuth, RegistryClient};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -199,20 +199,18 @@ pub(crate) fn pull_image_with_store(
     verify_digest(&config_path, &manifest.config.digest)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
-    let blob_root = runtime_dir.join("images").join("blobs");
-    fs::create_dir_all(&blob_root)?;
-    let mut layer_paths = Vec::new();
-
-    for layer in &manifest.layers {
-        let digest = layer.digest.replace(':', "_");
-        let blob_path = blob_root.join(&digest);
-        if !blob_path.exists() {
-            client.pull_blob_to_file(&canonical, &layer.digest, auth.as_ref(), &blob_path)?;
-        }
-        verify_digest(&blob_path, &layer.digest)?;
-        let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
-        layer_paths.push(blob_path);
-    }
+    let layer_digests = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.digest.clone())
+        .collect::<Vec<_>>();
+    let layer_paths = pull_layers_concurrently(
+        &client,
+        &canonical,
+        auth.as_ref(),
+        runtime_dir,
+        &layer_digests,
+    )?;
 
     Ok(ImageFetchResult {
         reference: canonical,
@@ -273,23 +271,21 @@ fn pull_planned_image_with_store_mode(
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
     fs::File::open(&config_path)?.sync_all()?;
 
-    let blob_root = runtime_dir.join("images").join("blobs");
-    fs::create_dir_all(&blob_root)?;
-    let mut layer_paths = Vec::with_capacity(plan.layer_digests().len());
-    for digest in plan.layer_digests().iter().filter(|_| include_layers) {
-        let blob_path = blob_root.join(digest.replace(':', "_"));
-        if !blob_path.exists() {
-            client.pull_blob_to_file(
-                plan.immutable_reference(),
-                digest,
-                auth.as_ref(),
-                &blob_path,
-            )?;
-        }
-        verify_digest(&blob_path, digest)?;
-        let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
-        fs::File::open(&blob_path)?.sync_all()?;
-        layer_paths.push(blob_path);
+    let layer_digests = plan
+        .layer_digests()
+        .iter()
+        .filter(|_| include_layers)
+        .cloned()
+        .collect::<Vec<_>>();
+    let layer_paths = pull_layers_concurrently(
+        &client,
+        plan.immutable_reference(),
+        auth.as_ref(),
+        runtime_dir,
+        &layer_digests,
+    )?;
+    for layer_path in &layer_paths {
+        fs::File::open(layer_path)?.sync_all()?;
     }
     // Publication is the commit point. Until every selected object has been
     // fetched, verified, and durably synced, no reference is visible.
@@ -304,6 +300,49 @@ fn pull_planned_image_with_store_mode(
         reference: plan.canonical_reference.clone(),
         layer_paths,
     })
+}
+
+/// Fetch independent OCI layers concurrently while preserving manifest order.
+/// Each worker writes to a unique digest path and performs the same verification
+/// and CAS publication as the serial path; only network latency is overlapped.
+fn pull_layers_concurrently(
+    client: &RegistryClient,
+    reference: &str,
+    auth: Option<&RegistryAuth>,
+    runtime_dir: &Path,
+    digests: &[String],
+) -> Result<Vec<PathBuf>, ImageFetchError> {
+    if digests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let blob_root = runtime_dir.join("images").join("blobs");
+    fs::create_dir_all(&blob_root)?;
+    let results = std::thread::scope(|scope| {
+        let workers = digests.iter().enumerate().map(|(index, digest)| {
+            let blob_path = blob_root.join(digest.replace(':', "_"));
+            scope.spawn(move || -> Result<(usize, PathBuf), ImageFetchError> {
+                if !blob_path.exists() {
+                    client.pull_blob_to_file(reference, digest, auth, &blob_path)?;
+                }
+                verify_digest(&blob_path, digest)?;
+                let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
+                Ok((index, blob_path))
+            })
+        });
+        workers
+            .map(|worker| {
+                worker.join().map_err(|_| {
+                    ImageFetchError::Integrity("layer fetch worker panicked".to_string())
+                })?
+            })
+            .collect::<Result<Vec<_>, ImageFetchError>>()
+    })?;
+    let mut ordered = results;
+    ordered.sort_by_key(|(index, _)| *index);
+    Ok(ordered
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>())
 }
 
 pub fn pull_manifest_only_with_store_authorized(

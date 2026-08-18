@@ -48,6 +48,8 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
 bash scripts/test-rootless-install.sh
 bash scripts/test-uninstall.sh
 bash scripts/perf/test-check-docker-comparison.sh
+bash scripts/test-generate-changelog.sh
+bash scripts/test-shell-out-audit.sh
 
 if (( ! skip_workspace )); then
   echo "[gate] serialized all-features workspace tests"

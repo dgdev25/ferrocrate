@@ -551,8 +551,7 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
         .expect("created id")
         .to_string();
 
-    let (status, response) =
-        harness.request("POST", &format!("/v1.45/containers/{container_id}/start"));
+    let (status, response) = harness.request("POST", "/v1.45/containers/exec-inspect/start");
     assert_eq!(status, 204, "container start response={response}");
 
     let exec_body = r#"{"Cmd":["/bin/busybox","true"]}"#;

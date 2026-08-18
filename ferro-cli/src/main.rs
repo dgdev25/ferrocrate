@@ -11288,18 +11288,27 @@ fn handle_docker_compat_connection(
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/start") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/start");
-                let spec = {
+                let (id, spec) = {
                     let mut pending = state
                         .pending
                         .lock()
                         .map_err(|e| format!("lock poisoned: {e}"))?;
-                    pending.remove(id)
+                    let pending_id = if pending.contains_key(requested_id) {
+                        Some(requested_id.to_string())
+                    } else {
+                        pending
+                            .iter()
+                            .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
+                            .map(|(pending_id, _)| pending_id.clone())
+                    };
+                    let spec = pending_id.as_deref().and_then(|id| pending.remove(id));
+                    (pending_id.unwrap_or_else(|| requested_id.to_string()), spec)
                 };
                 let Some(spec) = spec else {
-                    runtime.start(id).map_err(|error| error.to_string())?;
+                    runtime.start(&id).map_err(|error| error.to_string())?;
                     return Ok(http_response(204, &[], "text/plain"));
                 };
                 state.persist_pending()?;
@@ -11346,11 +11355,11 @@ fn handle_docker_compat_connection(
                     spec.pids_max,
                     None,
                     None,
-                    Some(id),
+                    Some(&id),
                 );
                 if let Err(error) = start_result {
                     if let Ok(mut pending) = state.pending.lock() {
-                        pending.insert(id.to_string(), spec);
+                        pending.insert(id, spec);
                     }
                     let _ = state.persist_pending();
                     return Err(error);

@@ -43,9 +43,11 @@ fi
 
 echo "[gate] rootless installer/uninstall lifecycle checks"
 bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
-  scripts/uninstall.sh scripts/test-uninstall.sh
+  scripts/uninstall.sh scripts/test-uninstall.sh \
+  scripts/perf/check-docker-comparison.sh scripts/perf/test-check-docker-comparison.sh
 bash scripts/test-rootless-install.sh
 bash scripts/test-uninstall.sh
+bash scripts/perf/test-check-docker-comparison.sh
 
 if (( ! skip_workspace )); then
   echo "[gate] serialized all-features workspace tests"

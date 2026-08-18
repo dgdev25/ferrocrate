@@ -1904,10 +1904,17 @@ fn discover_rootless_socket() -> Option<PathBuf> {
     use std::os::unix::fs::FileTypeExt;
 
     let mut candidates = Vec::new();
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        candidates.push(PathBuf::from(runtime).join("docker.sock"));
+    if let Some(explicit) = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET") {
+        candidates.push(PathBuf::from(explicit));
     }
-    candidates.push(runtime_dir().join("docker.sock"));
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        let runtime = PathBuf::from(runtime);
+        candidates.push(runtime.join("ferrocrate.sock"));
+        candidates.push(runtime.join("docker.sock"));
+    }
+    let runtime = runtime_dir();
+    candidates.push(runtime.join("ferrocrate.sock"));
+    candidates.push(runtime.join("docker.sock"));
     candidates.into_iter().find(|path| {
         std::fs::symlink_metadata(path)
             .map(|metadata| metadata.file_type().is_socket())
@@ -13249,6 +13256,34 @@ mod tests {
         match previous {
             Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_socket_discovery_prefers_explicit_ferrocrate_socket() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let temp = tempfile::tempdir().expect("socket fixture");
+        let previous_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let previous_socket = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET");
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", temp.path());
+            std::env::set_var(
+                "FERROCRATE_ROOTLESS_SOCKET",
+                temp.path().join("ferrocrate.sock"),
+            );
+        }
+        let socket = temp.path().join("ferrocrate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert_eq!(discover_rootless_socket(), Some(socket));
+        drop(listener);
+        match previous_runtime {
+            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        match previous_socket {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_ROOTLESS_SOCKET", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_ROOTLESS_SOCKET") },
         }
     }
 

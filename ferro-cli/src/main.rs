@@ -7338,11 +7338,12 @@ fn handle_stats(
             }
         } else {
             println!(
-                "container={} mem_current={} mem_max={} pids_current={} cpu_usage_usec={} cpu_user_usec={} cpu_system_usec={}",
+                "container={} mem_current={} mem_max={} pids_current={} pids_limit_reached={} cpu_usage_usec={} cpu_user_usec={} cpu_system_usec={}",
                 resolved,
                 stats.memory_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
                 stats.memory_max.map(|v| v.to_string()).unwrap_or_else(|| "max".to_string()),
                 stats.pids_current.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                stats.pids_limit_reached.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
                 stats.cpu_usage_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
                 stats.cpu_user_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
                 stats.cpu_system_usec.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
@@ -13361,7 +13362,7 @@ fn stream_docker_logs(
 fn docker_stats_payload(stats: &ferro_core::cgroups::CgroupStats) -> serde_json::Value {
     serde_json::json!({
         "memory_stats": {"usage": stats.memory_current, "limit": stats.memory_max},
-        "pids_stats": {"current": stats.pids_current},
+        "pids_stats": {"current": stats.pids_current, "limit_reached": stats.pids_limit_reached},
         "cpu_stats": {"cpu_usage": {"total_usage": stats.cpu_usage_usec}}
     })
 }
@@ -13660,13 +13661,13 @@ mod tests {
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
         docker_pending_inspect_payload, docker_pending_matches_filters,
         docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
-        docker_tail_logs, docker_top_payload, docker_volume_matches_filters, effective_readonly,
-        ensure_context_routing_available, extract_docker_build_context, handle_build,
-        handle_containers, handle_context, handle_events, handle_exec, handle_image_prune,
-        handle_images, handle_inspect, handle_kill, handle_logs, handle_migrate_compose_report,
-        handle_network, handle_pause, handle_pull, handle_push, handle_restart, handle_rm,
-        handle_rmi, handle_run, handle_stats, handle_stop, handle_top, handle_unpause,
-        handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
+        docker_stats_payload, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
+        effective_readonly, ensure_context_routing_available, extract_docker_build_context,
+        handle_build, handle_containers, handle_context, handle_events, handle_exec,
+        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
+        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
         parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_kill_signal, parse_docker_limit_query,
@@ -17629,6 +17630,22 @@ volumes:
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let err = handle_stats(&runtime, "", "text", false).expect_err("container required");
         assert!(err.contains("stats: container is required"));
+    }
+
+    #[test]
+    fn docker_stats_payload_reports_pid_limit_events() {
+        let stats = ferro_core::cgroups::CgroupStats {
+            memory_current: Some(1),
+            memory_max: Some(2),
+            pids_current: Some(3),
+            pids_limit_reached: Some(4),
+            cpu_usage_usec: Some(5),
+            cpu_user_usec: Some(6),
+            cpu_system_usec: Some(7),
+        };
+        let payload = docker_stats_payload(&stats);
+        assert_eq!(payload["pids_stats"]["current"], 3);
+        assert_eq!(payload["pids_stats"]["limit_reached"], 4);
     }
 
     #[test]

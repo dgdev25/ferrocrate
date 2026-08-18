@@ -25,6 +25,8 @@ pub struct CgroupStats {
     pub memory_current: Option<u64>,
     pub memory_max: Option<u64>,
     pub pids_current: Option<u64>,
+    /// Number of times this cgroup hit its `pids.max` ceiling.
+    pub pids_limit_reached: Option<u64>,
     pub cpu_usage_usec: Option<u64>,
     pub cpu_user_usec: Option<u64>,
     pub cpu_system_usec: Option<u64>,
@@ -180,6 +182,7 @@ impl CgroupV2Manager {
         let memory_current = read_u64(group_path.join("memory.current"))?;
         let memory_max = read_u64_allow_max(group_path.join("memory.max"))?;
         let pids_current = read_u64(group_path.join("pids.current"))?;
+        let pids_limit_reached = read_event_counter(group_path.join("pids.events"), "max")?;
         let (cpu_usage_usec, cpu_user_usec, cpu_system_usec) =
             read_cpu_stat(group_path.join("cpu.stat"))?;
 
@@ -187,6 +190,7 @@ impl CgroupV2Manager {
             memory_current,
             memory_max,
             pids_current,
+            pids_limit_reached,
             cpu_usage_usec,
             cpu_user_usec,
             cpu_system_usec,
@@ -255,6 +259,33 @@ fn read_u64_allow_max(path: PathBuf) -> Result<Option<u64>, CgroupError> {
         return Ok(None);
     }
     Ok(trimmed.parse::<u64>().ok())
+}
+
+fn read_event_counter(path: PathBuf, key: &str) -> Result<Option<u64>, CgroupError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)?;
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some(key) {
+            continue;
+        }
+        let value = fields.next().ok_or_else(|| {
+            CgroupError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("missing {key} counter in {}", path.display()),
+            ))
+        })?;
+        let parsed = value.parse::<u64>().map_err(|error| {
+            CgroupError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid {key} counter in {}: {error}", path.display()),
+            ))
+        })?;
+        return Ok(Some(parsed));
+    }
+    Ok(None)
 }
 
 type CpuStat = (Option<u64>, Option<u64>, Option<u64>);
@@ -452,6 +483,7 @@ mod tests {
         fs::write(group.join("memory.current"), "123").expect("memory.current");
         fs::write(group.join("memory.max"), "max").expect("memory.max");
         fs::write(group.join("pids.current"), "7").expect("pids.current");
+        fs::write(group.join("pids.events"), "max 3\n").expect("pids.events");
         fs::write(
             group.join("cpu.stat"),
             "usage_usec 100\nuser_usec 40\nsystem_usec 60\n",
@@ -465,6 +497,7 @@ mod tests {
             memory_current: Some(123),
             memory_max: None,
             pids_current: Some(7),
+            pids_limit_reached: Some(3),
             cpu_usage_usec: Some(100),
             cpu_user_usec: Some(40),
             cpu_system_usec: Some(60),

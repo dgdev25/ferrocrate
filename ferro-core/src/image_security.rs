@@ -108,9 +108,16 @@ pub fn verify_image_signature(image: &str) -> Result<(), String> {
         .or_else(|_| std::env::var("COSIGN_PUBLIC_KEY"))
         .map_err(|_| "signature verification requires FERROCRATE_SIGNATURE_KEY".to_string())?;
 
-    // Security: Use "--" delimiter to prevent flag injection from malicious image names
+    // Security: Use "--" delimiter to prevent flag injection from malicious image names.
+    // Cosign does not consume Ferrocrate's CA override automatically, so pass
+    // the validated trust root explicitly for private TLS registries.
+    let mut args = vec!["verify".to_string(), "--key".to_string(), key];
+    if let Some(ca_path) = registry_ca_path()? {
+        args.extend(["--registry-cacert".to_string(), ca_path]);
+    }
+    args.extend(["--".to_string(), image.to_string()]);
     let mut child = Command::new(cosign)
-        .args(["verify", "--key", &key, "--", image])
+        .args(&args)
         .spawn()
         .map_err(|_| "failed to execute cosign verification".to_string())?;
 
@@ -121,6 +128,26 @@ pub fn verify_image_signature(image: &str) -> Result<(), String> {
         return Err("image signature verification failed".to_string());
     }
     Ok(())
+}
+
+fn registry_ca_path() -> Result<Option<String>, String> {
+    let Some(path) = std::env::var_os("FERROCRATE_REGISTRY_CA_CERT") else {
+        return Ok(None);
+    };
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| "signature verification CA certificate is unavailable".to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("signature verification CA certificate must be a regular file".to_string());
+    }
+    let size = metadata.len();
+    if size == 0 || size > 1024 * 1024 {
+        return Err("signature verification CA certificate is empty or oversized".to_string());
+    }
+    Ok(Some(
+        path.to_str()
+            .ok_or_else(|| "signature verification CA certificate path is not UTF-8".to_string())?
+            .to_string(),
+    ))
 }
 
 fn signature_verification_enabled() -> bool {

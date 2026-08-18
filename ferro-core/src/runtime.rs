@@ -1456,6 +1456,27 @@ fn immutable_image_reference(reference: &str, digest: &str) -> Result<String, Ru
     ))
 }
 
+/// Return the registry-manifest digest reference for signature verification.
+///
+/// The image store's `digest` field intentionally points at the OCI config
+/// blob because it is used for local execution and CAS lookup.  Cosign,
+/// however, signs the registry manifest digest.  Keep those identities
+/// separate so a verified image is never accidentally checked under its
+/// config digest.
+fn immutable_image_manifest_reference(
+    store: &LocalImageStore,
+    image: &str,
+) -> Result<String, RuntimeError> {
+    let Some(record) = store.resolve_reference(image)? else {
+        return Ok(image.to_owned());
+    };
+    let manifest_digest = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(record.manifest_json.as_bytes())
+    );
+    immutable_image_reference(&record.reference, &manifest_digest)
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("invalid image reference: {0}")]
@@ -2496,6 +2517,7 @@ impl ContainerRuntime {
             Some(record) => immutable_image_reference(&record.reference, &record.digest)?,
             None => image.to_owned(),
         };
+        let signature_image = immutable_image_manifest_reference(store, image)?;
         let normalized = normalize_run_request(
             capabilities,
             mounts,
@@ -2583,6 +2605,7 @@ impl ContainerRuntime {
             container_id.clone(),
             store,
             &authorized_image,
+            &signature_image,
             cmd,
             env,
             labels,
@@ -2669,6 +2692,7 @@ impl ContainerRuntime {
         container_id: String,
         store: &LocalImageStore,
         image: &str,
+        signature_image: &str,
         cmd: &[String],
         env: &[String],
         labels: &HashMap<String, String>,
@@ -2699,7 +2723,8 @@ impl ContainerRuntime {
         if rootless && network_mode == "bridge" && rootless_netns_enabled() {
             nested_bubblewrap_diagnostic().map_err(RuntimeError::InvalidCommand)?;
         }
-        verify_image_signature(image).map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
+        verify_image_signature(signature_image)
+            .map_err(|err| RuntimeError::InvalidState(err.to_string()))?;
         let mut config_json = None;
         if let Ok(Some(config_path)) =
             resolve_config_path_with_store(&self.runtime_dir, image, store)
@@ -11235,10 +11260,10 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_restart_delay, associated_network_name, immutable_image_reference, BindMount,
-        ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
-        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
-        TmpfsMount,
+        adaptive_restart_delay, associated_network_name, immutable_image_manifest_reference,
+        immutable_image_reference, BindMount, ContainerRuntime, KernelResourceOps,
+        LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend, NoopLifecyclePhaseHook,
+        ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -11275,6 +11300,30 @@ mod tests {
             "registry-1.docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert!(!pinned.contains(":latest@"));
+    }
+
+    #[test]
+    fn signature_reference_uses_manifest_digest_not_config_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(dir.path().join("images")).expect("store");
+        let reference = canonicalize_reference("localhost:5443/example:latest").unwrap();
+        let manifest = r#"{"schemaVersion":2,"config":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"layers":[]}"#;
+        store
+            .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                &reference,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                manifest,
+            )
+            .expect("store image");
+        let actual = immutable_image_manifest_reference(&store, &reference).unwrap();
+        let expected = format!(
+            "localhost:5443/example@sha256:{:x}",
+            sha2::Sha256::digest(manifest.as_bytes())
+        );
+        assert_eq!(actual, expected);
+        assert!(!actual.contains("aaaaaaaa"));
     }
 
     #[test]

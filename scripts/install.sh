@@ -12,10 +12,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO="dgtise25/ferrocrate"
+REPO="dgdev25/ferrocrate"
 RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
 GITHUB_RELEASE_BASE="https://github.com/${REPO}/releases/download"
 INSTALL_DIR="${HOME}/.local/bin"
+FERROCRATE_VERSION="${FERROCRATE_VERSION:-}"
 
 # Functions
 log_info() {
@@ -72,11 +73,23 @@ detect_arch() {
 }
 
 get_latest_version() {
+  if [ -n "$FERROCRATE_VERSION" ]; then
+    printf '%s\n' "$FERROCRATE_VERSION"
+    return
+  fi
   if command -v jq &> /dev/null; then
     curl -s "${RELEASE_API}" | jq -r '.tag_name' 2>/dev/null || echo "latest"
   else
     # Fallback without jq - extract version from release page
     curl -s "https://github.com/${REPO}/releases/latest" | grep -oP 'href="/[^/]*/ferrocrate/releases/tag/\K[^"]+' | head -1 || echo "latest"
+  fi
+}
+
+validate_version() {
+  local version="$1"
+  if [[ ! "$version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    log_error "Invalid release version: $version"
+    exit 1
   fi
 }
 
@@ -112,6 +125,78 @@ verify_checksum() {
   fi
 
   log_info "Checksum verified"
+}
+
+download_linux_release() {
+  local arch version artifact_dir archive checksum_file provenance_file
+  arch="$1"
+  version="$2"
+  artifact_dir="$3"
+  archive="ferrocrate-${version}-linux-${arch}.tar.gz"
+  checksum_file="ferrocrate-${version}-checksums.txt"
+  provenance_file="${archive}.provenance.json"
+  mkdir -p "$artifact_dir"
+
+  log_info "Downloading ${archive}..." >&2
+  curl -fsSL -o "$artifact_dir/$archive" "${GITHUB_RELEASE_BASE}/${version}/${archive}"
+  curl -fsSL -o "$artifact_dir/$checksum_file" "${GITHUB_RELEASE_BASE}/${version}/${checksum_file}"
+  curl -fsSL -o "$artifact_dir/$provenance_file" "${GITHUB_RELEASE_BASE}/${version}/${provenance_file}"
+
+  (cd "$artifact_dir" && sha256sum --ignore-missing -c "$checksum_file" >/dev/null) || {
+    log_error "Release checksum verification failed"
+    exit 1
+  }
+  python3 - "$artifact_dir/$provenance_file" "$artifact_dir/$archive" "$version" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+archive_path = Path(sys.argv[2])
+version = sys.argv[3]
+data = json.loads(manifest_path.read_text(encoding="utf-8"))
+if data.get("schema") != "ferrocrate-release-provenance-v1":
+    raise SystemExit("unsupported release provenance schema")
+if data.get("version") != version or data.get("archive") != archive_path.name:
+    raise SystemExit("release provenance identity mismatch")
+if data.get("sha256") != hashlib.sha256(archive_path.read_bytes()).hexdigest():
+    raise SystemExit("release provenance digest mismatch")
+PY
+  printf '%s\n' "$artifact_dir/$archive"
+}
+
+install_linux_release() {
+  local archive="$1" install_dir="$2" stage backup
+  stage="$(mktemp -d)"
+  backup=""
+  cleanup() {
+    rm -rf "$stage"
+    if [ -n "$backup" ] && [ ! -e "$install_dir/ferrocrate" ]; then
+      mv "$backup" "$install_dir/ferrocrate" 2>/dev/null || true
+    fi
+  }
+  trap cleanup RETURN
+  tar -xzf "$archive" -C "$stage"
+  if [ ! -f "$stage/ferrocrate/ferrocrate" ]; then
+    log_error "Release archive does not contain ferrocrate CLI"
+    return 1
+  fi
+  chmod 0755 "$stage/ferrocrate/ferrocrate"
+  mkdir -p "$install_dir"
+  if [ -e "$install_dir/ferrocrate" ]; then
+    backup="$install_dir/.ferrocrate.previous.$$"
+    mv "$install_dir/ferrocrate" "$backup"
+  fi
+  if ! mv "$stage/ferrocrate/ferrocrate" "$install_dir/ferrocrate"; then
+    log_error "Unable to install ferrocrate; restoring previous binary"
+    return 1
+  fi
+  if [ -n "$backup" ]; then
+    rm -f "$backup"
+  fi
+  backup=""
+  log_info "Installed to $install_dir/ferrocrate"
 }
 
 download_binary() {
@@ -183,13 +268,14 @@ install_binary() {
 }
 
 main() {
-  local os arch version file
+  local os arch version file download_dir
 
   log_info "FerroCrate Installer"
 
   os=$(detect_os_arch)
   arch=$(detect_arch)
   version=$(get_latest_version)
+  validate_version "$version"
 
   log_info "Detected platform: $os/$arch"
   log_info "Latest version: $version"
@@ -204,8 +290,17 @@ main() {
     fi
   fi
 
-  file=$(download_binary "$os" "$arch" "$version")
-  install_binary "$os" "$file"
+  if [ "$os" = "linux" ]; then
+    command -v python3 >/dev/null 2>&1 || { log_error "python3 is required for release provenance verification"; exit 1; }
+    command -v sha256sum >/dev/null 2>&1 || { log_error "sha256sum is required for release verification"; exit 1; }
+    download_dir=$(mktemp -d)
+    trap 'rm -rf "$download_dir"' EXIT
+    file=$(download_linux_release "$arch" "$version" "$download_dir")
+    install_linux_release "$file" "$INSTALL_DIR"
+  else
+    file=$(download_binary "$os" "$arch" "$version")
+    install_binary "$os" "$file"
+  fi
 
   log_info "FerroCrate installation complete!"
   log_info "Run 'ferrocrate --help' to get started"

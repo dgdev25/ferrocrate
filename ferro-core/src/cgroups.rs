@@ -86,12 +86,6 @@ impl CgroupV2Manager {
 
         let group_path = self.root.join(name);
         fs::create_dir_all(&group_path)?;
-
-        let subtree_control = self.root.join(CGROUP_SUBTREE_CONTROL);
-        if subtree_control.exists() {
-            let _ = fs::write(subtree_control, "+memory +cpu +pids\n");
-        }
-
         Ok(group_path)
     }
 
@@ -101,6 +95,46 @@ impl CgroupV2Manager {
         limits: &ResourceLimits,
     ) -> Result<(), CgroupError> {
         let group_path = group_path.as_ref();
+
+        let mut controllers = Vec::new();
+        if limits.memory_max.is_some() {
+            controllers.push("memory");
+        }
+        if limits.cpu_max.is_some() {
+            controllers.push("cpu");
+        }
+        if limits.pids_max.is_some() {
+            controllers.push("pids");
+        }
+        if !controllers.is_empty() {
+            let parent = group_path
+                .parent()
+                .filter(|path| path.join(CGROUP_CONTROLLERS).exists())
+                .unwrap_or(&self.root);
+            let available = fs::read_to_string(parent.join(CGROUP_CONTROLLERS))
+                .unwrap_or_default();
+            if controllers
+                .iter()
+                .any(|controller| !available.split_whitespace().any(|item| item == *controller))
+            {
+                return Err(CgroupError::Io(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "requested cgroup controller is unavailable below {}",
+                        parent.display()
+                    ),
+                )));
+            }
+            let subtree_control = parent.join(CGROUP_SUBTREE_CONTROL);
+            if subtree_control.exists() {
+                let enable = controllers
+                    .iter()
+                    .map(|controller| format!("+{controller}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                fs::write(subtree_control, format!("{enable}\n"))?;
+            }
+        }
 
         if let Some(memory_max) = limits.memory_max {
             fs::write(group_path.join("memory.max"), memory_max.to_string())?;
@@ -298,6 +332,53 @@ mod tests {
             fs::read_to_string(group.join("pids.max")).expect("pids.max"),
             "256"
         );
+    }
+
+    #[test]
+    fn enables_only_requested_available_controllers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("cgroup.controllers"), "memory pids").expect("seed controllers");
+        fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
+
+        let manager = CgroupV2Manager::new(root);
+        let group = manager.create_group("containers/test").expect("group created");
+        manager
+            .apply_limits(
+                &group,
+                &ResourceLimits {
+                    memory_max: Some(1024),
+                    cpu_max: None,
+                    pids_max: Some(4),
+                },
+            )
+            .expect("available limits applied");
+        assert_eq!(fs::read_to_string(root.join("cgroup.subtree_control")).unwrap(), "+memory +pids\n");
+    }
+
+    #[test]
+    fn rejects_unavailable_requested_controller_before_writing_limits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("cgroup.controllers"), "memory pids").expect("seed controllers");
+        fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
+
+        let manager = CgroupV2Manager::new(root);
+        let group = manager.create_group("containers/test").expect("group created");
+        let error = manager
+            .apply_limits(
+                &group,
+                &ResourceLimits {
+                    memory_max: None,
+                    cpu_max: Some(CpuMax {
+                        quota: 1,
+                        period: 1,
+                    }),
+                    pids_max: None,
+                },
+            )
+            .expect_err("unavailable CPU must fail closed");
+        assert!(error.to_string().contains("controller is unavailable"));
     }
 
     #[test]

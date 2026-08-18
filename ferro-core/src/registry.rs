@@ -7,6 +7,7 @@ use reqwest::Method;
 use std::fs::File;
 use std::io::{copy, Read};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::debug;
@@ -88,6 +89,13 @@ pub struct RegistryClient {
     client: Client,
     #[allow(dead_code)]
     config: RegistryClientConfig,
+    bearer_token: Mutex<Option<CachedBearerToken>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedBearerToken {
+    origin: String,
+    token: String,
 }
 
 impl RegistryClient {
@@ -100,7 +108,11 @@ impl RegistryClient {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            bearer_token: Mutex::new(None),
+        })
     }
 
     /// Execute a request with retry logic and exponential backoff
@@ -197,7 +209,7 @@ impl RegistryClient {
 
         if status.as_u16() == 404 {
             if let Some(challenge) = self.ping_bearer_challenge(&image_ref, auth)? {
-                let token = self.fetch_bearer_token(&challenge, auth)?;
+                let token = self.fetch_bearer_token(&challenge, auth, &request_origin(&url)?)?;
                 let retry = self
                     .build_request(
                         &Method::GET,
@@ -411,8 +423,17 @@ impl RegistryClient {
         body: Option<Vec<u8>>,
         auth: Option<&RegistryAuth>,
     ) -> Result<reqwest::blocking::Response, RegistryError> {
+        let origin = request_origin(url)?;
+        let cached_token = self.cached_bearer_token(&origin)?;
         let mut response = self
-            .build_request(&method, url, &headers, body.as_ref(), auth, None)
+            .build_request(
+                &method,
+                url,
+                &headers,
+                body.as_ref(),
+                if cached_token.is_some() { None } else { auth },
+                cached_token.as_deref(),
+            )
             .send()
             .map_err(RegistryError::Request)?;
 
@@ -423,7 +444,8 @@ impl RegistryClient {
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_bearer_challenge);
             if let Some(challenge) = challenge {
-                let token = self.fetch_bearer_token(&challenge, auth)?;
+                self.invalidate_bearer_token(&origin)?;
+                let token = self.fetch_bearer_token(&challenge, auth, &origin)?;
                 response = self
                     .build_request(&method, url, &headers, body.as_ref(), None, Some(&token))
                     .send()
@@ -462,6 +484,7 @@ impl RegistryClient {
         &self,
         challenge: &BearerChallenge,
         auth: Option<&RegistryAuth>,
+        origin: &str,
     ) -> Result<String, RegistryError> {
         let mut request = self.client.get(&challenge.realm);
         if let Some(service) = challenge.service.as_ref() {
@@ -491,8 +514,51 @@ impl RegistryClient {
             .or_else(|| parsed.get("access_token"))
             .and_then(|value| value.as_str())
             .ok_or_else(|| RegistryError::InvalidReference("token missing".to_string()))?;
-        Ok(token.to_string())
+        let token = token.to_string();
+        self.bearer_token
+            .lock()
+            .map_err(|_| {
+                RegistryError::InvalidReference("bearer token cache lock poisoned".to_string())
+            })?
+            .replace(CachedBearerToken {
+                origin: origin.to_string(),
+                token: token.clone(),
+            });
+        Ok(token)
     }
+
+    fn cached_bearer_token(&self, origin: &str) -> Result<Option<String>, RegistryError> {
+        let cache = self.bearer_token.lock().map_err(|_| {
+            RegistryError::InvalidReference("bearer token cache lock poisoned".to_string())
+        })?;
+        Ok(cache
+            .as_ref()
+            .filter(|cached| cached.origin == origin)
+            .map(|cached| cached.token.clone()))
+    }
+
+    fn invalidate_bearer_token(&self, origin: &str) -> Result<(), RegistryError> {
+        let mut cache = self.bearer_token.lock().map_err(|_| {
+            RegistryError::InvalidReference("bearer token cache lock poisoned".to_string())
+        })?;
+        if cache.as_ref().is_some_and(|cached| cached.origin == origin) {
+            *cache = None;
+        }
+        Ok(())
+    }
+}
+
+fn request_origin(url: &str) -> Result<String, RegistryError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| RegistryError::InvalidReference(format!("invalid registry URL: {error}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| RegistryError::InvalidReference("registry URL has no host".to_string()))?;
+    let port = parsed
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Ok(format!("{}://{host}{port}", parsed.scheme()))
 }
 
 fn parse_bearer_challenge(header: &str) -> Option<BearerChallenge> {
@@ -761,13 +827,25 @@ fn append_digest_query(upload_url: &str, digest: &str) -> String {
 mod tests {
     use super::{
         append_digest_query, normalize_location, parse_image_reference, ReferenceSeparator,
-        RegistryAuth, RegistryClient,
+        request_origin, RegistryAuth, RegistryClient,
     };
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use httptest::matchers::{all_of, contains, request};
     use httptest::responders::status_code;
     use httptest::{Expectation, Server};
+
+    #[test]
+    fn bearer_cache_origin_excludes_registry_path() {
+        assert_eq!(
+            request_origin("https://registry.example/v2/team/image/blobs/x").unwrap(),
+            "https://registry.example"
+        );
+        assert_eq!(
+            request_origin("http://127.0.0.1:5000/v2/_catalog").unwrap(),
+            "http://127.0.0.1:5000"
+        );
+    }
 
     #[test]
     fn parses_image_reference_with_default_registry_and_latest_tag() {

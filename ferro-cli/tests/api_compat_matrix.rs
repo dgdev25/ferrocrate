@@ -70,7 +70,9 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "POST",
         path: "/build",
-        coverage: Coverage::Partial,
+        // The route has a dedicated valid tar-context probe below; this matrix
+        // row preserves its fail-closed empty-body validation behavior.
+        coverage: Coverage::Implemented,
         expected_status: 404,
         body: "",
     },
@@ -329,6 +331,34 @@ impl DaemonHarness {
         (code, body)
     }
 
+    fn request_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, String) {
+        let header = format!(
+            "{method} {path} HTTP/1.1\r\nHost: docker\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = UnixStream::connect(&self.socket_path).expect("connect daemon socket");
+        stream.write_all(header.as_bytes()).expect("write headers");
+        stream.write_all(body).expect("write body");
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        let text = String::from_utf8_lossy(&response);
+        let (headers, body) = text.split_once("\r\n\r\n").expect("response headers");
+        let code = headers
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("parse status code");
+        (code, body.to_owned())
+    }
+
     fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -388,6 +418,37 @@ fn docker_api_compatibility_matrix() {
             );
         }
     }
+}
+
+#[test]
+fn docker_api_build_accepts_a_valid_tar_context() {
+    let harness = DaemonHarness::spawn();
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let dockerfile = b"FROM scratch\nCOPY app /app\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("Dockerfile").expect("dockerfile path");
+        header.set_size(dockerfile.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &dockerfile[..]).expect("append dockerfile");
+        let app = b"hello";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("app").expect("app path");
+        header.set_size(app.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &app[..]).expect("append app");
+        builder.finish().expect("finish tar archive");
+    }
+
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/build?dockerfile=Dockerfile&t=matrix%2Fbuild%3Alatest",
+        "application/x-tar",
+        &archive,
+    );
+    assert_eq!(status, 200, "build response: {body}");
+    assert!(body.contains("Successfully built"), "build response: {body}");
 }
 
 #[test]

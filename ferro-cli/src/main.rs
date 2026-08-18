@@ -6958,6 +6958,23 @@ fn append_export_rootfs_dir<W: Write>(
 }
 
 #[cfg(target_os = "linux")]
+fn append_export_archive_path<W: Write>(
+    builder: &mut tar::Builder<W>,
+    rootfs: &Path,
+    selected: &Path,
+    excluded_targets: &[PathBuf],
+) -> Result<(), std::io::Error> {
+    let metadata = std::fs::symlink_metadata(selected)?;
+    if metadata.file_type().is_dir() {
+        append_export_rootfs_dir(builder, rootfs, selected, Path::new("."), excluded_targets)
+    } else if metadata.file_type().is_symlink() {
+        append_commit_symlink(builder, selected, Path::new("."))
+    } else {
+        builder.append_path_with_name(selected, Path::new("."))
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn append_commit_rootfs_dir<W: Write>(
     builder: &mut tar::Builder<W>,
     directory: &Path,
@@ -10781,6 +10798,71 @@ fn handle_docker_compat_connection(
                     builder
                         .finish()
                         .map_err(|error| format!("docker: finish export archive: {error}"))?;
+                }
+                http_response(200, &archive, "application/x-tar")
+            }
+            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/archive") => {
+                let id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/archive");
+                let archive_path = query
+                    .get("path")
+                    .ok_or_else(|| "docker: archive path is required".to_string())?;
+                let relative = archive_path.trim_start_matches('/');
+                if relative.is_empty()
+                    || relative.split('/').any(|component| {
+                        component.is_empty() || component == "." || component == ".."
+                    })
+                {
+                    return Err(
+                        "docker: archive path must be a normalized absolute path".to_string()
+                    );
+                }
+                let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+                let rootfs = runtime_dir
+                    .join("containers")
+                    .join(&record.id)
+                    .join("rootfs");
+                if !rootfs.is_dir() {
+                    return Err(format!(
+                        "docker: container rootfs is unavailable: {}",
+                        rootfs.display()
+                    ));
+                }
+                let selected = rootfs.join(relative);
+                let selected = selected
+                    .canonicalize()
+                    .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
+                if !selected.starts_with(&rootfs) {
+                    return Err("docker: archive path escapes the container rootfs".to_string());
+                }
+                let excluded_targets = record
+                    .mounts
+                    .iter()
+                    .map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
+                    .chain(
+                        record
+                            .tmpfs_mounts
+                            .iter()
+                            .map(|mount| PathBuf::from(mount.target.trim_start_matches('/'))),
+                    )
+                    .collect::<Vec<_>>();
+                let selected_relative = selected
+                    .strip_prefix(&rootfs)
+                    .expect("canonical archive path must remain beneath rootfs");
+                if excluded_targets.iter().any(|target| {
+                    selected_relative == target || selected_relative.starts_with(target)
+                }) {
+                    return Err("docker: archive path is a persisted mount target".to_string());
+                }
+                let mut archive = Vec::new();
+                {
+                    let mut builder = tar::Builder::new(&mut archive);
+                    append_export_archive_path(&mut builder, &rootfs, &selected, &excluded_targets)
+                        .map_err(|error| format!("docker: archive path: {error}"))?;
+                    builder
+                        .finish()
+                        .map_err(|error| format!("docker: finish archive: {error}"))?;
                 }
                 http_response(200, &archive, "application/x-tar")
             }

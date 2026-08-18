@@ -149,6 +149,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/containers/missing/archive?path=%2Fetc%2Fhosts",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/missing/start",
         coverage: Coverage::Implemented,

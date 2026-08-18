@@ -48,6 +48,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/test-rootless-subid-diagnostics.sh \
   scripts/test-reliability-matrix-preflight.sh \
   scripts/perf/check-docker-comparison.sh scripts/perf/test-check-docker-comparison.sh \
+  scripts/perf/docker-image-lifecycle-comparison.sh \
   scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \
   scripts/verify-indie-release-plan.sh \
   scripts/test-docker-cli-compat.sh \

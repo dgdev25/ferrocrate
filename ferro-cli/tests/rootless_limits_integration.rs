@@ -22,9 +22,11 @@ fn rootless_run_attaches_before_workload_and_applies_limits() {
     let root = tempfile::tempdir().expect("runtime tempdir");
     let runtime = root.path().join("runtime");
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let image = std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE")
+        .unwrap_or_else(|_| "alpine:3.20".to_string());
     let pull = Command::new(binary)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
-        .args(["pull", "alpine:3.20"])
+        .args(["pull", &image])
         .output()
         .expect("pull alpine");
     assert!(
@@ -47,7 +49,7 @@ fn rootless_run_attaches_before_workload_and_applies_limits() {
             "16777216",
             "--pids-max",
             "32",
-            "alpine:3.20",
+            &image,
             "sh",
             "-c",
             "sleep 30",

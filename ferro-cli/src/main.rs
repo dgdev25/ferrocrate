@@ -11483,12 +11483,35 @@ fn handle_docker_compat_connection(
             ("DELETE", path) if path.starts_with("/containers/") => {
                 let id = path.trim_start_matches("/containers/");
                 let force = parse_docker_bool_query(query.get("force"), "force")?;
-                let removed_pending = state
-                    .pending
-                    .lock()
-                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
-                    .remove(id)
-                    .is_some();
+                // Docker accepts either the provisional ID returned by
+                // `/containers/create` or its `?name=` alias before the
+                // container has been started. Resolve both forms while the
+                // record still lives in the durable pending map.
+                let pending_id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    if pending.contains_key(id) {
+                        Some(id.to_string())
+                    } else {
+                        pending
+                            .iter()
+                            .find(|(_, spec)| spec.name.as_deref() == Some(id))
+                            .map(|(pending_id, _)| pending_id.clone())
+                    }
+                };
+                let removed_pending = pending_id
+                    .as_deref()
+                    .map(|pending_id| {
+                        state
+                            .pending
+                            .lock()
+                            .map_err(|error| format!("docker: pending lock poisoned: {error}"))
+                            .map(|mut pending| pending.remove(pending_id).is_some())
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
                 if removed_pending {
                     state.persist_pending()?;
                     http_response(204, &[], "text/plain")

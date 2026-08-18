@@ -496,6 +496,34 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
 }
 
 #[test]
+fn docker_compat_removes_created_container_by_name_before_start() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful pending-container name fixture");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=pending-name HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create response JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("created id")
+        .to_string();
+
+    let (status, response) = harness.request("DELETE", "/v1.45/containers/pending-name");
+    assert_eq!(status, 204, "name removal response={response}");
+    let (status, response) = harness.request("DELETE", &format!("/v1.45/containers/{id}"));
+    assert_eq!(status, 404, "removed id response={response}");
+}
+
+#[test]
 fn docker_compat_exec_inspect_reports_created_exec_state() {
     if nix::unistd::geteuid().is_root() {
         eprintln!("skipping rootful exec-inspect fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");

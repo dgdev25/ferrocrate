@@ -2835,7 +2835,9 @@ fn run_stage_commands(
                         fs::rename(backup, target)?;
                     }
                 }
-                return Err(err.into());
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "RUN sandbox spawn failed: {err}"
+                )));
             }
         };
         let started = Instant::now();

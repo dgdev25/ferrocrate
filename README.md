@@ -61,6 +61,8 @@ not included; reproducible local/release gates are documented in
 
 ## Project status
 
-This repository is not yet declaring a universal Docker replacement. A public
-license decision is still required before open-source publication; no license
-is implied by this repository until that decision is recorded.
+This repository is not declaring a universal Docker replacement. The current
+indie-release target is a Linux-first local development runtime, with the
+qualified and experimental boundaries documented in
+[`docs/INDIE_RELEASE_PLAN.md`](docs/INDIE_RELEASE_PLAN.md). The repository is
+licensed under [Apache-2.0](LICENSE).

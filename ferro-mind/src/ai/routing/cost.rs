@@ -1310,4 +1310,59 @@ mod tests {
             ExecutionError::HttpStatus { status: 503, .. }
         ));
     }
+
+    #[test]
+    fn reconciles_anthropic_reported_input_and_output_usage() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let mut request = [0u8; 8192];
+            let size = stream.read(&mut request).expect("request bytes");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.contains("\"model\":\"claude-test\""));
+            assert!(request.contains("anthropic prompt"));
+            let body =
+                r#"{"content":[{"type":"text","text":"anthropic reply"}],"usage":{"input_tokens":2,"output_tokens":1}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("response");
+        });
+        let providers = vec![ProviderAdapter::Http(HttpProviderEndpoint {
+            provider: Provider {
+                name: "cloud-anthropic".into(),
+                cost_per_1k_tokens: 8.0,
+                quality: 0.96,
+                avg_latency_ms: 380,
+                local: false,
+            },
+            url: format!("http://{address}/v1/messages"),
+            api_key: Some("test-key".into()),
+            model: "claude-test".into(),
+            protocol: HttpProviderProtocol::AnthropicMessages,
+        })];
+        let budget = TokenBudget::new(5);
+        let result = execute_routed_prompt_with_adapters_metered(
+            &providers,
+            &RoutingPolicy {
+                min_quality: 0.9,
+                ..RoutingPolicy::default()
+            },
+            "anthropic prompt",
+            std::time::Duration::from_secs(2),
+            &budget,
+        )
+        .expect("HTTP provider response");
+        server.join().expect("server");
+        assert_eq!(
+            result,
+            ("cloud-anthropic".into(), "anthropic reply".into(), 3)
+        );
+    }
 }

@@ -839,6 +839,39 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a privileged delegated cgroup-v2 root; run with FERROCRATE_PLUGIN_CGROUP_ROOT"]
+    fn cgroup_execution_applies_limits_on_a_real_hierarchy() {
+        let cgroup_root = std::env::var_os("FERROCRATE_PLUGIN_CGROUP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("FERROCRATE_PLUGIN_CGROUP_ROOT");
+        assert!(cgroup_root.join("cgroup.controllers").is_file());
+        assert!(
+            cgroup_root.join("memory.controllers").is_file()
+                || cgroup_root.join("memory.max").is_file()
+        );
+        assert!(
+            cgroup_root.join("pids.controllers").is_file()
+                || cgroup_root.join("pids.max").is_file()
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let manifest = signed_manifest(
+            &script(&temp, "printf cgroup-qualified"),
+            PluginLimits {
+                memory_bytes: 64 * 1024 * 1024,
+                pids: 16,
+                ..PluginLimits::default()
+            },
+            &key,
+        );
+        let output =
+            execute_plugin_with_cgroup(&manifest, &key.verifying_key(), &[], b"", &cgroup_root)
+                .expect("plugin should execute in delegated cgroup");
+        assert_eq!(output.stdout, b"cgroup-qualified");
+    }
+
+    #[test]
     fn delegated_plugin_execution_persists_intent_effect_and_cleanup_without_output() {
         let temp = tempfile::tempdir().expect("tempdir");
         let key = SigningKey::from_bytes(&[8u8; 32]);

@@ -49,9 +49,9 @@ get_gpg_key() {
 
   if [ -n "${FERROCRATE_GPG_KEY_ID:-}" ]; then
     key_id="$FERROCRATE_GPG_KEY_ID"
-    log_info "Using GPG key from environment: $key_id"
+    log_info "Using GPG key from environment: $key_id" >&2
   else
-    log_warn "No GPG_KEY_ID in environment. Available keys:"
+    log_warn "No GPG_KEY_ID in environment. Available keys:" >&2
     gpg --list-secret-keys --keyid-format short
 
     echo ""
@@ -93,7 +93,7 @@ sign_binary() {
   log_info "Signing: $binary"
 
   # Create detached signature
-  if ! gpg --default-key "$key_id" --detach-sign --armor "$binary"; then
+  if ! gpg --batch --yes --default-key "$key_id" --detach-sign --armor "$binary"; then
     log_error "Failed to sign: $binary"
     return 1
   fi

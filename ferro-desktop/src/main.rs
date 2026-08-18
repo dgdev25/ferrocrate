@@ -287,9 +287,8 @@ fn default_vm_name() -> String {
 }
 
 fn command_exists(bin: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin} >/dev/null 2>&1"))
+    Command::new(bin)
+        .arg("--version")
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -2194,7 +2193,7 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
 mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_requires_desktop_entitlement,
-        command_targets_ferrocrate, exec_mode_from_env, gather_phase0_check, load_channel_manifest,
+        command_exists, command_targets_ferrocrate, exec_mode_from_env, gather_phase0_check, load_channel_manifest,
         load_forward_entries, load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
         render_windows_service_script, run_request, save_forward_entries, save_vm_state,
         should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr, vm_state_running,
@@ -2202,6 +2201,12 @@ mod tests {
         VmState,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn command_exists_treats_binary_name_as_literal_argv() {
+        assert!(command_exists("true"));
+        assert!(!command_exists("true; printf injected"));
+    }
 
     #[test]
     fn executes_local_command() {

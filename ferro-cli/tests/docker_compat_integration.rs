@@ -740,18 +740,13 @@ fn docker_compat_attach_forwards_stdin_over_hijacked_socket() {
     assert_eq!(start.0, 204, "start response: {}", start.1);
     let inspect = harness.request("GET", "/v1.45/containers/attach-stdin-wire/json");
     assert_eq!(inspect.0, 200, "inspect response: {}", inspect.1);
-    let id = serde_json::from_str::<serde_json::Value>(&inspect.1)
-        .expect("inspect JSON")
-        .get("Id")
-        .and_then(serde_json::Value::as_str)
-        .expect("container id")
-        .to_string();
+    let _ = serde_json::from_str::<serde_json::Value>(&inspect.1).expect("inspect JSON");
 
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
     stream
         .write_all(
             format!(
-                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+                "POST /v1.45/containers/attach-stdin-wire/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
             )
             .as_bytes(),
         )

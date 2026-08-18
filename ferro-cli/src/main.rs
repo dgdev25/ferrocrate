@@ -11019,9 +11019,16 @@ fn handle_docker_compat_connection(
                 }
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/attach");
+                let id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    docker_resolve_id(&runtime, &pending, requested_id)?
+                };
                 // Docker's attach query flags are validated even though the
                 // local runtime exposes its persisted combined log stream as
                 // stdout. Keep the flags explicit so `logs=0` does not leak
@@ -11054,18 +11061,18 @@ fn handle_docker_compat_connection(
                     .map(|value| parse_docker_bool_query(Some(value), "stderr"))
                     .transpose()?
                     .unwrap_or(true);
-                let pending_attach = runtime.logs(id).is_err();
+                let pending_attach = runtime.logs(&id).is_err();
                 if pending_attach {
                     let pending = state
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
-                        .contains_key(id);
+                        .contains_key(&id);
                     if !pending {
                         return Err(format!("docker: container not found: {id}"));
                     }
                 }
-                let (stdout, stderr) = runtime.logs_split(id).unwrap_or_default();
+                let (stdout, stderr) = runtime.logs_split(&id).unwrap_or_default();
                 let output = if logs_requested {
                     docker_raw_stream(
                         if stdout_requested { &stdout } else { "" },

@@ -566,6 +566,16 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
     let (status, response) = harness.request("POST", "/v1.45/containers/exec-inspect/start");
     assert_eq!(status, 204, "container start response={response}");
 
+    let (status, response) = harness.request("GET", "/v1.45/containers/exec-inspect/json");
+    assert_eq!(status, 200, "post-start name inspect response={response}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("name inspect JSON");
+    assert_eq!(inspect["Id"], container_id);
+    let (status, response) = harness.request("GET", "/v1.45/containers/exec-inspect/logs");
+    assert_eq!(status, 200, "post-start name logs response={response}");
+    let (status, response) = harness.request("GET", "/v1.45/containers/exec-inspect/changes");
+    assert_eq!(status, 200, "post-start name changes response={response}");
+    assert!(response.starts_with('['), "changes response={response}");
+
     let exec_body = r#"{"Cmd":["/bin/busybox","true"]}"#;
     let exec_request = format!(
         "POST /v1.45/containers/{container_id}/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -600,6 +610,9 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
         "exit code={}",
         inspect["ExitCode"]
     );
+
+    let (status, response) = harness.request("DELETE", "/v1.45/containers/exec-inspect");
+    assert_eq!(status, 204, "post-start name removal response={response}");
 }
 
 #[test]

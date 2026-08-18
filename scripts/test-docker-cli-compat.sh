@@ -64,14 +64,42 @@ docker -H "$host" ps --all >/dev/null
 docker -H "$host" images >/dev/null
 
 name="docker-cli-compat-$$"
+image="docker-cli-compat-image-$$:latest"
+context_dir="$runtime_dir/context"
+mkdir -p "$context_dir"
+printf 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n' >"$context_dir/Dockerfile"
+if [[ ! -x /bin/busybox ]]; then
+  echo "Docker CLI lifecycle smoke requires /bin/busybox" >&2
+  exit 1
+fi
+cp /bin/busybox "$context_dir/busybox"
+chmod 0755 "$context_dir/busybox"
+tar -C "$context_dir" -cf "$runtime_dir/context.tar" Dockerfile busybox
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Docker CLI lifecycle smoke requires curl for the Docker-compatible build endpoint" >&2
+  exit 1
+fi
+curl --fail --silent --show-error --unix-socket "$socket" \
+  -H 'Content-Type: application/x-tar' \
+  --data-binary "@$runtime_dir/context.tar" \
+  "http://localhost/v1.45/build?dockerfile=Dockerfile&t=${image//:/%3A}" \
+  >"$runtime_dir/build.jsonl"
 events_file="$runtime_dir/events.jsonl"
 timeout 5 docker -H "$host" events --since 0s --filter type=container \
   >"$events_file" 2>"$runtime_dir/events.stderr" &
 events_pid=$!
 sleep 0.2
-container_id="$(docker -H "$host" create --name "$name" busybox true)"
+container_id="$(docker -H "$host" create --network none --name "$name" "$image" /bin/busybox true)"
 [[ -n "$container_id" ]] || { echo "docker create returned no ID" >&2; exit 1; }
 docker -H "$host" inspect "$name" >/dev/null
+docker -H "$host" start "$name" >/dev/null
+wait_status="$(docker -H "$host" wait "$name")"
+[[ "$wait_status" == "0" ]] || {
+  echo "Docker CLI wait returned unexpected status: $wait_status" >&2
+  exit 1
+}
+docker -H "$host" logs "$name" >/dev/null
+docker -H "$host" diff "$name" >/dev/null
 docker -H "$host" rm "$name" >/dev/null
 wait "$events_pid" 2>/dev/null || true
 grep -q 'container create' "$events_file" || {
@@ -81,4 +109,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/create/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/create/start/wait/logs/diff/rm/events"

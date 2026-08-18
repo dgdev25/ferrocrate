@@ -10811,25 +10811,28 @@ fn handle_docker_compat_connection(
                 http_response(200, json.as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/json") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/json");
-                let body = match runtime.inspect(id) {
-                    Ok(record) => docker_inspect_payload(&record),
-                    Err(error) => {
-                        let pending = state.pending.lock().map_err(|lock_error| {
-                            format!("docker: pending lock poisoned: {lock_error}")
-                        })?;
-                        let (pending_id, spec) = pending
-                            .get_key_value(id)
-                            .or_else(|| {
-                                pending
-                                    .iter()
-                                    .find(|(_, spec)| spec.name.as_deref() == Some(id))
-                            })
-                            .ok_or_else(|| error.to_string())?;
-                        docker_pending_inspect_payload(pending_id, spec)
-                    }
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let body = if let Ok(record) = runtime.inspect(requested_id) {
+                    docker_inspect_payload(&record)
+                } else if let Ok(id) = resolve_container_id(&runtime, requested_id) {
+                    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+                    docker_inspect_payload(&record)
+                } else {
+                    let (pending_id, spec) = pending
+                        .get_key_value(requested_id)
+                        .or_else(|| {
+                            pending
+                                .iter()
+                                .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
+                        })
+                        .ok_or_else(|| format!("container not found: {requested_id}"))?;
+                    docker_pending_inspect_payload(pending_id, spec)
                 };
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -11570,17 +11573,24 @@ fn handle_docker_compat_connection(
                     state.persist_pending()?;
                     http_response(204, &[], "text/plain")
                 } else {
-                    if let Ok(record) = runtime.inspect(id) {
+                    let resolved_id =
+                        resolve_container_id(&runtime, id).unwrap_or_else(|_| id.to_string());
+                    if let Ok(record) = runtime.inspect(&resolved_id) {
                         if record.status == "running" {
                             if !force {
-                                return Err(format!("container {id} is still running"));
+                                return Err(format!("container {resolved_id} is still running"));
                             }
                             runtime
-                                .kill_with_signal(id, Some(nix::sys::signal::Signal::SIGKILL))
+                                .kill_with_signal(
+                                    &resolved_id,
+                                    Some(nix::sys::signal::Signal::SIGKILL),
+                                )
                                 .map_err(|error| error.to_string())?;
                         }
                     }
-                    runtime.remove(id).map_err(|err| err.to_string())?;
+                    runtime
+                        .remove(&resolved_id)
+                        .map_err(|err| err.to_string())?;
                     http_response(204, &[], "text/plain")
                 }
             }
@@ -12917,6 +12927,8 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
     let cpu_quota = normalize_docker_limit(host_config.cpu_quota, "CpuQuota")?;
     let cpu_period = normalize_docker_limit(host_config.cpu_period, "CpuPeriod")?;
     let pids_max = normalize_docker_limit(host_config.pids_limit, "PidsLimit")?;
+    let workdir = request.working_dir.filter(|value| !value.trim().is_empty());
+    let user = request.user.filter(|value| !value.trim().is_empty());
     Ok(DockerCreateSpec {
         image: request.image,
         cmd,
@@ -12924,8 +12936,8 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         labels,
         binds: host_config.binds.unwrap_or_default(),
         publish,
-        workdir: request.working_dir,
-        user: request.user,
+        workdir,
+        user,
         name,
         network_mode,
         auto_remove: host_config.auto_remove,

@@ -8220,6 +8220,22 @@ fn handle_pull_authorized(
     execute_image_pull(store, lazy, binding, proof)
 }
 
+/// Docker's image-create endpoint is a JSON stream, even when a pull has no
+/// layer progress to report. Returning a terminal status keeps socket clients
+/// from having to special-case Ferrocrate's formerly empty `{}` response.
+fn docker_pull_status(reference: &str, lazy: bool) -> Vec<u8> {
+    let status = if lazy {
+        "Manifest fetched"
+    } else {
+        "Pull complete"
+    };
+    let body = serde_json::json!({
+        "status": status,
+        "id": reference,
+    });
+    format!("{}\n", body).into_bytes()
+}
+
 fn execute_image_pull(
     store: &LocalImageStore,
     lazy: bool,
@@ -11301,7 +11317,8 @@ fn handle_docker_compat_connection(
                     .get("lazy")
                     .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
                 handle_pull_authorized(&store, &reference, lazy, &origin, &surface_authorization)?;
-                http_response(200, b"{}", "application/json")
+                let body = docker_pull_status(&reference, lazy);
+                http_response(200, &body, "application/json")
             }
             ("POST", "/plugins/pull") => docker_error_response(
                 404,
@@ -13590,6 +13607,22 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn docker_pull_status_is_a_terminal_json_stream_record() {
+        let body = super::docker_pull_status("alpine:latest", false);
+        let line = std::str::from_utf8(&body)
+            .expect("status body utf8")
+            .trim_end();
+        let value: serde_json::Value = serde_json::from_str(line).expect("status JSON");
+        assert_eq!(value["status"], "Pull complete");
+        assert_eq!(value["id"], "alpine:latest");
+        assert!(body.ends_with(b"\n"));
+
+        let lazy = super::docker_pull_status("alpine:latest", true);
+        let value: serde_json::Value = serde_json::from_slice(&lazy).expect("lazy status JSON");
+        assert_eq!(value["status"], "Manifest fetched");
     }
 
     #[test]

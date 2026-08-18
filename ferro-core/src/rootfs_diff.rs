@@ -175,7 +175,11 @@ mod tests {
         fs::create_dir(root.path().join("mount")).expect("mount");
         fs::write(root.path().join("mount/ignored"), b"ignored").expect("ignored");
         let baseline = capture(root.path(), &[root.path().join("mount")]).expect("snapshot");
-        let baseline_path = root.path().parent().unwrap().join("baseline.json");
+        // Keep the baseline outside the rootfs in its own unique directory;
+        // using a shared `/tmp/baseline.json` makes rootful and unprivileged
+        // test runs interfere through ownership and permissions.
+        let baseline_dir = tempfile::tempdir().expect("baseline directory");
+        let baseline_path = baseline_dir.path().join("baseline.json");
         write_baseline(&baseline_path, &baseline).expect("write baseline");
         fs::write(root.path().join("modify"), b"new").expect("modify");
         fs::remove_file(root.path().join("delete")).expect("delete");

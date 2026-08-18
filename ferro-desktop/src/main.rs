@@ -2192,13 +2192,13 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_path_for_disk, build_vm_command, command_requires_desktop_entitlement,
-        command_exists, command_targets_ferrocrate, exec_mode_from_env, gather_phase0_check, load_channel_manifest,
-        load_forward_entries, load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
-        render_windows_service_script, run_request, save_forward_entries, save_vm_state,
-        should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr, vm_state_running,
-        Commands, ExecMode, ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig,
-        VmState,
+        backup_path_for_disk, build_vm_command, command_exists,
+        command_requires_desktop_entitlement, command_targets_ferrocrate, exec_mode_from_env,
+        gather_phase0_check, load_channel_manifest, load_forward_entries, load_vm_state,
+        parse_exec_mode, render_macos_launch_agent_plist, render_windows_service_script,
+        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, Commands, ExecMode,
+        ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
     use std::path::PathBuf;
 

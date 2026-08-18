@@ -1,3 +1,4 @@
+use crate::wasm::{WasmRegistry, WasmRequest};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -41,6 +42,29 @@ pub struct HttpProviderEndpoint {
     pub protocol: HttpProviderProtocol,
 }
 
+/// A local inference tier backed by a registered WASM engine.
+///
+/// The registry is shared so callers can register validated engines once and
+/// route multiple prompts through the same immutable dispatch surface.
+#[derive(Clone)]
+pub struct WasmProviderEndpoint {
+    pub provider: Provider,
+    pub registry: Arc<WasmRegistry>,
+    pub engine: String,
+    pub model: String,
+}
+
+impl std::fmt::Debug for WasmProviderEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WasmProviderEndpoint")
+            .field("provider", &self.provider)
+            .field("engine", &self.engine)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A provider candidate backed by either a local executable or a structured
 /// HTTP endpoint. Keeping the adapter explicit makes tier selection auditable
 /// and prevents an unavailable tier from being silently substituted.
@@ -48,6 +72,7 @@ pub struct HttpProviderEndpoint {
 pub enum ProviderAdapter {
     Command(ProviderEndpoint),
     Http(HttpProviderEndpoint),
+    Wasm(WasmProviderEndpoint),
 }
 
 impl ProviderAdapter {
@@ -55,6 +80,7 @@ impl ProviderAdapter {
         match self {
             Self::Command(endpoint) => &endpoint.provider,
             Self::Http(endpoint) => &endpoint.provider,
+            Self::Wasm(endpoint) => &endpoint.provider,
         }
     }
 }
@@ -79,6 +105,8 @@ pub enum ExecutionError {
     InvalidResponse(String),
     #[error("provider endpoint is invalid: {0}")]
     InvalidEndpoint(String),
+    #[error("WASM provider failed: {0}")]
+    Wasm(String),
     #[error("provider token budget exceeded: used {used}, budget {budget}")]
     TokenBudgetExceeded { used: u64, budget: u64 },
 }
@@ -316,6 +344,9 @@ pub fn execute_routed_prompt_with_adapters(
         ProviderAdapter::Http(endpoint) => {
             execute_routed_http_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
         }
+        ProviderAdapter::Wasm(endpoint) => {
+            execute_routed_wasm_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+        }
     }
 }
 
@@ -354,6 +385,12 @@ pub fn execute_routed_prompt_with_adapters_failover(
                 execute_routed_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
             }
             ProviderAdapter::Http(endpoint) => execute_routed_http_prompt(
+                std::slice::from_ref(endpoint),
+                policy,
+                prompt,
+                timeout,
+            ),
+            ProviderAdapter::Wasm(endpoint) => execute_routed_wasm_prompt(
                 std::slice::from_ref(endpoint),
                 policy,
                 prompt,
@@ -406,6 +443,12 @@ pub fn execute_routed_prompt_with_adapters_metered(
             let response_tokens = usage.unwrap_or_else(|| estimate_tokens(&response));
             (provider, response, response_tokens)
         }
+        ProviderAdapter::Wasm(endpoint) => {
+            let (provider, response) =
+                execute_routed_wasm_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)?;
+            let response_tokens = estimate_tokens(&response);
+            (provider, response, response_tokens)
+        }
     };
     budget.reserve(response_tokens)?;
     Ok((provider, response, budget.used_tokens()))
@@ -454,6 +497,10 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
                 prompt,
                 timeout,
             ),
+            ProviderAdapter::Wasm(endpoint) => {
+                execute_routed_wasm_prompt(std::slice::from_ref(endpoint), policy, prompt, timeout)
+                    .map(|(provider, response)| (provider, response, None))
+            }
         };
         match result {
             Ok((provider, response, usage)) => {
@@ -484,6 +531,54 @@ pub fn execute_routed_http_prompt(
     let (provider, response, _) =
         execute_routed_http_prompt_with_usage(providers, policy, prompt, timeout)?;
     Ok((provider, response))
+}
+
+/// Execute a selected local WASM provider through its registered engine.
+///
+/// The timeout is still required at the routing boundary. Engine execution is
+/// synchronous and must be bounded by the engine implementation itself; a
+/// zero timeout is rejected so callers cannot accidentally claim an unbounded
+/// tier-chain operation is safe.
+fn execute_routed_wasm_prompt(
+    providers: &[WasmProviderEndpoint],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<(String, String), ExecutionError> {
+    if timeout.is_zero() {
+        return Err(ExecutionError::Timeout(0));
+    }
+    let candidates: Vec<Provider> = providers
+        .iter()
+        .map(|entry| entry.provider.clone())
+        .collect();
+    let selected = choose_provider(&candidates, policy).ok_or(ExecutionError::NoProvider)?;
+    let endpoint = providers
+        .iter()
+        .find(|entry| entry.provider.name == selected.name)
+        .ok_or(ExecutionError::NoProvider)?;
+    if endpoint.engine.trim().is_empty() || endpoint.model.trim().is_empty() {
+        return Err(ExecutionError::InvalidEndpoint(
+            "WASM engine and model must not be empty".into(),
+        ));
+    }
+    let response = endpoint
+        .registry
+        .infer(
+            &endpoint.engine,
+            WasmRequest {
+                input: prompt.as_bytes().to_vec(),
+                model: endpoint.model.clone(),
+            },
+        )
+        .map_err(ExecutionError::Wasm)?;
+    let text = String::from_utf8(response.output)
+        .map_err(|error| ExecutionError::InvalidResponse(error.to_string()))?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ExecutionError::EmptyResponse);
+    }
+    Ok((endpoint.provider.name.clone(), text.to_string()))
 }
 
 fn execute_routed_http_prompt_with_usage(
@@ -629,6 +724,25 @@ fn provider_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wasm::{WasmInferenceEngine, WasmResponse};
+    use std::collections::HashMap;
+
+    struct EchoWasmEngine;
+
+    impl WasmInferenceEngine for EchoWasmEngine {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn infer(&self, request: crate::wasm::WasmRequest) -> Result<WasmResponse, String> {
+            let mut output = b"wasm:".to_vec();
+            output.extend_from_slice(&request.input);
+            Ok(WasmResponse {
+                output,
+                metadata: HashMap::new(),
+            })
+        }
+    }
 
     fn sample_providers() -> Vec<Provider> {
         vec![
@@ -738,6 +852,35 @@ mod tests {
         assert_eq!(name, "local-test");
         assert_eq!(response, "reply:hello; touch SHOULD_NOT_RUN");
         assert!(!temp.path().join("SHOULD_NOT_RUN").exists());
+    }
+
+    #[test]
+    fn executes_selected_provider_through_registered_wasm_engine() {
+        let mut registry = WasmRegistry::default();
+        registry.register(EchoWasmEngine);
+        let adapters = vec![ProviderAdapter::Wasm(WasmProviderEndpoint {
+            provider: Provider {
+                name: "local-wasm".into(),
+                cost_per_1k_tokens: 0.0,
+                quality: 0.8,
+                avg_latency_ms: 4,
+                local: true,
+            },
+            registry: Arc::new(registry),
+            engine: "echo".into(),
+            model: "fixture-model".into(),
+        })];
+        let result = execute_routed_prompt_with_adapters(
+            &adapters,
+            &RoutingPolicy {
+                min_quality: 0.7,
+                ..RoutingPolicy::default()
+            },
+            "hello",
+            std::time::Duration::from_secs(1),
+        )
+        .expect("WASM provider response");
+        assert_eq!(result, ("local-wasm".into(), "wasm:hello".into()));
     }
 
     #[test]

@@ -41,6 +41,7 @@ const EPOCH: &[u8] = b"epoch";
 
 #[cfg(test)]
 type CheckpointLockHook = (
+    [u8; 16],
     std::sync::Arc<std::sync::Barrier>,
     std::sync::Arc<std::sync::Barrier>,
 );
@@ -48,13 +49,16 @@ type CheckpointLockHook = (
 static CHECKPOINT_LOCK_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<CheckpointLockHook>>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
-fn checkpoint_lock_hook() {
+fn checkpoint_lock_hook(journal_id: [u8; 16]) {
     let hook = CHECKPOINT_LOCK_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .unwrap()
         .clone();
-    if let Some((reached, release)) = hook {
+    if let Some((expected_journal_id, reached, release)) = hook {
+        if expected_journal_id != journal_id {
+            return;
+        }
         reached.wait();
         release.wait();
     }
@@ -148,7 +152,7 @@ impl WitnessJournal {
         record.result_digest = Some(artifact_digest);
         super::validation::validate_record(&record)?;
         #[cfg(test)]
-        checkpoint_lock_hook();
+        checkpoint_lock_hook(self.journal_id);
         let _guard = self.coordinator.lock().map_err(|_| JournalError::Corrupt)?;
         if record.epoch != self.current_epoch() {
             return Err(JournalError::ProofMismatch);
@@ -1091,7 +1095,7 @@ mod epoch_lock_tests {
         *CHECKPOINT_LOCK_HOOK
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
-            .unwrap() = Some((reached.clone(), release.clone()));
+            .unwrap() = Some(([91; 16], reached.clone(), release.clone()));
         let worker_journal = journal.clone();
         let worker = std::thread::spawn(move || {
             worker_journal.append_checkpoint_publication([8; 32], publication())

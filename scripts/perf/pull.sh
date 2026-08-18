@@ -3,7 +3,7 @@ set -euo pipefail
 
 IMAGE=${FERROCRATE_PERF_IMAGE:-alpine:latest}
 RUNTIME_DIR=${FERROCRATE_RUNTIME_DIR:-$HOME/.ferrocrate}
-BLOB_DIR="$RUNTIME_DIR/images/blobs"
+ISOLATED=${FERROCRATE_PERF_PULL_ISOLATED:-0}
 MIN_PULL_MIB_PER_S=${FERROCRATE_PERF_PULL_MIN_MIB_PER_S:-50}
 ENFORCE=${FERROCRATE_PERF_ENFORCE:-1}
 ALLOW_SKIP=${FERROCRATE_PERF_ALLOW_SKIP:-0}
@@ -12,10 +12,23 @@ if [ ! -x ./target/release/ferro-cli ]; then
   cargo build -p ferro-cli --release
 fi
 
+cleanup() {
+  if [ "${ISOLATED}" = "1" ] && [ -n "${isolated_runtime_dir:-}" ]; then
+    rm -rf "$isolated_runtime_dir"
+  fi
+}
+trap cleanup EXIT
+
+if [ "${ISOLATED}" = "1" ]; then
+  isolated_runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-pull.XXXXXX")
+  RUNTIME_DIR="$isolated_runtime_dir"
+fi
+
+BLOB_DIR="$RUNTIME_DIR/images/blobs"
 mkdir -p "$BLOB_DIR"
 before=$(du -sb "$BLOB_DIR" | awk '{print $1}')
 start_ns=$(date +%s%N)
-if ! ./target/release/ferro-cli pull "$IMAGE" >/dev/null 2>&1; then
+if ! FERROCRATE_RUNTIME_DIR="$RUNTIME_DIR" ./target/release/ferro-cli pull "$IMAGE" >/dev/null 2>&1; then
   if [ "${ALLOW_SKIP}" = "1" ]; then
     echo "perf.pull_skipped=1"
     echo "perf.pull_skip_reason=pull_failed"
@@ -39,6 +52,11 @@ echo "perf.pull_bytes=${bytes}"
 echo "perf.pull_ms=${elapsed_ms}"
 echo "perf.pull_mib_per_s=${mbps}"
 echo "perf.pull_min_mib_per_s_slo=${MIN_PULL_MIB_PER_S}"
+if [ "${ISOLATED}" = "1" ]; then
+  echo "perf.pull_store=isolated"
+else
+  echo "perf.pull_store=configured"
+fi
 
 if [ "${bytes}" -le 0 ]; then
   if [ "${ALLOW_SKIP}" = "1" ]; then

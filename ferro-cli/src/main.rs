@@ -11094,19 +11094,21 @@ fn handle_docker_compat_connection(
                 }
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/top") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/top");
-                let body = docker_top_payload(&runtime, id)?;
+                let id = resolve_container_id(&runtime, requested_id)?;
+                let body = docker_top_payload(&runtime, &id)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stats");
-                let stats = runtime.stats(id).map_err(|err| err.to_string())?;
+                let id = resolve_container_id(&runtime, requested_id)?;
+                let stats = runtime.stats(&id).map_err(|err| err.to_string())?;
                 if query.get("stream").is_some_and(|value| value == "1") {
-                    stats_follow = Some(id.to_string());
+                    stats_follow = Some(id.clone());
                     docker_chunked_headers(200, "application/json")
                 } else {
                     let body = docker_stats_payload(&stats);
@@ -11401,44 +11403,49 @@ fn handle_docker_compat_connection(
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/stop") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stop");
+                let id = resolve_container_id(&runtime, requested_id)?;
                 let timeout = parse_docker_stop_timeout(&query)?;
-                runtime.stop(id, timeout).map_err(|err| err.to_string())?;
+                runtime.stop(&id, timeout).map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/restart") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/restart");
+                let id = resolve_container_id(&runtime, requested_id)?;
                 let timeout = parse_docker_stop_timeout(&query)?;
                 runtime
-                    .restart(id, timeout)
+                    .restart(&id, timeout)
                     .map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/pause") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/pause");
-                runtime.pause(id).map_err(|err| err.to_string())?;
+                let id = resolve_container_id(&runtime, requested_id)?;
+                runtime.pause(&id).map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/unpause") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/unpause");
-                runtime.resume(id).map_err(|err| err.to_string())?;
+                let id = resolve_container_id(&runtime, requested_id)?;
+                runtime.resume(&id).map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/kill") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/kill");
+                let id = resolve_container_id(&runtime, requested_id)?;
                 let signal = parse_docker_kill_signal(query.get("signal"))?;
                 runtime
-                    .kill_with_signal(id, signal)
+                    .kill_with_signal(&id, signal)
                     .map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }

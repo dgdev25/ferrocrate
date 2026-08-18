@@ -250,8 +250,8 @@ impl RootlessConfig {
             .ok_or(RootlessError::CurrentUserUnavailable)?;
 
         let username = user.name;
-        let uid_range = first_subid_range(Path::new("/etc/subuid"), &username)?;
-        let gid_range = first_subid_range(Path::new("/etc/subgid"), &username)?;
+        let uid_range = first_subid_range(Path::new("/etc/subuid"), &username, uid.as_raw())?;
+        let gid_range = first_subid_range(Path::new("/etc/subgid"), &username, gid.as_raw())?;
 
         let uid_mapping = uid_range
             .map(|range| RootlessMapping {
@@ -397,7 +397,11 @@ fn write_id_mapping(
     }
 }
 
-fn first_subid_range(path: &Path, username: &str) -> Result<Option<IdRange>, RootlessError> {
+fn first_subid_range(
+    path: &Path,
+    username: &str,
+    numeric_id: u32,
+) -> Result<Option<IdRange>, RootlessError> {
     let raw = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -409,9 +413,10 @@ fn first_subid_range(path: &Path, username: &str) -> Result<Option<IdRange>, Roo
         }
     };
 
+    let numeric_id = numeric_id.to_string();
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
         let parsed = parse_subid_line(line)?;
-        if parsed.0 == username {
+        if parsed.0 == username || parsed.0 == numeric_id {
             return Ok(Some(IdRange {
                 start: parsed.1,
                 count: parsed.2,
@@ -470,7 +475,10 @@ fn parse_subid_line(line: &str) -> Result<(String, u32, u32), RootlessError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_user_namespace_mappings, parse_subid_line, RootlessConfig, RootlessMapping};
+    use super::{
+        apply_user_namespace_mappings, first_subid_range, parse_subid_line, RootlessConfig,
+        RootlessMapping,
+    };
     use std::fs;
     const DEFAULT_SUBID_SIZE: u32 = 65_536;
 
@@ -488,6 +496,24 @@ mod tests {
         assert!(err
             .to_string()
             .contains("failed to parse subordinate id line"));
+    }
+
+    #[test]
+    fn resolves_numeric_subordinate_id_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("subuid");
+        fs::write(&path, "4242:200000:65536\n").expect("write subuid");
+
+        let range = first_subid_range(&path, "tester", 4242)
+            .expect("numeric owner parses")
+            .expect("numeric owner matches");
+        assert_eq!(
+            range,
+            super::IdRange {
+                start: 200_000,
+                count: 65_536
+            }
+        );
     }
 
     #[test]

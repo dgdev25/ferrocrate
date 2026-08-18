@@ -37,6 +37,20 @@ grep -q 'use --upgrade' "$tmp_home/duplicate.txt"
 run_installer --upgrade >"$tmp_home/upgrade.txt"
 grep -q '^rootless.install.mode=upgrade$' "$tmp_home/upgrade.txt"
 
+# Fault-inject the second half of an upgrade and verify that the paired
+# binary/unit transaction restores both previous artifacts.
+sha_before_binary="$(sha256sum "$tmp_home/.local/bin/ferrocrate" | awk '{print $1}')"
+sha_before_unit="$(sha256sum "$tmp_home/config/systemd/user/ferrocrate.service" | awk '{print $1}')"
+if ! FERROCRATE_INSTALL_FAIL_AFTER_BINARY=1 run_installer --upgrade >"$tmp_home/rollback.txt" 2>&1; then
+  :
+else
+  echo "injected upgrade failure unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -q 'injected failure after binary replacement' "$tmp_home/rollback.txt"
+test "$(sha256sum "$tmp_home/.local/bin/ferrocrate" | awk '{print $1}')" = "$sha_before_binary"
+test "$(sha256sum "$tmp_home/config/systemd/user/ferrocrate.service" | awk '{print $1}')" = "$sha_before_unit"
+
 if HOME="$tmp_home" XDG_CONFIG_HOME="$tmp_home/config" XDG_RUNTIME_DIR="$runtime_dir" \
   "$installer" --binary /bin/true --socket '/tmp/unsafe%socket' --dry-run \
   >"$tmp_home/unsafe.txt" 2>&1; then

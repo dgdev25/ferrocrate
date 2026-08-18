@@ -179,16 +179,52 @@ fi
 install -d -m 0755 "$HOME/.local/bin" "$unit_dir"
 binary_tmp="$(mktemp "$HOME/.local/bin/.ferrocrate.new.XXXXXX")"
 unit_tmp="$(mktemp "$unit_dir/.ferrocrate.service.new.XXXXXX")"
+rollback_dir="$(mktemp -d "$HOME/.local/bin/.ferrocrate-rollback.XXXXXX")"
+transaction_committed=0
 cleanup() {
+  local status=$?
   rm -f -- "$binary_tmp" "$unit_tmp"
+  if (( !transaction_committed )); then
+    # Restore both artifacts if either replacement failed.  Never remove a
+    # directory supplied as a deliberately invalid unit target.
+    if [[ -f "$installed_binary" || -L "$installed_binary" ]]; then
+      rm -f -- "$installed_binary"
+    fi
+    if [[ -f "$unit_path" || -L "$unit_path" ]]; then
+      rm -f -- "$unit_path"
+    fi
+    if [[ -e "$rollback_dir/binary" ]]; then
+      mv -f -- "$rollback_dir/binary" "$installed_binary" || true
+    fi
+    if [[ -e "$rollback_dir/unit" ]]; then
+      install -d -m 0755 "$unit_dir"
+      mv -f -- "$rollback_dir/unit" "$unit_path" || true
+    fi
+  fi
+  if [[ -d "$rollback_dir" ]]; then
+    rmdir -- "$rollback_dir" 2>/dev/null || true
+  fi
+  return "$status"
 }
 trap cleanup EXIT
 install -m 0755 "$binary" "$binary_tmp"
 printf '%s' "$unit_content" >"$unit_tmp"
 chmod 0644 "$unit_tmp"
+if [[ -e "$installed_binary" ]]; then
+  mv -- "$installed_binary" "$rollback_dir/binary"
+fi
+if [[ -e "$unit_path" ]]; then
+  mv -- "$unit_path" "$rollback_dir/unit"
+fi
 mv -f -- "$binary_tmp" "$installed_binary"
+if [[ "${FERROCRATE_INSTALL_FAIL_AFTER_BINARY:-0}" == "1" ]]; then
+  echo "rootless-install: injected failure after binary replacement" >&2
+  exit 1
+fi
 mv -f -- "$unit_tmp" "$unit_path"
+transaction_committed=1
 trap - EXIT
+cleanup
 echo "rootless.install.binary_path=$installed_binary"
 echo "rootless.install.unit_path=$unit_path"
 

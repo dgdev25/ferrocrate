@@ -42,17 +42,18 @@ online data collection have independent consent and approval gates.
 ## Docker comparison
 
 The latest three-round, no-skip host-local ten-feature comparison uses the
-Docker Hub-independent `quay.io/libpod/alpine:latest` fixture. Full
-[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-dd3b2122-quay-iptables.md)
+Docker Hub-independent `quay.io/libpod/alpine:latest` fixture. The
+[`summary`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-6ce509bc-summary.md),
+[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-6ce509bc-iptables.md),
 and
-[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-0d09e42e-quay-nftables.md)
+[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-6ce509bc-nftables.md)
 measurements are archived with host, backend, image, and round metadata.
 Both report command-path medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.
 
 ## Development
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), the [support policy](docs/operations/support-policy.md),
+See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SUPPORT.md`](SUPPORT.md), and the [support policy](docs/operations/support-policy.md),
 and the [indie-release plan](docs/INDIE_RELEASE_PLAN.md). Security reports
 should follow [`SECURITY.md`](SECURITY.md). GitHub workflows are intentionally
 not included; reproducible local/release gates are documented in

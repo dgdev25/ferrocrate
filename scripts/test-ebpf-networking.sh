@@ -27,6 +27,9 @@ after_iptables="$(mktemp)"
 after_nft="$(mktemp)"
 redirect_diagnostics="$(mktemp)"
 redirect_sampler_pid=""
+packet_capture="$(mktemp)"
+packet_capture_pid=""
+checksum_errors_before="$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')"
 reserved_ports_path="/proc/sys/net/ipv4/ip_local_reserved_ports"
 reserved_ports_before="$(cat "$reserved_ports_path" 2>/dev/null || true)"
 reserved_ports_changed=0
@@ -35,10 +38,14 @@ cleanup() {
     kill "$redirect_sampler_pid" 2>/dev/null || true
     wait "$redirect_sampler_pid" 2>/dev/null || true
   fi
+  if [[ -n "$packet_capture_pid" ]]; then
+    kill "$packet_capture_pid" 2>/dev/null || true
+    wait "$packet_capture_pid" 2>/dev/null || true
+  fi
   if [[ "$reserved_ports_changed" -eq 1 ]]; then
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi
-  rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" "$redirect_diagnostics"
+  rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" "$redirect_diagnostics" "$packet_capture"
   rm -rf "/sys/fs/bpf/ferrocrate/${FERRO_EBPF_TEST_NETWORK_ID}" || true
 }
 trap cleanup EXIT
@@ -63,6 +70,12 @@ sample_redirect_diagnostics() {
 dump_redirect_diagnostics() {
   printf '%s\n' '--- eBPF redirect diagnostics sampled during qualification ---' >&2
   tail -n 300 "$redirect_diagnostics" >&2 || true
+  printf '%s\n' '--- packet/checksum diagnostics ---' >&2
+  printf 'TcpInCsumErrors before=%s after=%s\n' "$checksum_errors_before" \
+    "$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')" >&2
+  if [[ -s "$packet_capture" ]]; then
+    tail -n 120 "$packet_capture" >&2 || true
+  fi
 }
 
 # The eBPF loader refuses to allocate a SNAT port unless the complete range is
@@ -89,6 +102,10 @@ cargo test -p ferro-net --test kernel_compat -- --ignored
 cargo test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
 sample_redirect_diagnostics >"$redirect_diagnostics" 2>&1 &
 redirect_sampler_pid=$!
+if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1; then
+  tcpdump -i any -nn -vvv -l -s 0 'tcp and (host 127.0.0.1 or net 10.0.0.0/24)' >"$packet_capture" 2>&1 &
+  packet_capture_pid=$!
+fi
 if ! cargo test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
   dump_redirect_diagnostics
   exit 1

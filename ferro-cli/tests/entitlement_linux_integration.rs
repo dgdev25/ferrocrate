@@ -62,6 +62,23 @@ mod linux_tests {
     }
 
     #[test]
+    fn free_cli_workflow_does_not_require_entitlement() {
+        let (mut cmd, _runtime_dir, _image_store) = cmd_with_isolated_state();
+        let output = cmd
+            .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+            .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+            .args(["images"])
+            .output()
+            .expect("run free CLI workflow");
+
+        assert!(
+            output.status.success(),
+            "free workflow must remain available without entitlement, stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn ai_orchestrate_succeeds_with_valid_entitlement_on_linux() {
         let (mut cmd, _runtime_dir, _image_store) = cmd_with_isolated_state();
         let entitlement_dir = tempfile::tempdir().expect("entitlement tempdir");

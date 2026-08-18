@@ -12416,7 +12416,14 @@ fn parse_docker_event_filters(
     // do not evaluate is worse than returning an unsupported-filter error:
     // callers would believe the stream was narrowed when it was not.
     const SUPPORTED: &[&str] = &[
-        "container", "event", "image", "label", "network", "scope", "type", "volume",
+        "container",
+        "event",
+        "image",
+        "label",
+        "network",
+        "scope",
+        "type",
+        "volume",
     ];
     let mut filters = HashMap::new();
     for (key, value) in object {
@@ -17046,14 +17053,14 @@ volumes:
         let temp = tempfile::tempdir().expect("event runtime");
         let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
         let mut query = HashMap::new();
-        query.insert(
-            "filters".to_string(),
-            r#"{"service":["web"]}"#.to_string(),
-        );
+        query.insert("filters".to_string(), r#"{"service":["web"]}"#.to_string());
         let error = store
             .query(&query)
             .expect_err("unknown event filters must fail closed");
-        assert!(error.contains("unsupported event filter `service`"), "error={error}");
+        assert!(
+            error.contains("unsupported event filter `service`"),
+            "error={error}"
+        );
     }
 
     #[test]

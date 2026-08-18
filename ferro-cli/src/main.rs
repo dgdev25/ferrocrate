@@ -4412,14 +4412,28 @@ fn remote_docker_request(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<(u16, Vec<u8>), String> {
+    remote_docker_request_with_content_type(socket_path, method, path, body, None)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_request_with_content_type(
+    socket_path: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+) -> Result<(u16, Vec<u8>), String> {
     if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
         return Err("remote context request has an invalid socket or path".to_string());
     }
     let body = body.unwrap_or_default();
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|error| format!("remote context connect failed: {error}"))?;
+    let content_header = content_type
+        .map(|value| format!("Content-Type: {value}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: close\r\nContent-Length: {}\r\n{content_header}\r\n",
         body.len()
     );
     stream
@@ -4771,6 +4785,30 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 request("DELETE", format!("/containers/{id}"))?;
             }
             println!("run: id={id}");
+            Ok(())
+        })(),
+        Commands::Build {
+            dockerfile, ferrofile, tag, compress, image_format, embed_model, platform,
+            cache_from, cache_to, build_context, secret,
+        } => (|| -> Result<(), String> {
+            if ferrofile.is_some() { return Err("remote build: --ferrofile is not representable by the Docker transport".to_string()); }
+            if compress != "gzip" { return Err("remote build: --compress is not representable by the Docker transport".to_string()); }
+            if image_format != "oci" || embed_model.is_some() { return Err("remote build: native RVF output is not representable by the Docker transport".to_string()); }
+            if platform.is_some() || cache_from.is_some() || cache_to.is_some() { return Err("remote build: platform/cache options are not representable by the Docker transport".to_string()); }
+            if !build_context.is_empty() || !secret.is_empty() { return Err("remote build: named contexts and secrets are not supported by this transport yet".to_string()); }
+            let dockerfile = dockerfile.as_deref().unwrap_or("Dockerfile");
+            let dockerfile_path = if Path::new(dockerfile).is_absolute() { PathBuf::from(dockerfile) } else { std::env::current_dir().map_err(|error| format!("remote build: failed to get current directory: {error}"))?.join(dockerfile) };
+            if !dockerfile_path.is_file() { return Err(format!("remote build: Dockerfile does not exist: {}", dockerfile_path.display())); }
+            let context_dir = dockerfile_path.parent().unwrap_or_else(|| Path::new("."));
+            let mut archive = tar::Builder::new(Vec::new());
+            archive.append_dir_all(".", context_dir).map_err(|error| format!("remote build: archive context failed: {error}"))?;
+            let archive = archive.into_inner().map_err(|error| format!("remote build: finalize context failed: {error}"))?;
+            let filename = dockerfile_path.file_name().and_then(|name| name.to_str()).unwrap_or("Dockerfile");
+            let mut path = format!("/build?dockerfile={}", percent_encode_path_component(filename));
+            if let Some(tag) = tag { parse_image_reference(tag).map_err(|error| error.to_string())?; path.push_str("&t="); path.push_str(&percent_encode_path_component(tag)); }
+            let (status, body) = remote_docker_request_with_content_type(&endpoint, "POST", &path, Some(&archive), Some("application/x-tar"))?;
+            if !(200..300).contains(&status) { return Err(format!("remote context request returned HTTP {status}: {}", String::from_utf8_lossy(&body))); }
+            if !body.is_empty() { print_json(body, "json")?; }
             Ok(())
         })(),
         Commands::Images { format, filters } => (|| -> Result<(), String> {
@@ -16445,6 +16483,35 @@ volumes:
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_build_sends_tar_context_to_docker_build_api() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("remote build config");
+        let context = temp.path().join("context");
+        std::fs::create_dir(&context).expect("create context");
+        std::fs::write(context.join("Dockerfile"), b"FROM scratch\n").expect("write Dockerfile");
+        let socket = temp.path().join("remote-build.sock");
+        let listener = UnixListener::bind(&socket).expect("bind socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read");
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains("POST /build?dockerfile=Dockerfile&t=example%2Fapp%3Adev"));
+            assert!(request.contains("Content-Type: application/x-tar"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").expect("respond");
+        });
+        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()); }
+        handle_context(ContextCommands::Create { name: "remote".to_string(), endpoint: format!("unix://{}", socket.display()) }).expect("create context");
+        handle_context(ContextCommands::Use { name: "remote".to_string() }).expect("use context");
+        let command = Cli::try_parse_from(["ferrocrate", "build", "--dockerfile", context.join("Dockerfile").to_str().unwrap(), "--tag", "example/app:dev"]).unwrap().command;
+        dispatch_remote_context(&command).unwrap().unwrap();
+        worker.join().unwrap();
+        match previous { Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) }, None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") } }
     }
 
     #[test]

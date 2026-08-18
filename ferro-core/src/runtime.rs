@@ -1439,6 +1439,17 @@ fn internal_cleanup_observation(
     crate::witness::ObservationDigest::from_bytes(digest.finalize().into())
 }
 
+/// Return the valid OCI immutable form for a stored image reference. A tag
+/// and digest must not be concatenated (`name:tag@sha256:...`); OCI digest
+/// references use the repository name followed directly by `@digest`.
+fn immutable_image_reference(reference: &str, digest: &str) -> Result<String, RuntimeError> {
+    let parsed = parse_image_reference(reference)?;
+    Ok(format!(
+        "{}/{}@{}",
+        parsed.registry, parsed.repository, digest
+    ))
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("invalid image reference: {0}")]
@@ -2347,20 +2358,10 @@ impl ContainerRuntime {
         network_mode: &str,
         network_backend: NetworkBackend,
     ) -> Result<[u8; 32], RuntimeError> {
-        let pinned_image = store.resolve_reference(image)?.map_or_else(
-            || image.to_owned(),
-            |record| {
-                format!(
-                    "{}@{}",
-                    record
-                        .reference
-                        .split('@')
-                        .next()
-                        .unwrap_or(&record.reference),
-                    record.digest
-                )
-            },
-        );
+        let pinned_image = match store.resolve_reference(image)? {
+            Some(record) => immutable_image_reference(&record.reference, &record.digest)?,
+            None => image.to_owned(),
+        };
         let normalized = normalize_run_request(
             capabilities,
             mounts,
@@ -2485,20 +2486,10 @@ impl ContainerRuntime {
             }
             LifecycleLock::acquire(&lock_path)?
         };
-        let pinned_image = store.resolve_reference(image)?.map_or_else(
-            || image.to_owned(),
-            |record| {
-                format!(
-                    "{}@{}",
-                    record
-                        .reference
-                        .split('@')
-                        .next()
-                        .unwrap_or(&record.reference),
-                    record.digest
-                )
-            },
-        );
+        let pinned_image = match store.resolve_reference(image)? {
+            Some(record) => immutable_image_reference(&record.reference, &record.digest)?,
+            None => image.to_owned(),
+        };
         let normalized = normalize_run_request(
             capabilities,
             mounts,
@@ -10753,7 +10744,8 @@ fn run_resource_monitor(
 mod tests {
     use super::{
         adaptive_restart_delay, associated_network_name, BindMount, ContainerRuntime,
-        KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
+        immutable_image_reference, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
+        NetworkBackend,
         NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
     use crate::authorization::{
@@ -10778,6 +10770,20 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex};
+
+    #[test]
+    fn immutable_image_reference_uses_repository_digest_form() {
+        let pinned = immutable_image_reference(
+            "registry-1.docker.io/library/alpine:latest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("stored image reference should parse");
+        assert_eq!(
+            pinned,
+            "registry-1.docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(!pinned.contains(":latest@"));
+    }
 
     #[test]
     fn adaptive_restart_decision_can_stop_restart_loop() {

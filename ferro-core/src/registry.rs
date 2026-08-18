@@ -808,6 +808,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_explicit_docker_hub_registry_endpoint_with_tag() {
+        let parsed = parse_image_reference("registry-1.docker.io/library/alpine:latest")
+            .expect("registry endpoint form should parse");
+        assert_eq!(parsed.registry, "registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/alpine");
+        assert_eq!(parsed.reference, "latest");
+    }
+
+    #[test]
     fn parses_image_reference_with_digest() {
         let parsed = parse_image_reference(
             "registry-1.docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

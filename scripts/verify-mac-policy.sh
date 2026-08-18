@@ -41,17 +41,20 @@ fi
 if [[ "$strict" == 1 ]]; then
   if truthy "$enabled_apparmor" && (( apparmor_tools == 0 )); then
     echo "strict MAC check failed: AppArmor is enabled but apparmor_parser/aa-exec are unavailable" >&2
+    echo "strict MAC remediation: install AppArmor userspace tools or disable FERROCRATE_APPARMOR before claiming enforcement" >&2
     exit 1
   fi
   if truthy "$enabled_selinux"; then
     if (( selinux_tools == 0 )); then
       echo "strict MAC check failed: SELinux is enabled but runcon is unavailable" >&2
+      echo "strict MAC remediation: install SELinux userspace tools including runcon, then verify the policy domain before enabling enforcement" >&2
       exit 1
     fi
     case "${selinux_mode,,}" in
       enforcing|permissive) ;;
       *)
         echo "strict MAC check failed: SELinux is enabled but enforcement state is ${selinux_mode}" >&2
+        echo "strict MAC remediation: enable SELinux and make getenforce report enforcing or permissive before claiming enforcement" >&2
         exit 1
         ;;
     esac

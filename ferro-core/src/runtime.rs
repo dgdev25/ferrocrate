@@ -4160,9 +4160,50 @@ fn configured_cgroup_root() -> PathBuf {
     let relative = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
         .and_then(|contents| current_cgroup_relative_path(&contents));
+    if let Some(path) = relative
+        .as_deref()
+        .and_then(|path| select_delegated_cgroup_root(&hierarchy, path))
+    {
+        return path;
+    }
     relative
         .map(|path| hierarchy.join(path.trim_start_matches('/')))
         .unwrap_or(hierarchy)
+}
+
+/// Select the deepest ancestor of the current cgroup that has controllers
+/// enabled for children. A transient systemd scope is often a populated leaf
+/// with an empty `cgroup.subtree_control`; creating `ferrocrate/<id>` there
+/// would fail with EPERM even though its user service/app slice delegated the
+/// controllers. The walk never escapes the current hierarchy or falls back to
+/// an unrelated user's cgroup.
+fn select_delegated_cgroup_root(hierarchy: &Path, relative: &str) -> Option<PathBuf> {
+    let relative = relative.trim_start_matches('/');
+    if relative.is_empty() || relative.contains("..") {
+        return None;
+    }
+    let mut candidate = hierarchy.join(relative);
+    if !candidate.starts_with(hierarchy) {
+        return None;
+    }
+    loop {
+        if delegated_subtree_controls(&candidate) {
+            return Some(candidate);
+        }
+        if candidate == hierarchy || !candidate.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn delegated_subtree_controls(path: &Path) -> bool {
+    let Ok(controls) = std::fs::read_to_string(path.join("cgroup.subtree_control")) else {
+        return false;
+    };
+    controls
+        .split_whitespace()
+        .any(|control| matches!(control.trim_start_matches('+'), "cpu" | "memory" | "pids"))
 }
 
 fn current_cgroup_relative_path(contents: &str) -> Option<String> {
@@ -11706,6 +11747,27 @@ mod tests {
             None
         );
         assert_eq!(super::current_cgroup_relative_path(""), None);
+    }
+
+    #[test]
+    fn delegated_cgroup_root_falls_back_from_leaf_to_enabled_ancestor() {
+        let hierarchy = tempfile::tempdir().expect("hierarchy");
+        let parent = hierarchy
+            .path()
+            .join("user.slice/user-1000.slice/user@1000.service/app.slice");
+        let leaf = parent.join("app-ghostty.scope");
+        std::fs::create_dir_all(&leaf).expect("cgroup tree");
+        std::fs::write(parent.join("cgroup.subtree_control"), "+memory +pids\n")
+            .expect("parent delegation");
+        std::fs::write(leaf.join("cgroup.subtree_control"), "\n").expect("leaf controls");
+
+        assert_eq!(
+            super::select_delegated_cgroup_root(
+                hierarchy.path(),
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/app-ghostty.scope"
+            ),
+            Some(parent)
+        );
     }
 
     #[test]

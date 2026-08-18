@@ -4198,6 +4198,13 @@ fn select_delegated_cgroup_root(hierarchy: &Path, relative: &str) -> Option<Path
 }
 
 fn delegated_subtree_controls(path: &Path) -> bool {
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("cgroup.subtree_control"))
+        .is_err()
+    {
+        return false;
+    }
     let Ok(controls) = std::fs::read_to_string(path.join("cgroup.subtree_control")) else {
         return false;
     };

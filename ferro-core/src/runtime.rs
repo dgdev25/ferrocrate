@@ -13441,6 +13441,57 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     }
 
     #[test]
+    fn ai_runtime_decision_fixtures_emit_explainable_audit_records() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let temp = tempfile::tempdir().expect("audit tempdir");
+        let audit_path = temp.path().join("decisions.jsonl");
+        let previous_enabled = std::env::var("FERROCRATE_AI").ok();
+        let previous_path = std::env::var("FERROCRATE_AI_AUDIT_LOG").ok();
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+            std::env::set_var("FERROCRATE_AI_AUDIT_LOG", &audit_path);
+        }
+
+        super::log_ai_restart_lifecycle(
+            "fixture-container",
+            "ai_restart_applied",
+            137,
+            2,
+            3,
+            "observed",
+            Some(42),
+        );
+        super::log_ai_reconciliation("fixture-container", 137, "stale-pid", "exited");
+        super::log_ai_kernel_reconciliation("fixture-network", "verify-reuse", 2);
+
+        let entries = std::fs::read_to_string(&audit_path)
+            .expect("audit records")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid audit JSON"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["action"], "ai_restart_applied");
+        assert_eq!(entries[0]["model"], "adaptive-restart-policy");
+        assert_eq!(entries[0]["model_version"], "runtime-v1");
+        assert_eq!(entries[0]["evidence"]["container_id"], "fixture-container");
+        assert_eq!(entries[0]["evidence"]["stage"], "observed");
+        assert_eq!(entries[1]["action"], "ai_reconciliation_applied");
+        assert_eq!(entries[1]["evidence"]["reason"], "stale-pid");
+        assert_eq!(entries[2]["action"], "ai_kernel_reconciliation");
+        assert_eq!(entries[2]["evidence"]["network_id"], "fixture-network");
+        assert_eq!(entries[2]["evidence"]["container_count"], "2");
+
+        match previous_enabled {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI") },
+        }
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_AI_AUDIT_LOG", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_AI_AUDIT_LOG") },
+        }
+    }
+
+    #[test]
     fn ai_disabled_environment_overrides_explicit_runtime_config() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let previous = std::env::var("FERROCRATE_AI").ok();

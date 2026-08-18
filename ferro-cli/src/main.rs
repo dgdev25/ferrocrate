@@ -1748,7 +1748,8 @@ fn handle_doctor(
         #[cfg(target_os = "linux")]
         {
             let rootless = ferro_core::rootless::RootlessConfig::from_system();
-            let user_namespace_ok = ferro_core::rootless::user_namespace_available();
+            let user_namespace = ferro_core::rootless::user_namespace_diagnostic();
+            let user_namespace_ok = user_namespace.is_ok();
             let runtime_socket = discover_rootless_socket();
             let socket_message = runtime_socket.as_ref().map_or_else(
                 || "rootless Docker socket not discovered (set XDG_RUNTIME_DIR or use the configured daemon socket)".to_string(),
@@ -1759,7 +1760,7 @@ fn handle_doctor(
                 ok: rootless.is_ok() && user_namespace_ok,
                 message: match rootless {
                     Ok(config) => format!(
-                        "rootless context {} for {} (uid map {}:{} size {}; gid map {}:{} size {}); {}",
+                        "rootless context {} for {} (uid map {}:{} size {}; gid map {}:{} size {}); {}{}",
                         if user_namespace_ok {
                             "available"
                         } else {
@@ -1773,8 +1774,18 @@ fn handle_doctor(
                         config.gid_mapping.host_id,
                         config.gid_mapping.size,
                         socket_message,
+                        user_namespace
+                            .as_ref()
+                            .err()
+                            .map_or_else(String::new, |error| format!("; {error}")),
                     ),
-                    Err(error) => format!("rootless context unavailable: {error}; {socket_message}"),
+                    Err(error) => format!(
+                        "rootless context unavailable: {error}; {socket_message}{}",
+                        user_namespace
+                            .as_ref()
+                            .err()
+                            .map_or_else(String::new, |error| format!("; {error}")),
+                    ),
                 },
                 hint: Some(
                     "rootless contexts currently support the local runtime; CRI, Compose, and advanced network features remain explicitly qualification-gated".to_string(),

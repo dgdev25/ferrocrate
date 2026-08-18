@@ -82,6 +82,27 @@ pub fn user_namespace_available() -> bool {
     }
 }
 
+/// Probe the mapped user namespace that the rootless launcher requires and
+/// return a bounded operator-facing reason when the host rejects it.
+pub fn user_namespace_diagnostic() -> Result<(), String> {
+    if let Ok(value) = fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone") {
+        let value = value.trim();
+        if value != "1" {
+            return Err(format!(
+                "kernel.unprivileged_userns_clone={value:?}; unprivileged user namespaces are disabled"
+            ));
+        }
+    }
+    if user_namespace_available() {
+        Ok(())
+    } else {
+        Err(
+            "user namespace creation or UID/GID mapping was denied by host policy; check kernel, LSM, and outer-container namespace restrictions"
+                .to_string(),
+        )
+    }
+}
+
 /// Probe whether the caller can create the user+mount namespace pair required
 /// for rootless bind/tmpfs/read-only-rootfs execution. The probe is isolated
 /// in a short-lived `unshare` child and never changes the caller's namespaces.

@@ -224,6 +224,16 @@ pub struct DeletionReceipt {
     pub deleted_at_unix: u64,
 }
 
+/// Durable fail-closed revocation of one exact model artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelRevocation {
+    pub model_type: String,
+    pub version: u32,
+    pub artifact_sha256: String,
+    pub reason: String,
+    pub revoked_at_unix: u64,
+}
+
 /// Stats for a direct RVF file inspection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RvfFileStats {
@@ -376,6 +386,19 @@ fn artifact_sha256(path: &Path) -> Result<String, TrainingError> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+fn valid_artifact_digest(value: &str) -> bool {
+    let digest = value.strip_prefix("sha256:").unwrap_or(value);
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_policy_reason(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 fn atomic_temp_path(path: &Path) -> Result<PathBuf, TrainingError> {
     let parent = path.parent().ok_or_else(|| {
         TrainingError::Io(std::io::Error::new(
@@ -416,6 +439,7 @@ fn sync_parent(path: &Path) -> Result<(), TrainingError> {
 pub struct TrainingPipeline {
     config: TrainingConfig,
     versions: HashMap<ModelType, VecDeque<ModelVersion>>,
+    revocations: HashMap<ModelType, HashMap<u32, ModelRevocation>>,
     online_running: Arc<AtomicBool>,
     online_sample_cursor: HashMap<ModelType, usize>,
     online_retrain_delta: usize,
@@ -433,6 +457,7 @@ impl TrainingPipeline {
         let mut pipeline = Self {
             config,
             versions: HashMap::new(),
+            revocations: HashMap::new(),
             online_running: Arc::new(AtomicBool::new(false)),
             online_sample_cursor: HashMap::new(),
             online_retrain_delta: 1,
@@ -459,6 +484,8 @@ impl TrainingPipeline {
         ] {
             let versions = self.load_versions_for_model(model_type)?;
             self.versions.insert(model_type, versions);
+            let revocations = self.load_revocations_for_model(model_type)?;
+            self.revocations.insert(model_type, revocations);
         }
         Ok(())
     }
@@ -516,6 +543,48 @@ impl TrainingPipeline {
         }
     }
 
+    fn load_revocations_for_model(
+        &self,
+        model_type: ModelType,
+    ) -> Result<HashMap<u32, ModelRevocation>, TrainingError> {
+        let path = self
+            .config
+            .models_dir
+            .join(model_type.to_string())
+            .join("revocations.json");
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        let file = File::open(&path)?;
+        let entries: Vec<ModelRevocation> = serde_json::from_reader(BufReader::new(file))?;
+        if entries.len() > 1024 {
+            return Err(TrainingError::InvalidVersionHistory(format!(
+                "too many model revocations in {}",
+                path.display()
+            )));
+        }
+        let mut revocations = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            if entry.model_type != model_type.to_string()
+                || entry.version == 0
+                || !valid_artifact_digest(&entry.artifact_sha256)
+                || !valid_policy_reason(&entry.reason)
+            {
+                return Err(TrainingError::InvalidVersionHistory(format!(
+                    "invalid model revocation in {}",
+                    path.display()
+                )));
+            }
+            if revocations.insert(entry.version, entry).is_some() {
+                return Err(TrainingError::InvalidVersionHistory(format!(
+                    "duplicate model revocation in {}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(revocations)
+    }
+
     /// Save version history to disk
     fn save_versions(&self, model_type: ModelType) -> Result<(), TrainingError> {
         if let Some(versions) = self.versions.get(&model_type) {
@@ -539,6 +608,31 @@ impl TrainingPipeline {
             result?;
         }
         Ok(())
+    }
+
+    fn save_revocations(&self, model_type: ModelType) -> Result<(), TrainingError> {
+        let Some(revocations) = self.revocations.get(&model_type) else {
+            return Ok(());
+        };
+        let dir = self.config.models_dir.join(model_type.to_string());
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("revocations.json");
+        let temporary = atomic_temp_path(&path)?;
+        let result = (|| -> Result<(), TrainingError> {
+            let file = File::create(&temporary)?;
+            let mut writer = BufWriter::new(file);
+            let mut entries = revocations.values().cloned().collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.version);
+            serde_json::to_writer_pretty(&mut writer, &entries)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            fs::rename(&temporary, &path)?;
+            sync_parent(&path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     fn online_state_path(&self) -> PathBuf {
@@ -726,6 +820,16 @@ impl TrainingPipeline {
                 "{} v{version}",
                 model_type
             )))?;
+        if self
+            .revocations
+            .get(&model_type)
+            .is_some_and(|entries| entries.contains_key(&version))
+        {
+            return Err(TrainingError::InvalidVersionHistory(format!(
+                "model {} v{} is revoked",
+                model_type, version
+            )));
+        }
         let digest = artifact_sha256(&candidate.path)?;
         let expected = format!("{}:{}:{digest}", model_type, version);
         if approval_token != expected {
@@ -841,6 +945,7 @@ impl TrainingPipeline {
 
     /// Rollback to previous model version
     pub fn rollback(&mut self, model_type: ModelType) -> Result<ModelVersion, TrainingError> {
+        let revocations = self.revocations.get(&model_type);
         // First, find the index to rollback to
         let rollback_idx = {
             let versions = self
@@ -850,7 +955,15 @@ impl TrainingPipeline {
             let active_idx = versions.iter().position(|v| v.active);
 
             match active_idx {
-                Some(idx) if idx > 0 => Some(idx - 1),
+                Some(idx) => versions
+                    .iter()
+                    .enumerate()
+                    .take(idx)
+                    .rev()
+                    .find(|(_, version)| {
+                        !revocations.is_some_and(|entries| entries.contains_key(&version.version))
+                    })
+                    .map(|(index, _)| index),
                 _ => None,
             }
         };
@@ -887,7 +1000,78 @@ impl TrainingPipeline {
 
     /// Get active model version
     pub fn get_active_version(&self, model_type: ModelType) -> Option<&ModelVersion> {
-        self.versions.get(&model_type)?.iter().find(|v| v.active)
+        let revocations = self.revocations.get(&model_type);
+        self.versions.get(&model_type)?.iter().find(|v| {
+            v.active && !revocations.is_some_and(|entries| entries.contains_key(&v.version))
+        })
+    }
+
+    /// Revoke one exact model artifact and deactivate it immediately.
+    ///
+    /// Revocation is durable and fail-closed: if the artifact digest no longer
+    /// matches its version metadata, no revocation is recorded and routing was
+    /// already unsafe. Revoking the active version leaves the model family
+    /// without an active candidate until an operator approves another version.
+    pub fn revoke_model_version(
+        &mut self,
+        model_type: ModelType,
+        version: u32,
+        reason: impl Into<String>,
+    ) -> Result<ModelRevocation, TrainingError> {
+        let reason = reason.into();
+        if !valid_policy_reason(&reason) {
+            return Err(TrainingError::ParseError(
+                "revocation reason must be 1-128 safe ASCII characters".into(),
+            ));
+        }
+        let candidate = self
+            .versions
+            .get(&model_type)
+            .and_then(|entries| entries.iter().find(|entry| entry.version == version))
+            .cloned()
+            .ok_or_else(|| TrainingError::ModelNotFound(format!("{} v{version}", model_type)))?;
+        if let Some(existing) = self
+            .revocations
+            .get(&model_type)
+            .and_then(|entries| entries.get(&version))
+        {
+            return Ok(existing.clone());
+        }
+        if !valid_artifact_digest(&candidate.artifact_sha256) {
+            return Err(TrainingError::InvalidVersionHistory(format!(
+                "model {} v{} has no valid artifact digest",
+                model_type, version
+            )));
+        }
+        let observed = artifact_sha256(&candidate.path)?;
+        if observed != candidate.artifact_sha256 {
+            return Err(TrainingError::InvalidVersionHistory(format!(
+                "model {} v{} artifact digest mismatch",
+                model_type, version
+            )));
+        }
+        let revocation = ModelRevocation {
+            model_type: model_type.to_string(),
+            version,
+            artifact_sha256: candidate.artifact_sha256,
+            reason,
+            revoked_at_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        self.revocations
+            .entry(model_type)
+            .or_default()
+            .insert(version, revocation.clone());
+        if let Some(versions) = self.versions.get_mut(&model_type) {
+            if let Some(entry) = versions.iter_mut().find(|entry| entry.version == version) {
+                entry.active = false;
+            }
+        }
+        self.save_revocations(model_type)?;
+        self.save_versions(model_type)?;
+        Ok(revocation)
     }
 
     /// Resolve the active model only when its persisted digest matches the
@@ -2182,6 +2366,53 @@ mod tests {
             .resolve_active_model(ModelType::ResourcePredictor)
             .expect_err("legacy metadata must not route an unbound artifact");
         assert!(error.to_string().contains("no artifact digest"));
+    }
+
+    #[test]
+    fn model_revocation_is_durable_and_blocks_active_routing() {
+        let (_temp, config) = setup_test_env();
+        let dir = config
+            .models_dir
+            .join(ModelType::ResourcePredictor.to_string());
+        fs::create_dir_all(&dir).expect("model directory");
+        let artifact = dir.join("model_v1.bin");
+        fs::write(&artifact, b"revocable-model").expect("artifact");
+        let digest = format!("sha256:{:x}", Sha256::digest(b"revocable-model"));
+        let metadata = serde_json::json!([{
+            "model_type": "resource-predictor",
+            "version": 1,
+            "trained_at": "2026-01-01T00:00:00Z",
+            "samples_count": 3,
+            "loss": 0.1,
+            "path": artifact,
+            "artifact_sha256": digest,
+            "active": true
+        }]);
+        fs::write(
+            dir.join("versions.json"),
+            serde_json::to_vec(&metadata).expect("metadata"),
+        )
+        .expect("write metadata");
+
+        let mut pipeline = TrainingPipeline::new(config.clone()).expect("pipeline");
+        let revocation = pipeline
+            .revoke_model_version(ModelType::ResourcePredictor, 1, "key-compromise")
+            .expect("revoke model");
+        assert_eq!(revocation.version, 1);
+        assert!(pipeline
+            .get_active_version(ModelType::ResourcePredictor)
+            .is_none());
+        let error = pipeline
+            .resolve_active_model(ModelType::ResourcePredictor)
+            .expect_err("revoked model must not route");
+        assert!(error.to_string().contains("Model type not found"));
+
+        let revocations = fs::read_to_string(dir.join("revocations.json")).expect("revocations");
+        assert!(revocations.contains("key-compromise"));
+        let reloaded = TrainingPipeline::new(config).expect("reload pipeline");
+        assert!(reloaded
+            .get_active_version(ModelType::ResourcePredictor)
+            .is_none());
     }
 
     #[test]

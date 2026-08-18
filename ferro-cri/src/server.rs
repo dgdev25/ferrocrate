@@ -1572,6 +1572,7 @@ impl RuntimeService for CriRuntime {
         runtime
             .stop(&runtime_id, std::time::Duration::from_secs(req.timeout))
             .map_err(|error| Status::internal(error.to_string()))?;
+        maybe_crash_at_start_boundary("after-runtime-stop-effect");
         Ok(Response::new(StopContainerResponse {}))
     }
 

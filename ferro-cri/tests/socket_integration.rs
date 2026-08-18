@@ -11,7 +11,7 @@ use ferro_cri::runtime::{
     ImageFsInfoRequest, ListContainerStatsRequest, ListContainersRequest, ListImagesRequest,
     ListPodSandboxRequest, PodSandboxConfig, PodSandboxMetadata, PodSandboxStatusRequest,
     RemoveContainerRequest, RemovePodSandboxRequest, RunPodSandboxRequest, StartContainerRequest,
-    StatusRequest, StopPodSandboxRequest, VersionRequest,
+    StatusRequest, StopContainerRequest, StopPodSandboxRequest, VersionRequest,
 };
 use ferro_cri::runtime::{ImageSpec, PullImageRequest, RemoveImageRequest};
 use ferro_cri::server::{
@@ -1320,6 +1320,126 @@ async fn cri_start_recovery_rebinds_published_runtime_after_response_crash() {
     assert!(!std::path::Path::new("/var/run/netns")
         .join(format!("ferro-{container}"))
         .exists());
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    unsafe {
+        std::env::remove_var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE");
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires rootful OCI execution"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_stop_recovery_reconciles_runtime_after_effect_crash() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
+        .unwrap_or(true)
+    {
+        eprintln!("skipping CRI stop crash fixture: root is required");
+        return;
+    }
+
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    seed_runnable_fixture_image(runtime.path());
+    let socket = runtime.path().join("cri-stop-crash.sock");
+    unsafe {
+        std::env::set_var(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "cri-fault-injection",
+        );
+        std::env::set_var(
+            "FERROCRATE_CRI_TEST_CRASH_POINT",
+            "after-runtime-stop-effect",
+        );
+    }
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "stop-crash-pod".into(),
+                    uid: "stop-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "stop-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox,
+            config: Some(ContainerConfig {
+                metadata_name: "stop-crash-container".into(),
+                image: "fixture:latest".into(),
+                command: vec!["/bin/busybox".into(), "sleep".into(), "30".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("container")
+        .into_inner()
+        .container_id;
+    client
+        .start_container(StartContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect("start container");
+
+    let stop_result = client
+        .stop_container(StopContainerRequest {
+            container_id: container.clone(),
+            timeout: 5,
+        })
+        .await;
+    stop_result.expect_err("fault injection must terminate after runtime stop effect");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon.try_wait().expect("poll CRI stop crash").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(daemon.try_wait().expect("wait for CRI stop crash").is_some());
+    unsafe {
+        std::env::remove_var("FERROCRATE_CRI_TEST_CRASH_POINT");
+    }
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = recovered
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("recovered status")
+        .into_inner()
+        .status
+        .expect("recovered container");
+    assert_eq!(status.state, ferro_cri::runtime::ContainerState::Exited as i32);
+    recovered
+        .remove_container(RemoveContainerRequest {
+            container_id: container,
+        })
+        .await
+        .expect("recovered container cleanup");
     restarted.kill().expect("stop restarted CRI daemon");
     let _ = restarted.wait();
     unsafe {

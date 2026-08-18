@@ -306,4 +306,6 @@ main() {
   log_info "Run 'ferrocrate --help' to get started"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

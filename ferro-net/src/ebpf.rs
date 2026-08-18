@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -890,6 +892,11 @@ pub struct SecurityMonitorConfig {
 /// Kernel delivery must never be able to grow a daemon process without bound.
 pub const SECURITY_MONITOR_MAX_BUFFER_EVENTS: usize = 1024;
 const SECURITY_MONITOR_MAX_PAYLOAD_BYTES: usize = 4096;
+/// Receipts are durable, but the monitor must not turn an unbounded event
+/// stream into unbounded disk usage. Operators can rotate this file between
+/// runs after exporting the records they need.
+pub const SECURITY_MONITOR_MAX_RECEIPT_BYTES: u64 = 8 * 1024 * 1024;
+const SECURITY_MONITOR_RECEIPT_SCHEMA: &str = "ferrocrate/security-monitor-receipt/v1";
 
 /// Stable, bounded representation of one syscall tracepoint notification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -958,6 +965,171 @@ impl SecurityMonitorBuffer {
 
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// Persist queued events in FIFO order, retaining an event in memory until
+    /// its receipt has been durably written. This makes a failed write
+    /// retryable instead of silently losing the kernel notification.
+    pub fn drain_to(
+        &mut self,
+        sink: &mut SecurityMonitorReceiptWriter,
+    ) -> Result<usize, ExecError> {
+        let mut drained = 0;
+        while let Some(event) = self.events.front().cloned() {
+            sink.append(&event)?;
+            self.events.pop_front();
+            drained += 1;
+        }
+        Ok(drained)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SecurityMonitorReceipt {
+    schema: String,
+    sequence: u64,
+    event: SecurityMonitorEvent,
+}
+
+/// Durable, bounded JSONL sink for decoded kernel-monitor events.
+///
+/// The sink validates existing records before accepting new ones, resumes the
+/// sequence monotonically after a daemon restart, writes mode-0600 files, and
+/// calls `sync_data` for every receipt. It deliberately rejects a full file so
+/// callers can surface backpressure instead of silently dropping evidence.
+#[derive(Debug)]
+pub struct SecurityMonitorReceiptWriter {
+    file: File,
+    path: PathBuf,
+    next_sequence: u64,
+}
+
+impl SecurityMonitorReceiptWriter {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ExecError> {
+        let path = path.as_ref().to_path_buf();
+        if !path.is_absolute() {
+            return Err(receipt_error(&path, "receipt path must be absolute"));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            receipt_error(&path, "receipt path must have an existing parent directory")
+        })?;
+        let metadata = std::fs::metadata(parent).map_err(|source| ExecError::Io {
+            cmd: format!("open security monitor receipt {}", path.display()),
+            source,
+        })?;
+        if !metadata.is_dir() {
+            return Err(receipt_error(&path, "receipt parent must be a directory"));
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)
+            .map_err(|source| ExecError::Io {
+                cmd: format!("open security monitor receipt {}", path.display()),
+                source,
+            })?;
+        let length = file
+            .metadata()
+            .map_err(|source| ExecError::Io {
+                cmd: format!("stat security monitor receipt {}", path.display()),
+                source,
+            })?
+            .len();
+        if length > SECURITY_MONITOR_MAX_RECEIPT_BYTES {
+            return Err(receipt_error(&path, "receipt file exceeds bounded size"));
+        }
+        let mut next_sequence = 0;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| ExecError::Io {
+                cmd: format!("read security monitor receipt {}", path.display()),
+                source,
+            })?;
+        for line in BufReader::new(&file).lines() {
+            let line = line.map_err(|source| ExecError::Io {
+                cmd: format!("read security monitor receipt {}", path.display()),
+                source,
+            })?;
+            let receipt: SecurityMonitorReceipt =
+                serde_json::from_str(&line).map_err(|error| ExecError::CommandFailed {
+                    cmd: format!("read security monitor receipt {}", path.display()),
+                    stderr: format!("invalid receipt: {error}"),
+                })?;
+            if receipt.schema != SECURITY_MONITOR_RECEIPT_SCHEMA {
+                return Err(receipt_error(&path, "receipt schema is unsupported"));
+            }
+            next_sequence = next_sequence.max(
+                receipt
+                    .sequence
+                    .checked_add(1)
+                    .ok_or_else(|| receipt_error(&path, "receipt sequence exhausted"))?,
+            );
+        }
+        file.seek(SeekFrom::End(0))
+            .map_err(|source| ExecError::Io {
+                cmd: format!("append security monitor receipt {}", path.display()),
+                source,
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |source| ExecError::Io {
+                    cmd: format!("protect security monitor receipt {}", path.display()),
+                    source,
+                },
+            )?;
+        }
+        Ok(Self {
+            file,
+            path,
+            next_sequence,
+        })
+    }
+
+    pub fn append(&mut self, event: &SecurityMonitorEvent) -> Result<u64, ExecError> {
+        let receipt = SecurityMonitorReceipt {
+            schema: SECURITY_MONITOR_RECEIPT_SCHEMA.to_string(),
+            sequence: self.next_sequence,
+            event: event.clone(),
+        };
+        let mut encoded =
+            serde_json::to_vec(&receipt).map_err(|error| ExecError::CommandFailed {
+                cmd: format!("write security monitor receipt {}", self.path.display()),
+                stderr: error.to_string(),
+            })?;
+        encoded.push(b'\n');
+        let current = self
+            .file
+            .metadata()
+            .map_err(|source| ExecError::Io {
+                cmd: format!("stat security monitor receipt {}", self.path.display()),
+                source,
+            })?
+            .len();
+        if current.saturating_add(encoded.len() as u64) > SECURITY_MONITOR_MAX_RECEIPT_BYTES {
+            return Err(receipt_error(&self.path, "receipt capacity exhausted"));
+        }
+        self.file
+            .write_all(&encoded)
+            .map_err(|source| ExecError::Io {
+                cmd: format!("write security monitor receipt {}", self.path.display()),
+                source,
+            })?;
+        self.file.sync_data().map_err(|source| ExecError::Io {
+            cmd: format!("sync security monitor receipt {}", self.path.display()),
+            source,
+        })?;
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(sequence)
+    }
+}
+
+fn receipt_error(path: &Path, stderr: &str) -> ExecError {
+    ExecError::CommandFailed {
+        cmd: format!("security monitor receipt {}", path.display()),
+        stderr: stderr.to_string(),
     }
 }
 
@@ -1144,8 +1316,8 @@ mod lifecycle_tests {
     use super::{
         build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
         hex_bytes, normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
-        SecurityMonitorBuffer, SecurityMonitorEvent, EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
-        SECURITY_MONITOR_MAX_BUFFER_EVENTS,
+        SecurityMonitorBuffer, SecurityMonitorEvent, SecurityMonitorReceiptWriter,
+        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER, SECURITY_MONITOR_MAX_BUFFER_EVENTS,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1216,6 +1388,54 @@ mod lifecycle_tests {
         assert_eq!(buffer.dropped(), 1);
         assert_eq!(buffer.pop().unwrap().pid, 1);
         assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn security_monitor_receipts_are_durable_bounded_and_restart_safe() {
+        let temp = tempfile::tempdir().expect("receipt directory");
+        let path = temp.path().join("security-monitor.jsonl");
+        let event = SecurityMonitorEvent::new("open", 42, 1000, 7, "payload").unwrap();
+        let mut buffer = SecurityMonitorBuffer::default();
+        buffer.push(event.clone());
+        let mut writer = SecurityMonitorReceiptWriter::open(&path).unwrap();
+        assert_eq!(buffer.drain_to(&mut writer).unwrap(), 1);
+        assert!(buffer.is_empty());
+        assert_eq!(writer.append(&event).unwrap(), 1);
+
+        let mut restarted = SecurityMonitorReceiptWriter::open(&path).unwrap();
+        assert_eq!(restarted.append(&event).unwrap(), 2);
+        let lines = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["schema"], "ferrocrate/security-monitor-receipt/v1");
+        assert_eq!(lines[0]["sequence"], 0);
+        assert_eq!(lines[2]["sequence"], 2);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn security_monitor_receipts_reject_relative_and_malformed_files() {
+        let relative = SecurityMonitorReceiptWriter::open("security-monitor.jsonl")
+            .expect_err("relative receipt path must fail closed");
+        assert!(relative.to_string().contains("must be absolute"));
+        let temp = tempfile::tempdir().expect("receipt directory");
+        let path = temp.path().join("security-monitor.jsonl");
+        std::fs::write(&path, b"not-json\n").unwrap();
+        let malformed = SecurityMonitorReceiptWriter::open(&path)
+            .expect_err("malformed receipt must fail closed");
+        assert!(malformed.to_string().contains("invalid receipt"));
     }
 
     struct FakeKernel {

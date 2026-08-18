@@ -43,6 +43,7 @@ pub use ebpf::{
     cleanup_security_monitor, embedded_object_abi, embedded_object_sha256,
     install_security_monitor, EbpfError, EbpfMetrics, EbpfNetwork, EbpfNetworkConfig,
     SecurityMonitorBuffer, SecurityMonitorConfig, SecurityMonitorEvent,
+    SecurityMonitorReceiptWriter,
 };
 
 // Re-export veth execution functions

@@ -11406,8 +11406,8 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stop");
-                let id = resolve_container_id(&runtime, requested_id)?;
                 let timeout = parse_docker_stop_timeout(&query)?;
+                let id = resolve_container_id(&runtime, requested_id)?;
                 runtime.stop(&id, timeout).map_err(|err| err.to_string())?;
                 http_response(204, &[], "text/plain")
             }
@@ -11415,8 +11415,8 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/restart");
-                let id = resolve_container_id(&runtime, requested_id)?;
                 let timeout = parse_docker_stop_timeout(&query)?;
+                let id = resolve_container_id(&runtime, requested_id)?;
                 runtime
                     .restart(&id, timeout)
                     .map_err(|err| err.to_string())?;
@@ -11442,8 +11442,8 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/kill");
-                let id = resolve_container_id(&runtime, requested_id)?;
                 let signal = parse_docker_kill_signal(query.get("signal"))?;
+                let id = resolve_container_id(&runtime, requested_id)?;
                 runtime
                     .kill_with_signal(&id, signal)
                     .map_err(|err| err.to_string())?;

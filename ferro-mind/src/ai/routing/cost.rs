@@ -156,6 +156,38 @@ impl TokenBudget {
         }
     }
 
+    /// Reconcile one reservation after a provider reports exact usage. The
+    /// compare-and-swap loop preserves concurrent reservations while releasing
+    /// an overestimate or charging an underestimate without allowing the
+    /// accounting counter to underflow.
+    fn reconcile(&self, reserved: u64, actual: u64) -> Result<(), ExecutionError> {
+        if self.budget == 0 || reserved == actual {
+            return Ok(());
+        }
+        if actual > reserved {
+            return self.reserve(actual - reserved);
+        }
+        let release = reserved - actual;
+        let mut current = self.used.load(Ordering::Acquire);
+        loop {
+            if current < release {
+                return Err(ExecutionError::TokenBudgetExceeded {
+                    used: current,
+                    budget: self.budget,
+                });
+            }
+            match self.used.compare_exchange_weak(
+                current,
+                current - release,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     pub fn used_tokens(&self) -> u64 {
         self.used.load(Ordering::Acquire)
     }
@@ -170,6 +202,12 @@ pub fn estimate_tokens(text: &str) -> u64 {
     } else {
         (text.len() as u64).saturating_add(3) / 4
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderTokenUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -416,7 +454,8 @@ pub fn execute_routed_prompt_with_adapters_metered(
     timeout: std::time::Duration,
     budget: &TokenBudget,
 ) -> Result<(String, String, u64), ExecutionError> {
-    budget.reserve(estimate_tokens(prompt))?;
+    let accounted_prompt_tokens = estimate_tokens(prompt);
+    budget.reserve(accounted_prompt_tokens)?;
     let providers: Vec<Provider> = adapters
         .iter()
         .map(|adapter| adapter.provider().clone())
@@ -440,7 +479,12 @@ pub fn execute_routed_prompt_with_adapters_metered(
                 prompt,
                 timeout,
             )?;
-            let response_tokens = usage.unwrap_or_else(|| estimate_tokens(&response));
+            let response_tokens = if let Some(usage) = usage {
+                budget.reconcile(accounted_prompt_tokens, usage.prompt_tokens)?;
+                usage.completion_tokens
+            } else {
+                estimate_tokens(&response)
+            };
             (provider, response, response_tokens)
         }
         ProviderAdapter::Wasm(endpoint) => {
@@ -469,7 +513,8 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
     if max_attempts == 0 {
         return Err(ExecutionError::NoProvider);
     }
-    budget.reserve(estimate_tokens(prompt))?;
+    let mut accounted_prompt_tokens = estimate_tokens(prompt);
+    budget.reserve(accounted_prompt_tokens)?;
     let mut remaining = adapters.iter().collect::<Vec<_>>();
     let mut last_error = None;
     for _ in 0..max_attempts {
@@ -504,7 +549,13 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
         };
         match result {
             Ok((provider, response, usage)) => {
-                let response_tokens = usage.unwrap_or_else(|| estimate_tokens(&response));
+                let response_tokens = if let Some(usage) = usage {
+                    budget.reconcile(accounted_prompt_tokens, usage.prompt_tokens)?;
+                    accounted_prompt_tokens = usage.prompt_tokens;
+                    usage.completion_tokens
+                } else {
+                    estimate_tokens(&response)
+                };
                 match budget.reserve(response_tokens) {
                     Ok(()) => return Ok((provider, response, budget.used_tokens())),
                     Err(error) => last_error = Some(error),
@@ -586,7 +637,7 @@ fn execute_routed_http_prompt_with_usage(
     policy: &RoutingPolicy,
     prompt: &str,
     timeout: std::time::Duration,
-) -> Result<(String, String, Option<u64>), ExecutionError> {
+) -> Result<(String, String, Option<ProviderTokenUsage>), ExecutionError> {
     if timeout.is_zero() {
         return Err(ExecutionError::Timeout(0));
     }
@@ -653,15 +704,33 @@ fn execute_routed_http_prompt_with_usage(
     .map(str::trim)
     .filter(|text| !text.is_empty())
     .ok_or_else(|| ExecutionError::InvalidResponse("missing non-empty text content".into()))?;
-    let output_tokens = match endpoint.protocol {
+    let usage = match endpoint.protocol {
         HttpProviderProtocol::OpenAiCompatible => value
-            .pointer("/usage/completion_tokens")
-            .and_then(serde_json::Value::as_u64),
+            .pointer("/usage/prompt_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .zip(
+                value
+                    .pointer("/usage/completion_tokens")
+                    .and_then(serde_json::Value::as_u64),
+            )
+            .map(|(prompt_tokens, completion_tokens)| ProviderTokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            }),
         HttpProviderProtocol::AnthropicMessages => value
-            .pointer("/usage/output_tokens")
-            .and_then(serde_json::Value::as_u64),
+            .pointer("/usage/input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .zip(
+                value
+                    .pointer("/usage/output_tokens")
+                    .and_then(serde_json::Value::as_u64),
+            )
+            .map(|(prompt_tokens, completion_tokens)| ProviderTokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            }),
     };
-    Ok((endpoint.provider.name.clone(), text.to_string(), output_tokens))
+    Ok((endpoint.provider.name.clone(), text.to_string(), usage))
 }
 
 fn validate_http_provider_endpoint(endpoint: &HttpProviderEndpoint) -> Result<(), ExecutionError> {
@@ -1087,6 +1156,16 @@ mod tests {
     }
 
     #[test]
+    fn token_budget_reconciles_a_reserved_estimate_to_provider_usage() {
+        let budget = TokenBudget::new(100);
+        budget.reserve(10).expect("reserve estimate");
+        budget.reconcile(10, 4).expect("release overestimate");
+        assert_eq!(budget.used_tokens(), 4);
+        budget.reconcile(4, 12).expect("charge underestimation");
+        assert_eq!(budget.used_tokens(), 12);
+    }
+
+    #[test]
     fn provider_endpoint_validation_requires_tls_off_loopback() {
         let endpoint = HttpProviderEndpoint {
             provider: Provider {
@@ -1147,7 +1226,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains("\"model\":\"test-model\""));
             assert!(request.contains("provider prompt"));
-            let body = r#"{"choices":[{"message":{"content":"openai reply"}}],"usage":{"completion_tokens":1}}"#;
+            let body = r#"{"choices":[{"message":{"content":"openai reply"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1181,7 +1260,7 @@ mod tests {
         server.join().expect("server");
         assert_eq!(
             result,
-            ("local-openai-compatible".into(), "openai reply".into(), 5)
+            ("local-openai-compatible".into(), "openai reply".into(), 3)
         );
     }
 

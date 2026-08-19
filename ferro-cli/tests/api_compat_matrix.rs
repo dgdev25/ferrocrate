@@ -121,6 +121,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/containers/matrix-container/stats?stream=0",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/matrix-container/update",
         coverage: Coverage::Implemented,
@@ -634,6 +641,12 @@ fn docker_api_compatibility_matrix() {
                 body.trim().is_empty(),
                 "created-container logs should be empty: {body:?}"
             );
+        }
+        if case.path.ends_with("/stats?stream=0") {
+            let stats: serde_json::Value = serde_json::from_str(&body).expect("stats JSON");
+            assert!(stats.get("memory_stats").is_some());
+            assert!(stats.get("cpu_stats").is_some());
+            assert!(stats.get("pids_stats").is_some());
         }
         if case.path.ends_with("/changes") && case.path.contains("matrix-container") {
             let changes: serde_json::Value = serde_json::from_str(&body).expect("changes JSON");

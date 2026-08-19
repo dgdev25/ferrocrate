@@ -11404,8 +11404,24 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stats");
-                let id = resolve_container_id(&runtime, requested_id)?;
-                let stats = runtime.stats(&id).map_err(|err| err.to_string())?;
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                let stats = match runtime.stats(&id) {
+                    Ok(stats) => stats,
+                    Err(error) if pending.contains_key(&id) => {
+                        // Docker exposes a zero-valued snapshot for a created
+                        // container before its cgroup exists. Keep this
+                        // observation read-only and avoid creating runtime
+                        // state merely to satisfy an inspect/stats request.
+                        let _ = error;
+                        ferro_core::cgroups::CgroupStats::default()
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                drop(pending);
                 if query.get("stream").is_some_and(|value| value == "1") {
                     stats_follow = Some(id.clone());
                     docker_chunked_headers(200, "application/json")

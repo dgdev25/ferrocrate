@@ -375,7 +375,16 @@ fn write_id_mapping(
     match fs::write(path, mapping.as_uid_map_entry()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            let status = Command::new(helper)
+            let helper_path = trusted_helper_path(helper).ok_or_else(|| {
+                RootlessError::LaunchMappingHelper {
+                    helper,
+                    source: io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{helper} is unavailable or not a trusted root-owned executable"),
+                    ),
+                }
+            })?;
+            let status = Command::new(helper_path)
                 .args([
                     pid.to_string(),
                     mapping.container_id.to_string(),
@@ -395,6 +404,43 @@ fn write_id_mapping(
             source,
         }),
     }
+}
+
+/// Resolve mapping helpers without trusting an attacker-controlled PATH entry.
+/// The setuid helpers must be regular, executable, root-owned files that are
+/// not writable by group or other users.
+fn trusted_helper_path(helper: &str) -> Option<PathBuf> {
+    let mut candidates = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(helper))
+                .collect::<Vec<_>>()
+        })
+        .chain([
+            PathBuf::from("/usr/local/bin").join(helper),
+            PathBuf::from("/usr/bin").join(helper),
+            PathBuf::from("/bin").join(helper),
+        ]);
+    candidates.find(|candidate| {
+        let Ok(metadata) = fs::metadata(candidate) else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            metadata.uid() == 0
+                && metadata.permissions().mode() & 0o111 != 0
+                && metadata.permissions().mode() & 0o022 == 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
 }
 
 fn first_subid_range(
@@ -476,8 +522,8 @@ fn parse_subid_line(line: &str) -> Result<(String, u32, u32), RootlessError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_user_namespace_mappings, first_subid_range, parse_subid_line, RootlessConfig,
-        RootlessMapping,
+        apply_user_namespace_mappings, first_subid_range, parse_subid_line, trusted_helper_path,
+        RootlessConfig, RootlessMapping,
     };
     use std::fs;
     const DEFAULT_SUBID_SIZE: u32 = 65_536;
@@ -514,6 +560,24 @@ mod tests {
                 count: 65_536
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_untrusted_mapping_helper_from_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let helper = temp.path().join("newuidmap");
+        fs::write(&helper, "#!/bin/sh\nexit 0\n").expect("write helper");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("executable");
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", temp.path());
+        let resolved = trusted_helper_path("newuidmap");
+        assert!(resolved.as_deref() != Some(helper.as_path()));
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
     }
 
     #[test]

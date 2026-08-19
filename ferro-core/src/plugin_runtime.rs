@@ -215,7 +215,12 @@ fn plugin_command(
         // shell interpretation or interpolation. RLIMIT_NPROC is per-user on
         // Linux (not per-plugin), so it cannot safely represent the manifest's
         // process budget; deployment cgroups enforce that budget instead.
-        let mut command = Command::new("prlimit");
+        let prlimit = crate::rootless::trusted_executable_path("prlimit").ok_or_else(|| {
+            PluginExecutionError::ResourceLimits(
+                "trusted root-owned prlimit executable is unavailable".to_string(),
+            )
+        })?;
+        let mut command = Command::new(prlimit);
         command
             .arg(format!("--as={}", manifest.limits.memory_bytes))
             .arg("--")

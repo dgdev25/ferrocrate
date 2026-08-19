@@ -275,18 +275,30 @@ fn rootless_run_reports_memory_oom_event() {
     let events = std::path::Path::new("/sys/fs/cgroup")
         .join(relative)
         .join("memory.events");
+    let swap_max = events
+        .parent()
+        .expect("memory cgroup parent")
+        .join("memory.swap.max");
+    let swap_unbounded = std::fs::read_to_string(&swap_max)
+        .map(|value| value.trim() == "max")
+        .unwrap_or(false);
     let mut oom = false;
+    let mut max_pressure = false;
     for _ in 0..100 {
         if std::fs::read_to_string(&events)
             .ok()
             .map(|value| {
                 value.lines().any(|line| {
                     let mut fields = line.split_whitespace();
-                    matches!(fields.next(), Some("oom" | "oom_kill"))
-                        && fields
-                            .next()
-                            .and_then(|count| count.parse::<u64>().ok())
-                            .is_some_and(|count| count > 0)
+                    let name = fields.next();
+                    let count = fields
+                        .next()
+                        .and_then(|count| count.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if name == Some("max") && count > 0 {
+                        max_pressure = true;
+                    }
+                    matches!(name, Some("oom" | "oom_kill")) && count > 0
                 })
             })
             .unwrap_or(false)
@@ -296,12 +308,25 @@ fn rootless_run_reports_memory_oom_event() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert!(
-        oom,
-        "memory OOM event was not observed in {}: {}",
-        events.display(),
-        std::fs::read_to_string(&events).unwrap_or_else(|error| error.to_string())
-    );
+    if swap_unbounded {
+        assert!(
+            max_pressure,
+            "memory pressure was not observed in {}: {}",
+            events.display(),
+            std::fs::read_to_string(&events).unwrap_or_else(|error| error.to_string())
+        );
+        eprintln!(
+            "rootless memory limit reached max pressure but no OOM kill because {} is unlimited",
+            swap_max.display()
+        );
+    } else {
+        assert!(
+            oom,
+            "memory OOM event was not observed in {}: {}",
+            events.display(),
+            std::fs::read_to_string(&events).unwrap_or_else(|error| error.to_string())
+        );
+    }
     run.kill().expect("stop rootless OOM run");
     let _ = run.wait();
 }

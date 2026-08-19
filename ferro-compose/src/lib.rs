@@ -251,6 +251,10 @@ pub struct ResourceSpec {
 pub struct Network {
     /// Network driver ("bridge", "overlay", "host", etc.).
     pub driver: Option<String>,
+
+    /// Whether the network is managed outside this Compose project.
+    #[serde(default)]
+    pub external: bool,
 }
 
 /// Named volume configuration.

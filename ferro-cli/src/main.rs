@@ -9006,6 +9006,12 @@ fn ensure_compose_networks(
         let definition = networks
             .get(&name)
             .ok_or_else(|| format!("compose: missing network definition {name}"))?;
+        if definition.external {
+            if records.iter().any(|record| record.name == name) {
+                continue;
+            }
+            return Err(format!("compose: external network {name} was not found"));
+        }
         let driver = definition.driver.as_deref().unwrap_or("bridge");
         if driver != "bridge" {
             return Err(format!(
@@ -15898,6 +15904,28 @@ volumes:
             super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
                 .expect_err("overlay driver is bounded");
         assert!(error.contains("unsupported driver overlay"));
+    }
+
+    #[test]
+    fn compose_network_provisioning_does_not_create_missing_external_network() {
+        let project = super::ComposeProject {
+            path: std::path::PathBuf::new(),
+            compose: serde_json::from_value(serde_json::json!({
+                "services": {},
+                "networks": {"shared": {"external": true}}
+            }))
+            .expect("compose project"),
+        };
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let authorization = test_surface_authorization(runtime_dir.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let error =
+            super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
+                .expect_err("missing external network");
+        assert!(error.contains("external network shared was not found"));
+        assert!(super::load_networks(runtime_dir.path())
+            .expect("networks")
+            .is_empty());
     }
 
     #[test]

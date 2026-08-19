@@ -801,6 +801,19 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
     let (status, response) = harness.request("GET", "/v1.45/containers/exec-inspect/changes");
     assert_eq!(status, 200, "post-start name changes response={response}");
     assert!(response.starts_with('['), "changes response={response}");
+    let (status, response) = harness.request(
+        "POST",
+        "/v1.45/containers/exec-inspect/wait?condition=not-running",
+    );
+    assert_eq!(status, 200, "post-start name wait response={response}");
+    let wait = serde_json::from_str::<serde_json::Value>(&response).expect("wait JSON");
+    assert!(wait.get("StatusCode").is_some(), "wait response={response}");
+    let (status, response) = harness.request(
+        "POST",
+        "/v1.45/containers/exec-inspect/attach?logs=0&stream=0",
+    );
+    assert_eq!(status, 200, "post-start name attach response={response}");
+    assert!(response.is_empty(), "logs=0 attach should be empty: {response:?}");
 
     let exec_body = r#"{"Cmd":["/bin/busybox","true"]}"#;
     let exec_request = format!(

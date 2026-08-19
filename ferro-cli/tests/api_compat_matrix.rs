@@ -114,6 +114,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: r#"{"Image":"busybox","Cmd":["sh"],"Tty":true}"#,
     },
     ApiCase {
+        method: "POST",
+        path: "/exec/missing/start",
+        coverage: Coverage::Unsupported,
+        expected_status: 400,
+        body: r#"{"Tty":true}"#,
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/matrix-container/logs?stdout=1&stderr=1",
         coverage: Coverage::Implemented,

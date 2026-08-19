@@ -10160,6 +10160,17 @@ fn validate_docker_exec_command(cmd: &[String]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+fn validate_docker_exec_start(tty: bool) -> Result<(), String> {
+    if tty {
+        return Err(
+            "docker: Tty=true is unsupported for exec; Ferrocrate currently supports non-TTY exec only"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
@@ -11698,6 +11709,7 @@ fn handle_docker_compat_connection(
                     serde_json::from_slice(&request.body)
                         .map_err(|error| format!("docker: invalid exec start payload: {error}"))?
                 };
+                validate_docker_exec_start(start.tty)?;
                 let spec = {
                     let mut execs = state
                         .execs
@@ -14771,12 +14783,12 @@ mod tests {
         split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_container_name,
         validate_docker_container_prune_filters, validate_docker_exec_command,
-        validate_docker_image_prune_filters, validate_docker_network_filters,
-        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
-        validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
-        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
-        DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
-        VolumeCommands, WitnessCommands,
+        validate_docker_exec_start, validate_docker_image_prune_filters,
+        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
+        validate_network_mode, validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands,
+        ConfigCommands, ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent,
+        DockerEventStore, DockerExecCreateRequest, DockerHealthSpec, MigrateCommands,
+        NetworkCommands, RvfCommands, VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -17406,6 +17418,14 @@ volumes:
             parse_docker_create_spec(br#"{"Image":"busybox","Cmd":["sh"],"Tty":true}"#, None)
                 .expect_err("TTY creation must not be silently downgraded to pipes");
         assert!(error.contains("Tty=true is unsupported"));
+    }
+
+    #[test]
+    fn docker_exec_start_rejects_tty_instead_of_merging_pipe_streams() {
+        let error = validate_docker_exec_start(true)
+            .expect_err("TTY exec must not be silently downgraded to merged pipes");
+        assert!(error.contains("Tty=true is unsupported for exec"));
+        assert!(validate_docker_exec_start(false).is_ok());
     }
 
     #[test]

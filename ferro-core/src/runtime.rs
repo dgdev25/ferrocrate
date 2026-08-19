@@ -2720,6 +2720,11 @@ impl ContainerRuntime {
         parse_image_reference(image)?;
         ensure_kernel_min_version()?;
         let rootless = !nix::unistd::Uid::effective().is_root();
+        if rootless && selinux_enabled() {
+            return Err(RuntimeError::InvalidCommand(
+                "rootless SELinux enforcement is unavailable: a labeled rootful launcher is required; disable FERROCRATE_SELINUX or run rootful".to_string(),
+            ));
+        }
         validate_rootless_mount_capability(rootless, mounts, tmpfs_mounts, readonly_rootfs)?;
         if rootless && network_mode == "bridge" && rootless_netns_enabled() {
             nested_bubblewrap_diagnostic().map_err(RuntimeError::InvalidCommand)?;

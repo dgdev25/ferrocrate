@@ -10,6 +10,7 @@
 //! Docker Hub's unauthenticated pull quota is exhausted.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn rootless_test_image() -> String {
@@ -18,6 +19,62 @@ fn rootless_test_image() -> String {
 
 fn compose_fixture(contents: &str) -> String {
     contents.replace("alpine:3.20", &rootless_test_image())
+}
+
+fn runtime_dir(root: &Path) -> PathBuf {
+    let runtime = root.join("runtime");
+    if let Ok(store) = std::env::var("FERROCRATE_ROOTLESS_IMAGE_STORE") {
+        let store = PathBuf::from(store);
+        assert!(
+            store.is_dir(),
+            "configured rootless image store is not a directory"
+        );
+        fs::create_dir_all(&runtime).expect("runtime directory");
+        std::os::unix::fs::symlink(&store, runtime.join("images"))
+            .expect("link configured rootless image store");
+        let store_db = PathBuf::from(format!("{}.sqlite", store.display()));
+        assert!(
+            store_db.is_file(),
+            "configured rootless image store database is missing"
+        );
+        std::os::unix::fs::symlink(store_db, runtime.join("images.sqlite"))
+            .expect("link configured rootless image store database");
+    }
+    runtime
+}
+
+fn prepare_image(binary: &str, runtime: &Path, image: &str) {
+    let mut pull = Command::new(binary);
+    pull.env("FERROCRATE_RUNTIME_DIR", runtime);
+    if std::env::var("FERROCRATE_ROOTLESS_SKIP_PULL").as_deref() == Ok("1") {
+        let listing = pull
+            .args(["images"])
+            .output()
+            .expect("list preloaded rootless images");
+        assert!(listing.status.success(), "list preloaded images failed");
+        let short = image
+            .rsplit('/')
+            .next()
+            .unwrap_or(image)
+            .split([':', '@'])
+            .next()
+            .unwrap_or(image);
+        assert!(
+            String::from_utf8_lossy(&listing.stdout).contains(short),
+            "configured rootless image store does not contain {image}: {}",
+            String::from_utf8_lossy(&listing.stdout)
+        );
+    } else {
+        let output = pull
+            .args(["pull", image])
+            .output()
+            .expect("pull rootless image");
+        assert!(
+            output.status.success(),
+            "rootless pull failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -41,8 +98,9 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     )
     .expect("compose file");
 
-    let runtime = root.path().join("runtime");
+    let runtime = runtime_dir(root.path());
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
     let mut up = Command::new(binary);
     up.current_dir(&project)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
@@ -119,19 +177,10 @@ fn rootless_run_mounts_bind_and_named_volumes() {
     let workspace = root.path().join("workspace");
     fs::create_dir_all(&workspace).expect("workspace");
     fs::write(workspace.join("input"), b"rootless-run\n").expect("input");
-    let runtime = root.path().join("runtime");
+    let runtime = runtime_dir(root.path());
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
     let image = rootless_test_image();
-    let pull = Command::new(binary)
-        .env("FERROCRATE_RUNTIME_DIR", &runtime)
-        .args(["pull", image.as_str()])
-        .output()
-        .expect("pull alpine");
-    assert!(
-        pull.status.success(),
-        "rootless pull failed: {}",
-        String::from_utf8_lossy(&pull.stderr)
-    );
+    prepare_image(binary, &runtime, &image);
 
     let bind = Command::new(binary)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
@@ -209,8 +258,9 @@ fn rootless_compose_mounts_file_backed_secrets_and_configs_read_only() {
     )
     .expect("compose file");
 
-    let runtime = root.path().join("runtime");
+    let runtime = runtime_dir(root.path());
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
     let up = Command::new(binary)
         .current_dir(&project)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
@@ -286,8 +336,9 @@ fn rootless_compose_waits_for_successfully_completed_dependency() {
     )
     .expect("compose file");
 
-    let runtime = root.path().join("runtime");
+    let runtime = runtime_dir(root.path());
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
     let output = Command::new(binary)
         .current_dir(&project)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
@@ -342,8 +393,9 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
     )
     .expect("compose file");
 
-    let runtime = root.path().join("runtime");
+    let runtime = runtime_dir(root.path());
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
     let up = Command::new(binary)
         .current_dir(&project)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)

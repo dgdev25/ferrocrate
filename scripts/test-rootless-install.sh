@@ -23,6 +23,7 @@ grep -q '^rootless.install.cgroup_v2=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.user_namespaces=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.userns_mount=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.bwrap=' "$tmp_home/dry-run.txt"
+grep -q '^rootless.install.bwrap_nested=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
 # Numeric UID/GID subordinate-ID entries are valid system configuration and

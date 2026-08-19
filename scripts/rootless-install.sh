@@ -104,6 +104,20 @@ for helper in newuidmap newgidmap slirp4netns bwrap; do
   fi
 done
 
+# Presence of bubblewrap is not sufficient for bridge-mode rootless support:
+# the host may deny the nested user+network namespace operation (for example
+# through an outer container or LSM policy). Probe the exact composition used
+# by the workload path before any installation mutation. Non-strict installs
+# remain usable for host/none networking, but strict installs fail closed.
+if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
+  unshare --user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
+  echo "rootless.install.bwrap_nested=pass"
+else
+  echo "rootless.install.bwrap_nested=missing"
+  echo "rootless-install: bridge-mode rootless workloads may be unavailable because nested bubblewrap namespaces are denied" >&2
+  prerequisite_failures=1
+fi
+
 if awk -F: -v user="$user" -v uid="$uid" '$1 == user || $1 == uid { if ($2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0) found=1 } END { exit !found }' "$subuid_file" 2>/dev/null; then
   echo "rootless.install.subuid=pass"
 else

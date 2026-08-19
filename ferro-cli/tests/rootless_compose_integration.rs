@@ -178,3 +178,59 @@ fn rootless_run_mounts_bind_and_named_volumes() {
         "named-run\n"
     );
 }
+
+#[test]
+fn rootless_compose_waits_for_successfully_completed_dependency() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    let workspace = project.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(
+        project.join("compose.yml"),
+        "services:\n  job:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo completed\"]\n    network_mode: none\n  dependent:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo dependent > /data/output; sleep 2\"]\n    network_mode: none\n    volumes:\n      - ./workspace:/data\n    depends_on:\n      job:\n        condition: service_completed_successfully\n",
+    )
+    .expect("compose file");
+
+    let runtime = root.path().join("runtime");
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let output = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "up", "--detach"])
+        .output()
+        .expect("compose up");
+    assert!(
+        output.status.success(),
+        "completion-condition compose up failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for _ in 0..100 {
+        if workspace.join("output").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        fs::read_to_string(workspace.join("output")).expect("dependent output"),
+        "dependent\n"
+    );
+
+    let down = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .args(["compose", "--file", "compose.yml", "down"])
+        .output()
+        .expect("compose down");
+    assert!(
+        down.status.success(),
+        "completion-condition compose down failed: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+}

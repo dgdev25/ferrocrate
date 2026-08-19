@@ -2,7 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${ROOT_DIR}/target/debug/ferro-cli"
+# Keep the binary lookup aligned with Cargo's optional target directory. This
+# matters for guest/CI runs that place build artifacts on a caller-owned disk
+# rather than the repository filesystem.
+TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
+BIN="${TARGET_DIR}/debug/ferro-cli"
 
 if [[ ! -x "${BIN}" ]]; then
   echo "Building ferro-cli..."

@@ -35,6 +35,19 @@ if grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$tmp_home/dry-run.txt"; 
   exit 1
 fi
 
+# An upgrade without repeating the optional flag must preserve a previously
+# explicit network choice.
+network_home="$tmp_home/network-home"
+mkdir -p "$network_home"
+HOME="$network_home" XDG_CONFIG_HOME="$network_home/config" XDG_RUNTIME_DIR="$runtime_dir" \
+  "$installer" --binary /bin/true --socket "$runtime_dir/network.sock" --rootless-network \
+  >"$tmp_home/network-install.txt" 2>&1
+grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$network_home/config/systemd/user/ferrocrate.service"
+HOME="$network_home" XDG_CONFIG_HOME="$network_home/config" XDG_RUNTIME_DIR="$runtime_dir" \
+  "$installer" --binary /bin/true --socket "$runtime_dir/network.sock" --upgrade \
+  >"$tmp_home/network-upgrade.txt" 2>&1
+grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$network_home/config/systemd/user/ferrocrate.service"
+
 # Numeric UID/GID subordinate-ID entries are valid system configuration and
 # must produce the same installer result as username entries.
 printf '%s:200000:65536\n' "$(id -u)" >"$tmp_home/numeric-subuid"

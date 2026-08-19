@@ -190,6 +190,13 @@ fi
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit_path="$unit_dir/ferrocrate.service"
 installed_binary="$HOME/.local/bin/ferrocrate"
+# Preserve an operator's explicit network opt-in across upgrades unless the
+# unit has never enabled it. This avoids silently changing bridge behavior
+# when an upgrade command omits the optional flag.
+if ((upgrade)) && [[ -f "$unit_path" ]] &&
+  grep -Fqx 'Environment=FERROCRATE_ROOTLESS_NETNS=1' "$unit_path"; then
+  rootless_network=1
+fi
 unit_content="[Unit]
 Description=FerroCrate rootless Docker-compatible daemon
 After=default.target

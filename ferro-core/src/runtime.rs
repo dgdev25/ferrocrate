@@ -3887,6 +3887,9 @@ impl ContainerRuntime {
 
         record.pid = child_id;
         record.status = "running".to_string();
+        // A replacement starts a new lifecycle; do not expose the old
+        // supervisor's signal-derived exit code while it is being launched.
+        record.last_exit_code = None;
         let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
             self.store
                 .put_for_mutation(&record, reservation.operation_id)
@@ -6012,10 +6015,12 @@ fn supervise_child(
     loop {
         let status = child.wait();
         let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
-        let current_status = match update_exit_after_mutation(&store, &container_id, exit_code) {
-            Ok(status) => status,
-            Err(_) => "exited".to_string(),
-        };
+        let current_status =
+            match update_exit_after_mutation(&store, &container_id, child.id(), exit_code) {
+                Ok(Some(status)) => status,
+                Ok(None) => break,
+                Err(_) => "exited".to_string(),
+            };
 
         let uptime_secs = container_start_time.elapsed().as_secs();
         if ai_enabled {
@@ -10706,19 +10711,12 @@ fn update_pid_status(
     Ok(())
 }
 
-fn update_exit(
-    db: &SqliteContainerStore,
-    id: &str,
-    exit_code: i32,
-) -> Result<String, ContainerStoreError> {
-    db.update_exit(id, exit_code)
-}
-
 fn update_exit_after_mutation(
     db: &SqliteContainerStore,
     id: &str,
+    expected_pid: u32,
     exit_code: i32,
-) -> Result<String, ContainerStoreError> {
+) -> Result<Option<String>, ContainerStoreError> {
     // A short-lived workload can exit while its creating `run` mutation is
     // still being finalized by the parent CLI. Do not drop that terminal
     // observation: wait for the reservation to clear, then publish the exit
@@ -10729,7 +10727,7 @@ fn update_exit_after_mutation(
     // publish the launch identity and terminal state under heavy contention.
     const MAX_RETRIES: usize = 256;
     for attempt in 0..MAX_RETRIES {
-        match update_exit(db, id, exit_code) {
+        match db.update_exit_for_pid(id, expected_pid, exit_code) {
             Err(ContainerStoreError::MutationConflict) if attempt + 1 < MAX_RETRIES => {
                 // Any lifecycle owner may be finalizing a kernel effect while
                 // the supervisor observes process exit.  Waiting for that
@@ -10749,7 +10747,7 @@ fn update_exit_after_mutation(
             result => return result,
         }
     }
-    update_exit(db, id, exit_code)
+    db.update_exit_for_pid(id, expected_pid, exit_code)
 }
 
 fn update_health(
@@ -12275,6 +12273,22 @@ mod tests {
             .find(|c| c.id == record.id)
             .expect("record");
         assert_ne!(updated.pid, record.pid);
+
+        // The replaced supervisor must not publish its signal-derived `-1`
+        // after the replacement exits successfully.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let current = runtime.inspect(&record.id).expect("inspect after restart");
+            if current.status != "running" {
+                assert_eq!(current.last_exit_code, Some(0));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 
     #[test]

@@ -599,15 +599,23 @@ impl SqliteContainerStore {
         })
     }
 
-    pub(crate) fn update_exit(
+    /// Publish a process exit only if the record still belongs to the
+    /// supervisor that observed it. Restart replaces the PID while the old
+    /// supervisor may still be finishing its wait; without this compare the
+    /// old process can overwrite the replacement's running/exit state.
+    pub(crate) fn update_exit_for_pid(
         &self,
         id: &str,
+        expected_pid: u32,
         exit_code: i32,
-    ) -> Result<String, ContainerStoreError> {
+    ) -> Result<Option<String>, ContainerStoreError> {
         self.transaction(|transaction| {
             let Some(mut record) = Self::get_tx(transaction, id)? else {
-                return Ok("exited".to_string());
+                return Ok(None);
             };
+            if record.pid != expected_pid {
+                return Ok(None);
+            }
             if record.pending_mutation.is_some() {
                 return Err(ContainerStoreError::MutationConflict);
             }
@@ -621,7 +629,7 @@ impl SqliteContainerStore {
                 "UPDATE containers SET payload=?2 WHERE id=?1",
                 params![id, payload],
             )?;
-            Ok(status)
+            Ok(Some(status))
         })
     }
 

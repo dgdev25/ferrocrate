@@ -9397,6 +9397,9 @@ fn command_available(bin: &str) -> bool {
     // treating that probe as absence silently disables strict MAC enforcement.
     // Resolve the executable instead and let the real, timeout-bounded call
     // report an execution failure at the point of use.
+    if matches!(bin, "bwrap" | "unshare" | "setpriv" | "sh") {
+        return crate::rootless::trusted_executable_path(bin).is_some();
+    }
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };

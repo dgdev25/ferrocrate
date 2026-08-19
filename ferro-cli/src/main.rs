@@ -15980,6 +15980,41 @@ volumes:
     }
 
     #[test]
+    fn manual_ai_audit_serializes_explainability_context() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let temp = tempfile::tempdir().expect("audit directory");
+        let path = temp.path().join("audit.jsonl");
+        let old_enabled = std::env::var_os("FERROCRATE_AI");
+        let old_log = std::env::var_os("FERROCRATE_AI_AUDIT_LOG");
+        unsafe {
+            std::env::set_var("FERROCRATE_AI", "1");
+            std::env::set_var("FERROCRATE_AI_AUDIT_LOG", &path);
+        }
+        super::handle_ai_audit(
+            "observe",
+            "manual explainability test",
+            &["confidence=0.9".to_string(), "container_id=c1".to_string()],
+        )
+        .expect("manual audit");
+        let line = std::fs::read_to_string(&path).expect("audit record");
+        let record: serde_json::Value = serde_json::from_str(line.trim()).expect("json record");
+        assert_eq!(record["model"], "manual-audit");
+        assert_eq!(record["model_version"], "cli-v1");
+        assert_eq!(record["decision"], "observe");
+        assert_eq!(record["confidence"], 0.9);
+        unsafe {
+            match old_enabled {
+                Some(value) => std::env::set_var("FERROCRATE_AI", value),
+                None => std::env::remove_var("FERROCRATE_AI"),
+            }
+            match old_log {
+                Some(value) => std::env::set_var("FERROCRATE_AI_AUDIT_LOG", value),
+                None => std::env::remove_var("FERROCRATE_AI_AUDIT_LOG"),
+            }
+        }
+    }
+
+    #[test]
     fn parses_ai_train_alias_command() {
         let cli = Cli::parse_from([
             "ferrocrate",

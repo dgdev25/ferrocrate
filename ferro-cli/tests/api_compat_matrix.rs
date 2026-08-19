@@ -107,6 +107,20 @@ const API_MATRIX: &[ApiCase] = &[
         body: r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"RestartPolicy":{"Name":"unless-stopped","MaximumRetryCount":0}}}"#,
     },
     ApiCase {
+        method: "GET",
+        path: "/containers/matrix-container/logs?stdout=1&stderr=1",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        path: "/containers/matrix-container/changes",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/matrix-container/update",
         coverage: Coverage::Implemented,
@@ -614,6 +628,16 @@ fn docker_api_compatibility_matrix() {
                 body.trim().is_empty(),
                 "resize success must have an empty body: {body:?}"
             );
+        }
+        if case.path.contains("/logs?stdout=1&stderr=1") {
+            assert!(
+                body.trim().is_empty(),
+                "created-container logs should be empty: {body:?}"
+            );
+        }
+        if case.path.ends_with("/changes") && case.path.contains("matrix-container") {
+            let changes: serde_json::Value = serde_json::from_str(&body).expect("changes JSON");
+            assert!(changes.as_array().is_some_and(|entries| entries.is_empty()));
         }
     }
 }

@@ -20,3 +20,29 @@ bash "$repo_root/scripts/verify-rootless.sh" >"$output" 2>&1
 grep -q '^rootless.subuid=pass$' "$output"
 grep -q '^rootless.subgid=pass$' "$output"
 echo "rootless numeric subid diagnostic regression passed"
+
+# Hermetic strict-mode negative control: make the operational probes pass with
+# command stubs, then provide empty subordinate-ID files. Strict diagnostics
+# must fail closed and report both missing mappings.
+strict_bin="$tmp_dir/strict-bin"
+mkdir -p "$strict_bin"
+for helper in unshare bwrap newuidmap newgidmap slirp4netns; do
+  printf '#!/bin/sh\nexit 0\n' >"$strict_bin/$helper"
+  chmod 0755 "$strict_bin/$helper"
+done
+: >"$tmp_dir/empty-subuid"
+: >"$tmp_dir/empty-subgid"
+strict_output="$tmp_dir/strict-output"
+set +e
+PATH="$strict_bin:$PATH" \
+FERROCRATE_ROOTLESS_SUBUID_FILE="$tmp_dir/empty-subuid" \
+FERROCRATE_ROOTLESS_SUBGID_FILE="$tmp_dir/empty-subgid" \
+XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+FERROCRATE_ROOTLESS_STRICT=1 \
+bash "$repo_root/scripts/verify-rootless.sh" >"$strict_output" 2>&1
+strict_rc=$?
+set -e
+[[ "$strict_rc" -eq 1 ]]
+grep -q '^rootless.subuid=missing$' "$strict_output"
+grep -q '^rootless.subgid=missing$' "$strict_output"
+echo "rootless strict missing-subid regression passed"

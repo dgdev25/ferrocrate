@@ -8306,15 +8306,17 @@ fn handle_network_authorized(
         }
         NetworkCommands::Inspect { name, format } => {
             let payload = if name == "bridge" {
+                let containers = docker_network_containers(runtime, "bridge")?;
                 serde_json::json!({
                     "Name": "bridge", "Id": "bridge", "Driver": "bridge",
-                    "Scope": "local", "IPAM": {"Config": []}, "Containers": {}
+                    "Scope": "local", "IPAM": {"Config": []}, "Containers": containers
                 })
             } else {
                 let record = load_networks(runtime_dir)?
                     .into_iter()
                     .find(|record| record.name == name)
                     .ok_or_else(|| format!("network: not found {name}"))?;
+                let containers = docker_network_containers(runtime, &record.name)?;
                 let ipv6_config = docker_network_ipv6_config(&record);
                 let mut ipam_config = vec![serde_json::json!({
                     "Subnet": record.subnet,
@@ -8326,7 +8328,7 @@ fn handle_network_authorized(
                 serde_json::json!({
                     "Name": record.name, "Id": record.name, "Driver": record.driver,
                     "Scope": "local", "EnableIPv6": record.ipv6_cidr.is_some(),
-                    "IPAM": {"Config": ipam_config}, "Containers": {}
+                    "IPAM": {"Config": ipam_config}, "Containers": containers
                 })
             };
             if format == "json" {
@@ -12333,9 +12335,10 @@ fn handle_docker_compat_connection(
             ("GET", path) if path.starts_with("/networks/") => {
                 let name = path.trim_start_matches("/networks/");
                 if name == "bridge" {
+                    let containers = docker_network_containers(&runtime, "bridge")?;
                     let body = serde_json::json!({
                         "Name": "bridge", "Id": "bridge", "Driver": "bridge",
-                        "Scope": "local", "IPAM": {"Config": []}, "Containers": {}
+                        "Scope": "local", "IPAM": {"Config": []}, "Containers": containers
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 } else {
@@ -12343,6 +12346,7 @@ fn handle_docker_compat_connection(
                         .into_iter()
                         .find(|record| record.name == name)
                         .ok_or_else(|| format!("docker: network not found: {name}"))?;
+                    let containers = docker_network_containers(&runtime, &record.name)?;
                     let ipv6_config = docker_network_ipv6_config(&record);
                     let mut ipam_config = vec![serde_json::json!({
                         "Subnet": record.subnet,
@@ -12356,7 +12360,7 @@ fn handle_docker_compat_connection(
                         "Scope": "local",
                         "EnableIPv6": record.ipv6_cidr.is_some(),
                         "IPAM": {"Config": ipam_config},
-                        "Containers": {}
+                        "Containers": containers
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 }
@@ -13593,6 +13597,48 @@ fn docker_network_ipv6_config(record: &NetworkRecord) -> Option<serde_json::Valu
         "Subnet": format!("{subnet}/{prefix}"),
         "Gateway": gateway.to_string(),
     }))
+}
+
+/// Project the runtime's single persisted network association into Docker's
+/// network-inspect container map.  This is intentionally a read-only view:
+/// network connect/disconnect mutation remains unsupported until the runtime
+/// can represent multiple attachments with durable endpoint identities.
+#[cfg(target_os = "linux")]
+fn docker_network_containers(
+    runtime: &ContainerRuntime,
+    network: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let records = runtime.list().map_err(|error| error.to_string())?;
+    Ok(docker_network_containers_from_records(&records, network))
+}
+
+#[cfg(target_os = "linux")]
+fn docker_network_containers_from_records(
+    records: &[ferro_core::container_store::ContainerRecord],
+    network: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut containers = serde_json::Map::new();
+    for container in records {
+        if container.network_name.as_deref() != Some(network) {
+            continue;
+        }
+        let name = container
+            .name
+            .as_deref()
+            .map(|name| format!("/{name}"))
+            .unwrap_or_default();
+        containers.insert(
+            container.id.clone(),
+            serde_json::json!({
+                "Name": name,
+                "EndpointID": "",
+                "MacAddress": "",
+                "IPv4Address": container.ip_address.as_deref().unwrap_or_default(),
+                "IPv6Address": container.ipv6_address.as_deref().unwrap_or_default(),
+            }),
+        );
+    }
+    containers
 }
 
 fn validate_docker_network_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
@@ -16137,6 +16183,38 @@ volumes:
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn network_inspect_projects_persisted_container_associations() {
+        let attached: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "container-1",
+                "name": "api",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["/bin/true"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "exited",
+                "network_name": "app-net",
+                "ip_address": "172.30.0.2",
+                "ipv6_address": "fd42:30::2"
+            }))
+            .expect("decode attached record");
+        let mut detached = ferro_core::container_store::ContainerRecord {
+            id: "container-2".to_string(),
+            ..attached.clone()
+        };
+        detached.network_name = None;
+        let projected =
+            super::docker_network_containers_from_records(&[attached, detached], "app-net");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected["container-1"]["Name"], "/api");
+        assert_eq!(projected["container-1"]["IPv4Address"], "172.30.0.2");
+        assert_eq!(projected["container-1"]["IPv6Address"], "fd42:30::2");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -269,7 +269,11 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, DockerAuthError> {
     let helper_bin = format!("docker-credential-{helper}");
-    let helper_path = resolve_helper_path(&helper_bin);
+    let helper_path = resolve_helper_path(&helper_bin).ok_or_else(|| {
+        DockerAuthError::Helper(format!(
+            "credential helper is unavailable or not trusted: {helper_bin}"
+        ))
+    })?;
 
     // SEC-05: Execute credential helper with timeout to prevent blocking indefinitely
     let output = execute_helper_with_timeout(&helper_path, registry)?;
@@ -287,19 +291,44 @@ fn resolve_with_helper(helper: &str, registry: &str) -> Result<RegistryAuth, Doc
     })
 }
 
-fn resolve_helper_path(helper_bin: &str) -> String {
+fn resolve_helper_path(helper_bin: &str) -> Option<PathBuf> {
     if let Ok(config_dir) = std::env::var("DOCKER_CONFIG") {
         let candidate = PathBuf::from(config_dir).join("bin").join(helper_bin);
-        if candidate.is_file() {
-            return candidate.to_string_lossy().to_string();
+        if trusted_helper_path(&candidate) {
+            return Some(candidate);
         }
     }
-    helper_bin.to_string()
+    crate::rootless::trusted_executable_path(helper_bin)
+}
+
+fn trusted_helper_path(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let owner_ok = if nix::unistd::geteuid().is_root() {
+            metadata.uid() == 0
+        } else {
+            metadata.uid() == nix::unistd::geteuid().as_raw()
+        };
+        owner_ok
+            && metadata.permissions().mode() & 0o111 != 0
+            && metadata.permissions().mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// SEC-05: Execute credential helper with timeout to prevent blocking indefinitely
 fn execute_helper_with_timeout(
-    helper_bin: &str,
+    helper_bin: &Path,
     registry: &str,
 ) -> Result<std::process::Output, DockerAuthError> {
     let mut child = Command::new(helper_bin)
@@ -444,7 +473,10 @@ fn normalize_registry_key(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_registry_key, resolve_auth_for_registry, DockerAuthError, ScopedEnvVar};
+    use super::{
+        normalize_registry_key, resolve_auth_for_registry, trusted_helper_path, DockerAuthError,
+        ScopedEnvVar,
+    };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
@@ -559,6 +591,17 @@ mod tests {
             .expect("auth present");
         assert_eq!(auth.username, "helper");
         assert_eq!(auth.password, "token");
+    }
+
+    #[test]
+    fn rejects_group_writable_credential_helper() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let helper_path = dir.path().join("docker-credential-test");
+        fs::write(&helper_path, "#!/bin/sh\n").expect("write helper");
+        let mut perms = fs::metadata(&helper_path).expect("metadata").permissions();
+        perms.set_mode(0o777);
+        fs::set_permissions(&helper_path, perms).expect("chmod");
+        assert!(!trusted_helper_path(&helper_path));
     }
 
     #[test]

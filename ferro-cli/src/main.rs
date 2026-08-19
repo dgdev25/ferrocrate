@@ -8874,6 +8874,54 @@ struct PreparedComposeService {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ComposeNetworkOwnership {
+    project: String,
+    networks: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn compose_network_ownership_path(runtime_dir: &Path) -> std::path::PathBuf {
+    runtime_dir.join("compose-networks.json")
+}
+
+#[cfg(target_os = "linux")]
+fn load_compose_network_ownership(
+    runtime_dir: &Path,
+) -> Result<Vec<ComposeNetworkOwnership>, String> {
+    let path = compose_network_ownership_path(runtime_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| format!("compose: failed to read network ownership: {error}"))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("compose: failed to parse network ownership: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn save_compose_network_ownership(
+    runtime_dir: &Path,
+    ownership: &[ComposeNetworkOwnership],
+) -> Result<(), String> {
+    let path = compose_network_ownership_path(runtime_dir);
+    let payload = serde_json::to_vec_pretty(ownership)
+        .map_err(|error| format!("compose: failed to encode network ownership: {error}"))?;
+    ferro_core::fs_atomic::write_atomic(&path, &payload)
+        .map_err(|error| format!("compose: failed to write network ownership: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn compose_project_key(project: &ComposeProject) -> String {
+    project
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| project.path.clone())
+        .display()
+        .to_string()
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_compose_service(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
@@ -8990,7 +9038,73 @@ fn ensure_compose_networks(
         records.push(record);
         created.push(name);
     }
+    if !created.is_empty() {
+        let project_key = compose_project_key(project);
+        let mut ownership = load_compose_network_ownership(runtime_dir)?;
+        if let Some(entry) = ownership
+            .iter_mut()
+            .find(|entry| entry.project == project_key)
+        {
+            for name in &created {
+                if !entry.networks.contains(name) {
+                    entry.networks.push(name.clone());
+                }
+            }
+            entry.networks.sort();
+        } else {
+            let mut networks = created.clone();
+            networks.sort();
+            ownership.push(ComposeNetworkOwnership {
+                project: project_key,
+                networks,
+            });
+        }
+        ownership.sort_by(|left, right| left.project.cmp(&right.project));
+        save_compose_network_ownership(runtime_dir, &ownership)?;
+    }
     Ok(created)
+}
+
+#[cfg(target_os = "linux")]
+fn remove_owned_compose_networks(
+    project: &ComposeProject,
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    let project_key = compose_project_key(project);
+    let mut ownership = load_compose_network_ownership(runtime_dir)?;
+    let Some(entry) = ownership.iter().find(|entry| entry.project == project_key) else {
+        return Ok(());
+    };
+    let associations = runtime.list().map_err(|error| error.to_string())?;
+    let records = load_networks(runtime_dir)?;
+    for name in &entry.networks {
+        let Some(record) = records.iter().find(|record| record.name == *name) else {
+            continue;
+        };
+        if associations
+            .iter()
+            .any(|container| container.network_name.as_deref() == Some(record.name.as_str()))
+        {
+            return Err(format!(
+                "compose: cannot remove owned network {name} while containers remain attached"
+            ));
+        }
+        let permit = authorization
+            .authorize_named(
+                origin,
+                AuthorizationAction::NetworkDelete,
+                ResourceKind::Network,
+                &record.name,
+                record.generation,
+            )
+            .map_err(|error| error.to_string())?;
+        execute_network_remove(runtime_dir, record, &associations, permit)?;
+    }
+    ownership.retain(|entry| entry.project != project_key);
+    save_compose_network_ownership(runtime_dir, &ownership)
 }
 
 #[cfg(target_os = "linux")]
@@ -9293,6 +9407,9 @@ fn handle_compose(
                 .collect();
             let parent_origin = ferro_core::authorization::RequestOrigin::cli_current()
                 .map_err(|error| format!("compose identity resolution failed: {error}"))?;
+            let surface_authorization = runtime
+                .surface_authorization()
+                .map_err(|error| error.to_string())?;
             let mut parent_hasher = Sha256::new();
             parent_hasher.update(b"ferrocrate/compose-down-parent/v1");
             parent_hasher.update(
@@ -9453,6 +9570,13 @@ fn handle_compose(
                     failures.join("; ")
                 ));
             }
+            remove_owned_compose_networks(
+                &project,
+                &runtime_dir(),
+                runtime,
+                &parent_origin,
+                &surface_authorization,
+            )?;
         }
         ComposeCommands::Ps => {
             let services = compose_ps(&project).map_err(|err| err.to_string())?;
@@ -15774,6 +15898,21 @@ volumes:
             super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
                 .expect_err("overlay driver is bounded");
         assert!(error.contains("unsupported driver overlay"));
+    }
+
+    #[test]
+    fn compose_network_ownership_round_trips_atomically() {
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let ownership = vec![super::ComposeNetworkOwnership {
+            project: "/tmp/project/compose.yaml".to_string(),
+            networks: vec!["app-net".to_string(), "db-net".to_string()],
+        }];
+        super::save_compose_network_ownership(runtime_dir.path(), &ownership)
+            .expect("save ownership");
+        assert_eq!(
+            super::load_compose_network_ownership(runtime_dir.path()).expect("load ownership"),
+            ownership
+        );
     }
 
     #[test]

@@ -52,6 +52,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/perf/docker-volume-io-comparison.sh \
   scripts/test-state-migrations.sh \
   scripts/next-release-version.sh scripts/test-next-release-version.sh \
+  scripts/generate-release-index.sh scripts/test-generate-release-index.sh \
   scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \
   scripts/verify-indie-release-plan.sh \
   scripts/test-docker-cli-compat.sh \
@@ -79,6 +80,7 @@ bash scripts/perf/test-check-docker-comparison.sh
 bash scripts/perf/test-check-benchmark-register.sh
 bash scripts/test-generate-changelog.sh
 bash scripts/test-next-release-version.sh
+bash scripts/test-generate-release-index.sh
 bash scripts/test-shell-out-audit.sh
 
 if (( ! skip_workspace )); then

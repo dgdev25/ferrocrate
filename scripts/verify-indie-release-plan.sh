@@ -96,4 +96,8 @@ grep -Fq "authoritative at $declared declared cases:" "$plan" || {
   echo "indie release plan Docker API matrix count is stale (expected $declared)" >&2
   exit 1
 }
+grep -Fq "$declared declared, $implemented implemented, $unsupported unsupported" "$roadmap" || {
+  echo "roadmap Docker API matrix count is stale (expected $declared/$implemented/$unsupported)" >&2
+  exit 1
+}
 echo "indie release plan gate passed: eight status rows, required public artifacts, no workflows"

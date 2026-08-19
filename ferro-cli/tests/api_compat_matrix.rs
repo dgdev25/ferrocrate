@@ -142,6 +142,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/v1.45/containers/matrix-renamed/json?size=1",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/prune",
         coverage: Coverage::Implemented,

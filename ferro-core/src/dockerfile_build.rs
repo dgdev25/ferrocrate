@@ -3374,6 +3374,13 @@ fn copy_from_context(
                     "COPY --parents source must not contain parent traversal".to_string(),
                 ));
             }
+            // An explicitly named source starts recursion with an empty
+            // relative path, so apply excludes to that source before entering
+            // the recursive walker. Without this check, `COPY --exclude=foo
+            // foo /dest` would incorrectly materialize `foo`.
+            if copy_path_is_excluded(Path::new(src.trim_start_matches('/')), &spec.excludes) {
+                continue;
+            }
             let source = src_root.join(src.trim_start_matches('/'));
             let dest = if spec.parents {
                 dest_root.join(src.trim_start_matches('/'))
@@ -4207,6 +4214,21 @@ mod tests {
         assert!(destination.join("app/keep.txt").exists());
         assert!(!destination.join("app/skip.tmp").exists());
         assert!(!destination.join("app/nested/secret").exists());
+
+        let explicit_destination = temp.path().join("explicit-destination");
+        super::copy_from_context(
+            temp.path(),
+            &explicit_destination,
+            &[super::CopySpec {
+                srcs: vec!["source/skip.tmp".into()],
+                dest: "/app".into(),
+                chmod: None,
+                parents: false,
+                excludes: vec!["*.tmp".into()],
+            }],
+        )
+        .unwrap();
+        assert!(!explicit_destination.join("app/skip.tmp").exists());
     }
 
     #[test]

@@ -78,14 +78,16 @@ tagged_image="docker-cli-compat-tag-$$:latest"
 committed_image="docker-cli-compat-commit-$$:latest"
 context_dir="$runtime_dir/context"
 mkdir -p "$context_dir"
-printf 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n' >"$context_dir/Dockerfile"
+printf 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\nCOPY --exclude=skip.tmp keep.txt skip.tmp /context/\n' >"$context_dir/Dockerfile"
 if [[ ! -x /bin/busybox ]]; then
   echo "Docker CLI lifecycle smoke requires /bin/busybox" >&2
   exit 1
 fi
 cp /bin/busybox "$context_dir/busybox"
 chmod 0755 "$context_dir/busybox"
-tar -C "$context_dir" -cf "$runtime_dir/context.tar" Dockerfile busybox
+printf 'kept by COPY --exclude\n' >"$context_dir/keep.txt"
+printf 'must be excluded\n' >"$context_dir/skip.tmp"
+tar -C "$context_dir" -cf "$runtime_dir/context.tar" Dockerfile busybox keep.txt skip.tmp
 if ! command -v curl >/dev/null 2>&1; then
   echo "Docker CLI lifecycle smoke requires curl for the Docker-compatible build endpoint" >&2
   exit 1
@@ -102,6 +104,16 @@ tar -tf "$save_archive" | grep -qx 'manifest.json'
 tar -tf "$save_archive" | grep -q '/layer.tar$'
 docker -H "$host" load -i "$save_archive" >/dev/null
 docker -H "$host" image inspect "$image" >/dev/null
+exclude_check_name="docker-cli-copy-exclude-$$"
+docker -H "$host" create --network none --name "$exclude_check_name" "$image" \
+  /bin/busybox sh -c 'test -f /context/keep.txt && test ! -e /context/skip.tmp' >/dev/null
+docker -H "$host" start "$exclude_check_name" >/dev/null
+exclude_check_status="$(docker -H "$host" wait "$exclude_check_name")"
+[[ "$exclude_check_status" == "0" ]] || {
+  echo "Dockerfile COPY --exclude smoke returned unexpected status: $exclude_check_status" >&2
+  exit 1
+}
+docker -H "$host" rm "$exclude_check_name" >/dev/null
 docker -H "$host" tag "$image" "$tagged_image"
 docker -H "$host" image inspect "$tagged_image" >/dev/null
 docker -H "$host" image rm "$tagged_image" >/dev/null
@@ -209,4 +221,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/logs-follow/diff/exec/export/cp/commit/attach/stop/kill/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/copy-exclude/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/logs-follow/diff/exec/export/cp/commit/attach/stop/kill/rm/events"

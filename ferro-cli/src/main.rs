@@ -12846,6 +12846,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("unsupported")
         || lowered.contains("too large")
         || lowered.contains("bad request")
+        || lowered.contains("event query parameter")
         || lowered.contains("must be a boolean")
         || lowered.contains("requires ")
     {

@@ -824,6 +824,26 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
 }
 
 #[test]
+fn docker_events_replay_since_until_bounds_and_reject_malformed_bounds() {
+    let harness = DaemonHarness::spawn();
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"replay-volume"}"#);
+    assert_eq!(status, 201);
+
+    let (status, body) = harness.request(
+        "GET",
+        "/events?type=volume&event=create&since=0&until=9999999999",
+        "",
+    );
+    assert_eq!(status, 200, "bounded events response: {body}");
+    assert!(body.contains("\"Action\":\"create\""), "{body}");
+
+    let (status, body) = harness.request("GET", "/events?since=not-a-timestamp", "");
+    assert_eq!(status, 400, "malformed since must fail closed: {body}");
+    let (status, body) = harness.request("GET", "/events?until=1.1234567890", "");
+    assert_eq!(status, 400, "over-precise until must fail closed: {body}");
+}
+
+#[test]
 fn docker_create_identity_is_inspectable_before_start() {
     let mut harness = DaemonHarness::spawn();
     let (status, body) = harness.request(

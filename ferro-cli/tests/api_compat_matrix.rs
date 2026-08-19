@@ -101,6 +101,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/create?name=matrix-restart-policy",
+        coverage: Coverage::Implemented,
+        expected_status: 201,
+        body: r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"RestartPolicy":{"Name":"unless-stopped","MaximumRetryCount":0}}}"#,
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/prune",
         coverage: Coverage::Implemented,
         expected_status: 200,

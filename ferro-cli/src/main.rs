@@ -11396,8 +11396,20 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/top");
-                let id = resolve_container_id(&runtime, requested_id)?;
-                let body = docker_top_payload(&runtime, &id)?;
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                let body = if pending.contains_key(&id) {
+                    serde_json::json!({
+                        "Titles": ["PID", "CMD", "STATE"],
+                        "Processes": [],
+                    })
+                } else {
+                    docker_top_payload(&runtime, &id)?
+                };
+                drop(pending);
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/stats") => {

@@ -122,6 +122,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/containers/matrix-container/top",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/matrix-container/stats?stream=0",
         coverage: Coverage::Implemented,
         expected_status: 200,
@@ -649,6 +656,13 @@ fn docker_api_compatibility_matrix() {
             assert_eq!(stats["cpu_stats"]["cpu_usage"]["total_usage"], 0);
             assert_eq!(stats["pids_stats"]["current"], 0);
             assert_eq!(stats["pids_stats"]["limit_reached"], 0);
+        }
+        if case.path.ends_with("/matrix-container/top") {
+            let top: serde_json::Value = serde_json::from_str(&body).expect("top JSON");
+            assert_eq!(top["Titles"][0], "PID");
+            assert!(top["Processes"]
+                .as_array()
+                .is_some_and(|rows| rows.is_empty()));
         }
         if case.path.ends_with("/changes") && case.path.contains("matrix-container") {
             let changes: serde_json::Value = serde_json::from_str(&body).expect("changes JSON");

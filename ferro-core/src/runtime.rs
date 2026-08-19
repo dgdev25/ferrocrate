@@ -3684,6 +3684,87 @@ impl ContainerRuntime {
         })
     }
 
+    /// Replace the complete resource-limit contract for a container. The
+    /// cgroup effect is applied before the durable record is changed so a
+    /// failed store write can restore the previous live limits.
+    pub fn update_resource_limits(
+        &self,
+        id: &str,
+        limits: ResourceLimitRecord,
+    ) -> Result<(), RuntimeError> {
+        if limits.cpu_quota.is_some() != limits.cpu_period.is_some() {
+            return Err(RuntimeError::InvalidState(
+                "cpu quota and period must be supplied together".into(),
+            ));
+        }
+        self.mediate_existing(Action::ContainerUpdate, id, |runtime, proof, intent| {
+            runtime.update_resource_limits_authorized(proof, intent, id, limits)
+        })
+    }
+
+    fn update_resource_limits_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        limits: ResourceLimitRecord,
+    ) -> Result<(), RuntimeError> {
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let previous = record.resource_limits.clone();
+        let to_cgroup =
+            |value: Option<&ResourceLimitRecord>| -> Result<ResourceLimits, RuntimeError> {
+                let value = value.cloned().unwrap_or(ResourceLimitRecord {
+                    memory_max: None,
+                    cpu_quota: None,
+                    cpu_period: None,
+                    pids_max: None,
+                });
+                let cpu_max = match (value.cpu_quota, value.cpu_period) {
+                    (Some(quota), Some(period)) => Some(CpuMax { quota, period }),
+                    (None, None) => None,
+                    _ => {
+                        return Err(RuntimeError::InvalidState(
+                            "persisted cpu quota and period must be supplied together".into(),
+                        ))
+                    }
+                };
+                Ok(ResourceLimits {
+                    memory_max: value.memory_max,
+                    cpu_max,
+                    pids_max: value.pids_max,
+                })
+            };
+        let manager = CgroupV2Manager::new(&self.cgroup_root);
+        let group = manager.create_group(&format!("ferrocrate/{id}"))?;
+        manager.replace_limits(&group, &to_cgroup(Some(&limits))?)?;
+
+        record.resource_limits = Some(limits);
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        if let Err(error) = self.store.put_for_mutation(&record, operation_id) {
+            let rollback = to_cgroup(previous.as_ref()).and_then(|old| {
+                manager
+                    .replace_limits(&group, &old)
+                    .map_err(RuntimeError::from)
+            });
+            if let Err(rollback_error) = rollback {
+                log::error!(
+                    "container resource-limit rollback failed: container_id={} error={}",
+                    id,
+                    rollback_error
+                );
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     fn rename_authorized(
         &self,
         _proof: &AuthorizedRequest,
@@ -5085,6 +5166,7 @@ fn runtime_action_name(action: Action) -> &'static str {
         Action::ContainerStart => "container.start",
         Action::ContainerDelete => "container.delete",
         Action::ContainerRename => "container.rename",
+        Action::ContainerUpdate => "container.update",
         Action::ContainerArchiveWrite => "container.archive-write",
         _ => "container.unsupported",
     }
@@ -5102,6 +5184,7 @@ fn runtime_witness_action_name(action: crate::witness::WitnessAction) -> &'stati
         crate::witness::WitnessAction::ContainerStart => "container.start",
         crate::witness::WitnessAction::ContainerDelete => "container.delete",
         crate::witness::WitnessAction::ContainerRename => "container.rename",
+        crate::witness::WitnessAction::ContainerUpdate => "container.update",
         crate::witness::WitnessAction::ContainerArchiveWrite => "container.archive-write",
         _ => "container.unsupported",
     }

@@ -318,6 +318,7 @@ fn action(value: u8) -> Result<WitnessAction, JournalError> {
         28 => Ok(KeyRotate),
         29 => Ok(RootlessMapping),
         30 => Ok(ContainerRename),
+        33 => Ok(ContainerUpdate),
         _ => Err(JournalError::Corrupt),
     }
 }

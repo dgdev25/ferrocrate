@@ -357,6 +357,38 @@ fn docker_compat_create_persists_host_resource_limits_before_start() {
 }
 
 #[test]
+fn docker_compat_update_changes_pending_resource_limits() {
+    let harness = DaemonHarness::spawn();
+    let create_body =
+        r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"Memory":67108864,"PidsLimit":32}}"#;
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=update-compat",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+    let (status, response) = harness.request_bytes(
+        "POST",
+        &format!("/v1.45/containers/{id}/update"),
+        "application/json",
+        br#"{"Memory":134217728,"PidsLimit":64}"#,
+    );
+    assert_eq!(status, 200, "update response={response}");
+    assert!(response.contains("Warnings"), "update response={response}");
+    let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/json"));
+    assert_eq!(status, 200, "inspect response={response}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("inspect JSON");
+    assert_eq!(inspect["HostConfig"]["Memory"], 134_217_728u64);
+    assert_eq!(inspect["HostConfig"]["PidsLimit"], 64u64);
+}
+
+#[test]
 fn docker_compat_inspect_uses_rfc3339_started_at() {
     let harness = DaemonHarness::spawn();
     let body = r#"{"Image":"busybox","Cmd":["true"]}"#;

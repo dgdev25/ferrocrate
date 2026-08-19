@@ -40,6 +40,7 @@ impl RecoveryTruthStrategy {
             WitnessAction::ContainerStart => Some(Self::RestartObserved),
             WitnessAction::ContainerDelete => Some(Self::ContainerPresent),
             WitnessAction::ContainerArchiveWrite => Some(Self::ContainerPresent),
+            WitnessAction::ContainerUpdate => Some(Self::ContainerPresent),
             _ => None,
         }
     }
@@ -157,6 +158,7 @@ impl RecoveryRecipe {
                     | WitnessAction::ContainerRestart
                     | WitnessAction::ContainerStart
                     | WitnessAction::ContainerDelete
+                    | WitnessAction::ContainerUpdate
                     | WitnessAction::ContainerArchiveWrite,
                 WitnessResourceKind::Container,
                 WitnessAction::ContainerDelete
@@ -350,6 +352,7 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         29 => Some(WitnessAction::RootlessMapping),
         30 => Some(WitnessAction::ContainerRename),
         32 => Some(WitnessAction::ContainerArchiveWrite),
+        33 => Some(WitnessAction::ContainerUpdate),
         _ => None,
     }
 }

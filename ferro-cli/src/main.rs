@@ -24,6 +24,8 @@ use ferro_compose::{
 use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
 #[cfg(target_os = "linux")]
 use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, ResourceKind};
+#[cfg(target_os = "linux")]
+use ferro_core::container_store::ResourceLimitRecord;
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
@@ -9916,6 +9918,28 @@ struct DockerCreateRequest {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
+struct DockerUpdateRequest {
+    #[serde(rename = "Memory")]
+    memory: Option<i64>,
+    #[serde(rename = "CpuQuota")]
+    cpu_quota: Option<i64>,
+    #[serde(rename = "CpuPeriod")]
+    cpu_period: Option<i64>,
+    #[serde(rename = "PidsLimit")]
+    pids_limit: Option<i64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerResourceUpdate {
+    memory_max: Option<Option<u64>>,
+    cpu_quota: Option<Option<u64>>,
+    cpu_period: Option<Option<u64>>,
+    pids_max: Option<Option<u64>>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
 struct DockerHealthcheck {
     #[serde(rename = "Test", default)]
     test: Vec<String>,
@@ -11617,6 +11641,74 @@ fn handle_docker_compat_connection(
                     let output = docker_raw_stream(&result.stdout, &result.stderr);
                     http_response(200, &output, "application/vnd.docker.raw-stream")
                 }
+            }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/update") => {
+                let requested_id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/update");
+                let update = parse_docker_update_request(&request.body)?;
+                let pending_id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    if pending.contains_key(requested_id) {
+                        Some(requested_id.to_string())
+                    } else {
+                        pending
+                            .iter()
+                            .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
+                            .map(|(id, _)| id.clone())
+                    }
+                };
+                if let Some(pending_id) = pending_id {
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    let spec = pending
+                        .get_mut(&pending_id)
+                        .ok_or_else(|| "docker: pending container disappeared".to_string())?;
+                    if let Some(value) = update.memory_max {
+                        spec.memory_max = value;
+                    }
+                    if let Some(value) = update.cpu_quota {
+                        spec.cpu_quota = value;
+                    }
+                    if let Some(value) = update.cpu_period {
+                        spec.cpu_period = value;
+                    }
+                    if let Some(value) = update.pids_max {
+                        spec.pids_max = value;
+                    }
+                    drop(pending);
+                    state.persist_pending()?;
+                    let body = serde_json::json!({"Warnings": []});
+                    return Ok(http_response(
+                        200,
+                        body.to_string().as_bytes(),
+                        "application/json",
+                    ));
+                }
+                let id = resolve_container_id(&runtime, requested_id)?;
+                let current = runtime.inspect(&id).map_err(|error| error.to_string())?;
+                let current_limits = current.resource_limits.unwrap_or(ResourceLimitRecord {
+                    memory_max: None,
+                    cpu_quota: None,
+                    cpu_period: None,
+                    pids_max: None,
+                });
+                let limits = ResourceLimitRecord {
+                    memory_max: update.memory_max.unwrap_or(current_limits.memory_max),
+                    cpu_quota: update.cpu_quota.unwrap_or(current_limits.cpu_quota),
+                    cpu_period: update.cpu_period.unwrap_or(current_limits.cpu_period),
+                    pids_max: update.pids_max.unwrap_or(current_limits.pids_max),
+                };
+                runtime
+                    .update_resource_limits(&id, limits)
+                    .map_err(|error| error.to_string())?;
+                let body = serde_json::json!({"Warnings": []});
+                http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/rename") => {
                 let requested_id = path
@@ -13447,6 +13539,35 @@ fn normalize_docker_limit(value: Option<i64>, field: &str) -> Result<Option<u64>
 }
 
 #[cfg(target_os = "linux")]
+fn parse_docker_update_request(body: &[u8]) -> Result<DockerResourceUpdate, String> {
+    let request: DockerUpdateRequest = serde_json::from_slice(body)
+        .map_err(|error| format!("docker: invalid update payload: {error}"))?;
+    let cpu_quota = request
+        .cpu_quota
+        .map(|value| normalize_docker_limit(Some(value), "CpuQuota"))
+        .transpose()?;
+    let cpu_period = request
+        .cpu_period
+        .map(|value| normalize_docker_limit(Some(value), "CpuPeriod"))
+        .transpose()?;
+    if cpu_quota.is_some() != cpu_period.is_some() {
+        return Err("docker: CpuQuota and CpuPeriod must be supplied together".to_string());
+    }
+    Ok(DockerResourceUpdate {
+        memory_max: request
+            .memory
+            .map(|value| normalize_docker_limit(Some(value), "Memory"))
+            .transpose()?,
+        cpu_quota,
+        cpu_period,
+        pids_max: request
+            .pids_limit
+            .map(|value| normalize_docker_limit(Some(value), "PidsLimit"))
+            .transpose()?,
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn parse_docker_healthcheck(
     healthcheck: Option<DockerHealthcheck>,
 ) -> Result<Option<DockerHealthSpec>, String> {
@@ -14334,6 +14455,7 @@ mod network_lifecycle;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use super::{parse_docker_update_request, DockerResourceUpdate};
     use ferro_core::image_manifest::parse_image_manifest;
     use sha2::Digest;
     use std::collections::{BTreeMap, HashMap};
@@ -17767,6 +17889,38 @@ volumes:
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
             None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
         }
+    }
+
+    #[test]
+    fn docker_update_request_normalizes_limits_and_requires_cpu_pair() {
+        let update = parse_docker_update_request(
+            br#"{"Memory":67108864,"CpuQuota":50000,"CpuPeriod":100000,"PidsLimit":32}"#,
+        )
+        .expect("resource update");
+        assert_eq!(
+            update,
+            DockerResourceUpdate {
+                memory_max: Some(Some(67_108_864)),
+                cpu_quota: Some(Some(50_000)),
+                cpu_period: Some(Some(100_000)),
+                pids_max: Some(Some(32)),
+            }
+        );
+        let clear = parse_docker_update_request(
+            br#"{"Memory":0,"CpuQuota":0,"CpuPeriod":0,"PidsLimit":-1}"#,
+        )
+        .expect("unlimited update");
+        assert_eq!(
+            clear,
+            DockerResourceUpdate {
+                memory_max: Some(None),
+                cpu_quota: Some(None),
+                cpu_period: Some(None),
+                pids_max: Some(None),
+            }
+        );
+        assert!(parse_docker_update_request(br#"{"CpuQuota":50000}"#).is_err());
+        assert!(parse_docker_update_request(br#"{"Memory":-1}"#).is_err());
     }
 
     #[cfg(unix)]

@@ -163,6 +163,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/missing/update",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: r#"{"Memory":0,"PidsLimit":-1}"#,
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/missing/changes",
         coverage: Coverage::Implemented,

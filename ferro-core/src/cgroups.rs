@@ -52,6 +52,20 @@ impl CgroupV2Manager {
 
     pub fn ensure_v2_available(&self) -> Result<(), CgroupError> {
         if self.root.join(CGROUP_CONTROLLERS).exists() {
+            if !nix::unistd::Uid::effective().is_root()
+                && fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.root.join(CGROUP_SUBTREE_CONTROL))
+                    .is_err()
+            {
+                return Err(CgroupError::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "rootless cgroup path is not delegated: {}; launch under a delegated user scope or set FERROCRATE_CGROUP_ROOT",
+                        self.root.display()
+                    ),
+                )));
+            }
             Ok(())
         } else {
             Err(CgroupError::NotV2(self.root.clone()))
@@ -87,7 +101,9 @@ impl CgroupV2Manager {
         }
 
         let group_path = self.root.join(name);
-        fs::create_dir_all(&group_path)?;
+        fs::create_dir_all(&group_path).map_err(|error| {
+            io::Error::new(error.kind(), format!("{}: {error}", group_path.display()))
+        })?;
         Ok(group_path)
     }
 
@@ -133,23 +149,23 @@ impl CgroupV2Manager {
                     .map(|controller| format!("+{controller}"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                fs::write(subtree_control, format!("{enable}\n"))?;
+                write_cgroup_file(&subtree_control, format!("{enable}\n"))?;
             }
         }
 
         if let Some(memory_max) = limits.memory_max {
-            fs::write(group_path.join("memory.max"), memory_max.to_string())?;
+            write_cgroup_file(&group_path.join("memory.max"), memory_max.to_string())?;
         }
 
         if let Some(cpu_max) = &limits.cpu_max {
-            fs::write(
+            write_cgroup_file(
                 group_path.join("cpu.max"),
                 format!("{} {}", cpu_max.quota, cpu_max.period),
             )?;
         }
 
         if let Some(pids_max) = limits.pids_max {
-            fs::write(group_path.join("pids.max"), pids_max.to_string())?;
+            write_cgroup_file(&group_path.join("pids.max"), pids_max.to_string())?;
         }
 
         Ok(())
@@ -297,6 +313,15 @@ impl CgroupV2Manager {
     pub fn is_ai_enabled() -> bool {
         ferro_mind::ai::config::AiConfig::from_env().enabled
     }
+}
+
+/// Preserve the kernel path in cgroup setup failures.  A bare `Permission
+/// denied` is not actionable on delegated hierarchies because the controller
+/// enable, limit write, and process attach operations have different remedies.
+fn write_cgroup_file(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = path.as_ref();
+    fs::write(path, contents)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
 }
 
 fn read_u64(path: PathBuf) -> Result<Option<u64>, CgroupError> {

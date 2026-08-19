@@ -80,6 +80,16 @@ pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), R
             continue;
         }
 
+        if normalized.as_os_str().is_empty() {
+            return Err(RootfsError::UnsafePath(format!(
+                "empty non-directory archive entry {:?} (raw {:?}, type {:?}, size {})",
+                entry_path,
+                entry.header().path_bytes(),
+                entry.header().entry_type(),
+                entry.header().size().unwrap_or(0)
+            )));
+        }
+
         let destination = rootfs_dir.join(&normalized);
         ensure_no_symlink_components(rootfs_dir, &normalized)?;
         if let Some(parent) = destination.parent() {

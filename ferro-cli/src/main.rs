@@ -7044,9 +7044,15 @@ fn append_export_archive_path<W: Write>(
     if metadata.file_type().is_dir() {
         append_export_rootfs_dir(builder, rootfs, selected, Path::new("."), excluded_targets)
     } else if metadata.file_type().is_symlink() {
-        append_commit_symlink(builder, selected, Path::new("."))
+        let name = selected
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("."));
+        append_commit_symlink(builder, selected, Path::new(name))
     } else {
-        builder.append_path_with_name(selected, Path::new("."))
+        let name = selected
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("."));
+        builder.append_path_with_name(selected, Path::new(name))
     }
 }
 
@@ -11083,7 +11089,8 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/export");
-                let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+                let id = resolve_container_id(&runtime, id)?;
+                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
                 let rootfs = runtime_dir
                     .join("containers")
                     .join(&record.id)
@@ -11116,7 +11123,9 @@ fn handle_docker_compat_connection(
                 }
                 http_response(200, &archive, "application/x-tar")
             }
-            ("GET", path) if path.starts_with("/containers/") && path.ends_with("/archive") => {
+            ("GET" | "HEAD", path)
+                if path.starts_with("/containers/") && path.ends_with("/archive") =>
+            {
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/archive");
@@ -11133,7 +11142,8 @@ fn handle_docker_compat_connection(
                         "docker: archive path must be a normalized absolute path".to_string()
                     );
                 }
-                let record = runtime.inspect(id).map_err(|error| error.to_string())?;
+                let id = resolve_container_id(&runtime, id)?;
+                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
                 let rootfs = runtime_dir
                     .join("containers")
                     .join(&record.id)
@@ -11180,12 +11190,21 @@ fn handle_docker_compat_connection(
                         .map_err(|error| format!("docker: finish archive: {error}"))?;
                 }
                 let stat = docker_archive_path_stat(&selected, archive_path)?;
-                http_response_with_headers(
-                    200,
-                    &archive,
-                    "application/x-tar",
-                    &[("X-Docker-Container-Path-Stat", stat.as_str())],
-                )
+                if request.method == "HEAD" {
+                    http_response_with_headers(
+                        200,
+                        &[],
+                        "application/x-tar",
+                        &[("X-Docker-Container-Path-Stat", stat.as_str())],
+                    )
+                } else {
+                    http_response_with_headers(
+                        200,
+                        &archive,
+                        "application/x-tar",
+                        &[("X-Docker-Container-Path-Stat", stat.as_str())],
+                    )
+                }
             }
             ("PUT", path) if path.starts_with("/containers/") && path.ends_with("/archive") => {
                 let requested_id = path
@@ -13555,10 +13574,20 @@ fn docker_archive_path_stat(path: &Path, logical_path: &str) -> Result<String, S
     } else {
         String::new()
     };
+    // Docker's PathStat.Mode is Go's os.FileMode wire representation, not
+    // the host's Unix st_mode value. Preserve permission bits and translate
+    // the directory/symlink type bits so clients such as `docker cp` make the
+    // same destination-directory decision as they do against dockerd.
+    let mut mode = metadata.mode() & 0o7777;
+    if metadata.is_dir() {
+        mode |= 1u32 << 31;
+    } else if metadata.file_type().is_symlink() {
+        mode |= 1u32 << 27;
+    }
     let stat = serde_json::json!({
         "name": name,
         "size": metadata.len(),
-        "mode": metadata.mode(),
+        "mode": mode,
         "mtime": docker_timestamp(metadata.mtime().max(0) as u64),
         "linkTarget": link_target,
     });

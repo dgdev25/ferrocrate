@@ -114,6 +114,10 @@ wait_status="$(docker -H "$host" wait "$name")"
 }
 docker -H "$host" logs "$name" >/dev/null
 docker -H "$host" diff "$name" >/dev/null
+printf 'ferrocrate-docker-cp-smoke\n' >"$runtime_dir/cp-host.txt"
+docker -H "$host" cp "$runtime_dir/cp-host.txt" "$name":/
+docker -H "$host" cp "$name":/cp-host.txt "$runtime_dir/cp-roundtrip.txt"
+cmp "$runtime_dir/cp-host.txt" "$runtime_dir/cp-roundtrip.txt"
 docker -H "$host" commit "$name" "$committed_image" >/dev/null
 docker -H "$host" image inspect "$committed_image" >/dev/null
 docker -H "$host" image rm "$committed_image" >/dev/null
@@ -152,4 +156,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/attach/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/cp/commit/attach/rm/events"

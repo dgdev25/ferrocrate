@@ -549,6 +549,13 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
         .expect("decode path-stat header");
     let stat: serde_json::Value = serde_json::from_slice(&stat).expect("path-stat JSON");
     assert_eq!(stat["name"], "added");
+    let mut archive = tar::Archive::new(&raw[header_end + 4..]);
+    let mut entries = archive.entries().expect("archive entries");
+    let entry = entries
+        .next()
+        .expect("file archive entry")
+        .expect("file archive entry decode");
+    assert_eq!(entry.path().expect("file archive path"), Path::new("added"));
     let root_raw = harness.request_bytes_raw(
         "GET",
         &format!("/v1.45/containers/{id}/archive?path=%2F"),
@@ -571,6 +578,22 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
     let root_stat: serde_json::Value =
         serde_json::from_slice(&root_stat).expect("root path-stat JSON");
     assert_eq!(root_stat["name"], "/");
+    assert!(root_stat["mode"].as_u64().unwrap_or_default() & (1u64 << 31) != 0);
+    let head_raw = harness.request_bytes_raw(
+        "HEAD",
+        &format!("/v1.45/containers/{id}/archive?path=%2F"),
+        "application/x-tar",
+        &[],
+    );
+    let head_end = head_raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HEAD archive response headers");
+    let head_headers = String::from_utf8_lossy(&head_raw[..head_end]);
+    assert!(head_headers.starts_with("HTTP/1.1 200 OK"));
+    assert!(head_headers
+        .lines()
+        .any(|line| line.starts_with("X-Docker-Container-Path-Stat: ")));
 
     let (status, body) = harness.request("GET", &format!("/v1.45/containers/{id}/changes"));
     assert_eq!(status, 200, "changes response={body}");

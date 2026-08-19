@@ -44,6 +44,7 @@ veth_ep="ve${if_id}"
 runtime_dir="$(mktemp -d "/tmp/${prefix}-runtime.XXXXXX")"
 net_name="${prefix}-net"
 test_image="${FERROCRATE_NETWORK_TEST_IMAGE:-alpine:3.19}"
+image_store="${FERROCRATE_NETWORK_IMAGE_STORE:-}"
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 case "$network_backend" in
   iptables|nftables) ;;
@@ -81,6 +82,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Linux CLI commands intentionally scope their image store beneath the runtime
+# directory.  An explicit store lets a privileged fixture reuse a trusted,
+# caller-preloaded image without reaching an external registry; the default
+# remains fully isolated and unchanged.
+if [[ -n "$image_store" ]]; then
+  [[ -d "$image_store" ]] || fail "configured image store is not a directory: $image_store"
+  ln -s -- "$image_store" "$runtime_dir/images"
+  [[ -f "${image_store}.sqlite" ]] ||
+    fail "configured image store database is missing: ${image_store}.sqlite"
+  ln -s -- "${image_store}.sqlite" "$runtime_dir/images.sqlite"
+fi
+
 ferro_net() {
   ip netns exec "$ns_name" env \
     -u FERROCRATE_NETWORK_KERNEL_STATE \
@@ -91,9 +104,16 @@ ferro_net() {
 
 # Pull the fixture before entering the isolated namespace; the namespace has
 # no external route, while the image store is shared with the public run path.
-env FERROCRATE_RUNTIME_DIR="$runtime_dir" HOME="$runtime_dir" \
-  "$ferro_cli" pull "$test_image" >/dev/null \
-  || fail "unable to prepare test image ${test_image}"
+if [[ "${FERROCRATE_NETWORK_SKIP_PULL:-0}" == 1 ]]; then
+  image_listing="$(env FERROCRATE_RUNTIME_DIR="$runtime_dir" HOME="$runtime_dir" \
+    "$ferro_cli" images 2>/dev/null || true)"
+  grep -Fq -- "$test_image" <<<"$image_listing" ||
+    fail "configured image store does not contain ${test_image}"
+else
+  env FERROCRATE_RUNTIME_DIR="$runtime_dir" HOME="$runtime_dir" \
+    "$ferro_cli" pull "$test_image" >/dev/null \
+    || fail "unable to prepare test image ${test_image}"
+fi
 
 ip netns add "$ns_name"
 ip netns exec "$ns_name" ip link set lo up

@@ -3528,6 +3528,15 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        // Compose down (and Docker stop) is idempotent for a container whose
+        // workload already exited.  There is no kernel stop effect to apply
+        // and, importantly, no `running -> stopped` CAS to publish: the
+        // supervisor has already persisted the terminal state.  Treat these
+        // terminal states as a successful no-op so the following delete can
+        // complete instead of reporting a spurious post-effect conflict.
+        if matches!(record.status.as_str(), "stopped" | "killed" | "exited") {
+            return Ok(());
+        }
         stop_pid(record.pid, timeout)?;
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;

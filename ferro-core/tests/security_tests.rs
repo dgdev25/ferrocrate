@@ -66,15 +66,70 @@ fn parses_syscall_rules_with_args() {
     assert_eq!(args[0].value, 1);
 }
 
-// Note: apply_seccomp_profile tests require root and seccomp capabilities
-// These are marked #[ignore] so they don't fail in regular test runs
-
 #[test]
-#[ignore = "requires root to apply seccomp filter"]
-fn applies_seccomp_profile() {
-    let profile = default_seccomp_profile().expect("profile should parse");
-    // This would apply the filter to the current process
-    // Only run this if you understand the implications
-    let result = apply_seccomp_profile(&profile);
-    assert!(result.is_ok(), "seccomp profile should apply successfully");
+fn applies_and_enforces_seccomp_profile_in_isolated_child() {
+    // Load the filter in a forked child so a denied syscall cannot poison the
+    // test harness. libseccomp sets no_new_privs for an unprivileged caller.
+    let mut pipe_fds = [0; 2];
+    assert_eq!(unsafe { nix::libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+    let child = unsafe { nix::libc::fork() };
+    assert!(child >= 0, "fork seccomp probe");
+    if child == 0 {
+        unsafe {
+            nix::libc::close(pipe_fds[0]);
+        }
+        let profile = ferro_core::seccomp::SeccompProfile {
+            default_action: "SCMP_ACT_ERRNO".to_string(),
+            default_errno_ret: Some(1),
+            architectures: vec![if cfg!(target_arch = "x86_64") {
+                "SCMP_ARCH_X86_64"
+            } else if cfg!(target_arch = "aarch64") {
+                "SCMP_ARCH_AARCH64"
+            } else {
+                "SCMP_ARCH_X86"
+            }
+            .to_string()],
+            syscalls: vec![
+                ferro_core::seccomp::SyscallRule {
+                    names: vec!["write".to_string()],
+                    action: "SCMP_ACT_ALLOW".to_string(),
+                    args: None,
+                },
+                ferro_core::seccomp::SyscallRule {
+                    names: vec!["exit".to_string(), "exit_group".to_string()],
+                    action: "SCMP_ACT_ALLOW".to_string(),
+                    args: None,
+                },
+            ],
+        };
+        if apply_seccomp_profile(&profile).is_err() {
+            let marker = [0xee_u8];
+            unsafe {
+                nix::libc::write(pipe_fds[1], marker.as_ptr().cast(), marker.len());
+                nix::libc::_exit(2);
+            }
+        }
+        let result = unsafe { nix::libc::syscall(nix::libc::SYS_getpid) };
+        let marker = [if result == -1 { 1_u8 } else { 0_u8 }];
+        unsafe {
+            nix::libc::write(pipe_fds[1], marker.as_ptr().cast(), marker.len());
+            nix::libc::_exit(0);
+        }
+    }
+    unsafe {
+        nix::libc::close(pipe_fds[1]);
+    }
+    let mut marker = [0_u8];
+    assert_eq!(
+        unsafe { nix::libc::read(pipe_fds[0], marker.as_mut_ptr().cast(), marker.len()) },
+        1,
+        "seccomp probe marker"
+    );
+    unsafe {
+        nix::libc::close(pipe_fds[0]);
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { nix::libc::waitpid(child, &mut status, 0) }, child);
+    assert_eq!(status, 0, "seccomp probe child exited unexpectedly");
+    assert_eq!(marker[0], 1, "getpid should be denied by the loaded filter");
 }

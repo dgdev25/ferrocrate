@@ -135,6 +135,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: r#"{"Tty":true}"#,
     },
     ApiCase {
+        method: "POST",
+        path: "/exec/missing/start",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: r#"{"Tty":false}"#,
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/matrix-container/logs?stdout=1&stderr=1",
         coverage: Coverage::Implemented,

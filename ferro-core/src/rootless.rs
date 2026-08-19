@@ -162,7 +162,10 @@ pub fn nested_bubblewrap_diagnostic() -> Result<(), String> {
         "bubblewrap (bwrap) executable is unavailable; rootless bridge workloads require it"
             .to_string()
     })?;
-    let output = Command::new("unshare")
+    let unshare = trusted_helper_path("unshare").ok_or_else(|| {
+        "unshare executable is unavailable or not a trusted root-owned executable".to_string()
+    })?;
+    let output = Command::new(unshare)
         .args(["--user", "--net", "--fork", "--"])
         .arg(bwrap)
         .args(["--ro-bind", "/", "/", "true"])

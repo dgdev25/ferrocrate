@@ -122,6 +122,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/matrix-container/rename?name=matrix-renamed",
+        coverage: Coverage::Implemented,
+        expected_status: 204,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/prune",
         coverage: Coverage::Implemented,
         expected_status: 200,

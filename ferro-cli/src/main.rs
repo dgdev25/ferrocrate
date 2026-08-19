@@ -11138,6 +11138,37 @@ fn handle_docker_compat_connection(
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 }
             }
+            ("POST", path) if path.starts_with("/containers/") && path.ends_with("/resize") => {
+                let requested_id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/resize");
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                let parse_dimension = |key: &str| -> Result<u32, String> {
+                    let value = query
+                        .get(key)
+                        .ok_or_else(|| format!("docker: resize requires {key}"))?;
+                    let parsed = value.parse::<u32>().map_err(|_| {
+                        format!("docker: resize {key} must be a non-negative integer")
+                    })?;
+                    if parsed > u16::MAX as u32 {
+                        return Err(format!("docker: resize {key} exceeds terminal bounds"));
+                    }
+                    Ok(parsed)
+                };
+                let _width = parse_dimension("w")?;
+                let _height = parse_dimension("h")?;
+                drop(pending);
+                // The current runtime has no PTY-backed terminal to resize;
+                // retain Docker's successful empty response after validating
+                // the container and dimensions so clients can use the same
+                // lifecycle against non-TTY workloads.
+                let _ = id;
+                http_response(200, &[], "text/plain")
+            }
             ("POST", "/commit") => {
                 let container = query
                     .get("container")

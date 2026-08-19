@@ -135,6 +135,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/missing/resize?w=80&h=24",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/missing/top",
         coverage: Coverage::Implemented,

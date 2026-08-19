@@ -37,6 +37,7 @@ impl SeccompProfile {
         if parse_action(&self.default_action).is_err() {
             return Err(SeccompError::UnknownAction(self.default_action.clone()));
         }
+        validate_errno(self.default_errno_ret, "defaultErrnoRet")?;
 
         // Validate architectures are known SCMP_ARCH_* constants
         for arch in &self.architectures {
@@ -52,6 +53,7 @@ impl SeccompProfile {
         for rule in &self.syscalls {
             // Validate action
             parse_action(&rule.action)?;
+            validate_errno(rule.errno_ret, "errnoRet")?;
 
             // Validate args[].index values are in range 0..5
             if let Some(args) = &rule.args {
@@ -97,6 +99,8 @@ impl SeccompProfile {
 pub struct SyscallRule {
     pub names: Vec<String>,
     pub action: String,
+    #[serde(rename = "errnoRet")]
+    pub errno_ret: Option<i64>,
     pub args: Option<Vec<SyscallArg>>,
 }
 
@@ -148,6 +152,27 @@ fn parse_action(action: &str) -> Result<ScmpAction, SeccompError> {
     }
 }
 
+fn validate_errno(value: Option<i64>, field: &str) -> Result<(), SeccompError> {
+    if let Some(value) = value {
+        if !(0..=4095).contains(&value) {
+            return Err(SeccompError::InvalidJson(format!(
+                "{field} must be between 0 and 4095"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_action_with_errno(action: &str, errno: Option<i64>) -> Result<ScmpAction, SeccompError> {
+    if action == "SCMP_ACT_ERRNO" {
+        let value = i32::try_from(errno.unwrap_or(1))
+            .map_err(|_| SeccompError::InvalidJson("errno value is out of range".into()))?;
+        Ok(ScmpAction::Errno(value))
+    } else {
+        parse_action(action)
+    }
+}
+
 /// Applies a seccomp profile to the current process.
 ///
 /// # Safety
@@ -159,7 +184,7 @@ fn parse_action(action: &str) -> Result<ScmpAction, SeccompError> {
 /// - The profile contains unknown syscalls or actions
 /// - The libseccomp library fails to apply the filter
 pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompError> {
-    let default_action = parse_action(&profile.default_action)?;
+    let default_action = parse_action_with_errno(&profile.default_action, profile.default_errno_ret)?;
 
     // Create the filter with the default action
     let mut filter = ScmpFilterContext::new_filter(default_action)
@@ -188,7 +213,7 @@ pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompErro
 
     // Add syscall rules
     for rule in &profile.syscalls {
-        let action = parse_action(&rule.action)?;
+        let action = parse_action_with_errno(&rule.action, rule.errno_ret)?;
 
         // libseccomp rejects an unconditional rule whose action equals the filter's
         // default action ("The library doesn't permit the particular operation").

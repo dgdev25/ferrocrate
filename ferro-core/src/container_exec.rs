@@ -38,28 +38,6 @@ pub fn exec_in_rootless_rootfs(
     readonly_rootfs: bool,
     timeout: Option<Duration>,
 ) -> Result<ExecResult, ContainerExecError> {
-    let bwrap = build_rootless_bwrap(
-        rootfs,
-        command,
-        env,
-        workdir,
-        mounts,
-        tmpfs_mounts,
-        readonly_rootfs,
-    )?;
-    execute_process(bwrap, timeout)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_rootless_bwrap(
-    rootfs: &Path,
-    command: &[String],
-    env: &[String],
-    workdir: Option<&str>,
-    mounts: &[(String, String, bool)],
-    tmpfs_mounts: &[(String, Option<String>)],
-    readonly_rootfs: bool,
-) -> Result<Command, ContainerExecError> {
     if command.is_empty() {
         return Err(ContainerExecError::EmptyCommand);
     }
@@ -120,49 +98,7 @@ fn build_rootless_bwrap(
         bwrap.arg("--setenv").arg(key).arg(value);
     }
     bwrap.arg(&command[0]).args(&command[1..]);
-    Ok(bwrap)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn exec_in_rootless_rootfs_tty(
-    rootfs: &Path,
-    command: &[String],
-    env: &[String],
-    workdir: Option<&str>,
-    mounts: &[(String, String, bool)],
-    tmpfs_mounts: &[(String, Option<String>)],
-    readonly_rootfs: bool,
-) -> Result<ExecResult, ContainerExecError> {
-    let mut bwrap = build_rootless_bwrap(
-        rootfs,
-        command,
-        env,
-        workdir,
-        mounts,
-        tmpfs_mounts,
-        readonly_rootfs,
-    )?;
-    let pty = nix::pty::openpty(None, None)
-        .map_err(|error| ContainerExecError::Io(std::io::Error::other(error)))?;
-    let slave = File::from(pty.slave);
-    let mut child = bwrap
-        .stdin(Stdio::from(slave.try_clone()?))
-        .stdout(Stdio::from(slave.try_clone()?))
-        .stderr(Stdio::from(slave))
-        .spawn()?;
-    let master = File::from(pty.master);
-    let mut output = Vec::new();
-    if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
-        if error.raw_os_error() != Some(nix::libc::EIO) {
-            return Err(ContainerExecError::Io(error));
-        }
-    }
-    let status = child.wait()?;
-    Ok(ExecResult {
-        exit_code: status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output).into_owned(),
-        stderr: String::new(),
-    })
+    execute_process(bwrap, timeout)
 }
 
 /// Build nsenter arguments for executing a command in all namespaces of target pid.

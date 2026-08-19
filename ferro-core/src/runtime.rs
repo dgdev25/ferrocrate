@@ -12,7 +12,7 @@ use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
 use crate::container_exec::{
     exec_in_container, exec_in_container_tty, exec_in_container_with_timeout,
-    exec_in_rootless_rootfs, exec_in_rootless_rootfs_tty,
+    exec_in_rootless_rootfs,
 };
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
@@ -3283,9 +3283,9 @@ impl ContainerRuntime {
         self.exec_with_timeout(id, cmd, None)
     }
 
-    /// Execute a command on a merged stdout/stderr pseudo-terminal.
-    /// Rootful and rootless rootfs paths both allocate a PTY; interactive
-    /// stdin forwarding and resize remain transport-level work.
+    /// Execute a rootful command on a merged stdout/stderr pseudo-terminal.
+    /// Rootless PTY exec remains explicitly unsupported until its bubblewrap
+    /// handoff can be bounded and qualified.
     pub fn exec_tty(
         &self,
         id: &str,
@@ -3345,7 +3345,15 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
-        let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
+        if tty && !nix::unistd::Uid::effective().is_root() {
+            return Err(RuntimeError::InvalidState(
+                "TTY exec requires a rootful runtime; rootless PTY support is not qualified"
+                    .to_string(),
+            ));
+        }
+        let result = if tty {
+            exec_in_container_tty(record.pid, cmd)?
+        } else if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             let mounts = record
                 .mounts
                 .iter()
@@ -3356,30 +3364,16 @@ impl ContainerRuntime {
                 .iter()
                 .map(|mount| (mount.target.clone(), mount.size.clone()))
                 .collect::<Vec<_>>();
-            if tty {
-                exec_in_rootless_rootfs_tty(
-                    &rootfs,
-                    cmd,
-                    &record.env,
-                    record.workdir.as_deref(),
-                    &mounts,
-                    &tmpfs_mounts,
-                    record.readonly_rootfs,
-                )?
-            } else {
-                exec_in_rootless_rootfs(
-                    &rootfs,
-                    cmd,
-                    &record.env,
-                    record.workdir.as_deref(),
-                    &mounts,
-                    &tmpfs_mounts,
-                    record.readonly_rootfs,
-                    timeout,
-                )?
-            }
-        } else if tty {
-            exec_in_container_tty(record.pid, cmd)?
+            exec_in_rootless_rootfs(
+                &rootfs,
+                cmd,
+                &record.env,
+                record.workdir.as_deref(),
+                &mounts,
+                &tmpfs_mounts,
+                record.readonly_rootfs,
+                timeout,
+            )?
         } else {
             match timeout {
                 Some(timeout) => exec_in_container_with_timeout(record.pid, cmd, timeout)?,

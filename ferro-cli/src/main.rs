@@ -10279,15 +10279,24 @@ impl DockerEventStore {
         let Some((event_type, action)) = docker_event_kind(method, path) else {
             return Ok(());
         };
-        let resource = docker_event_resource(path).or_else(|| {
-            response_body_json(response_bytes)
-                .and_then(|body| {
-                    body.get("Id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .filter(|id| !id.is_empty() && id.len() <= 256)
-        });
+        let request_attributes = docker_event_request_attributes(request_body);
+        let response_attributes = docker_event_response_attributes(response_bytes);
+        let resource = docker_event_resource(path)
+            .or_else(|| {
+                response_body_json(response_bytes)
+                    .and_then(|body| {
+                        body.get("Id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .filter(|id| !id.is_empty() && id.len() <= 256)
+            })
+            .or_else(|| {
+                request_attributes
+                    .get("Name")
+                    .or_else(|| request_attributes.get("name"))
+                    .cloned()
+            });
         let timestamp = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -10296,8 +10305,8 @@ impl DockerEventStore {
         attributes.insert("path".to_string(), path.to_string());
         attributes.insert("httpStatus".to_string(), status.to_string());
         attributes.insert("scope".to_string(), "local".to_string());
-        attributes.extend(docker_event_request_attributes(request_body));
-        attributes.extend(docker_event_response_attributes(response_bytes));
+        attributes.extend(request_attributes);
+        attributes.extend(response_attributes);
         let event = DockerEvent {
             id: self.next_id,
             time: timestamp.as_secs(),

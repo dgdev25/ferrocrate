@@ -819,6 +819,8 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
     assert_eq!(status, 200, "events response: {body}");
     assert!(body.contains("\"Type\":\"volume\""), "{body}");
     assert!(body.contains("\"Action\":\"create\""), "{body}");
+    assert!(body.contains("\"ID\":\"events-volume\""), "{body}");
+    assert!(body.contains("\"Name\":\"events-volume\""), "{body}");
     assert!(body.contains("\"Actor\":"), "{body}");
     assert!(body.contains("\"timeNano\":"), "{body}");
 }

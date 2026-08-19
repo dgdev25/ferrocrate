@@ -107,6 +107,10 @@ container_id="$(docker -H "$host" create --network none --name "$name" "$image" 
 docker -H "$host" inspect "$name" >/dev/null
 docker -H "$host" start "$name" >/dev/null
 docker -H "$host" exec "$name" /bin/busybox true >/dev/null
+printf 'docker-cp-compat\n' >"$runtime_dir/host-copy.txt"
+docker -H "$host" cp "$runtime_dir/host-copy.txt" "$name:/"
+docker -H "$host" cp "$name:/host-copy.txt" "$runtime_dir/container-copy.txt"
+cmp -s "$runtime_dir/host-copy.txt" "$runtime_dir/container-copy.txt"
 wait_status="$(docker -H "$host" wait "$name")"
 [[ "$wait_status" == "0" ]] || {
   echo "Docker CLI wait returned unexpected status: $wait_status" >&2
@@ -152,4 +156,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/attach/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/cp/wait/logs/diff/exec/commit/attach/rm/events"

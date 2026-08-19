@@ -11687,6 +11687,7 @@ fn handle_docker_compat_connection(
                     let spec = pending
                         .get_mut(&pending_id)
                         .ok_or_else(|| "docker: pending container disappeared".to_string())?;
+                    let previous = spec.clone();
                     if let Some(value) = update.memory_max {
                         spec.memory_max = value;
                     }
@@ -11703,7 +11704,13 @@ fn handle_docker_compat_connection(
                         spec.restart_policy = docker_restart_policy_name(&value).to_string();
                     }
                     drop(pending);
-                    state.persist_pending()?;
+                    if let Err(error) = state.persist_pending() {
+                        let mut pending = state.pending.lock().map_err(|lock_error| {
+                            format!("docker: pending lock poisoned during rollback: {lock_error}")
+                        })?;
+                        pending.insert(pending_id, previous);
+                        return Err(error);
+                    }
                     let body = serde_json::json!({"Warnings": []});
                     return Ok(http_response(
                         200,

@@ -213,7 +213,12 @@ main() {
   local provenance_name="${archive_name}.provenance.json"
   local archive_digest git_commit rustc_version
   archive_digest="$(awk 'NF >= 1 {print $1; exit}' "$OUTPUT_DIR/$checksum_name")"
-  git_commit="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  if ! git_commit="$(git rev-parse --verify HEAD 2>/dev/null)" ||
+    [[ ! "$git_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "release provenance requires a Git checkout with a verified HEAD commit" >&2
+    echo "build from the tagged checkout; staging/source archives are not release inputs" >&2
+    exit 1
+  fi
   rustc_version="$(rustc --version 2>/dev/null || echo unknown)"
   PROVENANCE_PATH="$OUTPUT_DIR/$provenance_name" \
     PROVENANCE_VERSION="$VERSION" \

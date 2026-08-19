@@ -60,12 +60,14 @@ if has_subid_entry "$subuid_file" "$user" "$user_id"; then
 else
   echo "rootless.subuid=missing"
   echo "warning: no $subuid_file entry for $(id -un) or UID $user_id; rootless will use 1:1 mapping" >&2
+  missing=1
 fi
 if has_subid_entry "$subgid_file" "$user" "$group_id"; then
   echo "rootless.subgid=pass"
 else
   echo "rootless.subgid=missing"
   echo "warning: no $subgid_file entry for $(id -un) or GID $group_id; rootless will use 1:1 mapping" >&2
+  missing=1
 fi
 
 for helper in newuidmap newgidmap; do

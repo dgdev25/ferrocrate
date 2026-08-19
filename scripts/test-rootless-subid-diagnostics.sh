@@ -45,4 +45,6 @@ set -e
 [[ "$strict_rc" -eq 1 ]]
 grep -q '^rootless.subuid=missing$' "$strict_output"
 grep -q '^rootless.subgid=missing$' "$strict_output"
+grep -q '^rootless.newuidmap=missing-or-untrusted$' "$strict_output"
+grep -q '^rootless.slirp4netns=missing-or-untrusted$' "$strict_output"
 echo "rootless strict missing-subid regression passed"

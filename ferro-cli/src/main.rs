@@ -4282,7 +4282,9 @@ fn handle_ai_audit(action: &str, summary: &str, evidence: &[String]) -> Result<(
             .map(|d| d.as_secs())
             .unwrap_or(0)
     );
-    let mut trace = DecisionTrace::new(trace_id.clone(), summary);
+    let mut trace = DecisionTrace::new(trace_id.clone(), summary)
+        .with_model("manual-audit", "cli-v1")
+        .with_decision(action);
     for entry in evidence {
         if let Some((key, value)) = entry.split_once('=') {
             trace = trace.with_evidence(key, value);

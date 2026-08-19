@@ -122,6 +122,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/images/search?term=alpine",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/missing/logs",
         coverage: Coverage::Implemented,
         expected_status: 404,

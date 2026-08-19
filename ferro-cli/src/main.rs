@@ -12066,6 +12066,14 @@ fn handle_docker_compat_connection(
                     .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
                 http_response(200, json.as_bytes(), "application/json")
             }
+            ("GET", "/images/search") => {
+                let (term, limit) = parse_docker_image_search_query(&query)?;
+                let images = store.list_references().map_err(|err| err.to_string())?;
+                let entries = docker_image_search_results(&images, &term, limit);
+                let json = serde_json::to_string(&entries)
+                    .map_err(|error| format!("docker: image search response failed: {error}"))?;
+                http_response(200, json.as_bytes(), "application/json")
+            }
             ("POST", "/build") => {
                 let dockerfile = query
                     .get("dockerfile")
@@ -13237,6 +13245,56 @@ fn docker_image_matches_filters(
                     .strip_suffix('*')
                     .is_some_and(|prefix| record.reference.starts_with(prefix))
         })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_docker_image_search_query(
+    query: &HashMap<String, String>,
+) -> Result<(String, usize), String> {
+    let term = query
+        .get("term")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "docker: image search requires a non-empty term".to_string())?;
+    let limit = query
+        .get("limit")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "docker: image search limit must be an integer".to_string())
+        })
+        .transpose()?
+        .unwrap_or(25);
+    if !(1..=100).contains(&limit) {
+        return Err("docker: image search limit must be between 1 and 100".to_string());
+    }
+    Ok((term.to_string(), limit))
+}
+
+#[cfg(target_os = "linux")]
+fn docker_image_search_results(
+    images: &[ferro_core::image_store::ImageRecord],
+    term: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let term = term.to_ascii_lowercase();
+    let mut results = images
+        .iter()
+        .filter(|record| record.reference.to_ascii_lowercase().contains(&term))
+        .map(|record| {
+            serde_json::json!({
+                "Index": "local",
+                "Name": record.reference,
+                "Description": "Locally available Ferrocrate image",
+                "Official": false,
+                "Automated": false,
+                "StarCount": 0,
+            })
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| left["Name"].as_str().cmp(&right["Name"].as_str()));
+    results.truncate(limit);
+    results
 }
 
 fn validate_docker_image_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
@@ -14487,33 +14545,34 @@ mod tests {
         docker_container_matches_filters, docker_container_prune_matches_filters,
         docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
-        docker_image_matches_filters, docker_image_prune_matches_filters, docker_inspect_payload,
-        docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
-        docker_pending_inspect_payload, docker_pending_matches_filters,
-        docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
-        docker_stats_payload, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
-        effective_readonly, ensure_context_routing_available, extract_docker_build_context,
-        handle_build, handle_containers, handle_context, handle_events, handle_exec,
-        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
-        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
-        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
-        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
-        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
-        parse_docker_filters, parse_docker_kill_signal, parse_docker_limit_query,
-        parse_docker_network_create_spec, parse_docker_stop_timeout, parse_driver_opts,
-        parse_env_entries, parse_key_values, parse_publish, parse_restart_policy,
-        parse_tmpfs_mounts, percent_encode_path_component, read_docker_request_after_auth,
-        read_http_request, read_merkle_leaves, remote_commit_path, remote_docker_request,
-        remote_docker_stream_request, should_desktop_forward, split_path_query,
-        structured_desktop_error, top_level_command_name, validate_build_platform,
-        validate_docker_container_name, validate_docker_container_prune_filters,
-        validate_docker_exec_command, validate_docker_image_prune_filters,
-        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
-        validate_network_mode, validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands,
-        ConfigCommands, ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent,
-        DockerEventStore, DockerExecCreateRequest, DockerHealthSpec, MigrateCommands,
-        NetworkCommands, RvfCommands, VolumeCommands, WitnessCommands,
+        docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_image_search_results, docker_inspect_payload, docker_manifest_layer_size,
+        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
+        docker_pending_matches_filters, docker_pending_prune_matches_filters, docker_raw_stream,
+        docker_runtime_healthcheck, docker_stats_payload, docker_tail_logs, docker_top_payload,
+        docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
+        extract_docker_build_context, handle_build, handle_containers, handle_context,
+        handle_events, handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill,
+        handle_logs, handle_migrate_compose_report, handle_network, handle_pause, handle_pull,
+        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
+        handle_top, handle_unpause, handle_volume, handle_wait, host_build_arch,
+        import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
+        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        parse_docker_filters, parse_docker_image_search_query, parse_docker_kill_signal,
+        parse_docker_limit_query, parse_docker_network_create_spec, parse_docker_stop_timeout,
+        parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
+        parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
+        read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
+        remote_docker_request, remote_docker_stream_request, should_desktop_forward,
+        split_path_query, structured_desktop_error, top_level_command_name,
+        validate_build_platform, validate_docker_container_name,
+        validate_docker_container_prune_filters, validate_docker_exec_command,
+        validate_docker_image_prune_filters, validate_docker_network_filters,
+        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
+        validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
+        DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
+        VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -17616,6 +17675,37 @@ volumes:
                 .collect::<Vec<_>>(),
             vec!["sha256:b"]
         );
+    }
+
+    #[test]
+    fn docker_image_search_is_bounded_case_insensitive_and_deterministic() {
+        let make = |reference: &str| ferro_core::image_store::ImageRecord {
+            reference: reference.to_string(),
+            digest: "sha256:test".to_string(),
+            manifest_media_type: "application/json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 1,
+        };
+        let images = vec![
+            make("zebra:latest"),
+            make("Alpine:3.20"),
+            make("alpine:latest"),
+        ];
+        let results = docker_image_search_results(&images, "ALPINE", 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["Name"], "Alpine:3.20");
+
+        let mut query = HashMap::new();
+        query.insert("term".to_string(), "alpine".to_string());
+        query.insert("limit".to_string(), "2".to_string());
+        assert_eq!(
+            parse_docker_image_search_query(&query).unwrap(),
+            ("alpine".to_string(), 2)
+        );
+        query.insert("limit".to_string(), "0".to_string());
+        assert!(parse_docker_image_search_query(&query).is_err());
+        query.remove("term");
+        assert!(parse_docker_image_search_query(&query).is_err());
     }
 
     #[test]

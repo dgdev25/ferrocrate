@@ -357,6 +357,21 @@ fn docker_compat_create_persists_host_resource_limits_before_start() {
 }
 
 #[test]
+fn docker_compat_image_search_returns_local_catalog_matches() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "search:fixture");
+    let (status, response) = harness.request("GET", "/v1.45/images/search?term=SEARCH&limit=5");
+    assert_eq!(status, 200, "search response={response}");
+    let results = serde_json::from_str::<Vec<serde_json::Value>>(&response).expect("search JSON");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["Index"], "local");
+    assert_eq!(
+        results[0]["Name"],
+        "registry-1.docker.io/library/search:fixture"
+    );
+}
+
+#[test]
 fn docker_compat_update_changes_pending_resource_limits() {
     let harness = DaemonHarness::spawn();
     let create_body =

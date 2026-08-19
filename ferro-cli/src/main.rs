@@ -11619,15 +11619,16 @@ fn handle_docker_compat_connection(
                 }
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/rename") => {
-                let id = path
+                let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/rename");
                 let name = query.get("name").ok_or_else(|| {
                     "docker: rename requires the name query parameter".to_string()
                 })?;
                 validate_docker_container_name(name)?;
+                let id = resolve_container_id(&runtime, requested_id)?;
                 runtime
-                    .rename(id, name)
+                    .rename(&id, name)
                     .map_err(|error| error.to_string())?;
                 http_response(204, &[], "text/plain")
             }

@@ -106,6 +106,9 @@ container_id="$(docker -H "$host" create --network none --name "$name" "$image" 
 [[ -n "$container_id" ]] || { echo "docker create returned no ID" >&2; exit 1; }
 docker -H "$host" inspect "$name" >/dev/null
 docker -H "$host" start "$name" >/dev/null
+renamed_name="${name}-renamed"
+docker -H "$host" rename "$name" "$renamed_name"
+name="$renamed_name"
 docker -H "$host" exec "$name" /bin/busybox true >/dev/null
 docker -H "$host" stats --no-stream "$name" >/dev/null
 docker -H "$host" top "$name" >/dev/null
@@ -186,4 +189,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/stats/top/pause/unpause/restart/wait/logs/diff/exec/export/cp/commit/attach/stop/kill/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/diff/exec/export/cp/commit/attach/stop/kill/rm/events"

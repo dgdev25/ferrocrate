@@ -5859,6 +5859,27 @@ fn handle_migrate_compose_report(file: &Path, output: Option<&Path>) -> Result<(
         .map(|values| values.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     networks.sort();
+    let network_definitions = project
+        .compose
+        .networks
+        .as_ref()
+        .map(|values| {
+            let mut entries = values
+                .iter()
+                .map(|(name, definition)| {
+                    (
+                        name.clone(),
+                        serde_json::json!({
+                            "driver": definition.driver,
+                            "external": definition.external,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            entries.into_iter().collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
     let mut volumes = project
         .compose
         .volumes
@@ -5872,6 +5893,7 @@ fn handle_migrate_compose_report(file: &Path, output: Option<&Path>) -> Result<(
         "compose_version": project.compose.version,
         "services": services,
         "networks": networks,
+        "network_definitions": network_definitions,
         "volumes": volumes,
         "dependency_order": graph.start_batches(),
         "manual_review": manual_review,
@@ -15380,7 +15402,8 @@ services:
     image: nginx:latest
     network_mode: host
 networks:
-  zeta: {}
+  zeta:
+    external: true
   alpha: {}
 volumes:
   cache: {}
@@ -15398,6 +15421,8 @@ volumes:
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&first).expect("report bytes")).expect("json");
         assert_eq!(report["networks"], serde_json::json!(["alpha", "zeta"]));
+        assert_eq!(report["network_definitions"]["zeta"]["external"], true);
+        assert_eq!(report["network_definitions"]["alpha"]["external"], false);
         assert_eq!(report["manual_review"].as_array().unwrap().len(), 1);
     }
 

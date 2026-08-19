@@ -115,6 +115,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/matrix-container/update",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: r#"{"NanoCpus":1000000}"#,
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/prune",
         coverage: Coverage::Implemented,
         expected_status: 200,

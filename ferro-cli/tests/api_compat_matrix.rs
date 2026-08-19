@@ -122,6 +122,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/matrix-container/resize?w=80&h=24",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/matrix-container/rename?name=matrix-renamed",
         coverage: Coverage::Implemented,
         expected_status: 204,
@@ -594,6 +601,12 @@ fn docker_api_compatibility_matrix() {
             assert!(payload
                 .get("SizeRootFs")
                 .is_some_and(serde_json::Value::is_u64));
+        }
+        if case.path.ends_with("/matrix-container/resize?w=80&h=24") {
+            assert!(
+                body.trim().is_empty(),
+                "resize success must have an empty body: {body:?}"
+            );
         }
     }
 }

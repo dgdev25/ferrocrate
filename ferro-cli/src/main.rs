@@ -8947,10 +8947,16 @@ fn compose_project_key(project: &ComposeProject) -> String {
 
 #[cfg(target_os = "linux")]
 fn compose_default_network_name(project_dir: &Path) -> Result<String, String> {
-    let raw = project_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("ferrocrate");
+    let raw = std::env::var("COMPOSE_PROJECT_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            project_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "ferrocrate".to_string());
     let mut project = raw
         .chars()
         .map(|ch| {
@@ -16148,6 +16154,16 @@ volumes:
             super::compose_default_network_name(std::path::Path::new("/tmp/..bad name.."))
                 .expect("sanitized name");
         assert_eq!(sanitized, "bad_name_default");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_default_network_name_honors_project_name_override() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let _project_name = super::ScopedEnv::set("COMPOSE_PROJECT_NAME", Some("Release.App"));
+        let name = super::compose_default_network_name(std::path::Path::new("directory-name"))
+            .expect("project override");
+        assert_eq!(name, "release_app_default");
     }
 
     #[test]

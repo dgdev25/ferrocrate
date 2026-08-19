@@ -3199,6 +3199,16 @@ impl ContainerRuntime {
         // record exists. Release it before attaching slirp4netns: attaching
         // to the stopped pre-exec launcher targets the host namespace rather
         // than the user/network namespace created by `unshare`.
+        // Publish container-owned hosts/resolver files before a non-slirp
+        // launcher is released into its rootfs.  Bubblewrap binds the rootfs
+        // at exec time; publishing afterwards races the bind and can leave a
+        // rootless workload without `/etc/resolv.conf` (notably on Rocky's
+        // older kernel/runtime combination).
+        if !use_slirp {
+            if let Ok(containers) = self.store.list() {
+                update_container_hosts(&self.runtime_dir, &containers)?;
+            }
+        }
         release_prepared_child(child_id)?;
         if use_slirp {
             let api_socket = container_dir.join("slirp4netns.sock");
@@ -3221,6 +3231,12 @@ impl ContainerRuntime {
         // The rootless wrapper deliberately stopped after namespace creation;
         // let it exec the workload only after slirp setup is complete.
         if use_slirp {
+            // slirp must be attached before the workload starts, but resolver
+            // publication must still precede the second release for the same
+            // rootfs bind-order reason as the non-slirp path above.
+            if let Ok(containers) = self.store.list() {
+                update_container_hosts(&self.runtime_dir, &containers)?;
+            }
             release_prepared_child(child_id)?;
         }
         // Commit the creation - all resources are now tracked in the store
@@ -13001,6 +13017,32 @@ mod tests {
         unsafe {
             std::env::remove_var("FERROCRATE_DNS_SERVERS");
             std::env::remove_var("FERROCRATE_DNS_SEARCH");
+        }
+    }
+
+    #[test]
+    fn rootless_runtime_host_update_publishes_slirp_resolver_before_launch() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut record = fixture_container_record("rootless-dns", "running");
+        record.ip_address = None;
+        record.ipv6_address = None;
+        let rootfs_etc = temp
+            .path()
+            .join("containers")
+            .join(&record.id)
+            .join("rootfs")
+            .join("etc");
+        std::fs::create_dir_all(&rootfs_etc).expect("rootfs etc");
+        unsafe {
+            std::env::set_var("FERROCRATE_ROOTLESS_NETNS", "1");
+        }
+        super::update_container_hosts(temp.path(), &[record]).expect("publish resolver");
+        let resolver = std::fs::read_to_string(rootfs_etc.join("resolv.conf"))
+            .expect("rootless resolver file");
+        assert_eq!(resolver, "nameserver 10.0.2.3\nsearch ferro.local\n");
+        unsafe {
+            std::env::remove_var("FERROCRATE_ROOTLESS_NETNS");
         }
     }
 

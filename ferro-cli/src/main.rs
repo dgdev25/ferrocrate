@@ -20157,11 +20157,11 @@ volumes:
     fn exec_handler_requires_container_and_command() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err =
-            handle_exec(&runtime, "", &["/bin/sh".to_string()]).expect_err("container required");
+        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()], false)
+            .expect_err("container required");
         assert!(err.contains("exec: container is required"));
 
-        let err = handle_exec(&runtime, "c1", &[]).expect_err("command required");
+        let err = handle_exec(&runtime, "c1", &[], false).expect_err("command required");
         assert!(err.contains("exec: command is required"));
     }
 

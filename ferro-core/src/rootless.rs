@@ -428,7 +428,9 @@ pub(crate) fn trusted_executable_path(helper: &str) -> Option<PathBuf> {
         .chain([
             PathBuf::from("/usr/local/bin").join(helper),
             PathBuf::from("/usr/bin").join(helper),
+            PathBuf::from("/usr/sbin").join(helper),
             PathBuf::from("/bin").join(helper),
+            PathBuf::from("/sbin").join(helper),
         ]);
     candidates.find(|candidate| {
         let Ok(metadata) = fs::metadata(candidate) else {

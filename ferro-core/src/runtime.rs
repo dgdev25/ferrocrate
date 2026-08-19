@@ -5371,7 +5371,13 @@ fn build_command(
         direct_cmd.args(&cmd[1..]);
         direct_cmd
     } else if let Some(netns) = netns_name {
-        let mut netns_cmd = Command::new("ip");
+        let ip_path = crate::rootless::trusted_executable_path("ip").ok_or_else(|| {
+            RuntimeError::InvalidCommand(
+                "network namespace execution requires a trusted root-owned ip executable"
+                    .to_string(),
+            )
+        })?;
+        let mut netns_cmd = Command::new(ip_path);
         netns_cmd.arg("netns").arg("exec").arg(netns);
         if let Some(rootfs) = rootfs_dir {
             if running_as_root {
@@ -13758,17 +13764,17 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args.ends_with(&[
-            "unshare".to_string(),
-            "--user".to_string(),
-            "--net".to_string(),
-            "--".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "kill -STOP $$; exec \"$@\"".to_string(),
-            "ferrocrate-rootless".to_string(),
-            "/bin/true".to_string(),
-        ]));
+        assert!(args.len() >= 9);
+        assert!(args[args.len() - 9].ends_with("/unshare"));
+        assert_eq!(
+            &args[args.len() - 8..args.len() - 5],
+            ["--user", "--net", "--"]
+        );
+        assert!(args[args.len() - 5].ends_with("/sh"));
+        assert_eq!(args[args.len() - 4], "-c");
+        assert_eq!(args[args.len() - 3], "kill -STOP $$; exec \"$@\"");
+        assert_eq!(args[args.len() - 1], "/bin/true");
+        assert!(args.iter().any(|arg| arg == "ferrocrate-rootless"));
     }
 
     #[test]
@@ -13793,17 +13799,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args.ends_with(&[
-            "unshare".to_string(),
-            "--user".to_string(),
-            "--net".to_string(),
-            "--".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "kill -STOP $$; exec setpriv --no-new-privs -- \"$@\"".to_string(),
-            "ferrocrate-rootless".to_string(),
-            "/bin/true".to_string(),
-        ]));
+        assert!(args.len() >= 9);
+        assert!(args[args.len() - 9].ends_with("/unshare"));
+        assert_eq!(
+            &args[args.len() - 8..args.len() - 5],
+            ["--user", "--net", "--"]
+        );
+        assert!(args[args.len() - 5].ends_with("/sh"));
+        assert_eq!(args[args.len() - 4], "-c");
+        assert!(args[args.len() - 3].starts_with("kill -STOP $$; exec "));
+        assert!(args[args.len() - 3].ends_with(" --no-new-privs -- \"$@\""));
+        assert_eq!(args[args.len() - 1], "/bin/true");
+        assert!(args.iter().any(|arg| arg == "ferrocrate-rootless"));
     }
 
     #[test]

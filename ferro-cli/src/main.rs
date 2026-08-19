@@ -15901,6 +15901,40 @@ volumes:
     }
 
     #[test]
+    fn compose_network_provisioning_creates_and_tracks_missing_bridge() {
+        super::reset_network_kernel_effect_count();
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let project = super::ComposeProject {
+            path: runtime_dir.path().join("compose.yml"),
+            compose: serde_json::from_value(serde_json::json!({
+                "services": {},
+                "networks": {"app-net": {}}
+            }))
+            .expect("compose project"),
+        };
+        let authorization = test_surface_authorization(runtime_dir.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let created =
+            super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
+                .expect("provision custom bridge");
+        assert_eq!(created, vec!["app-net".to_string()]);
+        assert_eq!(
+            super::load_networks(runtime_dir.path())
+                .expect("networks")
+                .len(),
+            1
+        );
+        assert_eq!(
+            super::load_compose_network_ownership(runtime_dir.path())
+                .expect("ownership")
+                .first()
+                .map(|entry| entry.networks.as_slice()),
+            Some(["app-net".to_string()].as_slice())
+        );
+        assert_eq!(super::network_kernel_effect_count(), 1);
+    }
+
+    #[test]
     fn compose_network_ownership_round_trips_atomically() {
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let ownership = vec![super::ComposeNetworkOwnership {

@@ -261,6 +261,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/containers/missing/stats?stream=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/missing/resize?w=80&h=24",
         coverage: Coverage::Implemented,
@@ -279,6 +286,13 @@ const API_MATRIX: &[ApiCase] = &[
         path: "/containers/missing/attach",
         coverage: Coverage::Implemented,
         expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/missing/attach?logs=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
         body: "",
     },
     ApiCase {

@@ -11351,6 +11351,12 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/attach");
+                // Docker validates attach query flags before resolving the
+                // container. Preserve that 400-class boundary for malformed
+                // requests even when the resource is absent.
+                for key in ["logs", "stream", "stdin", "stdout", "stderr"] {
+                    let _ = parse_docker_bool_query(query.get(key), key)?;
+                }
                 let id = {
                     let pending = state
                         .pending
@@ -11362,9 +11368,6 @@ fn handle_docker_compat_connection(
                 // local runtime exposes its persisted combined log stream as
                 // stdout. Keep the flags explicit so `logs=0` does not leak
                 // historical output into a new attach session.
-                for key in ["logs", "stream", "stdin", "stdout", "stderr"] {
-                    let _ = parse_docker_bool_query(query.get(key), key)?;
-                }
                 let logs_requested = query
                     .get("logs")
                     .map(|value| parse_docker_bool_query(Some(value), "logs"))
@@ -11462,6 +11465,11 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/stats");
+                let stream = query
+                    .get("stream")
+                    .map(|value| parse_docker_bool_query(Some(value), "stream"))
+                    .transpose()?
+                    .unwrap_or(false);
                 let pending = state
                     .pending
                     .lock()
@@ -11488,11 +11496,6 @@ fn handle_docker_compat_connection(
                     Err(error) => return Err(error.to_string()),
                 };
                 drop(pending);
-                let stream = query
-                    .get("stream")
-                    .map(|value| parse_docker_bool_query(Some(value), "stream"))
-                    .transpose()?
-                    .unwrap_or(false);
                 if stream {
                     stats_follow = Some(id.clone());
                     docker_chunked_headers(200, "application/json")

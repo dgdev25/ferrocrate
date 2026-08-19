@@ -12884,6 +12884,8 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("bad request")
         || lowered.contains("event query parameter")
         || lowered.contains("must be a boolean")
+        || lowered.contains("non-negative integer")
+        || lowered.contains("exceeds terminal bounds")
         || lowered.contains("requires ")
     {
         return 400;

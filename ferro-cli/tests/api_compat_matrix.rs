@@ -171,6 +171,27 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/matrix-container/resize?w=80",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/matrix-container/resize?w=wide&h=24",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
+        path: "/containers/matrix-container/resize?w=65536&h=24",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/matrix-container/rename?name=matrix-renamed",
         coverage: Coverage::Implemented,
         expected_status: 204,

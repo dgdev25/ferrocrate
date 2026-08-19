@@ -608,6 +608,43 @@ CMD ["cat", "/hello.txt"]
         );
 
         std::thread::sleep(Duration::from_secs(2));
+        let local_health = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args([
+                "exec",
+                "ferro-e2e-ebpf-web",
+                "wget",
+                "-q",
+                "-O",
+                "-",
+                "--timeout=3",
+                "http://127.0.0.1/",
+            ])
+            .output()
+            .expect("in-namespace service probe");
+        if !local_health.status.success() {
+            let inspect = ferro_cli()
+                .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+                .args(["inspect", "ferro-e2e-ebpf-web"])
+                .output()
+                .ok();
+            let logs = ferro_cli()
+                .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+                .args(["logs", "ferro-e2e-ebpf-web"])
+                .output()
+                .ok();
+            eprintln!(
+                "eBPF in-namespace service probe failed: stderr={}; inspect={}; logs={}",
+                String::from_utf8_lossy(&local_health.stderr),
+                inspect
+                    .as_ref()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+                    .unwrap_or_else(|| "<inspect unavailable>".to_string()),
+                logs.as_ref()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+                    .unwrap_or_else(|| "<logs unavailable>".to_string()),
+            );
+        }
         let start = std::time::Instant::now();
         let mut last_curl = None;
         while start.elapsed() < Duration::from_secs(12) {

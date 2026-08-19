@@ -26,12 +26,13 @@ grep -q '^rootless.install.bwrap=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.bwrap_nested=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
-# Bridge networking is an explicit operator choice. Persist it only when the
-# operator asks for it; ordinary installs retain the fail-closed default.
+# The installer flag remains a compatibility/persistence control. Runtime
+# networking defaults on for non-root callers; hosts still fail closed during
+# capability admission and operators can set FERROCRATE_ROOTLESS_NETNS=0.
 run_installer --rootless-network --dry-run >"$tmp_home/network-dry-run.txt"
 grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$tmp_home/network-dry-run.txt"
-if grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$tmp_home/dry-run.txt"; then
-  echo "rootless networking unexpectedly enabled by default" >&2
+if grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=0$' "$tmp_home/dry-run.txt"; then
+  echo "rootless networking unexpectedly disabled by default" >&2
   exit 1
 fi
 

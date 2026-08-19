@@ -14,8 +14,9 @@ Installs ~/.local/bin/ferrocrate and a systemd user unit. --enable starts the
 unit immediately when systemd --user is available. --upgrade atomically replaces
 an existing per-user binary and unit. Use --dry-run to inspect the plan without
 writing files. --uninstall removes only the installed per-user binary and unit.
---rootless-network persists the explicit slirp4netns bridge opt-in in the user
-service; without it, bridge networking remains disabled by default.
+--rootless-network persists an explicit slirp4netns bridge setting in the user
+service for compatibility; current non-root runtime defaults already enable
+the validated path and FERROCRATE_ROOTLESS_NETNS=0 opts out.
 --strict fails before mutation when required rootless host
 prerequisites are unavailable.
 EOF

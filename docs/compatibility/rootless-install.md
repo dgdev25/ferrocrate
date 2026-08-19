@@ -18,9 +18,9 @@ mutation if one or more prerequisites are missing. Missing helpers still need
 operator or distribution provisioning; the installer deliberately does not
 invoke a package manager or `sudo`.
 
-Bridge networking remains fail-closed by default. Pass
-`--rootless-network` when installing or upgrading to persist
-`FERROCRATE_ROOTLESS_NETNS=1` in the generated user service and opt into the
-validated `slirp4netns` bridge path. The installer regression verifies both
-the explicit opt-in and the default-disabled behavior. Upgrades preserve an
-existing explicit opt-in even when `--rootless-network` is omitted.
+Rootless bridge networking is enabled by default for non-root callers and
+fails closed with a capability diagnostic when the host cannot provide the
+required namespaces. Set `FERROCRATE_ROOTLESS_NETNS=0` for an explicitly
+network-isolated deployment. The `--rootless-network` installer option remains
+available for compatibility and persists `FERROCRATE_ROOTLESS_NETNS=1` in the
+generated user service; upgrades preserve an existing explicit setting.

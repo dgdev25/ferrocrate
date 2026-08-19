@@ -8385,7 +8385,7 @@ fn validate_rootless_bridge_network(
 ) -> Result<(), RuntimeError> {
     if !enabled {
         return Err(RuntimeError::Network(format!(
-            "rootless bridge networking is disabled; set FERROCRATE_ROOTLESS_NETNS=1 to use slirp4netns (requested backend {requested_backend})"
+            "rootless bridge networking is disabled; unset FERROCRATE_ROOTLESS_NETNS or set it to 1 to use slirp4netns (requested backend {requested_backend})"
         )));
     }
     for mapping in port_mappings {
@@ -9613,9 +9613,14 @@ fn configure_slirp_host_forwards(
 }
 
 fn rootless_netns_enabled() -> bool {
-    std::env::var("FERROCRATE_ROOTLESS_NETNS")
-        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    match std::env::var("FERROCRATE_ROOTLESS_NETNS") {
+        Ok(value) => value == "1" || value.eq_ignore_ascii_case("true"),
+        // Rootless bridge networking is the Docker-compatible default. Hosts
+        // that cannot create the required nested namespaces fail closed at
+        // the existing capability probe; callers can explicitly opt out with
+        // FERROCRATE_ROOTLESS_NETNS=0.
+        Err(_) => !nix::unistd::Uid::effective().is_root(),
+    }
 }
 
 fn seccomp_enabled() -> bool {
@@ -14101,7 +14106,30 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn rootless_bridge_requires_explicit_slirp_enablement() {
         let err = super::validate_rootless_bridge_network(false, &[], NetworkBackend::Iptables)
             .expect_err("rootless networking must be opt-in");
-        assert!(err.to_string().contains("FERROCRATE_ROOTLESS_NETNS=1"));
+        assert!(err.to_string().contains("FERROCRATE_ROOTLESS_NETNS"));
+    }
+
+    #[test]
+    fn rootless_networking_defaults_on_for_non_root_and_supports_opt_out() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        unsafe {
+            std::env::remove_var("FERROCRATE_ROOTLESS_NETNS");
+        }
+        assert_eq!(
+            super::rootless_netns_enabled(),
+            !nix::unistd::Uid::effective().is_root()
+        );
+        unsafe {
+            std::env::set_var("FERROCRATE_ROOTLESS_NETNS", "0");
+        }
+        assert!(!super::rootless_netns_enabled());
+        unsafe {
+            std::env::set_var("FERROCRATE_ROOTLESS_NETNS", "1");
+        }
+        assert!(super::rootless_netns_enabled());
+        unsafe {
+            std::env::remove_var("FERROCRATE_ROOTLESS_NETNS");
+        }
     }
 
     #[test]

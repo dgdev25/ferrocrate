@@ -9160,7 +9160,12 @@ fn ensure_compose_networks(
         !external && driver.as_deref().unwrap_or("bridge") == "bridge"
     });
     if needs_rootful_bridge {
-        let rootless_enabled = std::env::var("FERROCRATE_ROOTLESS_NETNS").as_deref() == Ok("1");
+        // Rootless bridge provisioning is a Compose-level shared-network
+        // operation and is unsupported regardless of whether per-container
+        // slirp networking was explicitly enabled. Detect the caller's
+        // privilege directly so the runtime's default-on rootless networking
+        // cannot accidentally bypass this fail-closed boundary.
+        let rootless_enabled = !nix::unistd::Uid::effective().is_root();
         if let Some(message) = compose_rootless_bridge_boundary(
             rootless_enabled,
             nix::unistd::Uid::effective().is_root(),

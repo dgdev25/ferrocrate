@@ -8938,6 +8938,62 @@ fn prepare_compose_service(
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_compose_networks(
+    project: &ComposeProject,
+    runtime_dir: &Path,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<Vec<String>, String> {
+    let Some(networks) = project.compose.networks.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let mut names = networks.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let mut records = load_networks(runtime_dir)?;
+    let mut created = Vec::new();
+    for name in names {
+        if is_builtin_network_mode(&name) {
+            continue;
+        }
+        let definition = networks
+            .get(&name)
+            .ok_or_else(|| format!("compose: missing network definition {name}"))?;
+        let driver = definition.driver.as_deref().unwrap_or("bridge");
+        if driver != "bridge" {
+            return Err(format!(
+                "compose: network {name} uses unsupported driver {driver}"
+            ));
+        }
+        validate_network_name(&name)?;
+        if records.iter().any(|record| record.name == name) {
+            continue;
+        }
+        let record = create_network_record(&name, None, None, None, None)?;
+        if records.iter().any(|existing| {
+            existing.bridge_name == record.bridge_name && existing.name != record.name
+        }) {
+            return Err(format!(
+                "compose: network {name} collides with bridge {}",
+                record.bridge_name
+            ));
+        }
+        let permit = authorization
+            .authorize_named(
+                origin,
+                AuthorizationAction::NetworkCreate,
+                ResourceKind::Network,
+                &name,
+                record.generation,
+            )
+            .map_err(|error| error.to_string())?;
+        execute_network_create(runtime_dir, &record, permit)?;
+        records.push(record);
+        created.push(name);
+    }
+    Ok(created)
+}
+
+#[cfg(target_os = "linux")]
 fn handle_compose(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
@@ -9028,6 +9084,12 @@ fn handle_compose(
             let surface_authorization = runtime
                 .surface_authorization()
                 .map_err(|error| error.to_string())?;
+            ensure_compose_networks(
+                &project,
+                &runtime_dir(),
+                &parent_origin,
+                &surface_authorization,
+            )?;
             let mut failures = Vec::new();
             for prepared in prepared {
                 let service = project
@@ -15693,6 +15755,25 @@ volumes:
         let error = super::compose_service_network(&multiple, "api")
             .expect_err("multiple attachments are bounded");
         assert!(error.contains("multiple networks"));
+    }
+
+    #[test]
+    fn compose_network_provisioning_rejects_non_bridge_driver() {
+        let project = super::ComposeProject {
+            path: std::path::PathBuf::new(),
+            compose: serde_json::from_value(serde_json::json!({
+                "services": {},
+                "networks": {"mesh": {"driver": "overlay"}}
+            }))
+            .expect("compose project"),
+        };
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let authorization = test_surface_authorization(runtime_dir.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let error =
+            super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
+                .expect_err("overlay driver is bounded");
+        assert!(error.contains("unsupported driver overlay"));
     }
 
     #[test]

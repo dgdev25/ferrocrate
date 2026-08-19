@@ -155,6 +155,65 @@ impl CgroupV2Manager {
         Ok(())
     }
 
+    /// Replace the complete resource-limit contract for an existing group.
+    ///
+    /// Unlike [`Self::apply_limits`], which is intentionally launch-oriented
+    /// and only writes requested controllers, this operation also clears a
+    /// previously configured controller when its new value is `None`.  That
+    /// distinction is required by Docker-compatible live resource updates:
+    /// omitted limits mean "unlimited", not "leave the old limit in place".
+    /// Controller availability and path validation still happen before any
+    /// requested limit is written.
+    pub fn replace_limits(
+        &self,
+        group_path: impl AsRef<Path>,
+        limits: &ResourceLimits,
+    ) -> Result<(), CgroupError> {
+        let group_path = group_path.as_ref();
+        if !group_path.is_dir() {
+            return Err(CgroupError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("cgroup group does not exist: {}", group_path.display()),
+            )));
+        }
+
+        // Reuse the launch path for controller admission and requested values.
+        // It performs the availability check before writing any requested
+        // controller, preserving fail-closed behavior on delegated cgroups.
+        self.apply_limits(group_path, limits)?;
+
+        if limits.memory_max.is_none() {
+            let path = group_path.join("memory.max");
+            if path.exists() {
+                fs::write(path, "max")?;
+            }
+        }
+
+        if limits.cpu_max.is_none() {
+            let path = group_path.join("cpu.max");
+            if path.exists() {
+                // cgroup v2 requires a period even for an unlimited quota.
+                // Preserve the current period when possible, otherwise use
+                // the kernel's conventional 100ms period.
+                let period = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|value| value.split_whitespace().nth(1)?.parse::<u64>().ok())
+                    .filter(|period| *period > 0)
+                    .unwrap_or(100_000);
+                fs::write(path, format!("max {period}"))?;
+            }
+        }
+
+        if limits.pids_max.is_none() {
+            let path = group_path.join("pids.max");
+            if path.exists() {
+                fs::write(path, "max")?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn add_pid(&self, group_path: impl AsRef<Path>, pid: u32) -> Result<(), CgroupError> {
         let group_path = group_path.as_ref();
         let procs_path = group_path.join("cgroup.procs");
@@ -362,6 +421,50 @@ mod tests {
             fs::read_to_string(group.join("pids.max")).expect("pids.max"),
             "256"
         );
+    }
+
+    #[test]
+    fn replaces_limits_and_restores_unlimited_controllers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("seed controllers");
+        fs::write(root.join("cgroup.subtree_control"), "").expect("seed subtree control");
+
+        let manager = CgroupV2Manager::new(root);
+        let group = manager
+            .create_group("containers/update")
+            .expect("group created");
+        manager
+            .apply_limits(
+                &group,
+                &ResourceLimits {
+                    memory_max: Some(64 * 1024 * 1024),
+                    cpu_max: Some(CpuMax {
+                        quota: 50_000,
+                        period: 100_000,
+                    }),
+                    pids_max: Some(32),
+                },
+            )
+            .expect("initial limits applied");
+
+        manager
+            .replace_limits(
+                &group,
+                &ResourceLimits {
+                    memory_max: None,
+                    cpu_max: None,
+                    pids_max: Some(64),
+                },
+            )
+            .expect("replacement limits applied");
+
+        assert_eq!(fs::read_to_string(group.join("memory.max")).unwrap(), "max");
+        assert_eq!(
+            fs::read_to_string(group.join("cpu.max")).unwrap(),
+            "max 100000"
+        );
+        assert_eq!(fs::read_to_string(group.join("pids.max")).unwrap(), "64");
     }
 
     #[test]

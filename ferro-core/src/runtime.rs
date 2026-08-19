@@ -80,7 +80,7 @@ use nix::fcntl::{flock, FlockArg};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::{CString, OsStr};
+use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -5293,6 +5293,7 @@ fn build_bwrap_command(
         .arg("--setenv")
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    bwrap.arg("--cap-drop").arg("ALL");
     for mount in mounts {
         bwrap.arg(if mount.read_only {
             "--ro-bind"
@@ -5338,9 +5339,26 @@ fn build_command(
     readonly_rootfs: bool,
 ) -> Result<Command, RuntimeError> {
     let running_as_root = nix::unistd::Uid::effective().is_root();
-    let direct_container_setup = running_as_root && (netns_name.is_some() || rootfs_dir.is_some());
+    let direct_container_setup = running_as_root && netns_name.is_some();
+    // Keep the launcher shell outside a rootful image. A shell-less OCI image
+    // (for example, FROM scratch with a static binary) cannot execute the
+    // launcher after chroot. Bubblewrap enters the image after the launcher
+    // barrier without requiring a shell or dynamic loader in the image.
+    let rootfs_chroot_launcher = running_as_root && rootfs_dir.is_some();
 
-    let mut command = if direct_container_setup {
+    let mut command = if rootfs_chroot_launcher {
+        let launcher = std::env::current_exe().map_err(RuntimeError::Io)?;
+        let mut helper = Command::new(launcher);
+        helper
+            .arg("__ferrocrate_rootfs_launch")
+            .arg(rootfs_dir.expect("rootfs launcher requires rootfs"))
+            .arg(workdir.unwrap_or(""))
+            .arg(user.unwrap_or(""))
+            .arg(if no_new_privs { "1" } else { "0" })
+            .arg("--")
+            .args(cmd);
+        helper
+    } else if direct_container_setup {
         let mut direct_cmd = Command::new(&cmd[0]);
         direct_cmd.args(&cmd[1..]);
         direct_cmd
@@ -5407,12 +5425,10 @@ fn build_command(
         host_cmd
     };
 
-    // The launcher shell becomes the stable process identity first, stops itself,
-    // and only execs the workload after the parent has durably recorded ownership.
-    // All subsequently configured credentials and sandboxing are inherited across
-    // the final exec. The stopped ownership barrier closes the pre-publication
-    // parent-race window. Detached CLI launches opt out of the parent-death
-    // lease after that barrier so later CLI invocations can manage them.
+    // The launcher shell becomes the stable process identity first, stops
+    // itself, and only execs the workload after the parent has durably recorded
+    // ownership. For rootful rootfs images it execs bubblewrap, avoiding any
+    // assumption that the image contains a shell.
     let workload_program = command.get_program().to_os_string();
     let workload_args = command
         .get_args()
@@ -5439,12 +5455,12 @@ fn build_command(
         command.env(key, value);
     }
 
-    if let Some(dir) = workdir.filter(|_| !direct_container_setup) {
+    if let Some(dir) = workdir.filter(|_| !direct_container_setup && !rootfs_chroot_launcher) {
         command.current_dir(dir);
     }
 
     if let Some(user_spec) = user {
-        if running_as_root && !direct_container_setup {
+        if running_as_root && !direct_container_setup && !rootfs_chroot_launcher {
             if let Some((uid, gid)) = parse_user_spec(user_spec) {
                 command.uid(uid);
                 command.gid(gid);
@@ -5457,16 +5473,6 @@ fn build_command(
     let seccomp_permissive = seccomp_permissive_mode();
     let setup_netns = if direct_container_setup {
         netns_name.map(str::to_string)
-    } else {
-        None
-    };
-    let setup_rootfs = if direct_container_setup {
-        rootfs_dir.map(Path::to_path_buf)
-    } else {
-        None
-    };
-    let setup_workdir = if direct_container_setup {
-        workdir.map(str::to_string)
     } else {
         None
     };
@@ -5494,11 +5500,6 @@ fn build_command(
                     io::Error::new(err.kind(), format!("pre_exec enter netns {netns}: {err}"))
                 })?;
             }
-            if let Some(rootfs) = setup_rootfs.as_deref() {
-                enter_runtime_rootfs(rootfs, setup_workdir.as_deref()).map_err(|err| {
-                    io::Error::new(err.kind(), format!("pre_exec enter rootfs: {err}"))
-                })?;
-            }
             if let Some(user_spec) = setup_user.as_deref() {
                 apply_runtime_identity(user_spec).map_err(|err| {
                     io::Error::new(
@@ -5522,7 +5523,7 @@ fn build_command(
                 }
             }
             let is_root = nix::unistd::Uid::effective().is_root();
-            if is_root {
+            if is_root && !rootfs_chroot_launcher {
                 if caps.is_empty() {
                     drop_all_capabilities().map_err(|err| {
                         std::io::Error::other(format!("pre_exec drop capabilities: {err}"))
@@ -5577,17 +5578,58 @@ fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {
         .map_err(|err| io::Error::from_raw_os_error(err as i32))
 }
 
-fn enter_runtime_rootfs(rootfs: &Path, workdir: Option<&str>) -> io::Result<()> {
-    let path = CString::new(rootfs.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rootfs path contains NUL"))?;
-    let rc = unsafe { nix::libc::chroot(path.as_ptr()) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+/// Execute a rootfs workload from the internal launcher handoff.
+///
+/// This path exists for shell-less OCI images. `Command::spawn` must return
+/// before the ownership barrier can be observed, so the helper executable is
+/// used as the post-spawn process that performs chroot after the existing
+/// launcher-shell barrier is released and then execs the workload.
+#[cfg(target_os = "linux")]
+pub fn run_rootfs_launcher(args: &[String]) -> Result<(), String> {
+    if args.len() < 6 || args[4] != "--" {
+        return Err("invalid rootfs launcher arguments".to_string());
     }
-    std::env::set_current_dir(container_workdir(workdir))
+    let rootfs = Path::new(&args[0]);
+    let workdir = (!args[1].is_empty()).then_some(args[1].as_str());
+    let user = (!args[2].is_empty()).then_some(args[2].as_str());
+    let no_new_privs = args[3] == "1";
+    let command = &args[5..];
+    if command.is_empty() {
+        return Err("rootfs launcher command is empty".to_string());
+    }
+    let rootfs_c = std::ffi::CString::new(rootfs.as_os_str().as_bytes())
+        .map_err(|_| "rootfs path contains NUL".to_string())?;
+    let rc = unsafe { nix::libc::chroot(rootfs_c.as_ptr()) };
+    if rc != 0 {
+        return Err(format!(
+            "chroot {}: {}",
+            rootfs.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    std::env::set_current_dir(container_workdir_for_launcher(workdir))
+        .map_err(|err| format!("set rootfs workdir: {err}"))?;
+    if let Some(user_spec) = user {
+        apply_runtime_identity(user_spec).map_err(|err| format!("set rootfs identity: {err}"))?;
+    }
+    if no_new_privs {
+        set_no_new_privileges().map_err(|err| format!("set rootfs no_new_privs: {err}"))?;
+    }
+    drop_all_capabilities().map_err(|err| format!("drop rootfs capabilities: {err}"))?;
+    let program = std::ffi::CString::new(command[0].as_str())
+        .map_err(|_| "rootfs command contains NUL".to_string())?;
+    let argv = command
+        .iter()
+        .map(|arg| std::ffi::CString::new(arg.as_str()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "rootfs command contains NUL".to_string())?;
+    match nix::unistd::execv(&program, &argv) {
+        Ok(never) => match never {},
+        Err(err) => Err(format!("exec rootfs workload: {err}")),
+    }
 }
 
-fn container_workdir(workdir: Option<&str>) -> String {
+fn container_workdir_for_launcher(workdir: Option<&str>) -> String {
     match workdir.map(str::trim).filter(|dir| !dir.is_empty()) {
         Some("/") | None => "/".to_string(),
         Some(dir) if dir.starts_with('/') => dir.to_string(),

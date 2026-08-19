@@ -1014,6 +1014,13 @@ fn main() {
         .init();
 
     let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if raw_args.first().map(String::as_str) == Some("__ferrocrate_rootfs_launch") {
+        if let Err(err) = ferro_core::runtime::run_rootfs_launcher(&raw_args[1..]) {
+            eprintln!("rootfs launcher: {err}");
+            process::exit(125);
+        }
+        process::exit(125);
+    }
     match maybe_host_desktop_forward(&raw_args) {
         Ok(true) => return,
         Ok(false) => {}

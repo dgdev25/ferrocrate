@@ -12109,7 +12109,7 @@ fn handle_docker_compat_connection(
                     let exec_id = id.to_string();
                     let container = spec.container.clone();
                     let command = spec.cmd.clone();
-                    std::thread::Builder::new()
+                    let worker = std::thread::Builder::new()
                         .name(format!("ferro-exec-{exec_id}"))
                         .spawn(move || {
                             let result = ContainerRuntime::new(&runtime_dir)
@@ -12129,9 +12129,16 @@ fn handle_docker_compat_connection(
                                 }
                             }
                         })
-                        .map_err(|error| {
-                            format!("docker: failed to spawn detached exec: {error}")
-                        })?;
+                        .map_err(|error| format!("docker: failed to spawn detached exec: {error}"));
+                    if let Err(error) = worker {
+                        if let Ok(mut execs) = state.execs.lock() {
+                            if let Some(exec) = execs.get_mut(id) {
+                                exec.running = false;
+                                exec.exit_code = Some(-1);
+                            }
+                        }
+                        return Err(error);
+                    }
                     return Ok(http_response(200, &[], "application/vnd.docker.raw-stream"));
                 }
                 let result = match runtime.exec(&spec.container, &spec.cmd) {

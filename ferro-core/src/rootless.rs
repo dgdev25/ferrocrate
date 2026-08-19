@@ -575,6 +575,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_untrusted_mapping_helper_from_path() {
+        let _env_guard = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let helper = temp.path().join("newuidmap");
         fs::write(&helper, "#!/bin/sh\nexit 0\n").expect("write helper");
@@ -593,6 +594,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_untrusted_bubblewrap_from_path() {
+        let _env_guard = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let bwrap = temp.path().join("bwrap");
         fs::write(&bwrap, "#!/bin/sh\nexit 0\n").expect("write bwrap");

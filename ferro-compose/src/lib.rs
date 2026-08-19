@@ -65,6 +65,9 @@ pub struct ComposeFile {
     /// Compose file format version (e.g., "3.8").
     pub version: Option<String>,
 
+    /// Optional Compose project name used for generated default resources.
+    pub name: Option<String>,
+
     /// Service definitions indexed by name.
     pub services: HashMap<String, Service>,
 

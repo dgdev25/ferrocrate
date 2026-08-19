@@ -8947,9 +8947,22 @@ fn compose_project_key(project: &ComposeProject) -> String {
 
 #[cfg(target_os = "linux")]
 fn compose_default_network_name(project_dir: &Path) -> Result<String, String> {
+    compose_default_network_name_with_declared(project_dir, None)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_default_network_name_with_declared(
+    project_dir: &Path,
+    declared_name: Option<&str>,
+) -> Result<String, String> {
     let raw = std::env::var("COMPOSE_PROJECT_NAME")
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            declared_name
+                .map(str::to_owned)
+                .filter(|value| !value.trim().is_empty())
+        })
         .or_else(|| {
             project_dir
                 .file_name()
@@ -9211,7 +9224,8 @@ fn handle_compose(
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let default_network = compose_default_network_name(project_dir)?;
+    let default_network =
+        compose_default_network_name_with_declared(project_dir, project.compose.name.as_deref())?;
     match command {
         ComposeCommands::Up { profile, detach: _ } => {
             // Compose is a detached CLI operation: services must outlive the
@@ -16164,6 +16178,19 @@ volumes:
         let name = super::compose_default_network_name(std::path::Path::new("directory-name"))
             .expect("project override");
         assert_eq!(name, "release_app_default");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_default_network_name_honors_declared_name_without_env_override() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let _project_name = super::ScopedEnv::set("COMPOSE_PROJECT_NAME", None);
+        let name = super::compose_default_network_name_with_declared(
+            std::path::Path::new("directory-name"),
+            Some("Declared.Project"),
+        )
+        .expect("declared project name");
+        assert_eq!(name, "declared_project_default");
     }
 
     #[test]

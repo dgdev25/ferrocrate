@@ -7042,7 +7042,16 @@ fn append_export_archive_path<W: Write>(
 ) -> Result<(), std::io::Error> {
     let metadata = std::fs::symlink_metadata(selected)?;
     if metadata.file_type().is_dir() {
-        append_export_rootfs_dir(builder, rootfs, selected, Path::new("."), excluded_targets)
+        if selected == rootfs {
+            append_export_rootfs_dir(builder, rootfs, selected, Path::new("."), excluded_targets)
+        } else {
+            let name = selected
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("."));
+            let archive_name = Path::new(name);
+            builder.append_dir(archive_name, selected)?;
+            append_export_rootfs_dir(builder, rootfs, selected, archive_name, excluded_targets)
+        }
     } else if metadata.file_type().is_symlink() {
         let name = selected
             .file_name()

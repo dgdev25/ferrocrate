@@ -145,6 +145,10 @@ pub struct Service {
     /// Service labels for metadata.
     pub labels: Option<HashMap<String, String>>,
 
+    /// Mount the container root filesystem read-only.
+    #[serde(default)]
+    pub read_only: bool,
+
     /// Profile names that enable this service.
     pub profiles: Option<Vec<String>>,
 }
@@ -612,6 +616,22 @@ configs:
         let compose = ComposeFile::parse(content, &HashMap::new()).expect("file resources");
         assert_eq!(compose.services["api"].secrets.as_ref().unwrap().len(), 2);
         assert_eq!(compose.services["api"].configs.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parses_service_read_only_flag_with_false_default() {
+        let defaulted = ComposeFile::parse(
+            "services:\n  api:\n    image: alpine:latest\n",
+            &HashMap::new(),
+        )
+        .expect("default compose");
+        assert!(!defaulted.services["api"].read_only);
+        let readonly = ComposeFile::parse(
+            "services:\n  api:\n    image: alpine:latest\n    read_only: true\n",
+            &HashMap::new(),
+        )
+        .expect("read-only compose");
+        assert!(readonly.services["api"].read_only);
     }
 
     #[test]

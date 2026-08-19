@@ -32,5 +32,6 @@ FERROCRATE_ROOTLESS_STRICT=0 bash scripts/verify-rootless.sh \
 
 echo "[release] collecting compatibility evidence"
 bash scripts/compat-evidence.sh
+bash scripts/test-check-linux-binary-compat.sh
 
 echo "[release] readiness checks passed"

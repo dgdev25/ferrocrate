@@ -130,8 +130,8 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "POST",
         path: "/exec/missing/start",
-        coverage: Coverage::Unsupported,
-        expected_status: 400,
+        coverage: Coverage::Implemented,
+        expected_status: 404,
         body: r#"{"Tty":true}"#,
     },
     ApiCase {

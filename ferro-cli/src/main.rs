@@ -10520,12 +10520,9 @@ fn validate_docker_exec_command(cmd: &[String]) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn validate_docker_exec_start(tty: bool) -> Result<(), String> {
-    if tty {
-        return Err(
-            "docker: Tty=true is unsupported for exec; Ferrocrate currently supports non-TTY exec only"
-                .to_string(),
-        );
-    }
+    // Rootful TTY exec is backed by a kernel PTY. Rootless requests are
+    // rejected by the runtime with a precise unsupported-host diagnostic.
+    let _ = tty;
     Ok(())
 }
 
@@ -12141,7 +12138,11 @@ fn handle_docker_compat_connection(
                     }
                     return Ok(http_response(200, &[], "application/vnd.docker.raw-stream"));
                 }
-                let result = match runtime.exec(&spec.container, &spec.cmd) {
+                let result = match if start.tty {
+                    runtime.exec_tty(&spec.container, &spec.cmd)
+                } else {
+                    runtime.exec(&spec.container, &spec.cmd)
+                } {
                     Ok(result) => result,
                     Err(error) => {
                         if let Ok(mut execs) = state.execs.lock() {
@@ -18310,10 +18311,8 @@ volumes:
     }
 
     #[test]
-    fn docker_exec_start_rejects_tty_instead_of_merging_pipe_streams() {
-        let error = validate_docker_exec_start(true)
-            .expect_err("TTY exec must not be silently downgraded to merged pipes");
-        assert!(error.contains("Tty=true is unsupported for exec"));
+    fn docker_exec_start_accepts_tty_for_rootful_runtime_path() {
+        assert!(validate_docker_exec_start(true).is_ok());
         assert!(validate_docker_exec_start(false).is_ok());
     }
 

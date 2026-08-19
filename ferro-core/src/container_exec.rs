@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -149,6 +151,49 @@ pub fn exec_in_container_with_timeout(
     execute_command_with_timeout(&nsenter, &args, timeout)
 }
 
+/// Execute a rootful container command attached to a pseudo-terminal.
+///
+/// The PTY intentionally merges stdout and stderr, matching Docker's TTY
+/// contract. Interactive stdin forwarding and resize are layered by the
+/// Docker transport; this primitive provides the terminal-backed process and
+/// bounded output capture.
+pub fn exec_in_container_tty(
+    target_pid: u32,
+    command: &[String],
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args(target_pid, command)?;
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    let pty = nix::pty::openpty(None, None)
+        .map_err(|error| ContainerExecError::Io(std::io::Error::other(error)))?;
+    let slave = File::from(pty.slave);
+    let mut child = Command::new(nsenter)
+        .args(args)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave))
+        .spawn()?;
+    let master = File::from(pty.master);
+    let mut output = Vec::new();
+    if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
+        // Linux reports EIO when the last PTY slave closes; for a PTY this is
+        // the normal end-of-stream signal rather than an execution failure.
+        if error.raw_os_error() != Some(nix::libc::EIO) {
+            return Err(ContainerExecError::Io(error));
+        }
+    }
+    let status = child.wait()?;
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output).into_owned(),
+        stderr: String::new(),
+    })
+}
+
 fn execute_command(binary: &Path, args: &[String]) -> Result<ExecResult, ContainerExecError> {
     let output = Command::new(binary).args(args).output()?;
     Ok(ExecResult {
@@ -243,7 +288,10 @@ fn collect_output(mut child: Child, exit_code: i32) -> Result<ExecResult, Contai
 
 #[cfg(test)]
 mod tests {
-    use super::{build_nsenter_args, execute_command, execute_command_with_timeout};
+    use super::{
+        build_nsenter_args, exec_in_container_tty, execute_command, execute_command_with_timeout,
+    };
+    use nix::unistd::Uid;
     use std::path::Path;
     use std::time::Duration;
 
@@ -294,5 +342,24 @@ mod tests {
                 .expect("command should run");
         assert_eq!(result.exit_code, 124);
         assert!(result.stderr.contains("timed out"));
+    }
+
+    #[test]
+    fn rootful_tty_exec_merges_output_and_reports_terminal() {
+        if !Uid::effective().is_root() {
+            return;
+        }
+        let result = exec_in_container_tty(
+            std::process::id(),
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "test -t 1 && printf tty".to_string(),
+            ],
+        )
+        .expect("rootful PTY exec");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("tty"), "output={:?}", result.stdout);
+        assert!(result.stderr.is_empty());
     }
 }

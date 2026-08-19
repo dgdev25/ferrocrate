@@ -5,10 +5,20 @@
 //! This is opt-in because it needs a user namespace, slirp4netns, an OCI
 //! registry/cache, and a host bind mount. Run it on a matching host with:
 //! `FERROCRATE_RUN_ROOTLESS_E2E=1 cargo test -p ferro-cli --test
-//! rootless_compose_integration -- --nocapture`.
+//! rootless_compose_integration -- --nocapture`. Set
+//! `FERROCRATE_ROOTLESS_TEST_IMAGE` to a compatible registry image when
+//! Docker Hub's unauthenticated pull quota is exhausted.
 
 use std::fs;
 use std::process::Command;
+
+fn rootless_test_image() -> String {
+    std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string())
+}
+
+fn compose_fixture(contents: &str) -> String {
+    contents.replace("alpine:3.20", &rootless_test_image())
+}
 
 #[test]
 fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
@@ -27,7 +37,7 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     fs::write(workspace.join("input"), b"rootless-compose\n").expect("input");
     fs::write(
         project.join("compose.yml"),
-        "services:\n  writer:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /data/input > /data/output; echo named-volume > /named/marker; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n      - named:/named\n    network_mode: none\nvolumes:\n  named: {}\n",
+        compose_fixture("services:\n  writer:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /data/input > /data/output; echo named-volume > /named/marker; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n      - named:/named\n    network_mode: none\nvolumes:\n  named: {}\n"),
     )
     .expect("compose file");
 
@@ -111,9 +121,10 @@ fn rootless_run_mounts_bind_and_named_volumes() {
     fs::write(workspace.join("input"), b"rootless-run\n").expect("input");
     let runtime = root.path().join("runtime");
     let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let image = rootless_test_image();
     let pull = Command::new(binary)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
-        .args(["pull", "alpine:3.20"])
+        .args(["pull", image.as_str()])
         .output()
         .expect("pull alpine");
     assert!(
@@ -132,7 +143,7 @@ fn rootless_run_mounts_bind_and_named_volumes() {
             "none",
             "--volume",
             &format!("{}:/data", workspace.display()),
-            "alpine:3.20",
+            image.as_str(),
             "sh",
             "-c",
             "cat /data/input > /data/output",
@@ -160,7 +171,7 @@ fn rootless_run_mounts_bind_and_named_volumes() {
             "none",
             "--volume",
             "named:/data",
-            "alpine:3.20",
+            image.as_str(),
             "sh",
             "-c",
             "echo named-run > /data/output",
@@ -194,7 +205,7 @@ fn rootless_compose_mounts_file_backed_secrets_and_configs_read_only() {
     fs::write(project.join("app.conf"), b"config-value\n").expect("config");
     fs::write(
         project.join("compose.yml"),
-        "services:\n  reader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /run/secrets/api-token /etc/configs/app-config > /data/output; test ! -w /run/secrets/api-token; test ! -w /etc/configs/app-config; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    secrets:\n      - api-token\n    configs:\n      - app-config\n    network_mode: none\nsecrets:\n  api-token:\n    file: ./token.txt\nconfigs:\n  app-config:\n    file: ./app.conf\n",
+        compose_fixture("services:\n  reader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /run/secrets/api-token /etc/configs/app-config > /data/output; test ! -w /run/secrets/api-token; test ! -w /etc/configs/app-config; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    secrets:\n      - api-token\n    configs:\n      - app-config\n    network_mode: none\nsecrets:\n  api-token:\n    file: ./token.txt\nconfigs:\n  app-config:\n    file: ./app.conf\n"),
     )
     .expect("compose file");
 
@@ -271,7 +282,7 @@ fn rootless_compose_waits_for_successfully_completed_dependency() {
     fs::create_dir_all(&workspace).expect("workspace");
     fs::write(
         project.join("compose.yml"),
-        "services:\n  job:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo completed\"]\n    network_mode: none\n  dependent:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo dependent > /data/output; sleep 2\"]\n    network_mode: none\n    volumes:\n      - ./workspace:/data\n    depends_on:\n      job:\n        condition: service_completed_successfully\n",
+        compose_fixture("services:\n  job:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo completed\"]\n    network_mode: none\n  dependent:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo dependent > /data/output; sleep 2\"]\n    network_mode: none\n    volumes:\n      - ./workspace:/data\n    depends_on:\n      job:\n        condition: service_completed_successfully\n"),
     )
     .expect("compose file");
 
@@ -327,7 +338,7 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
     fs::create_dir_all(&workspace).expect("workspace");
     fs::write(
         project.join("compose.yml"),
-        "services:\n  probe:\n    image: alpine:3.20\n    read_only: true\n    command: [\"sh\", \"-c\", \"if touch /rootfs-write 2>/dev/null; then exit 11; fi; echo bind-write > /data/output; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    network_mode: none\n",
+        compose_fixture("services:\n  probe:\n    image: alpine:3.20\n    read_only: true\n    command: [\"sh\", \"-c\", \"if touch /rootfs-write 2>/dev/null; then exit 11; fi; echo bind-write > /data/output; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    network_mode: none\n"),
     )
     .expect("compose file");
 

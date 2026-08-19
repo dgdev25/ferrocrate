@@ -11626,6 +11626,45 @@ fn handle_docker_compat_connection(
                     "docker: rename requires the name query parameter".to_string()
                 })?;
                 validate_docker_container_name(name)?;
+                let pending_id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    if pending.contains_key(requested_id) {
+                        Some(requested_id.to_string())
+                    } else {
+                        pending
+                            .iter()
+                            .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
+                            .map(|(id, _)| id.clone())
+                    }
+                };
+                if let Some(pending_id) = pending_id {
+                    let runtime_name_in_use = runtime
+                        .list()
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .any(|record| record.name.as_deref() == Some(name));
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    if pending
+                        .iter()
+                        .any(|(id, spec)| id != &pending_id && spec.name.as_deref() == Some(name))
+                        || runtime_name_in_use
+                    {
+                        return Err(format!("docker: container name is already in use: {name}"));
+                    }
+                    let spec = pending
+                        .get_mut(&pending_id)
+                        .ok_or_else(|| "docker: pending container disappeared".to_string())?;
+                    spec.name = Some(name.to_string());
+                    drop(pending);
+                    state.persist_pending()?;
+                    return Ok(http_response(204, &[], "text/plain"));
+                }
                 let id = resolve_container_id(&runtime, requested_id)?;
                 runtime
                     .rename(&id, name)

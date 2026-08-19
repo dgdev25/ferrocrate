@@ -104,6 +104,9 @@ events_pid=$!
 sleep 0.2
 container_id="$(docker -H "$host" create --network none --name "$name" "$image" /bin/busybox sleep 30)"
 [[ -n "$container_id" ]] || { echo "docker create returned no ID" >&2; exit 1; }
+pending_renamed="${name}-pending"
+docker -H "$host" rename "$name" "$pending_renamed"
+name="$pending_renamed"
 docker -H "$host" inspect "$name" >/dev/null
 docker -H "$host" start "$name" >/dev/null
 renamed_name="${name}-renamed"

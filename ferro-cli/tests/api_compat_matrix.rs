@@ -135,6 +135,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/containers/matrix-container/stats?stream=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/matrix-container/update",
         coverage: Coverage::Implemented,

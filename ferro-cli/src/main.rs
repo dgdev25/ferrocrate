@@ -11442,7 +11442,12 @@ fn handle_docker_compat_connection(
                     Err(error) => return Err(error.to_string()),
                 };
                 drop(pending);
-                if query.get("stream").is_some_and(|value| value == "1") {
+                let stream = query
+                    .get("stream")
+                    .map(|value| parse_docker_bool_query(Some(value), "stream"))
+                    .transpose()?
+                    .unwrap_or(false);
+                if stream {
                     stats_follow = Some(id.clone());
                     docker_chunked_headers(200, "application/json")
                 } else {

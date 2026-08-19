@@ -297,6 +297,41 @@ fn docker_compat_build_accepts_secure_tar_context() {
 }
 
 #[test]
+fn docker_compat_image_resource_form_export_matches_query_form() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/export:latest");
+
+    let raw = harness.request_bytes_raw(
+        "GET",
+        "/v1.45/images/compat%2Fexport%3Alatest/get",
+        "application/json",
+        &[],
+    );
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("image export response headers");
+    let headers = String::from_utf8_lossy(&raw[..header_end]);
+    assert!(headers.starts_with("HTTP/1.1 200 OK"), "headers={headers}");
+    let mut archive = tar::Archive::new(&raw[header_end + 4..]);
+    let entries = archive
+        .entries()
+        .expect("image export archive entries")
+        .map(|entry| {
+            entry
+                .expect("image export archive entry")
+                .path()
+                .expect("entry path")
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert!(entries
+        .iter()
+        .any(|path| path == Path::new("manifest.json")));
+    assert!(entries.iter().any(|path| path == Path::new("repositories")));
+}
+
+#[test]
 fn docker_compat_rename_uses_docker_name_query_parameter() {
     let harness = DaemonHarness::spawn();
 

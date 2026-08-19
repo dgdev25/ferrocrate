@@ -11319,8 +11319,22 @@ fn handle_docker_compat_connection(
             .surface_authorization()
             .map_err(|error| error.to_string())?;
 
-        let (path, query) = split_path_query(&request.path)?;
-        let path = normalize_docker_api_path(&path);
+        let (mut path, mut query) = split_path_query(&request.path)?;
+        path = normalize_docker_api_path(&path);
+        // Docker accepts both the query-form image export endpoint
+        // (`/images/get?names=...`) and the resource-form endpoint
+        // (`/images/{name}/get`). Normalize the latter before dispatch so the
+        // two forms share the same authorization and archive implementation.
+        if request.method == "GET"
+            && path.starts_with("/images/")
+            && path.ends_with("/get")
+            && path != "/images/get"
+        {
+            let encoded_name = path.trim_start_matches("/images/").trim_end_matches("/get");
+            let name = percent_decode_query_component(encoded_name)?;
+            query.insert("names".to_string(), name);
+            path = "/images/get".to_string();
+        }
         event_request = Some((request.method.clone(), path.clone(), request.body.clone()));
         let response = match (request.method.as_str(), path.as_str()) {
             ("GET", "/events") => {

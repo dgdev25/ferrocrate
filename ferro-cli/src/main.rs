@@ -11070,6 +11070,7 @@ fn handle_docker_compat_connection(
                 http_response(200, json.as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/json") => {
+                let include_size = parse_docker_bool_query(query.get("size"), "size")?;
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/json");
@@ -11078,10 +11079,10 @@ fn handle_docker_compat_connection(
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                 let body = if let Ok(record) = runtime.inspect(requested_id) {
-                    docker_inspect_payload(&record)
+                    docker_inspect_payload(&record, include_size)
                 } else if let Ok(id) = resolve_container_id(&runtime, requested_id) {
                     let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
-                    docker_inspect_payload(&record)
+                    docker_inspect_payload(&record, include_size)
                 } else {
                     let (pending_id, spec) = pending
                         .get_key_value(requested_id)
@@ -11091,7 +11092,7 @@ fn handle_docker_compat_connection(
                                 .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
                         })
                         .ok_or_else(|| format!("container not found: {requested_id}"))?;
-                    docker_pending_inspect_payload(pending_id, spec)
+                    docker_pending_inspect_payload(pending_id, spec, include_size)
                 };
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -13780,6 +13781,7 @@ fn validate_docker_container_name(name: &str) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn docker_inspect_payload(
     record: &ferro_core::container_store::ContainerRecord,
+    include_size: bool,
 ) -> serde_json::Value {
     let name = record.name.clone().unwrap_or_else(|| record.id.clone());
     let health = record.health.as_ref().map(|_| {
@@ -13789,7 +13791,7 @@ fn docker_inspect_payload(
             "Log": [],
         })
     });
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "Id": record.id,
         "Name": format!("/{name}"),
         "Image": record.image,
@@ -13834,7 +13836,12 @@ fn docker_inspect_payload(
             "StartedAt": docker_timestamp(record.created_at_unix),
             "Health": health,
         }
-    })
+    });
+    if include_size {
+        payload["SizeRw"] = serde_json::json!(0u64);
+        payload["SizeRootFs"] = serde_json::json!(0u64);
+    }
+    payload
 }
 
 #[cfg(target_os = "linux")]
@@ -13904,14 +13911,18 @@ fn docker_archive_path_stat(path: &Path, logical_path: &str) -> Result<String, S
 }
 
 #[cfg(target_os = "linux")]
-fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_json::Value {
+fn docker_pending_inspect_payload(
+    id: &str,
+    spec: &DockerCreateSpec,
+    include_size: bool,
+) -> serde_json::Value {
     let labels = spec
         .labels
         .iter()
         .filter_map(|entry| entry.split_once('='))
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect::<BTreeMap<_, _>>();
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "Id": id,
         "Name": format!("/{}", spec.name.as_deref().unwrap_or(id)),
         "Image": spec.image,
@@ -13940,7 +13951,12 @@ fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_js
             "StartedAt": docker_timestamp(0),
             "Health": serde_json::Value::Null,
         }
-    })
+    });
+    if include_size {
+        payload["SizeRw"] = serde_json::json!(0u64);
+        payload["SizeRootFs"] = serde_json::json!(0u64);
+    }
+    payload
 }
 
 #[cfg(target_os = "linux")]
@@ -17285,7 +17301,7 @@ volumes:
             restart_policy: "no".to_string(),
             created_at_unix: 0,
         };
-        let payload = docker_pending_inspect_payload("pending", &pending);
+        let payload = docker_pending_inspect_payload("pending", &pending, false);
         assert_eq!(payload["Config"]["Healthcheck"]["Test"][0], "CMD-SHELL");
         assert_eq!(
             payload["Config"]["Healthcheck"]["Interval"],
@@ -17325,7 +17341,7 @@ volumes:
             }))
             .expect("running record");
 
-        let payload = docker_inspect_payload(&record);
+        let payload = docker_inspect_payload(&record, false);
         assert_eq!(payload["HostConfig"]["Memory"], 67_108_864u64);
         assert_eq!(payload["HostConfig"]["CpuQuota"], 50_000u64);
         assert_eq!(payload["HostConfig"]["CpuPeriod"], 100_000u64);
@@ -18113,7 +18129,7 @@ volumes:
         )
         .expect("create restart policy");
         assert_eq!(spec.restart_policy, "unless-stopped");
-        let pending = docker_pending_inspect_payload("policy-id", &spec);
+        let pending = docker_pending_inspect_payload("policy-id", &spec, false);
         assert_eq!(
             pending["HostConfig"]["RestartPolicy"]["Name"],
             "unless-stopped"

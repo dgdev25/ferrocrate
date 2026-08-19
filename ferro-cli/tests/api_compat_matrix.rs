@@ -128,6 +128,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/containers/matrix-renamed/json?size=1",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/prune",
         coverage: Coverage::Implemented,
@@ -579,6 +586,14 @@ fn docker_api_compatibility_matrix() {
                     && pending_id.as_deref().is_some_and(|id| body.contains(id)),
                 "pending create must be removed by prune: {body}"
             );
+        }
+        if case.path.ends_with("/json?size=1") {
+            let payload: serde_json::Value =
+                serde_json::from_str(&body).expect("size inspect response is JSON");
+            assert!(payload.get("SizeRw").is_some_and(serde_json::Value::is_u64));
+            assert!(payload
+                .get("SizeRootFs")
+                .is_some_and(serde_json::Value::is_u64));
         }
     }
 }

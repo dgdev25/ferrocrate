@@ -9918,6 +9918,7 @@ struct DockerCreateRequest {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DockerUpdateRequest {
     #[serde(rename = "Memory")]
     memory: Option<i64>,
@@ -9933,6 +9934,7 @@ struct DockerUpdateRequest {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DockerRestartPolicy {
     #[serde(rename = "Name", default)]
     name: String,
@@ -18094,6 +18096,11 @@ volumes:
         );
         assert!(parse_docker_update_request(br#"{"CpuQuota":50000}"#).is_err());
         assert!(parse_docker_update_request(br#"{"Memory":-1}"#).is_err());
+        assert!(parse_docker_update_request(br#"{"NanoCpus":1000000}"#).is_err());
+        assert!(parse_docker_update_request(
+            br#"{"RestartPolicy":{"Name":"always","MaximumRetryCount":0,"Extra":true}}"#
+        )
+        .is_err());
     }
 
     #[test]

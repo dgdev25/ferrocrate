@@ -91,6 +91,7 @@ if (( ! skip_workspace )); then
 fi
 
 echo "[gate] release-readiness and compatibility checks"
+cargo test -p ferro-core --offline registry::tests -- --test-threads=1
 bash scripts/verify-release-readiness.sh
 
 echo "[gate] public release build and channel verification"

@@ -155,6 +155,7 @@ pub enum WitnessAction {
     RootlessMapping = 29,
     ContainerRename = 30,
     ContainerStart = 31,
+    ContainerArchiveWrite = 32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

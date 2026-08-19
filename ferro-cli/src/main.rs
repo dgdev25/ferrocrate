@@ -11177,6 +11177,19 @@ fn handle_docker_compat_connection(
                 }
                 http_response(200, &archive, "application/x-tar")
             }
+            ("PUT", path) if path.starts_with("/containers/") && path.ends_with("/archive") => {
+                let requested_id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/archive");
+                let archive_path = query
+                    .get("path")
+                    .ok_or_else(|| "docker: archive path is required".to_string())?;
+                let id = resolve_container_id(&runtime, requested_id)?;
+                runtime
+                    .put_archive(&id, archive_path, &request.body)
+                    .map_err(|error| format!("docker: put archive: {error}"))?;
+                http_response(200, &[], "text/plain")
+            }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {
                 let requested_id = path
                     .trim_start_matches("/containers/")

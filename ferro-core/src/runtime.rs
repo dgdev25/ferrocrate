@@ -41,7 +41,7 @@ use crate::observability::{log_audit_event, log_event, make_audit_event, make_ev
 use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, stop_pid, ProcessLifecycleError};
 use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
-use crate::rootfs::construct_rootfs_with_dedup;
+use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
 use crate::rootfs_diff;
 #[cfg(target_os = "linux")]
@@ -3972,6 +3972,77 @@ impl ContainerRuntime {
         })
     }
 
+    /// Apply a Docker-compatible tar archive beneath an existing container
+    /// directory. The mutation is mediated as its own action so the durable
+    /// witness records the filesystem write independently of lifecycle start,
+    /// exec, or deletion operations.
+    pub fn put_archive(&self, id: &str, target: &str, archive: &[u8]) -> Result<(), RuntimeError> {
+        if archive.is_empty() {
+            return Err(RuntimeError::InvalidCommand(
+                "container archive must not be empty".to_string(),
+            ));
+        }
+        if archive.len() > 64 * 1024 * 1024 {
+            return Err(RuntimeError::InvalidCommand(
+                "container archive exceeds the 64 MiB limit".to_string(),
+            ));
+        }
+        let target = target.to_owned();
+        self.mediate_existing(
+            Action::ContainerArchiveWrite,
+            id,
+            move |runtime, _proof, _intent| {
+                let record = runtime
+                    .store
+                    .get(id)?
+                    .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+                let rootfs = runtime
+                    .runtime_dir
+                    .join("containers")
+                    .join(id)
+                    .join("rootfs")
+                    .canonicalize()
+                    .map_err(|error| {
+                        RuntimeError::InvalidState(format!(
+                            "container rootfs is unavailable: {error}"
+                        ))
+                    })?;
+                if !rootfs.is_dir() {
+                    return Err(RuntimeError::InvalidState(
+                        "container rootfs is unavailable".to_string(),
+                    ));
+                }
+                let relative = validate_archive_target(&target)?;
+                let selected = rootfs.join(&relative);
+                let selected = selected.canonicalize().map_err(|error| {
+                    RuntimeError::InvalidCommand(format!("archive target unavailable: {error}"))
+                })?;
+                if !selected.starts_with(&rootfs) || !selected.is_dir() {
+                    return Err(RuntimeError::InvalidCommand(
+                        "archive target must be an existing directory beneath the container rootfs"
+                            .to_string(),
+                    ));
+                }
+                if record.mounts.iter().any(|mount| {
+                    relative == Path::new(mount.target.trim_start_matches('/'))
+                        || relative.starts_with(mount.target.trim_start_matches('/'))
+                }) || record.tmpfs_mounts.iter().any(|mount| {
+                    relative == Path::new(mount.target.trim_start_matches('/'))
+                        || relative.starts_with(mount.target.trim_start_matches('/'))
+                }) {
+                    return Err(RuntimeError::InvalidCommand(
+                        "archive target is a persisted mount target".to_string(),
+                    ));
+                }
+                let mut temp = tempfile::NamedTempFile::new_in(&runtime.runtime_dir)?;
+                temp.write_all(&archive)?;
+                temp.as_file_mut().sync_all()?;
+                apply_layer_tar(&selected, temp.path())?;
+                Ok(())
+            },
+        )
+    }
+
     fn remove_authorized(
         &self,
         _proof: &AuthorizedRequest,
@@ -4330,6 +4401,22 @@ fn validate_rootless_mount_capability(
         ));
     }
     Ok(())
+}
+
+fn validate_archive_target(target: &str) -> Result<PathBuf, RuntimeError> {
+    let relative = target
+        .strip_prefix('/')
+        .ok_or_else(|| RuntimeError::InvalidCommand("archive path must be absolute".to_string()))?;
+    if !relative.is_empty()
+        && relative
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(RuntimeError::InvalidCommand(
+            "archive path must be normalized and absolute".to_string(),
+        ));
+    }
+    Ok(PathBuf::from(relative))
 }
 
 fn rootless_mount_namespace_available() -> bool {
@@ -4994,6 +5081,7 @@ fn runtime_action_name(action: Action) -> &'static str {
         Action::ContainerStart => "container.start",
         Action::ContainerDelete => "container.delete",
         Action::ContainerRename => "container.rename",
+        Action::ContainerArchiveWrite => "container.archive-write",
         _ => "container.unsupported",
     }
 }
@@ -5010,6 +5098,7 @@ fn runtime_witness_action_name(action: crate::witness::WitnessAction) -> &'stati
         crate::witness::WitnessAction::ContainerStart => "container.start",
         crate::witness::WitnessAction::ContainerDelete => "container.delete",
         crate::witness::WitnessAction::ContainerRename => "container.rename",
+        crate::witness::WitnessAction::ContainerArchiveWrite => "container.archive-write",
         _ => "container.unsupported",
     }
 }
@@ -11357,9 +11446,9 @@ fn run_resource_monitor(
 mod tests {
     use super::{
         adaptive_restart_delay, associated_network_name, immutable_image_manifest_reference,
-        immutable_image_reference, BindMount, ContainerRuntime, KernelResourceOps,
-        LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend, NoopLifecyclePhaseHook,
-        ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
+        immutable_image_reference, validate_archive_target, BindMount, ContainerRuntime,
+        KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
+        NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -11383,6 +11472,24 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex};
+
+    #[test]
+    fn archive_targets_are_absolute_and_traversal_safe() {
+        assert_eq!(
+            validate_archive_target("/").expect("root target"),
+            PathBuf::new()
+        );
+        assert_eq!(
+            validate_archive_target("/var/tmp").expect("normalized target"),
+            PathBuf::from("var/tmp")
+        );
+        for invalid in ["relative", "/var/../etc", "/var//tmp", "/var/./tmp"] {
+            assert!(
+                validate_archive_target(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn immutable_image_reference_uses_repository_digest_form() {

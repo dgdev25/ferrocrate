@@ -184,6 +184,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "PUT",
+        path: "/containers/missing/archive?path=%2F",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "archive",
+    },
+    ApiCase {
         method: "GET",
         path: "/exec/missing/json",
         coverage: Coverage::Implemented,

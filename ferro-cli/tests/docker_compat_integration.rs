@@ -484,7 +484,30 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
         "created rootfs missing: {}",
         rootfs.display()
     );
-    fs::write(rootfs.join("added"), b"new").expect("write added rootfs entry");
+    let mut put_archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut put_archive);
+        let payload = b"written through the Docker archive API";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("added").expect("archive path");
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        builder
+            .append(&header, &payload[..])
+            .expect("append archive payload");
+        builder.finish().expect("finish put archive");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        &format!("/v1.45/containers/{id}/archive?path=%2F"),
+        "application/x-tar",
+        &put_archive,
+    );
+    assert_eq!(status, 200, "put archive response={body}");
+    assert_eq!(
+        fs::read(rootfs.join("added")).expect("archive output"),
+        b"written through the Docker archive API"
+    );
 
     let (status, body) = harness.request("GET", &format!("/v1.45/containers/{id}/changes"));
     assert_eq!(status, 200, "changes response={body}");

@@ -12527,7 +12527,9 @@ fn handle_docker_compat_connection(
                 };
                 let lazy = query
                     .get("lazy")
-                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+                    .map(|value| parse_docker_bool_query(Some(value), "lazy"))
+                    .transpose()?
+                    .unwrap_or(false);
                 handle_pull_authorized(&store, &reference, lazy, &origin, &surface_authorization)?;
                 let body = docker_pull_status(&reference, lazy);
                 http_response(200, &body, "application/json")

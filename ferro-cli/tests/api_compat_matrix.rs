@@ -219,6 +219,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/images/create?fromImage=busybox&lazy=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/missing/logs",
         coverage: Coverage::Implemented,

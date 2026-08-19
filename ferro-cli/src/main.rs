@@ -9137,6 +9137,18 @@ fn ensure_compose_networks(
         definitions.push((default_network.to_string(), None, false));
     }
     definitions.sort_by(|left, right| left.0.cmp(&right.0));
+    let needs_rootful_bridge = definitions.iter().any(|(_, driver, external)| {
+        !external && driver.as_deref().unwrap_or("bridge") == "bridge"
+    });
+    if needs_rootful_bridge {
+        let rootless_enabled = std::env::var("FERROCRATE_ROOTLESS_NETNS").as_deref() == Ok("1");
+        if let Some(message) = compose_rootless_bridge_boundary(
+            rootless_enabled,
+            nix::unistd::Uid::effective().is_root(),
+        ) {
+            return Err(message.to_string());
+        }
+    }
     let mut records = load_networks(runtime_dir)?;
     let mut created = Vec::new();
     for (name, driver, external) in definitions {
@@ -9206,6 +9218,16 @@ fn ensure_compose_networks(
         save_compose_network_ownership(runtime_dir, &ownership)?;
     }
     Ok(created)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_rootless_bridge_boundary(
+    rootless_enabled: bool,
+    effective_root: bool,
+) -> Option<&'static str> {
+    (rootless_enabled && !effective_root).then_some(
+        "compose: bridge network provisioning is unsupported in rootless mode; use network_mode: none or a pre-existing externally managed rootless network",
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -16266,6 +16288,17 @@ volumes:
         let error = super::compose_service_network(&multiple, "api", "bridge")
             .expect_err("multiple attachments are bounded");
         assert!(error.contains("multiple networks"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_compose_bridge_boundary_is_actionable_and_fail_closed() {
+        let error = super::compose_rootless_bridge_boundary(true, false)
+            .expect("rootless bridge provisioning must be rejected");
+        assert!(error.contains("bridge network provisioning is unsupported"));
+        assert!(error.contains("network_mode: none"));
+        assert!(super::compose_rootless_bridge_boundary(false, false).is_none());
+        assert!(super::compose_rootless_bridge_boundary(true, true).is_none());
     }
 
     #[test]

@@ -853,6 +853,50 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
         inspect["ExitCode"]
     );
 
+    // Detached exec must acknowledge immediately and publish completion through
+    // exec inspect rather than holding the HTTP request until the workload exits.
+    let detached_body = r#"{"Cmd":["/bin/busybox","sleep","1"]}"#;
+    let detached_request = format!(
+        "POST /v1.45/containers/exec-inspect/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        detached_body.len(),
+        detached_body
+    );
+    let (status, response) = harness.request_raw(&detached_request);
+    assert_eq!(status, 201, "detached exec create response={response}");
+    let detached_id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("detached exec create response JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("detached exec id")
+        .to_string();
+    let started = std::time::Instant::now();
+    let detached_start_body = r#"{"Detach":true}"#;
+    let detached_start_request = format!(
+        "POST /v1.45/exec/{detached_id}/start HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        detached_start_body.len(),
+        detached_start_body
+    );
+    let (status, response) = harness.request_raw(&detached_start_request);
+    assert_eq!(status, 200, "detached exec start response={response}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "detached exec request waited for workload: {:?}",
+        started.elapsed()
+    );
+    let mut completed = false;
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        let (status, response) = harness.request("GET", &format!("/v1.45/exec/{detached_id}/json"));
+        assert_eq!(status, 200, "detached exec inspect response={response}");
+        let inspect = serde_json::from_str::<serde_json::Value>(&response)
+            .expect("detached exec inspect JSON");
+        if inspect["Running"] == serde_json::Value::Bool(false) && inspect["ExitCode"].is_i64() {
+            completed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(completed, "detached exec did not publish completion");
+
     let (status, response) = harness.request("DELETE", "/v1.45/containers/exec-inspect");
     assert_eq!(status, 204, "post-start name removal response={response}");
 }

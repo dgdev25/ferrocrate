@@ -12095,6 +12095,45 @@ fn handle_docker_compat_connection(
                     spec.running = true;
                     spec.clone()
                 };
+                if start.detach {
+                    // Docker's detached exec contract returns as soon as the
+                    // process has been admitted. Running it synchronously
+                    // would make `Detach=true` indistinguishable from a
+                    // foreground exec and would block clients on long-lived
+                    // commands. Re-open the runtime in the worker so the
+                    // request thread can finish without borrowing request
+                    // state or the authenticated socket.
+                    let runtime_dir = runtime_dir.clone();
+                    let request_origin = runtime.request_origin();
+                    let state_for_worker = state.clone();
+                    let exec_id = id.to_string();
+                    let container = spec.container.clone();
+                    let command = spec.cmd.clone();
+                    std::thread::Builder::new()
+                        .name(format!("ferro-exec-{exec_id}"))
+                        .spawn(move || {
+                            let result = ContainerRuntime::new(&runtime_dir)
+                                .map(|runtime| {
+                                    if let Some(origin) = request_origin {
+                                        runtime.with_request_origin(origin)
+                                    } else {
+                                        runtime
+                                    }
+                                })
+                                .and_then(|runtime| runtime.exec(&container, &command));
+                            if let Ok(mut execs) = state_for_worker.execs.lock() {
+                                if let Some(exec) = execs.get_mut(&exec_id) {
+                                    exec.running = false;
+                                    exec.exit_code =
+                                        Some(result.map_or(-1, |output| output.exit_code));
+                                }
+                            }
+                        })
+                        .map_err(|error| {
+                            format!("docker: failed to spawn detached exec: {error}")
+                        })?;
+                    return Ok(http_response(200, &[], "application/vnd.docker.raw-stream"));
+                }
                 let result = match runtime.exec(&spec.container, &spec.cmd) {
                     Ok(result) => result,
                     Err(error) => {

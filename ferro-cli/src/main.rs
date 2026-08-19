@@ -9450,9 +9450,7 @@ fn wait_for_compose_dependencies(
                     "service_started" => {}
                     "service_healthy" => wait_for_compose_health(runtime, service)?,
                     "service_completed_successfully" => {
-                        return Err(format!(
-                            "compose: depends_on condition not supported: service_completed_successfully for {service}"
-                        ));
+                        wait_for_compose_completion(runtime, service)?
                     }
                     other => {
                         return Err(format!(
@@ -9463,6 +9461,35 @@ fn wait_for_compose_dependencies(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_compose_completion(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
+    let id = resolve_container_id(runtime, service)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = runtime.inspect(&id).map_err(|err| err.to_string())?;
+        if record.status == "exited" {
+            let code = record.last_exit_code.unwrap_or(0);
+            if code == 0 {
+                return Ok(());
+            }
+            return Err(format!(
+                "compose: dependency {service} exited with status {code}"
+            ));
+        }
+        if matches!(record.status.as_str(), "removed" | "quarantined") {
+            return Err(format!(
+                "compose: dependency {service} disappeared before successful completion"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "compose: timed out waiting for {service} to complete successfully"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -14744,6 +14771,45 @@ mod tests {
             .surface_authorization()
             .expect("surface authorization")
     }
+
+    #[test]
+    fn compose_completed_successfully_wait_checks_persisted_exit_code() {
+        let temp = configured_cli_runtime("disabled");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let mut record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "compose-job",
+                "name": "job",
+                "pid": 0,
+                "image": "example.invalid/job:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited",
+                "last_exit_code": 0
+            }))
+            .expect("record");
+        store.put(&record).expect("store successful record");
+        drop(store);
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        assert!(super::wait_for_compose_completion(&runtime, "job").is_ok());
+
+        record.last_exit_code = Some(7);
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("reopen container store");
+        store.put(&record).expect("store failed record");
+        drop(store);
+        let error = super::wait_for_compose_completion(&runtime, "job")
+            .expect_err("non-zero completion must fail");
+        assert!(error.contains("exited with status 7"));
+    }
+
     use ferro_core::runtime::{ContainerRuntime, NetworkBackend};
     use ferro_core::volume_store::LocalVolumeStore;
     use std::io::Write;

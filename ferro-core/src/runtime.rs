@@ -91,6 +91,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6014,7 +6015,14 @@ fn supervise_child(
 
     loop {
         let status = child.wait();
-        let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
+        let exit_code = status
+            .ok()
+            .and_then(|status| {
+                status
+                    .code()
+                    .or_else(|| status.signal().map(|signal| 128 + signal))
+            })
+            .unwrap_or(-1);
         let current_status =
             match update_exit_after_mutation(&store, &container_id, child.id(), exit_code) {
                 Ok(Some(status)) => status,

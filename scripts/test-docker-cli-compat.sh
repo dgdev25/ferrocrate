@@ -160,6 +160,12 @@ if [[ "$attach_status" != 124 && "$attach_status" != 137 ]]; then
   echo "Docker CLI attach returned unexpected status: $attach_status" >&2
   exit 1
 fi
+docker -H "$host" kill "$attach_name" >/dev/null
+kill_status="$(docker -H "$host" wait "$attach_name")"
+[[ "$kill_status" == "137" ]] || {
+  echo "Docker CLI kill returned unexpected wait status: $kill_status" >&2
+  exit 1
+}
 docker -H "$host" rm --force "$attach_name" >/dev/null
 wait "$events_pid" 2>/dev/null || true
 grep -q 'container create' "$events_file" || {
@@ -169,4 +175,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/stats/top/pause/unpause/restart/wait/logs/diff/exec/export/cp/commit/attach/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/stats/top/pause/unpause/restart/wait/logs/diff/exec/export/cp/commit/attach/kill/rm/events"

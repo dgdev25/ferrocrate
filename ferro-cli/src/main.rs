@@ -14008,6 +14008,7 @@ fn docker_inspect_payload(
                 "Name": docker_restart_policy_name(&record.restart_policy),
             },
         },
+        "NetworkSettings": docker_network_settings(record),
         "State": {
             "Status": record.status,
             "Pid": record.pid,
@@ -14021,6 +14022,50 @@ fn docker_inspect_payload(
         payload["SizeRootFs"] = serde_json::json!(0u64);
     }
     payload
+}
+
+#[cfg(target_os = "linux")]
+fn docker_network_settings(
+    record: &ferro_core::container_store::ContainerRecord,
+) -> serde_json::Value {
+    let network_name = record
+        .network_name
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    let ipv4 = record.ip_address.clone().unwrap_or_default();
+    let ipv6 = record.ipv6_address.clone().unwrap_or_default();
+    let network = serde_json::json!({
+        "NetworkID": network_name,
+        "EndpointID": "",
+        "Gateway": "",
+        "IPAddress": ipv4,
+        "IPPrefixLen": if record.ip_address.is_some() { 24 } else { 0 },
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": ipv6,
+        "GlobalIPv6PrefixLen": if record.ipv6_address.is_some() { 64 } else { 0 },
+        "MacAddress": "",
+        "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
+    });
+    serde_json::json!({
+        "Bridge": "",
+        "SandboxID": record.netns.clone().unwrap_or_default(),
+        "HairpinMode": false,
+        "LinkLocalIPv6Address": "",
+        "LinkLocalIPv6PrefixLen": 0,
+        "Ports": {},
+        "SandboxKey": record.netns.clone().unwrap_or_default(),
+        "SecondaryIPAddresses": null,
+        "SecondaryIPv6Addresses": null,
+        "EndpointID": "",
+        "Gateway": "",
+        "GlobalIPv6Address": ipv6,
+        "GlobalIPv6PrefixLen": if record.ipv6_address.is_some() { 64 } else { 0 },
+        "IPAddress": ipv4,
+        "IPPrefixLen": if record.ip_address.is_some() { 24 } else { 0 },
+        "IPv6Gateway": "",
+        "MacAddress": "",
+        "Networks": { network_name: network },
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -14122,6 +14167,33 @@ fn docker_pending_inspect_payload(
                 "MaximumRetryCount": 0,
                 "Name": spec.restart_policy,
             },
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "",
+            "SandboxKey": "",
+            "Ports": {},
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {
+                spec.network_mode.clone(): {
+                    "NetworkID": spec.network_mode,
+                    "EndpointID": "",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "MacAddress": "",
+                    "DNSNames": []
+                }
+            }
         },
         "State": {
             "Status": "created",
@@ -17660,6 +17732,38 @@ volumes:
         assert_eq!(payload["HostConfig"]["CpuQuota"], 50_000u64);
         assert_eq!(payload["HostConfig"]["CpuPeriod"], 100_000u64);
         assert_eq!(payload["HostConfig"]["PidsLimit"], 32u64);
+    }
+
+    #[test]
+    fn docker_inspect_projects_network_settings_and_logical_association() {
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "network-inspect",
+                "name": "api",
+                "pid": 4242,
+                "image": "alpine:3.20",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "network_name": "app-net",
+                "netns": "/run/netns/api",
+                "ip_address": "172.30.0.2",
+                "ipv6_address": "fd42:30::2"
+            }))
+            .expect("network record");
+        let payload = docker_inspect_payload(&record, false);
+        assert_eq!(payload["NetworkSettings"]["IPAddress"], "172.30.0.2");
+        assert_eq!(
+            payload["NetworkSettings"]["Networks"]["app-net"]["GlobalIPv6Address"],
+            "fd42:30::2"
+        );
+        assert_eq!(
+            payload["NetworkSettings"]["Networks"]["app-net"]["DNSNames"][0],
+            "api"
+        );
+        assert_eq!(payload["NetworkSettings"]["SandboxKey"], "/run/netns/api");
     }
 
     #[test]

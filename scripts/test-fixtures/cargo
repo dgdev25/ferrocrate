@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+mkdir -p "$target_dir/release"
+printf '#!/bin/sh\nexit 0\n' > "$target_dir/release/ferro-cli"
+chmod +x "$target_dir/release/ferro-cli"

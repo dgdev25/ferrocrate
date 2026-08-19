@@ -93,17 +93,26 @@ if [[ -z "${OUT}" ]]; then
 fi
 
 # 3) Compose up/down
+compose_network_mode=""
+if [[ "${FERROCRATE_ROOTLESS_NETNS:-}" == "1" ]]; then
+  # Rootless Compose cannot provision a durable host bridge yet. Keep this
+  # smoke focused on the supported lifecycle while the direct rootless bridge
+  # check below exercises slirp4netns independently.
+  compose_network_mode='    network_mode: none'
+fi
 cat > "${COMPOSE_FILE}" <<COMPOSE_EOF
 version: "3.8"
 services:
   api:
     image: ${PULL_IMAGE}
     command: ["sh","-c","sleep 2"]
+${compose_network_mode}
   web:
     image: ${PULL_IMAGE}
     depends_on:
       - api
     command: ["sh","-c","echo web && sleep 2"]
+${compose_network_mode}
 COMPOSE_EOF
 
 run "${BIN}" compose -f "${COMPOSE_FILE}" up

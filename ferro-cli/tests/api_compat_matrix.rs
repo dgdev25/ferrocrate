@@ -275,6 +275,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/missing/resize?w=wide&h=24",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/missing/top",
         coverage: Coverage::Implemented,

@@ -11508,11 +11508,6 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/resize");
-                let pending = state
-                    .pending
-                    .lock()
-                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
                 let parse_dimension = |key: &str| -> Result<u32, String> {
                     let value = query
                         .get(key)
@@ -11527,6 +11522,11 @@ fn handle_docker_compat_connection(
                 };
                 let _width = parse_dimension("w")?;
                 let _height = parse_dimension("h")?;
+                let pending = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
                 drop(pending);
                 // The current runtime has no PTY-backed terminal to resize;
                 // retain Docker's successful empty response after validating

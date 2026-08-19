@@ -9939,6 +9939,8 @@ struct DockerCreateRequest {
     labels: Option<HashMap<String, String>>,
     #[serde(rename = "Healthcheck")]
     healthcheck: Option<DockerHealthcheck>,
+    #[serde(rename = "Tty", default)]
+    tty: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
 }
@@ -13648,6 +13650,12 @@ fn normalize_docker_api_path(path: &str) -> String {
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
     let request: DockerCreateRequest =
         serde_json::from_slice(body).map_err(|err| err.to_string())?;
+    if request.tty {
+        return Err(
+            "docker: Tty=true is unsupported; Ferrocrate currently supports non-TTY containers only"
+                .to_string(),
+        );
+    }
     let name = name
         .map(|name| validate_docker_container_name(&name).map(|_| name))
         .transpose()?;
@@ -17390,6 +17398,14 @@ volumes:
         )
         .expect_err("unsafe Docker names must fail closed");
         assert!(error.contains("unsupported characters"));
+    }
+
+    #[test]
+    fn docker_create_spec_rejects_tty_instead_of_silently_downgrading() {
+        let error =
+            parse_docker_create_spec(br#"{"Image":"busybox","Cmd":["sh"],"Tty":true}"#, None)
+                .expect_err("TTY creation must not be silently downgraded to pipes");
+        assert!(error.contains("Tty=true is unsupported"));
     }
 
     #[test]

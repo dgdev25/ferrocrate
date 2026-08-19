@@ -13753,9 +13753,12 @@ fn docker_image_repo_digests(record: &ferro_core::image_store::ImageRecord) -> V
     }
     let repository = record
         .reference
-        .rsplit_once(':')
-        .filter(|(prefix, tag)| !tag.is_empty() && !prefix.ends_with('/'))
-        .map(|(prefix, _)| prefix)
+        .rfind(':')
+        .filter(|colon| {
+            *colon > record.reference.rfind('/').map_or(0, |slash| slash)
+                && *colon + 1 < record.reference.len()
+        })
+        .map(|colon| &record.reference[..colon])
         .unwrap_or(record.reference.as_str());
     vec![format!("{repository}@{}", record.digest)]
 }
@@ -18963,6 +18966,14 @@ volumes:
         assert_eq!(
             docker_image_repo_digests(&tagged),
             vec!["registry.example/app@sha256:abc"]
+        );
+        let registry_port = ferro_core::image_store::ImageRecord {
+            reference: "localhost:5000/app".to_string(),
+            ..tagged.clone()
+        };
+        assert_eq!(
+            docker_image_repo_digests(&registry_port),
+            vec!["localhost:5000/app@sha256:abc"]
         );
         assert!(docker_image_repo_digests(&dangling).is_empty());
     }

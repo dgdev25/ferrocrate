@@ -9368,6 +9368,7 @@ fn handle_compose(
                         store,
                         volume_store,
                         project_dir,
+                        &project.compose,
                         &default_network,
                         &prepared.name,
                         service,
@@ -9447,6 +9448,7 @@ fn handle_compose(
                     store,
                     volume_store,
                     project_dir,
+                    &project.compose,
                     &default_network,
                     &prepared.name,
                     service,
@@ -9499,6 +9501,7 @@ fn handle_compose(
                     store,
                     volume_store,
                     project_dir,
+                    &project.compose,
                     &default_network,
                     &prepared.name,
                     service,
@@ -9998,6 +10001,7 @@ fn run_compose_service(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
     project_dir: &Path,
+    compose: &ferro_compose::ComposeFile,
     default_network: &str,
     name: &str,
     service: &ComposeService,
@@ -10018,7 +10022,7 @@ fn run_compose_service(
     let publish = compose_service_ports(service);
     let configured_network_backend =
         std::env::var("FERROCRATE_NETWORK_BACKEND").unwrap_or_else(|_| "ebpf".to_string());
-    let bind_mounts = compose_service_mounts(project_dir, volume_store, service)?;
+    let bind_mounts = compose_service_mounts(project_dir, volume_store, compose, service)?;
     let restart = service.restart.as_deref().unwrap_or("no");
     let restart = match restart {
         "always" => "always",
@@ -10097,6 +10101,7 @@ fn compose_service_execution_digest(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
     project_dir: &Path,
+    compose: &ferro_compose::ComposeFile,
     default_network: &str,
     name: &str,
     service: &ComposeService,
@@ -10110,7 +10115,7 @@ fn compose_service_execution_digest(
     let labels = parse_key_values("label", &label_entries)?;
     let publish = compose_service_ports(service);
     let ports = parse_publish(&publish)?;
-    let mount_entries = compose_service_mounts(project_dir, volume_store, service)?;
+    let mount_entries = compose_service_mounts(project_dir, volume_store, compose, service)?;
     let mounts = parse_bind_mounts(&mount_entries)?;
     let configured_network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
         .unwrap_or_else(|_| "ebpf".to_string())
@@ -10239,6 +10244,7 @@ fn compose_service_ports(service: &ComposeService) -> Vec<String> {
 fn compose_service_mounts(
     project_dir: &Path,
     volume_store: &LocalVolumeStore,
+    compose: &ferro_compose::ComposeFile,
     service: &ComposeService,
 ) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
@@ -10274,7 +10280,91 @@ fn compose_service_mounts(
             }
         }
     }
+
+    append_compose_file_resource_mounts(
+        project_dir,
+        compose.secrets.as_ref(),
+        service.secrets.as_ref(),
+        "/run/secrets",
+        "secret",
+        &mut out,
+    )?;
+    append_compose_file_resource_mounts(
+        project_dir,
+        compose.configs.as_ref(),
+        service.configs.as_ref(),
+        "/etc/configs",
+        "config",
+        &mut out,
+    )?;
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn append_compose_file_resource_mounts(
+    project_dir: &Path,
+    declarations: Option<&HashMap<String, ferro_compose::FileResource>>,
+    references: Option<&Vec<ferro_compose::ServiceFileResource>>,
+    default_dir: &str,
+    kind: &str,
+    mounts: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some(references) = references else {
+        return Ok(());
+    };
+    let declarations = declarations.ok_or_else(|| {
+        format!("compose: service references {kind}s but no top-level {kind} declarations exist")
+    })?;
+    let project_root = project_dir.canonicalize().map_err(|error| {
+        format!("compose: project directory cannot be resolved for {kind} mounts: {error}")
+    })?;
+    let mut targets = std::collections::HashSet::new();
+    for reference in references {
+        let source = reference.source();
+        let declaration = declarations
+            .get(source)
+            .ok_or_else(|| format!("compose: service references undeclared {kind} '{source}'"))?;
+        if declaration.external || declaration.file.is_none() {
+            return Err(format!(
+                "compose: external or file-less {kind} '{source}' is unsupported"
+            ));
+        }
+        if reference.unsupported_metadata() {
+            return Err(format!(
+                "compose: service {kind} '{source}' ownership/mode metadata is unsupported"
+            ));
+        }
+        let relative = declaration.file.as_deref().unwrap_or_default();
+        if relative.is_empty() {
+            return Err(format!("compose: {kind} '{source}' has an empty file path"));
+        }
+        let path = project_dir.join(relative).canonicalize().map_err(|error| {
+            format!("compose: {kind} '{source}' file cannot be resolved: {error}")
+        })?;
+        if !path.starts_with(&project_root) {
+            return Err(format!(
+                "compose: {kind} '{source}' file must stay within the project directory"
+            ));
+        }
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            format!("compose: {kind} '{source}' file cannot be inspected: {error}")
+        })?;
+        if !metadata.is_file() {
+            return Err(format!("compose: {kind} '{source}' file is not regular"));
+        }
+        let default_target = format!("{default_dir}/{source}");
+        let target = reference.target(&default_target);
+        if !target.starts_with('/') || target.contains("..") {
+            return Err(format!(
+                "compose: {kind} '{source}' target must be an absolute safe path"
+            ));
+        }
+        if !targets.insert(target.clone()) {
+            return Err(format!("compose: duplicate {kind} target '{target}'"));
+        }
+        mounts.push(format!("{}:{target}:ro", path.display()));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -15463,11 +15553,48 @@ mod tests {
         assert!(error.contains("has no healthcheck"));
     }
 
+    use ferro_compose::ComposeFile;
     use ferro_core::runtime::{ContainerRuntime, NetworkBackend};
     use ferro_core::volume_store::LocalVolumeStore;
     use std::io::Write;
     use std::os::unix::net::{UnixListener, UnixStream as StdUnixStream};
     use std::path::PathBuf;
+
+    #[test]
+    fn compose_file_resources_resolve_to_read_only_mounts() {
+        let temp = tempfile::tempdir().expect("project directory");
+        std::fs::write(temp.path().join("secret.txt"), b"token\n").expect("secret");
+        std::fs::write(temp.path().join("app.conf"), b"enabled=true\n").expect("config");
+        let compose = ComposeFile::parse(
+            r#"
+services:
+  api:
+    image: alpine:latest
+    secrets: [api-token]
+    configs:
+      - source: app-config
+        target: /etc/my-app.conf
+secrets:
+  api-token:
+    file: ./secret.txt
+configs:
+  app-config:
+    file: ./app.conf
+"#,
+            &HashMap::new(),
+        )
+        .expect("compose resources");
+        let volumes = LocalVolumeStore::open(temp.path().join("volumes")).expect("volume store");
+        let service = compose.services.get("api").expect("service");
+        let mounts = super::compose_service_mounts(temp.path(), &volumes, &compose, service)
+            .expect("resource mounts");
+        assert!(mounts
+            .iter()
+            .any(|mount| mount.ends_with(":/run/secrets/api-token:ro")));
+        assert!(mounts
+            .iter()
+            .any(|mount| mount.ends_with(":/etc/my-app.conf:ro")));
+    }
 
     #[test]
     fn parses_run_command() {

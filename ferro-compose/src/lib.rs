@@ -76,6 +76,12 @@ pub struct ComposeFile {
 
     /// Named volume definitions.
     pub volumes: Option<HashMap<String, Volume>>,
+
+    /// File-backed secrets available to services.
+    pub secrets: Option<HashMap<String, FileResource>>,
+
+    /// File-backed configuration objects available to services.
+    pub configs: Option<HashMap<String, FileResource>>,
 }
 
 /// Docker Compose service definition.
@@ -107,6 +113,12 @@ pub struct Service {
 
     /// Volume mount specifications.
     pub volumes: Option<Vec<String>>,
+
+    /// Secrets mounted read-only under `/run/secrets` by default.
+    pub secrets: Option<Vec<ServiceFileResource>>,
+
+    /// Configs mounted read-only under `/etc/configs` by default.
+    pub configs: Option<Vec<ServiceFileResource>>,
 
     /// Networks to attach the service to. Compose list syntax and mapping
     /// syntax are both accepted; mapping values such as aliases are retained
@@ -267,6 +279,60 @@ pub struct Volume {
     pub driver: Option<String>,
 }
 
+/// Compose file-backed secret or config declaration.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FileResource {
+    /// Path relative to the Compose file. External resources are not yet
+    /// supported because they require a durable host-side store contract.
+    pub file: Option<String>,
+
+    /// Docker-compatible external marker. It is parsed so unsupported use can
+    /// fail explicitly rather than being silently ignored.
+    #[serde(default)]
+    pub external: bool,
+}
+
+/// A service secret/config reference, either short syntax (`name`) or long
+/// syntax with an explicit target. UID/GID are parsed for compatibility but
+/// are rejected until the runtime can apply them without weakening ownership.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum ServiceFileResource {
+    Name(String),
+    Mount {
+        source: String,
+        target: Option<String>,
+        uid: Option<String>,
+        gid: Option<String>,
+        mode: Option<String>,
+    },
+}
+
+impl ServiceFileResource {
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Name(name) => name,
+            Self::Mount { source, .. } => source,
+        }
+    }
+
+    pub fn target(&self, default: &str) -> String {
+        match self {
+            Self::Name(_) => default.to_string(),
+            Self::Mount { target, .. } => target.clone().unwrap_or_else(|| default.to_string()),
+        }
+    }
+
+    pub fn unsupported_metadata(&self) -> bool {
+        matches!(
+            self,
+            Self::Mount { uid: Some(_), .. }
+                | Self::Mount { gid: Some(_), .. }
+                | Self::Mount { mode: Some(_), .. }
+        )
+    }
+}
+
 pub mod compose;
 pub mod service_graph;
 
@@ -329,6 +395,44 @@ impl ComposeFile {
                         return Err(ComposeError::Validation(format!(
                             "service '{name}' depends on unknown service '{dep}'"
                         )));
+                    }
+                }
+            }
+
+            for (kind, references, declarations) in [
+                ("secret", service.secrets.as_ref(), self.secrets.as_ref()),
+                ("config", service.configs.as_ref(), self.configs.as_ref()),
+            ] {
+                if let Some(references) = references {
+                    for reference in references {
+                        if reference.source().trim().is_empty() {
+                            return Err(ComposeError::Validation(format!(
+                                "service '{name}' has an empty {kind} source"
+                            )));
+                        }
+                        let Some(declarations) = declarations else {
+                            return Err(ComposeError::Validation(format!(
+                                "service '{name}' references undeclared {kind} '{}'",
+                                reference.source()
+                            )));
+                        };
+                        let Some(declaration) = declarations.get(reference.source()) else {
+                            return Err(ComposeError::Validation(format!(
+                                "service '{name}' references undeclared {kind} '{}'",
+                                reference.source()
+                            )));
+                        };
+                        if declaration.external || declaration.file.is_none() {
+                            return Err(ComposeError::Validation(format!(
+                                "external or file-less {kind} '{}' is unsupported",
+                                reference.source()
+                            )));
+                        }
+                        if reference.unsupported_metadata() {
+                            return Err(ComposeError::Validation(format!(
+                                "service '{name}' {kind} ownership/mode metadata is unsupported"
+                            )));
+                        }
                     }
                 }
             }
@@ -482,6 +586,56 @@ services:
             compose.services["api"].networks.as_deref(),
             Some(["default".to_string()].as_slice())
         );
+    }
+
+    #[test]
+    fn parses_file_backed_secrets_and_configs() {
+        let content = r#"
+services:
+  api:
+    image: alpine:latest
+    secrets:
+      - api-key
+      - source: db-password
+        target: /run/secrets/database
+    configs:
+      - app-config
+secrets:
+  api-key:
+    file: ./secret.txt
+  db-password:
+    file: ./password.txt
+configs:
+  app-config:
+    file: ./app.conf
+"#;
+        let compose = ComposeFile::parse(content, &HashMap::new()).expect("file resources");
+        assert_eq!(compose.services["api"].secrets.as_ref().unwrap().len(), 2);
+        assert_eq!(compose.services["api"].configs.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rejects_external_file_resources_and_undeclared_references() {
+        let external = r#"
+services:
+  api:
+    image: alpine:latest
+    secrets: [api-key]
+secrets:
+  api-key:
+    external: true
+"#;
+        let err = ComposeFile::parse(external, &HashMap::new()).expect_err("external rejected");
+        assert!(err.to_string().contains("external or file-less secret"));
+
+        let missing = r#"
+services:
+  api:
+    image: alpine:latest
+    configs: [missing]
+"#;
+        let err = ComposeFile::parse(missing, &HashMap::new()).expect_err("missing rejected");
+        assert!(err.to_string().contains("undeclared config"));
     }
 }
 mod fanout;

@@ -19,7 +19,12 @@ end = text.find("## Update protocol", start)
 if start < 0 or end < 0:
     raise SystemExit("benchmark register gate failed: missing current snapshot section")
 section = text[start:end]
+head_match = re.search(r"Latest benchmark-relevant implementation head: `([^`]+)`", text)
+if not head_match:
+    raise SystemExit("benchmark register gate failed: missing latest implementation head")
+latest_head = head_match.group(1)
 rows = []
+snapshot_report_sets = []
 for line in section.splitlines():
     if not line.startswith("|") or line.startswith("|---") or line.startswith("| Feature"):
         continue
@@ -40,10 +45,21 @@ for row in rows:
     links = re.findall(r"\(([^)]+\.md)\)", row[9])
     if not links:
         raise SystemExit(f"benchmark register gate failed: {feature} has no report link")
+    snapshot_report_sets.append(tuple(links))
     for link in links:
         target = (path.parent / link).resolve()
         if not target.is_file():
             raise SystemExit(f"benchmark register gate failed: missing report {link}")
+        if latest_head not in Path(link).name:
+            raise SystemExit(
+                f"benchmark register gate failed: {feature} links report {link} "
+                f"for head {latest_head}"
+            )
+
+if len({reports for reports in snapshot_report_sets}) != 1:
+    raise SystemExit(
+        "benchmark register gate failed: snapshot rows link different report pairs"
+    )
 
 ids = re.findall(r"^\| (B-\d{3}) \|", text, flags=re.MULTILINE)
 if not ids or len(ids) != len(set(ids)):

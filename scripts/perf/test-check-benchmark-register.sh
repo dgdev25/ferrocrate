@@ -14,4 +14,10 @@ if bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$broken" >/dev/nu
   echo "benchmark register gate accepted a missing report link" >&2
   exit 1
 fi
+
+sed -i 's/Latest benchmark-relevant implementation head: `[^`]*`/Latest benchmark-relevant implementation head: `deadbeef`/' "$broken"
+if bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$broken" >/dev/null 2>&1; then
+  echo "benchmark register gate accepted a stale snapshot head" >&2
+  exit 1
+fi
 echo "benchmark register gate checks passed"

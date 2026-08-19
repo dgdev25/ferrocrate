@@ -394,6 +394,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        path: "/events?follow=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
         method: "POST",
         path: "/images/prune",
         coverage: Coverage::Implemented,

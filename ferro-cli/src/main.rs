@@ -10911,6 +10911,11 @@ fn handle_docker_compat_connection(
         event_request = Some((request.method.clone(), path.clone(), request.body.clone()));
         let response = match (request.method.as_str(), path.as_str()) {
             ("GET", "/events") => {
+                let follow = query
+                    .get("follow")
+                    .map(|value| parse_docker_bool_query(Some(value), "follow"))
+                    .transpose()?
+                    .unwrap_or(false);
                 let events = state
                     .events
                     .lock()
@@ -10934,7 +10939,7 @@ fn handle_docker_compat_connection(
                             || item.contains("json-seq")
                     })
                 });
-                if query.get("follow").is_some_and(|value| value == "1") || accepts_event_stream {
+                if follow || accepts_event_stream {
                     event_follow_query = Some(query.clone());
                     docker_chunked_headers(200, "application/x-ndjson")
                 } else {

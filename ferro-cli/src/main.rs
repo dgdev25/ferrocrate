@@ -10266,9 +10266,20 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
-    let network = network_override
+    let requested_network = network_override
         .map(str::to_string)
         .unwrap_or(compose_service_network(service, name, default_network)?);
+    // `handle_run` resolves named Compose networks to the runtime's bridge
+    // mode before authorization. The digest must hash that same effective
+    // mode, while preserving internal shared-namespace bindings.
+    let network = if is_builtin_network_mode(&requested_network)
+        || requested_network.starts_with("managed:")
+        || requested_network.starts_with("container:")
+    {
+        requested_network
+    } else {
+        "bridge".to_string()
+    };
     let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
         let mut value = parse_entrypoint(entrypoint)?;
         value.extend_from_slice(&cmd);

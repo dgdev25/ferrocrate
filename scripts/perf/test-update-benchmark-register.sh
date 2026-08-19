@@ -4,8 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname -- "$0")/../.." && pwd)"
 updater="$repo_root/scripts/perf/update-benchmark-register.py"
 register="$repo_root/docs/evidence/performance/benchmark-register.md"
-iptables="$repo_root/docs/evidence/performance/2026-08-19-docker-comparison-current-head-bb592039-iptables.md"
-nftables="$repo_root/docs/evidence/performance/2026-08-19-docker-comparison-current-head-bb592039-nftables.md"
+iptables="$repo_root/docs/evidence/performance/2026-08-19-docker-comparison-current-head-0711b729-iptables.md"
+nftables="$repo_root/docs/evidence/performance/2026-08-19-docker-comparison-current-head-0711b729-nftables.md"
 tmp_root="$(mktemp -d /tmp/ferrocrate-benchmark-register.XXXXXX)"
 trap 'rm -rf -- "$tmp_root"' EXIT
 

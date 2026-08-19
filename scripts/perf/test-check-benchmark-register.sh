@@ -9,7 +9,9 @@ tmp="$(mktemp -d /tmp/ferrocrate-benchmark-register-gate.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 broken="$tmp/register.md"
 cp "$repo_root/docs/evidence/performance/benchmark-register.md" "$broken"
-sed -i '0,/2026-08-18-docker-comparison-current-head-80e1b421-iptables.md/s//missing-report.md/' "$broken"
+current_report="$(sed -n 's/.*\[iptables\](\([^)]*\.md\)).*/\1/p' "$broken" | head -n 1)"
+[[ -n "$current_report" ]] || { echo "benchmark register fixture has no current report" >&2; exit 1; }
+sed -i "0,/${current_report//\//\\/}/s//missing-report.md/" "$broken"
 if bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$broken" >/dev/null 2>&1; then
   echo "benchmark register gate accepted a missing report link" >&2
   exit 1

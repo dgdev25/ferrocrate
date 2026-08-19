@@ -5381,8 +5381,14 @@ fn build_command(
         netns_cmd.arg("netns").arg("exec").arg(netns);
         if let Some(rootfs) = rootfs_dir {
             if running_as_root {
+                let chroot_path = crate::rootless::trusted_executable_path("chroot").ok_or_else(|| {
+                    RuntimeError::InvalidCommand(
+                        "network namespace execution requires a trusted root-owned chroot executable"
+                            .to_string(),
+                    )
+                })?;
                 netns_cmd
-                    .arg("chroot")
+                    .arg(chroot_path)
                     .arg(rootfs)
                     .arg(&cmd[0])
                     .args(&cmd[1..]);
@@ -5445,7 +5451,14 @@ fn build_command(
         unshare_cmd
     } else if let Some(rootfs) = rootfs_dir {
         if running_as_root {
-            let mut chroot_cmd = Command::new("chroot");
+            let chroot_path =
+                crate::rootless::trusted_executable_path("chroot").ok_or_else(|| {
+                    RuntimeError::InvalidCommand(
+                        "rootfs execution requires a trusted root-owned chroot executable"
+                            .to_string(),
+                    )
+                })?;
+            let mut chroot_cmd = Command::new(chroot_path);
             chroot_cmd.arg(rootfs);
             chroot_cmd.arg(&cmd[0]);
             chroot_cmd.args(&cmd[1..]);

@@ -113,8 +113,10 @@ impl OverlayFsManager {
         let args = build_fuse_overlayfs_args(config);
 
         // SEC-05: Execute fuse-overlayfs with timeout to prevent hanging
+        let fuse_binary = crate::rootless::trusted_executable_path("fuse-overlayfs")
+            .ok_or(OverlayFsError::FuseOverlayBinaryMissing)?;
         let output = Self::execute_fuse_command_with_timeout(
-            "fuse-overlayfs",
+            &fuse_binary,
             &args,
             Self::FUSE_OVERLAY_TIMEOUT,
         )?;
@@ -131,7 +133,7 @@ impl OverlayFsManager {
 
     /// SEC-05: Execute fuse-overlayfs command with timeout to prevent blocking indefinitely
     fn execute_fuse_command_with_timeout(
-        binary: &str,
+        binary: &Path,
         args: &[String],
         timeout: Duration,
     ) -> Result<std::process::Output, OverlayFsError> {

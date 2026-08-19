@@ -51,6 +51,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/perf/docker-image-lifecycle-comparison.sh \
   scripts/perf/docker-volume-io-comparison.sh \
   scripts/test-state-migrations.sh \
+  scripts/test-default-dependency-graph.sh \
   scripts/next-release-version.sh scripts/test-next-release-version.sh \
   scripts/generate-release-index.sh scripts/test-generate-release-index.sh \
   scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \
@@ -74,6 +75,7 @@ bash scripts/test-reliability-matrix-preflight.sh
 bash scripts/test-uninstall.sh
 bash scripts/test-install-rollback.sh
 bash scripts/test-state-migrations.sh
+bash scripts/test-default-dependency-graph.sh
 bash scripts/test-rootless-cri-oci.sh
 bash scripts/test-e2e-cli-backend.sh
 bash scripts/perf/test-check-docker-comparison.sh

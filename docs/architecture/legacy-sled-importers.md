@@ -30,3 +30,8 @@ available in default builds, but the legacy `LocalContainerStore` implementation
 and its Sled dependency are now compiled only with the opt-in feature. The
 remaining work is to retire that compatibility API and remove the feature after
 the supported migration window, not to treat the active runtime as Sled-backed.
+
+The dependency-isolation check is part of `scripts/local-release-gate.sh`:
+`scripts/test-default-dependency-graph.sh` verifies that the default
+`ferro-core` and `ferro-compose` graphs contain none of `sled`, `fxhash`, or
+`instant`, while the migration suites remain explicitly feature-gated.

@@ -16378,6 +16378,13 @@ volumes:
 
     #[test]
     fn compose_network_provisioning_creates_and_tracks_missing_bridge() {
+        // This fixture asserts kernel-backed bridge provisioning. A normal
+        // release-gate invocation is non-root and must not turn the explicit
+        // rootless Compose boundary into a false test failure; the same test
+        // runs fully under the privileged gate.
+        if !nix::unistd::Uid::effective().is_root() {
+            return;
+        }
         super::reset_network_kernel_effect_count();
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let project = super::ComposeProject {
@@ -16417,6 +16424,9 @@ volumes:
 
     #[test]
     fn compose_default_network_is_project_scoped_and_provisioned_for_implicit_services() {
+        if !nix::unistd::Uid::effective().is_root() {
+            return;
+        }
         super::reset_network_kernel_effect_count();
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let project_dir = runtime_dir.path().join("my-app");
@@ -16447,6 +16457,9 @@ volumes:
     #[cfg(target_os = "linux")]
     #[test]
     fn compose_explicit_default_definition_keeps_project_scoped_identity() {
+        if !nix::unistd::Uid::effective().is_root() {
+            return;
+        }
         super::reset_network_kernel_effect_count();
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let project_dir = runtime_dir.path().join("Checkout.Project");

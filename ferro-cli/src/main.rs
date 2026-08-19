@@ -10018,6 +10018,19 @@ fn compose_service_network(
         ));
     }
     if let Some(mode) = service.network_mode.as_deref() {
+        if let Some(target) = mode.strip_prefix("container:") {
+            if target.trim().is_empty() {
+                return Err(format!(
+                    "compose: service {name} has an empty container network target"
+                ));
+            }
+            if target.contains(':') || target.chars().any(char::is_whitespace) {
+                return Err(format!(
+                    "compose: service {name} has an invalid container network target"
+                ));
+            }
+            return Ok(format!("container:{target}"));
+        }
         return match mode {
             "bridge" | "host" | "none" => Ok(mode.to_string()),
             other => Err(format!(
@@ -10046,6 +10059,40 @@ fn compose_service_network(
 }
 
 #[cfg(target_os = "linux")]
+fn resolve_compose_network_mode(
+    runtime: &ContainerRuntime,
+    requested: &str,
+) -> Result<String, String> {
+    let Some(target) = requested.strip_prefix("container:") else {
+        return Ok(requested.to_string());
+    };
+    if !nix::unistd::Uid::effective().is_root() {
+        return Err(
+            "compose: network_mode: container:<service> requires rootful namespace joining; rootless shared networking requires the project supervisor"
+                .to_string(),
+        );
+    }
+    let target_id = resolve_container_id(runtime, target)?;
+    let target_record = runtime
+        .inspect(&target_id)
+        .map_err(|error| error.to_string())?;
+    if target_record.status != "running" {
+        return Err(format!(
+            "compose: container network target {target} is not running"
+        ));
+    }
+    let netns = target_record.netns.ok_or_else(|| {
+        format!("compose: container network target {target} has no persisted network namespace")
+    })?;
+    if netns.trim().is_empty() || netns.contains('/') || netns.contains(':') {
+        return Err(format!(
+            "compose: container network target {target} has an invalid persisted namespace"
+        ));
+    }
+    Ok(format!("container:{netns}"))
+}
+
+#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn run_compose_service(
     runtime: &ContainerRuntime,
@@ -10066,7 +10113,10 @@ fn run_compose_service(
             "compose: service {name} image prerequisite was not prepared"
         ));
     };
-    let requested_network = compose_service_network(service, name, default_network)?;
+    let requested_network = resolve_compose_network_mode(
+        runtime,
+        &compose_service_network(service, name, default_network)?,
+    )?;
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
@@ -10173,7 +10223,10 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
-    let network = compose_service_network(service, name, default_network)?;
+    let network = resolve_compose_network_mode(
+        runtime,
+        &compose_service_network(service, name, default_network)?,
+    )?;
     let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
         let mut value = parse_entrypoint(entrypoint)?;
         value.extend_from_slice(&cmd);
@@ -16312,6 +16365,32 @@ volumes:
         let error = super::compose_service_network(&multiple, "api", "bridge")
             .expect_err("multiple attachments are bounded");
         assert!(error.contains("multiple networks"));
+
+        let shared: ferro_compose::Service = serde_json::from_value(serde_json::json!({
+            "network_mode": "container:db"
+        }))
+        .expect("shared network service");
+        assert_eq!(
+            super::compose_service_network(&shared, "api", "bridge")
+                .expect("container network mode"),
+            "container:db"
+        );
+
+        let invalid: ferro_compose::Service = serde_json::from_value(serde_json::json!({
+            "network_mode": "container:db:extra"
+        }))
+        .expect("invalid shared network service");
+        let error = super::compose_service_network(&invalid, "api", "bridge")
+            .expect_err("invalid container network target");
+        assert!(error.contains("invalid container network target"));
+
+        if !nix::unistd::Uid::effective().is_root() {
+            let runtime_dir = tempfile::tempdir().expect("runtime directory");
+            let runtime = ContainerRuntime::new(runtime_dir.path()).expect("runtime");
+            let error = super::resolve_compose_network_mode(&runtime, "container:db")
+                .expect_err("rootless container namespace join");
+            assert!(error.contains("requires rootful namespace joining"));
+        }
     }
 
     #[cfg(target_os = "linux")]

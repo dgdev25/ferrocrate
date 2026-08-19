@@ -4087,11 +4087,10 @@ mod tests {
         let excludes =
             parse_stages("FROM scratch\nCOPY --exclude=*.tmp --exclude secret src /opt\n").unwrap();
         assert_eq!(excludes[0].copy_paths[0].excludes, ["*.tmp", "secret"]);
-        for directive in ["COPY --exclude= app /app"] {
-            let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
-                .expect_err("empty exclude pattern must fail");
-            assert!(error.to_string().contains("COPY --exclude"));
-        }
+        let directive = "COPY --exclude= app /app";
+        let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
+            .expect_err("empty exclude pattern must fail");
+        assert!(error.to_string().contains("COPY --exclude"));
 
         let error = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
             .expect_err("unsupported copy flags must not be silently ignored");

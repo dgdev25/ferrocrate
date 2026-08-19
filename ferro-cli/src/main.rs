@@ -9261,9 +9261,14 @@ fn handle_compose(
     let path = find_compose_file(file).map_err(|err| err.to_string())?;
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
-    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let project_dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .map_err(|error| format!("compose: project directory cannot be resolved: {error}"))?;
     let default_network =
-        compose_default_network_name_with_declared(project_dir, project.compose.name.as_deref())?;
+        compose_default_network_name_with_declared(&project_dir, project.compose.name.as_deref())?;
     match command {
         ComposeCommands::Up { profile, detach: _ } => {
             // Compose is a detached CLI operation: services must outlive the
@@ -9333,7 +9338,7 @@ fn handle_compose(
                     prepare_compose_service(
                         store,
                         volume_store,
-                        project_dir,
+                        &project_dir,
                         name,
                         instance,
                         service,
@@ -9367,7 +9372,7 @@ fn handle_compose(
                         runtime,
                         store,
                         volume_store,
-                        project_dir,
+                        &project_dir,
                         &project.compose,
                         &default_network,
                         &prepared.name,
@@ -9447,7 +9452,7 @@ fn handle_compose(
                     runtime,
                     store,
                     volume_store,
-                    project_dir,
+                    &project_dir,
                     &project.compose,
                     &default_network,
                     &prepared.name,
@@ -9500,7 +9505,7 @@ fn handle_compose(
                     &child_runtime,
                     store,
                     volume_store,
-                    project_dir,
+                    &project_dir,
                     &project.compose,
                     &default_network,
                     &prepared.name,
@@ -9516,7 +9521,7 @@ fn handle_compose(
             }
         }
         ComposeCommands::Watch { profile, interval } => {
-            let mut last_mtime = latest_mtime(project_dir)?;
+            let mut last_mtime = latest_mtime(&project_dir)?;
             loop {
                 handle_compose(
                     runtime,
@@ -9530,7 +9535,7 @@ fn handle_compose(
                 )?;
                 loop {
                     std::thread::sleep(Duration::from_secs(interval));
-                    let current = latest_mtime(project_dir)?;
+                    let current = latest_mtime(&project_dir)?;
                     if current > last_mtime {
                         last_mtime = current;
                         break;

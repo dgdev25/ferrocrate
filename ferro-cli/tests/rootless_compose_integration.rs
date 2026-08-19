@@ -180,6 +180,85 @@ fn rootless_run_mounts_bind_and_named_volumes() {
 }
 
 #[test]
+fn rootless_compose_mounts_file_backed_secrets_and_configs_read_only() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    let workspace = project.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(project.join("token.txt"), b"secret-value\n").expect("secret");
+    fs::write(project.join("app.conf"), b"config-value\n").expect("config");
+    fs::write(
+        project.join("compose.yml"),
+        "services:\n  reader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"cat /run/secrets/api-token /etc/configs/app-config > /data/output; test ! -w /run/secrets/api-token; test ! -w /etc/configs/app-config; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    secrets:\n      - api-token\n    configs:\n      - app-config\n    network_mode: none\nsecrets:\n  api-token:\n    file: ./token.txt\nconfigs:\n  app-config:\n    file: ./app.conf\n",
+    )
+    .expect("compose file");
+
+    let runtime = root.path().join("runtime");
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let up = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "up", "--detach"])
+        .output()
+        .expect("compose up");
+    assert!(
+        up.status.success(),
+        "secret/config compose up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    for _ in 0..100 {
+        if workspace.join("output").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !workspace.join("output").exists() {
+        let logs = Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .args(["logs", "reader"])
+            .output()
+            .expect("compose logs");
+        let inspect = Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .args(["inspect", "reader"])
+            .output()
+            .expect("inspect reader");
+        panic!(
+            "secret/config workload did not create output; logs={} logs_stderr={} inspect={} inspect_stderr={}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr),
+            String::from_utf8_lossy(&inspect.stdout),
+            String::from_utf8_lossy(&inspect.stderr)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(workspace.join("output")).expect("resource output"),
+        "secret-value\nconfig-value\n"
+    );
+
+    let down = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .args(["compose", "--file", "compose.yml", "down"])
+        .output()
+        .expect("compose down");
+    assert!(
+        down.status.success(),
+        "secret/config compose down failed: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+}
+
+#[test]
 fn rootless_compose_waits_for_successfully_completed_dependency() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
         return;

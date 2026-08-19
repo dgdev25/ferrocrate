@@ -36,7 +36,8 @@ use crate::managed_overlay::{
 use crate::mounts::{
     apply_authorized_bind_mounts, apply_readonly_rootfs, apply_tmpfs_mounts,
     normalize_mount_target, open_existing_mount_target_beneath, open_mount_source_beneath,
-    open_mount_target_beneath, BindMount, MountError, TmpfsMount,
+    open_mount_target_beneath, open_mount_target_beneath_for_source, BindMount, MountError,
+    TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, stop_pid, ProcessLifecycleError};
@@ -2857,7 +2858,9 @@ impl ContainerRuntime {
 
         let mut bind_plans = Vec::with_capacity(mounts.len());
         for mount in mounts {
-            let _target = open_mount_target_beneath(&rootfs_dir, &mount.target)?;
+            let source_is_dir = fs::metadata(&mount.source)?.is_dir();
+            let _target =
+                open_mount_target_beneath_for_source(&rootfs_dir, &mount.target, source_is_dir)?;
             let target = path_resource_identity(&rootfs_dir.join(&mount.target))?;
             let source_metadata = fs::metadata(&mount.source)?;
             let ResourceIdentity::Path {

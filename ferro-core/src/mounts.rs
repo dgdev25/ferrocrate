@@ -58,20 +58,32 @@ struct OpenHow {
 }
 
 pub(crate) fn open_mount_target_beneath(rootfs: &Path, target: &Path) -> Result<File, MountError> {
-    open_mount_target_beneath_inner(rootfs, target, true)
+    open_mount_target_beneath_inner(rootfs, target, true, true)
+}
+
+/// Open or create a bind target with the same kind as its source. Regular-file
+/// bind mounts must not be pre-created as directories, because bubblewrap and
+/// the kernel reject a file source mounted over a directory target.
+pub(crate) fn open_mount_target_beneath_for_source(
+    rootfs: &Path,
+    target: &Path,
+    source_is_dir: bool,
+) -> Result<File, MountError> {
+    open_mount_target_beneath_inner(rootfs, target, true, source_is_dir)
 }
 
 pub(crate) fn open_existing_mount_target_beneath(
     rootfs: &Path,
     target: &Path,
 ) -> Result<File, MountError> {
-    open_mount_target_beneath_inner(rootfs, target, false)
+    open_mount_target_beneath_inner(rootfs, target, false, true)
 }
 
 fn open_mount_target_beneath_inner(
     rootfs: &Path,
     target: &Path,
     create: bool,
+    final_is_dir: bool,
 ) -> Result<File, MountError> {
     let target = normalize_mount_target(target)?;
     let mut options = OpenOptions::new();
@@ -82,8 +94,16 @@ fn open_mount_target_beneath_inner(
     for component in target.components() {
         let name = CString::new(component.as_os_str().as_encoded_bytes())
             .map_err(|_| MountError::InvalidTarget("NUL in target".into()))?;
+        let is_final = component == target.components().next_back().expect("non-empty target");
+        let open_flags = nix::libc::O_PATH
+            | nix::libc::O_CLOEXEC
+            | if !is_final || final_is_dir {
+                nix::libc::O_DIRECTORY
+            } else {
+                0
+            };
         let how = OpenHow {
-            flags: (nix::libc::O_PATH | nix::libc::O_DIRECTORY | nix::libc::O_CLOEXEC) as u64,
+            flags: open_flags as u64,
             mode: 0,
             // linux/openat2.h: NO_MAGICLINKS | NO_SYMLINKS | BENEATH.
             resolve: 0x02 | 0x04 | 0x08,
@@ -101,12 +121,28 @@ fn open_mount_target_beneath_inner(
             && fd < 0
             && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::ENOENT)
         {
-            let created =
-                unsafe { nix::libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) };
+            let created = if !is_final || final_is_dir {
+                unsafe { nix::libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) }
+            } else {
+                unsafe {
+                    nix::libc::openat(
+                        directory.as_raw_fd(),
+                        name.as_ptr(),
+                        nix::libc::O_CREAT
+                            | nix::libc::O_EXCL
+                            | nix::libc::O_WRONLY
+                            | nix::libc::O_CLOEXEC,
+                        0o600,
+                    )
+                }
+            };
             if created < 0
                 && std::io::Error::last_os_error().raw_os_error() != Some(nix::libc::EEXIST)
             {
                 return Err(std::io::Error::last_os_error().into());
+            }
+            if created >= 0 && !(!is_final || final_is_dir) {
+                unsafe { nix::libc::close(created) };
             }
             fd = unsafe {
                 nix::libc::syscall(
@@ -191,7 +227,9 @@ fn apply_bind_mounts_inner(
             })?
         };
 
-        let target_handle = open_mount_target_beneath(rootfs, &mount_spec.target)?;
+        let source_is_dir = std::fs::metadata(&source)?.is_dir();
+        let target_handle =
+            open_mount_target_beneath_for_source(rootfs, &mount_spec.target, source_is_dir)?;
         let target = PathBuf::from(format!("/proc/self/fd/{}", target_handle.as_raw_fd()));
 
         mount(
@@ -253,7 +291,8 @@ pub fn apply_readonly_rootfs(rootfs: &Path) -> Result<(), MountError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_bind_mounts, normalize_mount_target, open_mount_target_beneath, BindMount, TmpfsMount,
+        apply_bind_mounts, normalize_mount_target, open_mount_target_beneath,
+        open_mount_target_beneath_for_source, BindMount, TmpfsMount,
     };
     use std::fs;
     use std::path::Path;
@@ -324,6 +363,18 @@ mod tests {
         std::os::unix::fs::symlink(temp.path(), rootfs.join("safe/link")).expect("symlink");
         assert!(open_mount_target_beneath(&rootfs, Path::new("safe/link/escape")).is_err());
         assert!(!temp.path().join("escape").exists());
+    }
+
+    #[test]
+    fn file_bind_target_is_created_as_a_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rootfs = temp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).expect("rootfs");
+        let handle =
+            open_mount_target_beneath_for_source(&rootfs, Path::new("run/secrets/token"), false)
+                .expect("file target");
+        assert!(!handle.metadata().expect("target metadata").is_dir());
+        assert!(rootfs.join("run/secrets/token").is_file());
     }
 
     #[test]

@@ -16100,6 +16100,56 @@ volumes:
         assert_eq!(super::network_kernel_effect_count(), 1);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_explicit_default_definition_keeps_project_scoped_identity() {
+        super::reset_network_kernel_effect_count();
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let project_dir = runtime_dir.path().join("Checkout.Project");
+        std::fs::create_dir_all(&project_dir).expect("project directory");
+        let project = super::ComposeProject {
+            path: project_dir.join("compose.yml"),
+            compose: serde_json::from_value(serde_json::json!({
+                "services": {
+                    "web": {"image": "alpine:3.20", "networks": ["default"]}
+                },
+                "networks": {"default": {"driver": "bridge"}}
+            }))
+            .expect("compose project"),
+        };
+        let default_name = super::compose_default_network_name(&project_dir).expect("name");
+        assert_eq!(default_name, "checkout_project_default");
+        let authorization = test_surface_authorization(runtime_dir.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let created = super::ensure_compose_networks(
+            &project,
+            runtime_dir.path(),
+            &default_name,
+            &origin,
+            &authorization,
+        )
+        .expect("default network");
+        assert_eq!(created, vec![default_name.clone()]);
+        let service = project.compose.services.get("web").expect("service");
+        assert_eq!(
+            super::compose_service_network(service, "web", &default_name).expect("service network"),
+            default_name
+        );
+        assert_eq!(super::network_kernel_effect_count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_default_network_name_rejects_empty_project_path_components() {
+        let fallback =
+            super::compose_default_network_name(std::path::Path::new("/")).expect("fallback");
+        assert_eq!(fallback, "ferrocrate_default");
+        let sanitized =
+            super::compose_default_network_name(std::path::Path::new("/tmp/..bad name.."))
+                .expect("sanitized name");
+        assert_eq!(sanitized, "bad_name_default");
+    }
+
     #[test]
     fn compose_network_ownership_round_trips_atomically() {
         let runtime_dir = tempfile::tempdir().expect("runtime directory");

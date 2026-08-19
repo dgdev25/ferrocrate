@@ -11124,8 +11124,8 @@ fn handle_docker_compat_connection(
                     .get("path")
                     .ok_or_else(|| "docker: archive path is required".to_string())?;
                 let relative = archive_path.trim_start_matches('/');
-                if relative.is_empty()
-                    || relative.split('/').any(|component| {
+                if !relative.is_empty()
+                    && relative.split('/').any(|component| {
                         component.is_empty() || component == "." || component == ".."
                     })
                 {
@@ -11179,7 +11179,7 @@ fn handle_docker_compat_connection(
                         .finish()
                         .map_err(|error| format!("docker: finish archive: {error}"))?;
                 }
-                let stat = docker_archive_path_stat(&selected)?;
+                let stat = docker_archive_path_stat(&selected, archive_path)?;
                 http_response_with_headers(
                     200,
                     &archive,
@@ -13537,13 +13537,16 @@ fn docker_timestamp(unix_seconds: u64) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn docker_archive_path_stat(path: &Path) -> Result<String, String> {
+fn docker_archive_path_stat(path: &Path, logical_path: &str) -> Result<String, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("docker: archive stat failed: {error}"))?;
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
+    let name = logical_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("/");
+    let name = name.to_string();
     let link_target = if metadata.file_type().is_symlink() {
         std::fs::read_link(path)
             .ok()

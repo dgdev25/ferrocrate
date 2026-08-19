@@ -217,7 +217,7 @@ impl DaemonHarness {
         path: &str,
         content_type: &str,
         body: &[u8],
-    ) -> String {
+    ) -> Vec<u8> {
         let header = format!(
             "{method} {path} HTTP/1.1\r\nHost: docker\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -228,7 +228,7 @@ impl DaemonHarness {
         let _ = stream.shutdown(std::net::Shutdown::Write);
         let mut response = Vec::new();
         stream.read_to_end(&mut response).expect("read response");
-        String::from_utf8(response).expect("response utf8")
+        response
     }
 }
 
@@ -535,9 +535,11 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
         "application/x-tar",
         &[],
     );
-    let (headers, _) = raw
-        .split_once("\r\n\r\n")
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
         .expect("archive response headers");
+    let headers = String::from_utf8_lossy(&raw[..header_end]);
     let stat = headers
         .lines()
         .find_map(|line| line.strip_prefix("X-Docker-Container-Path-Stat: "))
@@ -547,6 +549,28 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
         .expect("decode path-stat header");
     let stat: serde_json::Value = serde_json::from_slice(&stat).expect("path-stat JSON");
     assert_eq!(stat["name"], "added");
+    let root_raw = harness.request_bytes_raw(
+        "GET",
+        &format!("/v1.45/containers/{id}/archive?path=%2F"),
+        "application/x-tar",
+        &[],
+    );
+    let root_header_end = root_raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("root archive response headers");
+    let root_headers = String::from_utf8_lossy(&root_raw[..root_header_end]);
+    assert!(root_headers.starts_with("HTTP/1.1 200 OK"));
+    let root_stat = root_headers
+        .lines()
+        .find_map(|line| line.strip_prefix("X-Docker-Container-Path-Stat: "))
+        .expect("root path-stat header");
+    let root_stat = base64::engine::general_purpose::STANDARD
+        .decode(root_stat)
+        .expect("decode root path-stat header");
+    let root_stat: serde_json::Value =
+        serde_json::from_slice(&root_stat).expect("root path-stat JSON");
+    assert_eq!(root_stat["name"], "/");
 
     let (status, body) = harness.request("GET", &format!("/v1.45/containers/{id}/changes"));
     assert_eq!(status, 200, "changes response={body}");

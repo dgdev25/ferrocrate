@@ -108,6 +108,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/matrix-container/update",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: r#"{"RestartPolicy":{"Name":"always","MaximumRetryCount":0}}"#,
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/prune",
         coverage: Coverage::Implemented,
         expected_status: 200,

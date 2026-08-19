@@ -6,6 +6,7 @@ CHANNEL="${CHANNEL:-public}"
 OUTPUT_DIR="${OUTPUT_DIR:-dist/release}"
 TARGET_OS="${TARGET_OS:-}"
 TARGET_ARCH="${TARGET_ARCH:-}"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 usage() {
   cat <<USAGE
@@ -17,6 +18,7 @@ Options:
   --output-dir <path>        Output directory (default: dist/release)
   --target-os <os>           Override detected OS (linux|macos|windows)
   --target-arch <arch>       Override detected arch (x86_64|aarch64)
+  --target-dir <path>        Cargo target directory (default: CARGO_TARGET_DIR or target)
   -h, --help                 Show this help
 
 Notes:
@@ -46,6 +48,10 @@ parse_args() {
         ;;
       --target-arch)
         TARGET_ARCH="${2:-}"
+        shift 2
+        ;;
+      --target-dir)
+        TARGET_DIR="${2:-}"
         shift 2
         ;;
       -h|--help)
@@ -166,14 +172,14 @@ main() {
   fi
 
   echo "building release binaries (channel=$CHANNEL os=$os arch=$arch)..."
-  cargo build --release "${build_packages[@]}"
+  CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release "${build_packages[@]}"
 
   package_dir="$tmpdir/ferrocrate"
   mkdir -p "$package_dir"
 
   local cli_bin desktop_bin
-  cli_bin="target/release/$(binary_name ferro-cli "$os")"
-  desktop_bin="target/release/$(binary_name ferro-desktop "$os")"
+  cli_bin="$TARGET_DIR/release/$(binary_name ferro-cli "$os")"
+  desktop_bin="$TARGET_DIR/release/$(binary_name ferro-desktop "$os")"
 
   if [[ ! -f "$cli_bin" ]]; then
     echo "missing built CLI binary: $cli_bin" >&2

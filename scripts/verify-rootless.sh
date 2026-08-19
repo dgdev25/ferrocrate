@@ -70,11 +70,20 @@ else
   missing=1
 fi
 
-for helper in newuidmap newgidmap; do
-  if command -v "$helper" >/dev/null 2>&1; then
+check_trusted_helper() {
+  local helper="$1" path owner
+  path="$(command -v "$helper" || true)"
+  [[ -n "$path" && -f "$path" && ! -L "$path" ]] || return 1
+  owner="$(stat -c '%u' -- "$path" 2>/dev/null || true)"
+  [[ "$owner" == 0 ]] || return 1
+  ! find "$path" -prune -perm /022 -print -quit 2>/dev/null | grep -q .
+}
+
+for helper in newuidmap newgidmap slirp4netns bwrap; do
+  if check_trusted_helper "$helper"; then
     echo "rootless.$helper=pass"
   else
-    echo "rootless.$helper=missing"
+    echo "rootless.$helper=missing-or-untrusted"
     missing=1
   fi
 done
@@ -90,13 +99,6 @@ if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR
   echo "rootless.xdg_runtime_dir=pass"
 else
   echo "rootless.xdg_runtime_dir=missing"
-  missing=1
-fi
-
-if command -v slirp4netns >/dev/null 2>&1; then
-  echo "rootless.slirp4netns=pass"
-else
-  echo "rootless.slirp4netns=missing"
   missing=1
 fi
 

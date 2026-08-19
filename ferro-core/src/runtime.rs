@@ -3297,8 +3297,14 @@ impl ContainerRuntime {
         let result = self.exec_authorized(proof, intent, id, cmd, None, true);
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
         self.store.finish_mutation(id, operation_id)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
     }
 

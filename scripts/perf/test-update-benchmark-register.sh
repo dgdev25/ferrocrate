@@ -6,8 +6,13 @@ updater="$repo_root/scripts/perf/update-benchmark-register.py"
 register="$repo_root/docs/evidence/performance/benchmark-register.md"
 latest_head="$(sed -n 's/^Latest benchmark-relevant implementation head: `\([^`]*\)`.*/\1/p' "$register")"
 [[ -n "$latest_head" ]] || { echo "benchmark register fixture has no current head" >&2; exit 1; }
-iptables_path="$repo_root/docs/evidence/performance/$(date -u +%F)-docker-comparison-current-head-${latest_head}-iptables.md"
-nftables_path="$repo_root/docs/evidence/performance/$(date -u +%F)-docker-comparison-current-head-${latest_head}-nftables.md"
+# Report filenames are dated evidence, not a clock contract.  A report may be
+# generated near UTC midnight (or on a host whose clock is deliberately
+# offset), so resolve the latest report by implementation head rather than
+# requiring its date prefix to equal the runner's current UTC date.
+report_dir="$repo_root/docs/evidence/performance"
+iptables_path="$(find "$report_dir" -maxdepth 1 -type f -name "*-docker-comparison-current-head-${latest_head}-iptables.md" -print | sort | tail -n 1)"
+nftables_path="$(find "$report_dir" -maxdepth 1 -type f -name "*-docker-comparison-current-head-${latest_head}-nftables.md" -print | sort | tail -n 1)"
 [[ -f "$iptables_path" && -f "$nftables_path" ]] || { echo "benchmark register fixture has no current paired reports" >&2; exit 1; }
 iptables="$(basename -- "$iptables_path")"
 nftables="$(basename -- "$nftables_path")"

@@ -9927,6 +9927,17 @@ struct DockerUpdateRequest {
     cpu_period: Option<i64>,
     #[serde(rename = "PidsLimit")]
     pids_limit: Option<i64>,
+    #[serde(rename = "RestartPolicy")]
+    restart_policy: Option<DockerRestartPolicy>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerRestartPolicy {
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "MaximumRetryCount", default)]
+    maximum_retry_count: i64,
 }
 
 #[cfg(target_os = "linux")]
@@ -9936,6 +9947,7 @@ struct DockerResourceUpdate {
     cpu_quota: Option<Option<u64>>,
     cpu_period: Option<Option<u64>>,
     pids_max: Option<Option<u64>>,
+    restart_policy: Option<ferro_core::container_store::RestartPolicy>,
 }
 
 #[cfg(target_os = "linux")]
@@ -9972,6 +9984,8 @@ struct DockerHostConfig {
     cpu_period: Option<i64>,
     #[serde(rename = "PidsLimit")]
     pids_limit: Option<i64>,
+    #[serde(rename = "RestartPolicy")]
+    restart_policy: Option<DockerRestartPolicy>,
 }
 
 #[cfg(target_os = "linux")]
@@ -10005,6 +10019,8 @@ struct DockerCreateSpec {
     cpu_period: Option<u64>,
     #[serde(default)]
     pids_max: Option<u64>,
+    #[serde(default = "default_docker_restart_policy")]
+    restart_policy: String,
     #[serde(default)]
     created_at_unix: u64,
 }
@@ -11681,6 +11697,9 @@ fn handle_docker_compat_connection(
                     if let Some(value) = update.pids_max {
                         spec.pids_max = value;
                     }
+                    if let Some(value) = update.restart_policy.clone() {
+                        spec.restart_policy = docker_restart_policy_name(&value).to_string();
+                    }
                     drop(pending);
                     state.persist_pending()?;
                     let body = serde_json::json!({"Warnings": []});
@@ -11707,6 +11726,11 @@ fn handle_docker_compat_connection(
                 runtime
                     .update_resource_limits(&id, limits)
                     .map_err(|error| error.to_string())?;
+                if let Some(restart_policy) = update.restart_policy {
+                    runtime
+                        .update_restart_policy(&id, restart_policy)
+                        .map_err(|error| error.to_string())?;
+                }
                 let body = serde_json::json!({"Warnings": []});
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -11820,7 +11844,7 @@ fn handle_docker_compat_connection(
                     health.map(|value| value.timeout_secs),
                     health.map(|value| value.retries),
                     health.map(|value| value.start_period_secs),
-                    "no",
+                    &spec.restart_policy,
                     spec.auto_remove,
                     None,
                     None,
@@ -13545,6 +13569,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         cpu_quota: None,
         cpu_period: None,
         pids_limit: None,
+        restart_policy: None,
     });
     let publish = port_bindings_to_publish(host_config.port_bindings)?;
     let network_mode = match host_config.network_mode.as_deref() {
@@ -13558,6 +13583,8 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
     let cpu_quota = normalize_docker_limit(host_config.cpu_quota, "CpuQuota")?;
     let cpu_period = normalize_docker_limit(host_config.cpu_period, "CpuPeriod")?;
     let pids_max = normalize_docker_limit(host_config.pids_limit, "PidsLimit")?;
+    let restart_policy = parse_docker_restart_policy(host_config.restart_policy)?
+        .unwrap_or(ferro_core::container_store::RestartPolicy::No);
     let workdir = request.working_dir.filter(|value| !value.trim().is_empty());
     let user = request.user.filter(|value| !value.trim().is_empty());
     Ok(DockerCreateSpec {
@@ -13577,6 +13604,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         cpu_quota,
         cpu_period,
         pids_max,
+        restart_policy: docker_restart_policy_name(&restart_policy).to_string(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
@@ -13622,7 +13650,48 @@ fn parse_docker_update_request(body: &[u8]) -> Result<DockerResourceUpdate, Stri
             .pids_limit
             .map(|value| normalize_docker_limit(Some(value), "PidsLimit"))
             .transpose()?,
+        restart_policy: request
+            .restart_policy
+            .map(|policy| parse_docker_restart_policy(Some(policy)))
+            .transpose()?
+            .flatten(),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn default_docker_restart_policy() -> String {
+    "no".to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_docker_restart_policy(
+    policy: Option<DockerRestartPolicy>,
+) -> Result<Option<ferro_core::container_store::RestartPolicy>, String> {
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    if policy.maximum_retry_count < 0 {
+        return Err("docker: RestartPolicy.MaximumRetryCount cannot be negative".to_string());
+    }
+    if policy.maximum_retry_count != 0 {
+        return Err("docker: RestartPolicy.MaximumRetryCount is unsupported".to_string());
+    }
+    parse_restart_policy(if policy.name.trim().is_empty() {
+        "no"
+    } else {
+        policy.name.trim()
+    })
+    .map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_restart_policy_name(policy: &ferro_core::container_store::RestartPolicy) -> &'static str {
+    match policy {
+        ferro_core::container_store::RestartPolicy::No => "no",
+        ferro_core::container_store::RestartPolicy::OnFailure => "on-failure",
+        ferro_core::container_store::RestartPolicy::Always => "always",
+        ferro_core::container_store::RestartPolicy::UnlessStopped => "unless-stopped",
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -13749,6 +13818,10 @@ fn docker_inspect_payload(
                 .as_ref()
                 .and_then(|limits| limits.pids_max)
                 .unwrap_or(0),
+            "RestartPolicy": {
+                "MaximumRetryCount": 0,
+                "Name": docker_restart_policy_name(&record.restart_policy),
+            },
         },
         "State": {
             "Status": record.status,
@@ -13851,6 +13924,10 @@ fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_js
             "CpuQuota": spec.cpu_quota.unwrap_or(0),
             "CpuPeriod": spec.cpu_period.unwrap_or(0),
             "PidsLimit": spec.pids_max.unwrap_or(0),
+            "RestartPolicy": {
+                "MaximumRetryCount": 0,
+                "Name": spec.restart_policy,
+            },
         },
         "State": {
             "Status": "created",
@@ -17201,6 +17278,7 @@ volumes:
             cpu_quota: None,
             cpu_period: None,
             pids_max: None,
+            restart_policy: "no".to_string(),
             created_at_unix: 0,
         };
         let payload = docker_pending_inspect_payload("pending", &pending);
@@ -17273,6 +17351,7 @@ volumes:
                 cpu_quota: None,
                 cpu_period: None,
                 pids_max: None,
+                restart_policy: "no".to_string(),
                 created_at_unix: 0,
             },
         );
@@ -17315,6 +17394,7 @@ volumes:
             cpu_quota: None,
             cpu_period: None,
             pids_max: None,
+            restart_policy: "no".to_string(),
             created_at_unix: 0,
         };
         let mut filters = HashMap::new();
@@ -17446,6 +17526,7 @@ volumes:
             cpu_quota: None,
             cpu_period: None,
             pids_max: None,
+            restart_policy: "no".to_string(),
             created_at_unix: 10,
         };
         let labels = serde_json::from_value(serde_json::json!({
@@ -17994,6 +18075,7 @@ volumes:
                 cpu_quota: Some(Some(50_000)),
                 cpu_period: Some(Some(100_000)),
                 pids_max: Some(Some(32)),
+                restart_policy: None,
             }
         );
         let clear = parse_docker_update_request(
@@ -18007,10 +18089,39 @@ volumes:
                 cpu_quota: Some(None),
                 cpu_period: Some(None),
                 pids_max: Some(None),
+                restart_policy: None,
             }
         );
         assert!(parse_docker_update_request(br#"{"CpuQuota":50000}"#).is_err());
         assert!(parse_docker_update_request(br#"{"Memory":-1}"#).is_err());
+    }
+
+    #[test]
+    fn docker_restart_policy_is_supported_on_create_update_and_inspect() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"unless-stopped"}}}"#,
+            Some("policy".to_string()),
+        )
+        .expect("create restart policy");
+        assert_eq!(spec.restart_policy, "unless-stopped");
+        let pending = docker_pending_inspect_payload("policy-id", &spec);
+        assert_eq!(
+            pending["HostConfig"]["RestartPolicy"]["Name"],
+            "unless-stopped"
+        );
+
+        let update = parse_docker_update_request(
+            br#"{"RestartPolicy":{"Name":"always","MaximumRetryCount":0}}"#,
+        )
+        .expect("update restart policy");
+        assert_eq!(
+            update.restart_policy,
+            Some(ferro_core::container_store::RestartPolicy::Always)
+        );
+        assert!(parse_docker_update_request(
+            br#"{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}"#
+        )
+        .is_err());
     }
 
     #[cfg(unix)]

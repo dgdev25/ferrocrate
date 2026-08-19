@@ -3702,6 +3702,40 @@ impl ContainerRuntime {
         })
     }
 
+    /// Update the durable restart policy without changing the running process.
+    /// Docker applies this policy to subsequent exits/restarts, so the mutation
+    /// is journaled through the same authorization path as resource updates.
+    pub fn update_restart_policy(
+        &self,
+        id: &str,
+        restart_policy: RestartPolicy,
+    ) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerUpdate, id, |runtime, proof, intent| {
+            runtime.update_restart_policy_authorized(proof, intent, id, restart_policy)
+        })
+    }
+
+    fn update_restart_policy_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        restart_policy: RestartPolicy,
+    ) -> Result<(), RuntimeError> {
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        record.restart_policy = restart_policy;
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        self.store.put_for_mutation(&record, operation_id)?;
+        Ok(())
+    }
+
     fn update_resource_limits_authorized(
         &self,
         _proof: &AuthorizedRequest,

@@ -11973,9 +11973,13 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_string(&history).map_err(|error| error.to_string())?;
                 http_response(200, body.as_bytes(), "application/json")
             }
-            ("GET", path) if path.starts_with("/images/") && path.ends_with("/get") => {
-                let encoded_name = path.trim_start_matches("/images/").trim_end_matches("/get");
-                let name = percent_decode_query_component(encoded_name)?;
+            ("GET", "/images/get") => {
+                let name = query
+                    .get("names")
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| query.get("name").filter(|name| !name.is_empty()))
+                    .ok_or_else(|| "docker: image get requires names".to_string())?
+                    .to_string();
                 let reference = resolve_reference(&store, &name)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: unknown image {name}"))?;

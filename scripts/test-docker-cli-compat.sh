@@ -87,6 +87,10 @@ curl --fail --silent --show-error --unix-socket "$socket" \
   "http://localhost/v1.45/build?dockerfile=Dockerfile&t=${image//:/%3A}" \
   >"$runtime_dir/build.jsonl"
 docker -H "$host" history "$image" >/dev/null
+save_archive="$runtime_dir/image-save.tar"
+docker -H "$host" save "$image" -o "$save_archive" >/dev/null
+tar -tf "$save_archive" | grep -qx 'manifest.json'
+tar -tf "$save_archive" | grep -q '/layer.tar$'
 docker -H "$host" tag "$image" "$tagged_image"
 docker -H "$host" image inspect "$tagged_image" >/dev/null
 docker -H "$host" image rm "$tagged_image" >/dev/null
@@ -146,4 +150,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/attach/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/commit/attach/rm/events"

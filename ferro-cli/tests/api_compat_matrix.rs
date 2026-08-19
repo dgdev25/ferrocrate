@@ -297,7 +297,7 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
-        path: "/images/missing/get",
+        path: "/images/get?names=missing",
         coverage: Coverage::Implemented,
         expected_status: 404,
         body: "",

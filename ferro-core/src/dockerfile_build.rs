@@ -1808,6 +1808,7 @@ struct CopySpec {
     srcs: Vec<String>,
     dest: String,
     chmod: Option<u32>,
+    parents: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2113,6 +2114,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
     }
     let mut args = Vec::new();
     let mut chmod = None;
+    let mut parents = false;
     let mut index = 0;
     while index < tokens.len() {
         let token = tokens[index];
@@ -2124,6 +2126,8 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
             })?;
             chmod = Some(parse_copy_mode(raw_mode)?);
             index += 1;
+        } else if token == "--parents" {
+            parents = true;
         } else if token.starts_with("--") {
             return Err(DockerfileBuildError::Unsupported(format!(
                 "COPY flag {token} is not supported"
@@ -2147,7 +2151,12 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         .iter()
         .map(|s| s.to_string())
         .collect();
-    Ok(Some(CopySpec { srcs, dest, chmod }))
+    Ok(Some(CopySpec {
+        srcs,
+        dest,
+        chmod,
+        parents,
+    }))
 }
 
 fn parse_copy_mode(raw: &str) -> Result<u32, DockerfileBuildError> {
@@ -3335,8 +3344,19 @@ fn copy_from_context(
             fs::create_dir_all(&dest_root)?;
         }
         for src in &spec.srcs {
+            if spec.parents
+                && Path::new(src)
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+            {
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY --parents source must not contain parent traversal".to_string(),
+                ));
+            }
             let source = src_root.join(src.trim_start_matches('/'));
-            let dest = if multiple {
+            let dest = if spec.parents {
+                dest_root.join(src.trim_start_matches('/'))
+            } else if multiple {
                 let name = Path::new(src)
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
@@ -4003,6 +4023,8 @@ mod tests {
     fn copy_chmod_is_parsed_and_unsupported_flags_fail_deterministically() {
         let stages = parse_stages("FROM scratch\nCOPY --chmod=755 app /app\n").unwrap();
         assert_eq!(stages[0].copy_paths[0].chmod, Some(0o755));
+        let parents = parse_stages("FROM scratch\nCOPY --parents src/app /opt\n").unwrap();
+        assert!(parents[0].copy_paths[0].parents);
 
         let error = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
             .expect_err("unsupported copy flags must not be silently ignored");
@@ -4041,6 +4063,7 @@ mod tests {
                 srcs: vec!["source".into()],
                 dest: "/materialized".into(),
                 chmod: Some(0o640),
+                parents: false,
             }],
         )
         .unwrap();
@@ -4052,6 +4075,43 @@ mod tests {
                 & 0o777,
             0o640
         );
+    }
+
+    #[test]
+    fn copy_parents_preserves_source_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("src").join("app");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("main.txt"), "main").unwrap();
+        let destination = temp.path().join("destination");
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["src/app/main.txt".into()],
+                dest: "/opt".into(),
+                chmod: None,
+                parents: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("opt/src/app/main.txt")).unwrap(),
+            "main"
+        );
+
+        let error = super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["../escape.txt".into()],
+                dest: "/opt".into(),
+                chmod: None,
+                parents: true,
+            }],
+        )
+        .expect_err("parent traversal must be rejected");
+        assert!(error.to_string().contains("parent traversal"));
     }
 
     #[test]

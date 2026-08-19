@@ -3217,10 +3217,8 @@ impl ContainerRuntime {
         // Commit the creation - all resources are now tracked in the store
         rollback.commit();
 
-        if record.ip_address.is_some() {
-            if let Ok(containers) = self.store.list() {
-                let _ = update_container_hosts(&self.runtime_dir, &containers);
-            }
+        if let Ok(containers) = self.store.list() {
+            let _ = update_container_hosts(&self.runtime_dir, &containers);
         }
         let _ = log_event(
             &self.runtime_dir,
@@ -9860,39 +9858,45 @@ fn update_container_hosts(
         add_entry(&record.ipv6_address);
     }
 
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let hosts_body = render_hosts(&entries);
+    let hosts_body = (!entries.is_empty()).then(|| render_hosts(&entries));
     for record in containers {
         if record.status != "running" && record.status != "paused" {
             continue;
         }
-        if record.ip_address.is_none() && record.ipv6_address.is_none() {
-            continue;
-        }
-        let hosts_path = runtime_dir
+        let etc_dir = runtime_dir
             .join("containers")
             .join(&record.id)
             .join("rootfs")
-            .join("etc")
-            .join("hosts");
-        if let Some(parent) = hosts_path.parent() {
-            fs::create_dir_all(parent)?;
+            .join("etc");
+        if let Some(hosts_body) = hosts_body.as_deref() {
+            let hosts_path = etc_dir.join("hosts");
+            if let Some(parent) = hosts_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_runtime_file_atomically(&hosts_path, hosts_body.as_bytes())?;
         }
-        write_runtime_file_atomically(&hosts_path, hosts_body.as_bytes())?;
 
-        let resolv_path = runtime_dir
-            .join("containers")
-            .join(&record.id)
-            .join("rootfs")
-            .join("etc")
-            .join("resolv.conf");
+        // Rootless slirp containers intentionally have no kernel-assigned
+        // bridge IP, but still need resolver configuration for outbound DNS.
+        // Write resolv.conf for every running workload rather than coupling
+        // it to the privileged bridge IPAM path.
+        let resolv_path = etc_dir.join("resolv.conf");
         if let Some(parent) = resolv_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        ferro_net::dns::write_resolv_conf(&resolv_path, &runtime_dns_config())
+        let dns_config = if rootless_netns_enabled()
+            && record.ip_address.is_none()
+            && record.ipv6_address.is_none()
+        {
+            let runtime_config = runtime_dns_config();
+            ferro_net::dns::DnsConfig {
+                servers: vec!["10.0.2.3".to_string()],
+                search: runtime_config.search,
+            }
+        } else {
+            runtime_dns_config()
+        };
+        ferro_net::dns::write_resolv_conf(&resolv_path, &dns_config)
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
     }
     Ok(())

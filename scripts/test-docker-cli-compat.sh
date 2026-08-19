@@ -114,6 +114,9 @@ wait_status="$(docker -H "$host" wait "$name")"
 }
 docker -H "$host" logs "$name" >/dev/null
 docker -H "$host" diff "$name" >/dev/null
+export_archive="$runtime_dir/container-export.tar"
+docker -H "$host" export "$name" -o "$export_archive" >/dev/null
+tar -tf "$export_archive" | grep -qx 'bin/busybox'
 printf 'ferrocrate-docker-cp-smoke\n' >"$runtime_dir/cp-host.txt"
 docker -H "$host" cp "$runtime_dir/cp-host.txt" "$name":/
 docker -H "$host" cp "$name":/cp-host.txt "$runtime_dir/cp-roundtrip.txt"
@@ -161,4 +164,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/cp/commit/attach/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/wait/logs/diff/exec/export/cp/commit/attach/rm/events"

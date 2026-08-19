@@ -642,6 +642,27 @@ CMD ["cat", "/hello.txt"]
                     .unwrap_or_else(|| "<logs unavailable>".to_string()),
             );
         }
+        if let Ok(inspect) = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["inspect", "ferro-e2e-ebpf-web"])
+            .output()
+        {
+            eprintln!(
+                "eBPF endpoint inspect before published curl: {}",
+                String::from_utf8_lossy(&inspect.stdout)
+            );
+        }
+        if let Ok(logs) = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["logs", "ferro-e2e-ebpf-web"])
+            .output()
+        {
+            eprintln!(
+                "eBPF endpoint logs before published curl: stdout={}; stderr={}",
+                String::from_utf8_lossy(&logs.stdout),
+                String::from_utf8_lossy(&logs.stderr)
+            );
+        }
         let start = std::time::Instant::now();
         let mut last_curl = None;
         while start.elapsed() < Duration::from_secs(12) {

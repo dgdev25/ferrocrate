@@ -5610,6 +5610,13 @@ fn build_command(
             .arg(workdir.unwrap_or(""))
             .arg(user.unwrap_or(""))
             .arg(if no_new_privs { "1" } else { "0" })
+            .arg(
+                capabilities
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .arg("--")
             .args(cmd);
         helper
@@ -5887,14 +5894,19 @@ fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {
 /// launcher-shell barrier is released and then execs the workload.
 #[cfg(target_os = "linux")]
 pub fn run_rootfs_launcher(args: &[String]) -> Result<(), String> {
-    if args.len() < 6 || args[4] != "--" {
+    if args.len() < 7 || args[5] != "--" {
         return Err("invalid rootfs launcher arguments".to_string());
     }
     let rootfs = Path::new(&args[0]);
     let workdir = (!args[1].is_empty()).then_some(args[1].as_str());
     let user = (!args[2].is_empty()).then_some(args[2].as_str());
     let no_new_privs = args[3] == "1";
-    let command = &args[5..];
+    let capabilities = args[4]
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let command = &args[6..];
     if command.is_empty() {
         return Err("rootfs launcher command is empty".to_string());
     }
@@ -5916,17 +5928,39 @@ pub fn run_rootfs_launcher(args: &[String]) -> Result<(), String> {
     if no_new_privs {
         set_no_new_privileges().map_err(|err| format!("set rootfs no_new_privs: {err}"))?;
     }
-    drop_all_capabilities().map_err(|err| format!("drop rootfs capabilities: {err}"))?;
-    let program = std::ffi::CString::new(command[0].as_str())
+    let capabilities = parse_capabilities(&capabilities);
+    if capabilities.is_empty() {
+        drop_all_capabilities().map_err(|err| format!("drop rootfs capabilities: {err}"))?;
+    } else {
+        set_capabilities(&capabilities).map_err(|err| format!("set rootfs capabilities: {err}"))?;
+    }
+    // `execv` does not perform PATH lookup. Docker/OCI commands commonly use
+    // bare names (for example `sh` or `nginx`), so resolve them against the
+    // chrooted image before the direct exec. Bubblewrap uses the same resolver
+    // in its rootfs path.
+    let resolved_program = resolve_rootfs_command(rootfs, &command[0]);
+    let program = std::ffi::CString::new(resolved_program.clone())
         .map_err(|_| "rootfs command contains NUL".to_string())?;
     let argv = command
         .iter()
         .map(|arg| std::ffi::CString::new(arg.as_str()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "rootfs command contains NUL".to_string())?;
-    match nix::unistd::execv(&program, &argv) {
+    let exec_result = if resolved_program.starts_with('/') {
+        nix::unistd::execv(&program, &argv)
+    } else {
+        // If the image omits a discoverable host-side candidate (for example
+        // a symlink whose lower-layer target is materialized at chroot time),
+        // let libc perform the image PATH lookup after chroot.
+        nix::unistd::execvp(&program, &argv)
+    };
+    match exec_result {
         Ok(never) => match never {},
-        Err(err) => Err(format!("exec rootfs workload: {err}")),
+        Err(err) => Err(format!(
+            "exec rootfs workload `{}` (rootfs `{}`): {err}",
+            resolved_program,
+            rootfs.display()
+        )),
     }
 }
 
@@ -15482,5 +15516,23 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 );
             }
         }
+    }
+
+    #[test]
+    fn rootfs_launcher_resolves_bare_command_names_inside_image() {
+        let root = tempfile::tempdir().expect("rootfs fixture");
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin directory");
+        std::fs::write(bin.join("sh"), b"fixture").expect("command fixture");
+
+        assert_eq!(super::resolve_rootfs_command(root.path(), "sh"), "/bin/sh");
+        assert_eq!(
+            super::resolve_rootfs_command(root.path(), "/custom/entrypoint"),
+            "/custom/entrypoint"
+        );
+        assert_eq!(
+            super::resolve_rootfs_command(root.path(), "missing"),
+            "missing"
+        );
     }
 }

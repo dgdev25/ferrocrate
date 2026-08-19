@@ -45,7 +45,13 @@ pub fn exec_in_rootless_rootfs(
             format!("rootfs does not exist: {}", rootfs.display()),
         )));
     }
-    let mut bwrap = Command::new("bwrap");
+    let bwrap_path = crate::rootless::trusted_executable_path("bwrap").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "bwrap is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    let mut bwrap = Command::new(bwrap_path);
     bwrap
         .arg("--bind")
         .arg(rootfs)

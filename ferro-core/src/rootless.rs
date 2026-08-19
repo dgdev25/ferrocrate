@@ -162,7 +162,7 @@ pub fn nested_bubblewrap_diagnostic() -> Result<(), String> {
         "bubblewrap (bwrap) executable is unavailable; rootless bridge workloads require it"
             .to_string()
     })?;
-    let unshare = trusted_helper_path("unshare").ok_or_else(|| {
+    let unshare = trusted_executable_path("unshare").ok_or_else(|| {
         "unshare executable is unavailable or not a trusted root-owned executable".to_string()
     })?;
     let output = Command::new(unshare)
@@ -380,14 +380,15 @@ fn write_id_mapping(
     match fs::write(path, mapping.as_uid_map_entry()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            let helper_path =
-                trusted_helper_path(helper).ok_or_else(|| RootlessError::LaunchMappingHelper {
+            let helper_path = trusted_executable_path(helper).ok_or_else(|| {
+                RootlessError::LaunchMappingHelper {
                     helper,
                     source: io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("{helper} is unavailable or not a trusted root-owned executable"),
                     ),
-                })?;
+                }
+            })?;
             let status = Command::new(helper_path)
                 .args([
                     pid.to_string(),
@@ -413,7 +414,7 @@ fn write_id_mapping(
 /// Resolve mapping helpers without trusting an attacker-controlled PATH entry.
 /// The setuid helpers must be regular, executable, root-owned files that are
 /// not writable by group or other users.
-fn trusted_helper_path(helper: &str) -> Option<PathBuf> {
+pub(crate) fn trusted_executable_path(helper: &str) -> Option<PathBuf> {
     let mut candidates = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| {
@@ -526,8 +527,8 @@ fn parse_subid_line(line: &str) -> Result<(String, u32, u32), RootlessError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_user_namespace_mappings, first_subid_range, parse_subid_line, trusted_helper_path,
-        RootlessConfig, RootlessMapping,
+        apply_user_namespace_mappings, first_subid_range, parse_subid_line,
+        trusted_executable_path, RootlessConfig, RootlessMapping,
     };
     use std::fs;
     const DEFAULT_SUBID_SIZE: u32 = 65_536;
@@ -576,7 +577,7 @@ mod tests {
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("executable");
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", temp.path());
-        let resolved = trusted_helper_path("newuidmap");
+        let resolved = trusted_executable_path("newuidmap");
         assert!(resolved.as_deref() != Some(helper.as_path()));
         match old_path {
             Some(path) => std::env::set_var("PATH", path),

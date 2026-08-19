@@ -4333,7 +4333,10 @@ fn validate_rootless_mount_capability(
 }
 
 fn rootless_mount_namespace_available() -> bool {
-    std::process::Command::new("unshare")
+    let Some(unshare) = crate::rootless::trusted_executable_path("unshare") else {
+        return false;
+    };
+    std::process::Command::new(unshare)
         .args([
             "--user",
             "--mount",
@@ -5278,7 +5281,12 @@ fn build_bwrap_command(
             "rootfs execution requires bubblewrap (bwrap) for rootless mounts".to_string(),
         ));
     }
-    let mut bwrap = Command::new("bwrap");
+    let bwrap_path = crate::rootless::trusted_executable_path("bwrap").ok_or_else(|| {
+        RuntimeError::InvalidCommand(
+            "rootfs execution requires a trusted root-owned bubblewrap executable".to_string(),
+        )
+    })?;
+    let mut bwrap = Command::new(bwrap_path);
     let root_cmd = resolve_rootfs_command(rootfs, &cmd[0]);
     bwrap
         .arg("--bind")
@@ -5380,7 +5388,14 @@ fn build_command(
         }
         netns_cmd
     } else if unshare_netns {
-        let mut unshare_cmd = Command::new("unshare");
+        let unshare_path =
+            crate::rootless::trusted_executable_path("unshare").ok_or_else(|| {
+                RuntimeError::InvalidCommand(
+                    "rootless network namespaces require a trusted root-owned unshare executable"
+                        .to_string(),
+                )
+            })?;
+        let mut unshare_cmd = Command::new(unshare_path);
         // Creating a network namespace alone is not permitted for an
         // unprivileged caller. Pair it with a user namespace. Avoid invoking
         // setuid mapping helpers after no_new_privs is installed; callers

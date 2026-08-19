@@ -25,4 +25,9 @@ if FERROCRATE_DOCKER_MAX_REGRESSION_PCT=50 bash scripts/perf/check-docker-compar
 fi
 sed -i 's/| 100 | 200 |/| 100 | 100 |/' "$report"
 bash scripts/perf/check-docker-comparison.sh "$report" >/dev/null
+sed -i 's/| image pull (warm) | 100 | 100 |/| image pull (warm) | 100 | 250 |/' "$report"
+if FERROCRATE_DOCKER_PULL_MAX_REGRESSION_PCT=100 bash scripts/perf/check-docker-comparison.sh "$report" >/dev/null 2>&1; then
+  echo "expected per-feature pull regression rejection did not occur" >&2
+  exit 1
+fi
 echo "docker comparison regression gate checks passed"

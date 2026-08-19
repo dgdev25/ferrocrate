@@ -179,7 +179,7 @@ fn rootless_compose_services_share_the_project_network_namespace() {
     fs::write(
         project.join("compose.yml"),
         compose_fixture(
-            "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"mkdir -p /www; echo shared-network > /www/index.html; httpd -f -p 8080 -h /www\"]\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 2; wget -q -O /data/output http://127.0.0.1:8080\"]\n    depends_on:\n      - leader\n    volumes:\n      - ./workspace:/data\n",
+            "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"mkdir -p /www; echo shared-network > /www/index.html; httpd -p 8080 -h /www; sleep 30\"]\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 2; wget -q -O /data/output http://127.0.0.1:8080\"]\n    depends_on:\n      - leader\n    volumes:\n      - ./workspace:/data\n",
         ),
     )
     .expect("compose file");

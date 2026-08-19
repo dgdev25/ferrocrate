@@ -204,8 +204,10 @@ fn bubblewrap_path() -> Option<PathBuf> {
             }
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o111 != 0
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                metadata.uid() == 0
+                    && metadata.permissions().mode() & 0o111 != 0
+                    && metadata.permissions().mode() & 0o022 == 0
             }
             #[cfg(not(unix))]
             {
@@ -375,15 +377,14 @@ fn write_id_mapping(
     match fs::write(path, mapping.as_uid_map_entry()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            let helper_path = trusted_helper_path(helper).ok_or_else(|| {
-                RootlessError::LaunchMappingHelper {
+            let helper_path =
+                trusted_helper_path(helper).ok_or_else(|| RootlessError::LaunchMappingHelper {
                     helper,
                     source: io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("{helper} is unavailable or not a trusted root-owned executable"),
                     ),
-                }
-            })?;
+                })?;
             let status = Command::new(helper_path)
                 .args([
                     pid.to_string(),
@@ -574,6 +575,24 @@ mod tests {
         std::env::set_var("PATH", temp.path());
         let resolved = trusted_helper_path("newuidmap");
         assert!(resolved.as_deref() != Some(helper.as_path()));
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_untrusted_bubblewrap_from_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bwrap = temp.path().join("bwrap");
+        fs::write(&bwrap, "#!/bin/sh\nexit 0\n").expect("write bwrap");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).expect("executable");
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", temp.path());
+        let resolved = super::bubblewrap_path();
+        assert!(resolved.as_deref() != Some(bwrap.as_path()));
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),

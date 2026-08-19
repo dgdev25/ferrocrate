@@ -104,6 +104,16 @@ sample_redirect_diagnostics() {
     tc -s filter show dev lo ingress 2>/dev/null || true
     printf 'tc egress lo:\n'
     tc -s filter show dev lo egress 2>/dev/null || true
+    # The e2e fixture performs ownership cleanup before returning a failure,
+    # so a post-failure dump can miss the maps entirely. Poll the pinned
+    # counter map while classifiers are live to preserve disposition evidence.
+    if command -v bpftool >/dev/null 2>&1; then
+      while IFS= read -r counters_path; do
+        [[ -n "$counters_path" ]] || continue
+        printf 'counter map %s:\n' "$counters_path"
+        bpftool map dump pinned "$counters_path" 2>/dev/null || true
+      done < <(find /sys/fs/bpf/ferrocrate -mindepth 3 -maxdepth 3 -path '*/maps/FERRO_COUNTERS' 2>/dev/null)
+    fi
     sleep 0.2
   done
 }
@@ -120,7 +130,9 @@ dump_redirect_diagnostics() {
       fi
       printf 'counter map %s:\n' "$counters_path" >&2
       bpftool map dump pinned "$counters_path" 2>&1 || true
-    done < <(find /sys/fs/bpf/ferrocrate -mindepth 3 -maxdepth 3 -path '*/maps/FERRO_COUNTERS' -type f 2>/dev/null)
+    # Pinned bpffs maps are not guaranteed to report as regular files across
+    # kernels/filesystem implementations; match the exact pin path instead.
+    done < <(find /sys/fs/bpf/ferrocrate -mindepth 3 -maxdepth 3 -path '*/maps/FERRO_COUNTERS' 2>/dev/null)
   fi
   printf '%s\n' '--- packet/checksum diagnostics ---' >&2
   printf 'TcpInCsumErrors before=%s after=%s\n' "$checksum_errors_before" \

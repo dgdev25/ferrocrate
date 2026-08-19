@@ -3,6 +3,26 @@ set -euo pipefail
 
 userns_path="/proc/sys/kernel/unprivileged_userns_clone"
 strict="${FERROCRATE_ROOTLESS_STRICT:-0}"
+for argument in "$@"; do
+  case "$argument" in
+    --strict)
+      strict=1
+      ;;
+    --help|-h)
+      cat <<'USAGE'
+Usage: verify-rootless.sh [--strict]
+
+Probe rootless prerequisites. With --strict, return non-zero when any
+prerequisite or namespace capability is unavailable.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "verify-rootless: unknown argument: $argument" >&2
+      exit 2
+      ;;
+  esac
+done
 missing=0
 if [[ -f "$userns_path" ]]; then
   value=$(cat "$userns_path")

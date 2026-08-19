@@ -31,13 +31,28 @@ required_files=(
   CONTRIBUTING.md
   CODE_OF_CONDUCT.md
   SECURITY.md
+  SUPPORT.md
+  README.md
   CHANGELOG.md
   docs/INDIE_RELEASE_PLAN.md
+  docs/operations/local-release-gate.md
   docs/evidence/performance/benchmark-register.md
 )
 for file in "${required_files[@]}"; do
   [[ -f "$file" ]] || { echo "missing public release artifact: $file" >&2; exit 1; }
 done
+
+for template in .github/ISSUE_TEMPLATE/bug_report.md .github/ISSUE_TEMPLATE/feature_request.md; do
+  [[ -f "$template" ]] || {
+    echo "missing public issue template: $template" >&2
+    exit 1
+  }
+done
+
+if ! grep -Eiq 'supported|experimental|planned' README.md; then
+  echo "README must distinguish supported, experimental, or planned behavior" >&2
+  exit 1
+fi
 
 # GitHub Actions were intentionally removed; a workflow directory containing
 # executable workflow definitions would silently reintroduce an unreviewed CI

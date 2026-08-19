@@ -91,6 +91,8 @@ save_archive="$runtime_dir/image-save.tar"
 docker -H "$host" save "$image" -o "$save_archive" >/dev/null
 tar -tf "$save_archive" | grep -qx 'manifest.json'
 tar -tf "$save_archive" | grep -q '/layer.tar$'
+docker -H "$host" load -i "$save_archive" >/dev/null
+docker -H "$host" image inspect "$image" >/dev/null
 docker -H "$host" tag "$image" "$tagged_image"
 docker -H "$host" image inspect "$tagged_image" >/dev/null
 docker -H "$host" image rm "$tagged_image" >/dev/null

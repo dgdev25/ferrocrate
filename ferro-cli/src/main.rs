@@ -7087,6 +7087,188 @@ fn append_commit_symlink<W: Write>(
     builder.append_data(&mut header, archive_name, std::io::empty())
 }
 
+#[cfg(target_os = "linux")]
+fn docker_load_image_archive(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    authorization: &SurfaceAuthorization,
+    origin: &RequestOrigin,
+    archive_bytes: &[u8],
+) -> Result<String, String> {
+    const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+    let mut entries = BTreeMap::<String, Vec<u8>>::new();
+    // Docker may gzip the request body even when the saved archive itself is
+    // an uncompressed tar. Decode the transport envelope before walking it.
+    let decoded = ferro_core::layer_compression::decompress_bytes_to_reader(archive_bytes.to_vec())
+        .map_err(|error| format!("docker: image load compression: {error}"))?;
+    let mut archive = tar::Archive::new(decoded);
+    for entry in archive
+        .entries()
+        .map_err(|error| format!("docker: image load archive: {error}"))?
+    {
+        let mut entry = entry.map_err(|error| format!("docker: image load archive: {error}"))?;
+        let path = entry
+            .path()
+            .map_err(|error| format!("docker: image load path: {error}"))?
+            .to_path_buf();
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err("docker: image load archive contains an unsafe path".to_string());
+        }
+        let path = path
+            .to_str()
+            .ok_or_else(|| "docker: image load archive path is not UTF-8".to_string())?
+            .to_string();
+        if entry.size() > MAX_ENTRY_BYTES {
+            return Err(format!(
+                "docker: image load entry exceeds {} bytes: {path}",
+                MAX_ENTRY_BYTES
+            ));
+        }
+        if entries.contains_key(&path) {
+            return Err(format!("docker: image load archive repeats entry: {path}"));
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("docker: image load entry {path}: {error}"))?;
+        entries.insert(path, bytes);
+    }
+
+    let manifest_bytes = entries
+        .get("manifest.json")
+        .ok_or_else(|| "docker: image load archive is missing manifest.json".to_string())?;
+    let manifests: Vec<serde_json::Value> = serde_json::from_slice(manifest_bytes)
+        .map_err(|error| format!("docker: image load manifest is invalid: {error}"))?;
+    if manifests.len() != 1 {
+        return Err("docker: image load requires exactly one image in the archive".to_string());
+    }
+    let manifest = &manifests[0];
+    let config_name = manifest
+        .get("Config")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "docker: image load manifest has no Config".to_string())?;
+    let config_bytes = entries
+        .get(config_name)
+        .ok_or_else(|| format!("docker: image load is missing config {config_name}"))?;
+    let config_digest = format!("sha256:{:x}", Sha256::digest(config_bytes));
+    let expected_config_name = format!(
+        "{}.json",
+        config_digest
+            .strip_prefix("sha256:")
+            .expect("sha256 digest has prefix")
+    );
+    if config_name != expected_config_name {
+        return Err("docker: image load config digest does not match its filename".to_string());
+    }
+    let reference = manifest
+        .get("RepoTags")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|tags| tags.first())
+        .and_then(serde_json::Value::as_str)
+        .filter(|tag| !tag.is_empty())
+        .ok_or_else(|| "docker: image load archive has no repository tag".to_string())?;
+    let reference = canonicalize_reference(reference).map_err(|error| error.to_string())?;
+    let layer_names = manifest
+        .get("Layers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "docker: image load manifest has no Layers".to_string())?;
+    let mut layers = Vec::with_capacity(layer_names.len());
+    let mut diff_ids = Vec::with_capacity(layer_names.len());
+    let mut layer_blobs = Vec::with_capacity(layer_names.len());
+    for layer_name in layer_names {
+        let layer_name = layer_name
+            .as_str()
+            .ok_or_else(|| "docker: image load layer name is not a string".to_string())?;
+        let raw_layer = entries
+            .get(layer_name)
+            .ok_or_else(|| format!("docker: image load is missing layer {layer_name}"))?;
+        let diff_id = format!("sha256:{:x}", Sha256::digest(raw_layer));
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(raw_layer)
+            .map_err(|error| format!("docker: image load layer compression: {error}"))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|error| format!("docker: image load layer compression: {error}"))?;
+        let digest = format!("sha256:{:x}", Sha256::digest(&compressed));
+        diff_ids.push(diff_id);
+        layers.push(Descriptor {
+            media_type: OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(),
+            digest,
+            size: compressed.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        });
+        layer_blobs.push(compressed);
+    }
+
+    let mut config: serde_json::Value = serde_json::from_slice(config_bytes)
+        .map_err(|error| format!("docker: image load config is invalid: {error}"))?;
+    if let Some(rootfs) = config.get_mut("rootfs") {
+        if let Some(rootfs) = rootfs.as_object_mut() {
+            rootfs.insert("type".to_string(), serde_json::json!("layers"));
+            rootfs.insert("diff_ids".to_string(), serde_json::json!(diff_ids));
+        }
+    }
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|error| format!("docker: image load config serialization: {error}"))?;
+    let config_digest = format!("sha256:{:x}", Sha256::digest(&config_bytes));
+    let manifest = ImageManifest {
+        schema_version: 2,
+        media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+        config: Descriptor {
+            media_type: OCI_IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+            digest: config_digest.clone(),
+            size: config_bytes.len() as i64,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        },
+        layers,
+        artifact_type: None,
+        subject: None,
+        annotations: HashMap::new(),
+    };
+    let manifest_json = serde_json::to_string(&manifest)
+        .map_err(|error| format!("docker: image load manifest serialization: {error}"))?;
+    let plan = store
+        .prepare_reference_write(
+            &reference,
+            &config_digest,
+            OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+            &manifest_json,
+        )
+        .map_err(|error| format!("docker: image load authorization plan: {error}"))?;
+    let permit = authorization
+        .authorize_image_reference_write_plan(origin, &plan)
+        .map_err(|error| format!("docker: image load authorization: {error}"))?;
+    for (layer, bytes) in manifest.layers.iter().zip(layer_blobs.iter()) {
+        let path = runtime_dir
+            .join("images")
+            .join("blobs")
+            .join(layer.digest.replace(':', "_"));
+        write_bytes_atomically(&path, bytes)
+            .map_err(|error| format!("docker: image load layer publication: {error}"))?;
+    }
+    let config_path = runtime_dir
+        .join("images")
+        .join("configs")
+        .join(config_digest.replace(':', "_"));
+    write_bytes_atomically(&config_path, &config_bytes)
+        .map_err(|error| format!("docker: image load config publication: {error}"))?;
+    store
+        .put_reference_authorized(plan, permit)
+        .map_err(|error| format!("docker: image load reference publication: {error}"))?;
+    Ok(reference)
+}
+
 fn handle_tag(
     store: &LocalImageStore,
     source: &str,
@@ -12079,6 +12261,22 @@ fn handle_docker_compat_connection(
                 let body = docker_pull_status(&reference, lazy);
                 http_response(200, &body, "application/json")
             }
+            ("POST", "/images/load") => {
+                if request.body.is_empty() {
+                    return Err("docker: image load requires an archive".to_string());
+                }
+                let loaded = docker_load_image_archive(
+                    runtime_dir.as_ref(),
+                    &store,
+                    &surface_authorization,
+                    &origin,
+                    &request.body,
+                )?;
+                let body = serde_json::json!({
+                    "stream": format!("Loaded image: {loaded}\\n")
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
+            }
             ("POST", "/plugins/pull") => docker_error_response(
                 404,
                 "docker: plugin pull is unsupported; install a signed local plugin manifest",
@@ -13486,6 +13684,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     }
 
     let mut content_length = 0usize;
+    let mut chunked = false;
     let mut headers = HashMap::new();
     for line in lines {
         if line.contains('\0') {
@@ -13503,26 +13702,69 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
                     .trim()
                     .parse::<usize>()
                     .map_err(|_| "docker: invalid content-length".to_string())?;
+            } else if normalized_key == "transfer-encoding" {
+                chunked = normalized_value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"));
             }
         } else {
             return Err("docker: invalid request header".to_string());
         }
     }
+    if chunked && content_length != 0 {
+        return Err("docker: request cannot combine chunked encoding and content-length".into());
+    }
     if content_length > MAX_HTTP_BODY_BYTES {
         return Err("docker: request too large".to_string());
     }
-    let mut body = buffer[header_end..].to_vec();
-    while body.len() < content_length {
-        let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
-        if read == 0 {
-            return Err("docker: incomplete request body".to_string());
+    let prefix = Cursor::new(buffer[header_end..].to_vec());
+    let mut reader = BufReader::new(prefix.chain(&mut *stream));
+    let mut body = Vec::new();
+    if chunked {
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .map_err(|err| format!("docker: chunked request header: {err}"))?;
+            let size_text = line.trim().split(';').next().unwrap_or_default();
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| "docker: invalid chunk size".to_string())?;
+            if size == 0 {
+                // Consume optional trailer headers through the terminating
+                // blank line before returning the request to the dispatcher.
+                loop {
+                    line.clear();
+                    reader
+                        .read_line(&mut line)
+                        .map_err(|err| format!("docker: chunked request trailer: {err}"))?;
+                    if line == "\r\n" || line == "\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                break;
+            }
+            if body.len().saturating_add(size) > MAX_HTTP_BODY_BYTES {
+                return Err("docker: request too large".to_string());
+            }
+            let start = body.len();
+            body.resize(start + size, 0);
+            reader
+                .read_exact(&mut body[start..])
+                .map_err(|err| format!("docker: incomplete chunked request body: {err}"))?;
+            let mut terminator = [0_u8; 2];
+            reader
+                .read_exact(&mut terminator)
+                .map_err(|err| format!("docker: chunked request terminator: {err}"))?;
+            if terminator != *b"\r\n" {
+                return Err("docker: invalid chunked request terminator".to_string());
+            }
         }
-        body.extend_from_slice(&temp[..read]);
-        if body.len() > MAX_HTTP_BODY_BYTES {
-            return Err("docker: request too large".to_string());
-        }
+    } else if content_length > 0 {
+        body.resize(content_length, 0);
+        reader
+            .read_exact(&mut body)
+            .map_err(|err| format!("docker: incomplete request body: {err}"))?;
     }
-    body.truncate(content_length);
     Ok(HttpRequest {
         method,
         path,
@@ -14908,6 +15150,19 @@ volumes:
             request.headers.get("upgrade").map(String::as_str),
             Some("tcp")
         );
+    }
+
+    #[test]
+    fn read_http_request_decodes_chunked_bodies() {
+        let (mut writer, mut reader) = StdUnixStream::pair().expect("pair");
+        writer
+            .write_all(
+                b"POST /images/load HTTP/1.1\r\nHost: docker\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nload\r\n0\r\nX-Test: trailer\r\n\r\n",
+            )
+            .expect("write");
+        drop(writer);
+        let request = read_http_request(&mut reader).expect("chunked request");
+        assert_eq!(request.body, b"load");
     }
 
     #[cfg(target_os = "linux")]

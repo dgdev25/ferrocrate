@@ -3534,7 +3534,9 @@ impl ContainerRuntime {
         // supervisor has already persisted the terminal state.  Treat these
         // terminal states as a successful no-op so the following delete can
         // complete instead of reporting a spurious post-effect conflict.
-        if matches!(record.status.as_str(), "stopped" | "killed" | "exited") {
+        if matches!(record.status.as_str(), "stopped" | "killed")
+            || (record.status == "exited" && record.last_exit_code == Some(0))
+        {
             return Ok(());
         }
         stop_pid(record.pid, timeout)?;

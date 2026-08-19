@@ -9354,7 +9354,19 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
         )));
     }
     let (bin, rest) = parse_cmd_args(&cmd)?;
-    let mut child = Command::new(bin)
+    if bin != "slirp4netns" {
+        return Err(RuntimeError::InvalidCommand(
+            "rootless networking command must use slirp4netns".into(),
+        ));
+    }
+    let slirp_binary =
+        crate::rootless::trusted_executable_path("slirp4netns").ok_or_else(|| {
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "slirp4netns is unavailable or not a trusted root-owned executable",
+            ))
+        })?;
+    let mut child = Command::new(slirp_binary)
         .args(rest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

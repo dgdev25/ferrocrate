@@ -14810,6 +14810,45 @@ mod tests {
         assert!(error.contains("exited with status 7"));
     }
 
+    #[test]
+    fn compose_health_wait_handles_healthy_unhealthy_and_missing_checks() {
+        let temp = configured_cli_runtime("disabled");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        for (id, name, health_status) in [
+            ("healthy", "healthy", "healthy"),
+            ("unhealthy", "unhealthy", "unhealthy"),
+            ("no-health", "no-health", "none"),
+        ] {
+            let record: ferro_core::container_store::ContainerRecord =
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "pid": 0,
+                    "image": "example.invalid/health:latest",
+                    "command": ["true"],
+                    "created_at_unix": 1,
+                    "stdout_path": "",
+                    "stderr_path": "",
+                    "status": "running",
+                    "health_status": health_status
+                }))
+                .expect("health record");
+            store.put(&record).expect("store health record");
+        }
+        drop(store);
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        assert!(super::wait_for_compose_health(&runtime, "healthy").is_ok());
+        let error = super::wait_for_compose_health(&runtime, "unhealthy")
+            .expect_err("unhealthy dependency must fail");
+        assert!(error.contains("is unhealthy"));
+        let error = super::wait_for_compose_health(&runtime, "no-health")
+            .expect_err("missing healthcheck must fail");
+        assert!(error.contains("has no healthcheck"));
+    }
+
     use ferro_core::runtime::{ContainerRuntime, NetworkBackend};
     use ferro_core::volume_store::LocalVolumeStore;
     use std::io::Write;

@@ -441,6 +441,37 @@ fn docker_compat_update_changes_pending_restart_policy() {
 }
 
 #[test]
+fn docker_compat_update_combines_limits_and_restart_policy() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=combined-update-compat",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+    let (status, response) = harness.request_bytes(
+        "POST",
+        &format!("/v1.45/containers/{id}/update"),
+        "application/json",
+        br#"{"Memory":67108864,"PidsLimit":32,"RestartPolicy":{"Name":"always","MaximumRetryCount":0}}"#,
+    );
+    assert_eq!(status, 200, "update response={response}");
+    let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/json"));
+    assert_eq!(status, 200, "inspect response={response}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("inspect JSON");
+    assert_eq!(inspect["HostConfig"]["Memory"], 67_108_864u64);
+    assert_eq!(inspect["HostConfig"]["PidsLimit"], 32u64);
+    assert_eq!(inspect["HostConfig"]["RestartPolicy"]["Name"], "always");
+}
+
+#[test]
 fn docker_compat_inspect_uses_rfc3339_started_at() {
     let harness = DaemonHarness::spawn();
     let body = r#"{"Image":"busybox","Cmd":["true"]}"#;

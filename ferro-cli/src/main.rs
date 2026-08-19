@@ -12018,13 +12018,6 @@ fn handle_docker_compat_connection(
                         "docker: wait condition is unsupported: {condition}"
                     ));
                 }
-                let id = {
-                    let pending = state
-                        .pending
-                        .lock()
-                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                    docker_resolve_id(&runtime, &pending, requested_id)?
-                };
                 let timeout = query
                     .get("timeout")
                     .map(|value| {
@@ -12037,6 +12030,13 @@ fn handle_docker_compat_connection(
                     })
                     .transpose()?
                     .flatten();
+                let id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    docker_resolve_id(&runtime, &pending, requested_id)?
+                };
                 // Docker CLI issues `/wait?condition=removed` concurrently
                 // with `/start`, while the create record is still pending.
                 // Reconcile that pre-start window before evaluating exit or

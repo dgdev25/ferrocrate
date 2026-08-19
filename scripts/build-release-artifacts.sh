@@ -180,6 +180,11 @@ main() {
     exit 1
   fi
 
+  if [[ "$os" == "linux" && -n "${FERROCRATE_LINUX_GLIBC_BASELINE:-}" ]]; then
+    bash "$(dirname -- "$0")/check-linux-binary-compat.sh" \
+      "$cli_bin" "$FERROCRATE_LINUX_GLIBC_BASELINE"
+  fi
+
   cp "$cli_bin" "$package_dir/$(binary_name ferrocrate "$os")"
 
   if [[ "$CHANNEL" == "paid" ]]; then

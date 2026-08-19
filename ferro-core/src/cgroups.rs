@@ -53,6 +53,7 @@ impl CgroupV2Manager {
     pub fn ensure_v2_available(&self) -> Result<(), CgroupError> {
         if self.root.join(CGROUP_CONTROLLERS).exists() {
             if !nix::unistd::Uid::effective().is_root()
+                && self.root.starts_with("/sys/fs/cgroup")
                 && fs::OpenOptions::new()
                     .write(true)
                     .open(self.root.join(CGROUP_SUBTREE_CONTROL))

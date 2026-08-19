@@ -26,6 +26,15 @@ grep -q '^rootless.install.bwrap=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.bwrap_nested=' "$tmp_home/dry-run.txt"
 grep -q '^rootless.install.runtime_dir=pass$' "$tmp_home/dry-run.txt"
 
+# Bridge networking is an explicit operator choice. Persist it only when the
+# operator asks for it; ordinary installs retain the fail-closed default.
+run_installer --rootless-network --dry-run >"$tmp_home/network-dry-run.txt"
+grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$tmp_home/network-dry-run.txt"
+if grep -q '^Environment=FERROCRATE_ROOTLESS_NETNS=1$' "$tmp_home/dry-run.txt"; then
+  echo "rootless networking unexpectedly enabled by default" >&2
+  exit 1
+fi
+
 # Numeric UID/GID subordinate-ID entries are valid system configuration and
 # must produce the same installer result as username entries.
 printf '%s:200000:65536\n' "$(id -u)" >"$tmp_home/numeric-subuid"

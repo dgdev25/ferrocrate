@@ -8,12 +8,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--upgrade] [--uninstall] [--dry-run] [--strict]
+Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--rootless-network] [--enable] [--upgrade] [--uninstall] [--dry-run] [--strict]
 
 Installs ~/.local/bin/ferrocrate and a systemd user unit. --enable starts the
 unit immediately when systemd --user is available. --upgrade atomically replaces
 an existing per-user binary and unit. Use --dry-run to inspect the plan without
 writing files. --uninstall removes only the installed per-user binary and unit.
+--rootless-network persists the explicit slirp4netns bridge opt-in in the user
+service; without it, bridge networking remains disabled by default.
 --strict fails before mutation when required rootless host
 prerequisites are unavailable.
 EOF
@@ -21,6 +23,7 @@ EOF
 
 binary=""
 socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ferrocrate.sock"
+rootless_network=0
 enable=0
 upgrade=0
 uninstall=0
@@ -30,6 +33,7 @@ while (($#)); do
   case "$1" in
     --binary) binary="${2:?missing path after --binary}"; shift 2 ;;
     --socket) socket="${2:?missing path after --socket}"; shift 2 ;;
+    --rootless-network) rootless_network=1; shift ;;
     --enable) enable=1; shift ;;
     --upgrade) upgrade=1; shift ;;
     --uninstall) uninstall=1; shift ;;
@@ -195,6 +199,12 @@ ExecStart=$binary daemon --socket $socket --docker-compat
 Restart=on-failure
 RestartSec=2
 Environment=FERROCRATE_RUNTIME_DIR=%h/.local/share/ferrocrate
+"
+if ((rootless_network)); then
+  unit_content+="Environment=FERROCRATE_ROOTLESS_NETNS=1
+"
+fi
+unit_content+="
 
 [Install]
 WantedBy=default.target

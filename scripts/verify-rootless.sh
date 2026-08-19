@@ -42,12 +42,37 @@ fi
 # mechanism and reject hosts that the production path supports. Keep mount
 # propagation unchanged: changing the caller's root propagation is optional.
 # This probe is side-effect free: it launches `true` and exits.
-if command -v unshare >/dev/null 2>&1 && \
-  unshare --user --mount --fork --propagation unchanged true >/dev/null 2>&1; then
-  echo "rootless.userns_mount=pass"
+if command -v unshare >/dev/null 2>&1; then
+  if userns_mount_probe=$(unshare --user --mount --fork --propagation unchanged true 2>&1); then
+    echo "rootless.userns_mount=pass"
+  else
+    probe_reason=$(printf '%s' "$userns_mount_probe" | tr '\n' ' ' | tr -s ' ' | cut -c1-240)
+    echo "rootless.userns_mount=missing"
+    echo "rootless.userns_mount_reason=${probe_reason:-probe exited unsuccessfully}"
+    echo "warning: unprivileged user+mount namespace creation is unavailable" >&2
+    missing=1
+  fi
 else
   echo "rootless.userns_mount=missing"
+  echo "rootless.userns_mount_reason=unshare command is unavailable"
   echo "warning: unprivileged user+mount namespace creation is unavailable" >&2
+  missing=1
+fi
+
+if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1; then
+  if bwrap_nested_probe=$(unshare --user --map-root-user --net --fork sh -c 'exec bwrap --ro-bind / / true' 2>&1); then
+    echo "rootless.bwrap_nested=pass"
+  else
+    probe_reason=$(printf '%s' "$bwrap_nested_probe" | tr '\n' ' ' | tr -s ' ' | cut -c1-240)
+    echo "rootless.bwrap_nested=missing"
+    echo "rootless.bwrap_nested_reason=${probe_reason:-probe exited unsuccessfully}"
+    echo "warning: bridge-mode rootless workloads may be unavailable because nested bubblewrap user namespaces are denied" >&2
+    missing=1
+  fi
+else
+  echo "rootless.bwrap_nested=missing"
+  echo "rootless.bwrap_nested_reason=unshare or bubblewrap command is unavailable"
+  echo "warning: bridge-mode rootless workloads may be unavailable because nested bubblewrap user namespaces are denied" >&2
   missing=1
 fi
 
@@ -55,15 +80,6 @@ fi
 # bubblewrap for the rootfs/mount boundary. A host can permit the standalone
 # mount probe above while denying that nested combination, so report it
 # separately instead of letting Compose fail after container state is created.
-if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
-  unshare --user --map-root-user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
-  echo "rootless.bwrap_nested=pass"
-else
-  echo "rootless.bwrap_nested=missing"
-  echo "warning: bridge-mode rootless workloads may be unavailable because nested bubblewrap user namespaces are denied" >&2
-  missing=1
-fi
-
 user=$(id -un)
 user_id=$(id -u)
 group_id=$(id -g)

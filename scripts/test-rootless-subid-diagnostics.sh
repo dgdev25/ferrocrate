@@ -86,3 +86,27 @@ set -e
 grep -q '^rootless.subuid=missing$' "$strict_output"
 grep -q '^rootless.subgid=missing$' "$strict_output"
 echo "rootless strict malformed-subid regression passed"
+
+# A denied namespace operation must retain a bounded, actionable reason rather
+# than collapsing to an unexplained boolean prerequisite failure.
+reason_bin="$tmp_dir/reason-bin"
+mkdir -p "$reason_bin"
+cat >"$reason_bin/unshare" <<'EOF'
+#!/bin/sh
+echo 'unshare: unshare failed: Operation not permitted' >&2
+exit 1
+EOF
+cat >"$reason_bin/bwrap" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$reason_bin/unshare" "$reason_bin/bwrap"
+reason_output="$tmp_dir/reason-output"
+PATH="$reason_bin:$PATH" \
+FERROCRATE_ROOTLESS_SUBUID_FILE="$tmp_dir/subuid" \
+FERROCRATE_ROOTLESS_SUBGID_FILE="$tmp_dir/subgid" \
+XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+bash "$repo_root/scripts/verify-rootless.sh" >"$reason_output" 2>&1
+grep -q '^rootless.userns_mount=missing$' "$reason_output"
+grep -q '^rootless.userns_mount_reason=unshare: unshare failed: Operation not permitted$' "$reason_output"
+echo "rootless namespace failure reason regression passed"

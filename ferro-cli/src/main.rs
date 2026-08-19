@@ -12009,13 +12009,6 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/wait");
-                let id = {
-                    let pending = state
-                        .pending
-                        .lock()
-                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                    docker_resolve_id(&runtime, &pending, requested_id)?
-                };
                 let condition = query
                     .get("condition")
                     .map(String::as_str)
@@ -12025,6 +12018,13 @@ fn handle_docker_compat_connection(
                         "docker: wait condition is unsupported: {condition}"
                     ));
                 }
+                let id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    docker_resolve_id(&runtime, &pending, requested_id)?
+                };
                 let timeout = query
                     .get("timeout")
                     .map(|value| {

@@ -381,6 +381,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/missing/wait?condition=unsupported",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/missing/pause",
         coverage: Coverage::Implemented,
         expected_status: 404,

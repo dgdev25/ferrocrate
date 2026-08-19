@@ -5406,12 +5406,29 @@ fn build_command(
         // releases the workload with a second SIGCONT. This avoids both the
         // pre-exec host-namespace race and short-lived workloads exiting
         // before networking is attached.
+        let shell = crate::rootless::trusted_executable_path("sh").ok_or_else(|| {
+            RuntimeError::InvalidCommand(
+                "rootless network namespaces require a trusted root-owned shell executable"
+                    .to_string(),
+            )
+        })?;
         let script = if no_new_privs {
-            "kill -STOP $$; exec setpriv --no-new-privs -- \"$@\""
+            let setpriv = crate::rootless::trusted_executable_path("setpriv").ok_or_else(|| {
+                RuntimeError::InvalidCommand(
+                    "rootless no-new-privileges requires a trusted root-owned setpriv executable"
+                        .to_string(),
+                )
+            })?;
+            format!(
+                "kill -STOP $$; exec {} --no-new-privs -- \"$@\"",
+                setpriv.display()
+            )
         } else {
-            "kill -STOP $$; exec \"$@\""
+            "kill -STOP $$; exec \"$@\"".to_string()
         };
-        unshare_cmd.args(["sh", "-c", script, "ferrocrate-rootless"]);
+        unshare_cmd
+            .arg(shell)
+            .args(["-c", script.as_str(), "ferrocrate-rootless"]);
         if let Some(rootfs) = rootfs_dir.filter(|_| !running_as_root) {
             let inner = build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs)?;
             unshare_cmd.arg(inner.get_program());

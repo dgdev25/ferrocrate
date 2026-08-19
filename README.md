@@ -41,12 +41,14 @@ online data collection have independent consent and approval gates.
 
 ## Docker comparison
 
-The latest three-round, no-skip host-local ten-feature comparison uses the
-`alpine:3.20` fixture. The current-head
-[`iptables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-7307c43c-iptables.md)
-and
-[`nftables`](docs/evidence/performance/2026-08-18-docker-comparison-current-head-7307c43c-nftables.md)
-measurements are archived with host, backend, image, and round metadata.
+The latest valid three-round, no-skip host-local ten-feature comparison uses
+the `alpine:3.20` fixture. The current comparison snapshot is maintained in
+the [`benchmark register`](docs/evidence/performance/benchmark-register.md),
+with detailed [`iptables`](docs/evidence/performance/2026-08-19-docker-comparison-current-head-fa803a22-iptables.md)
+and [`nftables`](docs/evidence/performance/2026-08-19-docker-comparison-current-head-fa803a22-nftables.md)
+reports archived with host, backend, image, and round metadata. The register's
+top table includes the Docker-versus-Ferrocrate percentage difference for all
+ten measured features.
 Both report command-path medians and explicitly do not claim universal Docker
 parity, cross-platform support, or production superiority.
 

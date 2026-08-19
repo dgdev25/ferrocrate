@@ -5648,7 +5648,6 @@ fn build_command(
     readonly_rootfs: bool,
 ) -> Result<Command, RuntimeError> {
     let running_as_root = nix::unistd::Uid::effective().is_root();
-    let rootless_shared_netns = netns_name.is_some_and(|value| value.starts_with("pid:"));
     let direct_container_setup = running_as_root && netns_name.is_some();
     // Keep the launcher shell outside a rootful image. A shell-less OCI image
     // (for example, FROM scratch with a static binary) cannot execute the
@@ -5679,16 +5678,6 @@ fn build_command(
         let mut direct_cmd = Command::new(&cmd[0]);
         direct_cmd.args(&cmd[1..]);
         direct_cmd
-    } else if rootless_shared_netns {
-        // Join the leader's namespace in the pre-exec hook below. Keeping the
-        // workload command direct avoids requiring privileged `ip netns exec`.
-        if let Some(rootfs) = rootfs_dir {
-            build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs)?
-        } else {
-            let mut direct_cmd = Command::new(&cmd[0]);
-            direct_cmd.args(&cmd[1..]);
-            direct_cmd
-        }
     } else if let Some(netns) = netns_name {
         let ip_path = crate::rootless::trusted_executable_path("ip").ok_or_else(|| {
             RuntimeError::InvalidCommand(
@@ -5844,7 +5833,7 @@ fn build_command(
     let caps = capabilities.to_vec();
     let seccomp = seccomp_profile.cloned();
     let seccomp_permissive = seccomp_permissive_mode();
-    let setup_netns = if direct_container_setup || rootless_shared_netns {
+    let setup_netns = if direct_container_setup {
         netns_name.map(str::to_string)
     } else {
         None
@@ -5940,17 +5929,7 @@ fn build_command(
 }
 
 fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {
-    let path = if let Some(pid) = netns_name.strip_prefix("pid:") {
-        let pid = pid.parse::<u32>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid shared network namespace PID",
-            )
-        })?;
-        PathBuf::from(format!("/proc/{pid}/ns/net"))
-    } else {
-        netns::netns_path(netns_name)
-    };
+    let path = netns::netns_path(netns_name);
     let file = fs::File::open(&path).map_err(|err| {
         io::Error::new(
             err.kind(),
@@ -6717,24 +6696,12 @@ fn setup_network(
                 "shared network namespace name is empty".to_string(),
             ));
         }
-        // Reuse the existing namespace without recording ownership. Rootless
-        // Compose uses a leader PID because an unprivileged caller cannot
-        // publish a bind-mounted /run/netns entry for its user namespace.
-        let path = if let Some(pid) = shared_netns.strip_prefix("pid:") {
-            let pid = pid.parse::<u32>().map_err(|_| {
-                RuntimeError::Network("shared network namespace PID is invalid".to_string())
-            })?;
-            if pid == 0 {
-                return Err(RuntimeError::Network(
-                    "shared network namespace PID must be non-zero".to_string(),
-                ));
-            }
-            PathBuf::from(format!("/proc/{pid}/ns/net"))
-        } else {
-            netns::build_ip_netns_del_cmd(shared_netns)
-                .map_err(|error| RuntimeError::Network(error.to_string()))?;
-            netns::netns_path(shared_netns)
-        };
+        // Reuse the existing namespace without recording ownership. The
+        // caller remains responsible for its lifecycle; container cleanup
+        // must never delete a CRI pod sandbox namespace.
+        netns::build_ip_netns_del_cmd(shared_netns)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        let path = netns::netns_path(shared_netns);
         if !path.exists() {
             return Err(RuntimeError::Network(format!(
                 "shared network namespace {shared_netns} does not exist"
@@ -10398,13 +10365,7 @@ fn persisted_network_name(associated: Option<&str>, network_mode: &str) -> Optio
         && !nix::unistd::Uid::effective().is_root()
         && rootless_netns_enabled()
     {
-        // Keep a Compose logical network association for diagnostics and
-        // leader discovery, while never presenting the rootless slirp path as
-        // an owned kernel bridge.
-        return associated
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && *value != "bridge")
-            .map(str::to_string);
+        return None;
     }
     associated_network_name(associated, network_mode)
 }

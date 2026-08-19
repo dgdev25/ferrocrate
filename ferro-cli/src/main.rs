@@ -8230,6 +8230,21 @@ fn bind_run_network(
         ferro_core::managed_overlay::ManagedOverlayRef::parse(&mode)
             .map_err(|error| format!("run: invalid managed overlay: {error}"))?;
         Some(managed.to_string())
+    } else if let Some(pid) = mode.strip_prefix("container:") {
+        // Internal Compose follower binding. The runtime validates the PID
+        // again and enters the leader's rootless network namespace in its
+        // pre-exec hook; no named bridge record is required.
+        let pid = pid.strip_prefix("pid:").ok_or_else(|| {
+            "run: container network binding must use container:pid:<leader-pid>".to_string()
+        })?;
+        let pid = pid
+            .parse::<u32>()
+            .map_err(|_| "run: container network binding leader PID is invalid".to_string())?;
+        if pid == 0 {
+            return Err("run: container network binding leader PID must be non-zero".to_string());
+        }
+        mode = format!("container:pid:{pid}");
+        None
     } else if is_builtin_network_mode(&mode) {
         validate_network_mode(&mode)?;
         Some(mode.clone())
@@ -9159,6 +9174,7 @@ fn ensure_compose_networks(
     let needs_rootful_bridge = definitions.iter().any(|(_, driver, external)| {
         !external && driver.as_deref().unwrap_or("bridge") == "bridge"
     });
+    let rootless_compose = !nix::unistd::Uid::effective().is_root() && needs_rootful_bridge;
     if needs_rootful_bridge {
         // Rootless bridge provisioning is a Compose-level shared-network
         // operation and is unsupported regardless of whether per-container
@@ -9170,7 +9186,14 @@ fn ensure_compose_networks(
             rootless_enabled,
             nix::unistd::Uid::effective().is_root(),
         ) {
-            return Err(message.to_string());
+            // Rootless Compose provides one shared slirp-backed namespace per
+            // logical project network. We still persist a logical network
+            // record for name resolution and ownership, but skip all kernel
+            // bridge mutations; the first service becomes the leader and
+            // followers join it through `container:pid:<leader>`.
+            if !rootless_enabled {
+                return Err(message.to_string());
+            }
         }
     }
     let mut records = load_networks(runtime_dir)?;
@@ -9213,8 +9236,13 @@ fn ensure_compose_networks(
                 record.generation,
             )
             .map_err(|error| error.to_string())?;
-        execute_network_create(runtime_dir, &record, permit)?;
+        if !rootless_compose || cfg!(test) {
+            execute_network_create(runtime_dir, &record, permit)?;
+        }
         records.push(record);
+        if rootless_compose {
+            save_networks(runtime_dir, &records)?;
+        }
         created.push(name);
     }
     if !created.is_empty() {
@@ -9245,6 +9273,35 @@ fn ensure_compose_networks(
 }
 
 #[cfg(target_os = "linux")]
+fn compose_rootless_network_binding(
+    runtime: &ContainerRuntime,
+    service: &ComposeService,
+    name: &str,
+    default_network: &str,
+    leaders: &HashMap<String, u32>,
+) -> Result<(String, Option<String>), String> {
+    let logical = compose_service_network(service, name, default_network)?;
+    if nix::unistd::Uid::effective().is_root()
+        || matches!(logical.as_str(), "host" | "none" | "wireguard")
+    {
+        return Ok((logical, None));
+    }
+    if let Some(pid) = leaders.get(&logical) {
+        return Ok((format!("container:pid:{pid}"), Some(logical)));
+    }
+    // Reuse an already-running Compose leader on repeated `compose up`.
+    if let Ok(records) = runtime.list() {
+        if let Some(record) = records
+            .into_iter()
+            .find(|record| record.name.as_deref() == Some(name) && record.status == "running")
+        {
+            return Ok((format!("container:pid:{}", record.pid), Some(logical)));
+        }
+    }
+    Ok((logical.clone(), Some(logical)))
+}
+
+#[cfg(target_os = "linux")]
 fn compose_rootless_bridge_boundary(
     rootless_enabled: bool,
     effective_root: bool,
@@ -9268,9 +9325,10 @@ fn remove_owned_compose_networks(
         return Ok(());
     };
     let associations = runtime.list().map_err(|error| error.to_string())?;
-    let records = load_networks(runtime_dir)?;
+    let mut records = load_networks(runtime_dir)?;
+    let rootless_compose = !nix::unistd::Uid::effective().is_root();
     for name in &entry.networks {
-        let Some(record) = records.iter().find(|record| record.name == *name) else {
+        let Some(record) = records.iter().find(|record| record.name == *name).cloned() else {
             continue;
         };
         if associations
@@ -9281,16 +9339,26 @@ fn remove_owned_compose_networks(
                 "compose: cannot remove owned network {name} while containers remain attached"
             ));
         }
-        let permit = authorization
-            .authorize_named(
-                origin,
-                AuthorizationAction::NetworkDelete,
-                ResourceKind::Network,
-                &record.name,
-                record.generation,
-            )
-            .map_err(|error| error.to_string())?;
-        execute_network_remove(runtime_dir, record, &associations, permit)?;
+        if rootless_compose {
+            // Rootless Compose records are logical names only; the slirp
+            // helper and leader namespace are owned by the containers and are
+            // torn down by their normal lifecycle.
+            records.retain(|entry| entry.name != record.name);
+        } else {
+            let permit = authorization
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkDelete,
+                    ResourceKind::Network,
+                    &record.name,
+                    record.generation,
+                )
+                .map_err(|error| error.to_string())?;
+            execute_network_remove(runtime_dir, &record, &associations, permit)?;
+        }
+    }
+    if rootless_compose {
+        save_networks(runtime_dir, &records)?;
     }
     ownership.retain(|entry| entry.project != project_key);
     save_compose_network_ownership(runtime_dir, &ownership)
@@ -9402,12 +9470,21 @@ fn handle_compose(
                 &surface_authorization,
             )?;
             let mut failures = Vec::new();
+            let mut rootless_network_leaders = HashMap::<String, u32>::new();
             for prepared in prepared {
                 let service = project
                     .compose
                     .services
                     .get(&prepared.name)
                     .ok_or_else(|| format!("compose: missing service {}", prepared.name))?;
+                let (effective_compose_network, logical_network) =
+                    compose_rootless_network_binding(
+                        runtime,
+                        service,
+                        &prepared.name,
+                        &default_network,
+                        &rootless_network_leaders,
+                    )?;
                 let mut mutations = prepared
                     .prerequisites
                     .iter()
@@ -9425,6 +9502,7 @@ fn handle_compose(
                         service,
                         &prepared.instance,
                         &prepared.image,
+                        Some(&effective_compose_network),
                     )?
                     .1
                 } else {
@@ -9505,6 +9583,7 @@ fn handle_compose(
                     service,
                     &prepared.instance,
                     &prepared.image,
+                    Some(&effective_compose_network),
                 )?
                 .1;
                 let run_child = if let Some(previous) = predecessor.as_ref() {
@@ -9558,8 +9637,18 @@ fn handle_compose(
                     service,
                     Some(&prepared.instance),
                     Some(&prepared.image),
+                    Some(&effective_compose_network),
                 ) {
                     failures.push(format!("{} run failed: {error}", prepared.instance));
+                } else if let Some(logical) = logical_network {
+                    if let Ok(records) = runtime.list() {
+                        if let Some(record) = records.into_iter().find(|record| {
+                            record.name.as_deref() == Some(prepared.instance.as_str())
+                                && record.status == "running"
+                        }) {
+                            rootless_network_leaders.insert(logical, record.pid);
+                        }
+                    }
                 }
             }
             if !failures.is_empty() {
@@ -10058,6 +10147,7 @@ fn run_compose_service(
     service: &ComposeService,
     instance_override: Option<&str>,
     prepared_image: Option<&str>,
+    network_override: Option<&str>,
 ) -> Result<(), String> {
     let image = if let Some(image) = prepared_image {
         image.to_owned()
@@ -10066,7 +10156,9 @@ fn run_compose_service(
             "compose: service {name} image prerequisite was not prepared"
         ));
     };
-    let requested_network = compose_service_network(service, name, default_network)?;
+    let requested_network = network_override
+        .map(str::to_string)
+        .unwrap_or(compose_service_network(service, name, default_network)?);
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
@@ -10158,6 +10250,7 @@ fn compose_service_execution_digest(
     service: &ComposeService,
     instance: &str,
     image: &str,
+    network_override: Option<&str>,
 ) -> Result<(String, [u8; 32]), String> {
     let cmd = compose_service_command(service);
     let env_entries = compose_service_env(project_dir, service)?;
@@ -10173,7 +10266,9 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
-    let network = compose_service_network(service, name, default_network)?;
+    let network = network_override
+        .map(str::to_string)
+        .unwrap_or(compose_service_network(service, name, default_network)?);
     let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
         let mut value = parse_entrypoint(entrypoint)?;
         value.extend_from_slice(&cmd);
@@ -16312,6 +16407,22 @@ volumes:
         let error = super::compose_service_network(&multiple, "api", "bridge")
             .expect_err("multiple attachments are bounded");
         assert!(error.contains("multiple networks"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_compose_leader_binding_is_encoded_as_internal_pid_namespace() {
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let binding = super::bind_run_network(runtime_dir.path(), "container:pid:4242", None, None)
+            .expect("valid internal rootless binding");
+        assert_eq!(binding.mode, "container:pid:4242");
+        assert!(binding.association.is_none());
+        let error = match super::bind_run_network(runtime_dir.path(), "container:4242", None, None)
+        {
+            Ok(_) => panic!("binding without pid marker must fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("container:pid"));
     }
 
     #[cfg(target_os = "linux")]

@@ -8946,6 +8946,7 @@ fn compose_project_key(project: &ComposeProject) -> String {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(test)]
 fn compose_default_network_name(project_dir: &Path) -> Result<String, String> {
     compose_default_network_name_with_declared(project_dir, None)
 }

@@ -11322,6 +11322,10 @@ fn handle_docker_compat_connection(
                     .map(|value| parse_docker_bool_query(Some(value), "follow"))
                     .transpose()?
                     .unwrap_or(false);
+                // Validate tail syntax before resolving the resource so
+                // malformed requests retain Docker's 400-class response even
+                // when the container is absent.
+                let _ = docker_tail_logs("", tail.as_deref())?;
                 let pending = state
                     .pending
                     .lock()

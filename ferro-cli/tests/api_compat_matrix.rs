@@ -255,6 +255,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/containers/missing/logs?tail=invalid",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/missing/stats",
         coverage: Coverage::Implemented,
         expected_status: 404,

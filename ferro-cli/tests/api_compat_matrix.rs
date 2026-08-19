@@ -599,6 +599,28 @@ impl DaemonHarness {
         (code, body.to_owned())
     }
 
+    fn request_binary(&self, method: &str, path: &str) -> (u16, Vec<u8>) {
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let mut stream = UnixStream::connect(&self.socket_path).expect("connect daemon socket");
+        stream.write_all(request.as_bytes()).expect("write request");
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        let separator = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("response headers");
+        let status = String::from_utf8_lossy(&response[..separator])
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("parse status code");
+        (status, response[separator + 4..].to_vec())
+    }
+
     fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -748,6 +770,31 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         history.as_array().is_some_and(|layers| !layers.is_empty()),
         "history={history}"
     );
+
+    let (status, archive) =
+        harness.request_binary("GET", "/images/get?names=matrix%2Fbuild%3Alatest");
+    assert_eq!(status, 200, "image get response status");
+    let mut archive = tar::Archive::new(std::io::Cursor::new(archive));
+    let entries = archive
+        .entries()
+        .expect("image export entries")
+        .map(|entry| {
+            entry
+                .expect("image export entry")
+                .path()
+                .expect("entry path")
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert!(entries
+        .iter()
+        .any(|path| path == std::path::Path::new("manifest.json")));
+    assert!(entries
+        .iter()
+        .any(|path| path == std::path::Path::new("repositories")));
+    assert!(entries
+        .iter()
+        .any(|path| path.to_string_lossy().ends_with("/layer.tar")));
 }
 
 #[test]

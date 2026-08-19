@@ -969,10 +969,7 @@ fn docker_compat_attach_forwards_stdin_over_hijacked_socket() {
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
     stream
         .write_all(
-            format!(
-                "POST /v1.45/containers/attach-stdin-wire/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
-            )
-            .as_bytes(),
+            "POST /v1.45/containers/attach-stdin-wire/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n".as_bytes(),
         )
         .expect("write attach handshake");
     stream

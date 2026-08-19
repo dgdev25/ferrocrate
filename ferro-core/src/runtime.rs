@@ -4177,7 +4177,7 @@ impl ContainerRuntime {
                     ));
                 }
                 let mut temp = tempfile::NamedTempFile::new_in(&runtime.runtime_dir)?;
-                temp.write_all(&archive)?;
+                temp.write_all(archive)?;
                 temp.as_file_mut().sync_all()?;
                 apply_layer_tar(&selected, temp.path())?;
                 Ok(())

@@ -813,7 +813,10 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
         "/v1.45/containers/exec-inspect/attach?logs=0&stream=0",
     );
     assert_eq!(status, 200, "post-start name attach response={response}");
-    assert!(response.is_empty(), "logs=0 attach should be empty: {response:?}");
+    assert!(
+        response.is_empty(),
+        "logs=0 attach should be empty: {response:?}"
+    );
 
     let exec_body = r#"{"Cmd":["/bin/busybox","true"]}"#;
     let exec_request = format!(

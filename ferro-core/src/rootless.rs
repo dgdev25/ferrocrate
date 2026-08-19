@@ -111,7 +111,10 @@ pub fn user_namespace_diagnostic() -> Result<(), String> {
 /// CLI/operator surfaces can distinguish an absent helper, a host policy
 /// denial, and a non-zero helper exit without exposing unbounded stderr.
 pub fn mount_namespace_diagnostic() -> Result<(), String> {
-    let output = Command::new("unshare")
+    let unshare = trusted_executable_path("unshare").ok_or_else(|| {
+        "unshare executable is unavailable or not a trusted root-owned executable".to_string()
+    })?;
+    let output = Command::new(unshare)
         .args([
             "--user",
             "--mount",

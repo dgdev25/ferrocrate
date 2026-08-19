@@ -25,7 +25,7 @@ use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, Re
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
-use ferro_core::image_fetch::resolve_layer_paths_with_store;
+use ferro_core::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
 use ferro_core::image_manifest::{
     parse_image_manifest, Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE,
     OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
@@ -34,7 +34,7 @@ use ferro_core::image_store::LocalImageStore;
 use ferro_core::image_tagging::{
     canonicalize_reference, execute_image_tag_authorized, prepare_image_tag, resolve_reference,
 };
-use ferro_core::layer_compression::CompressionFormat;
+use ferro_core::layer_compression::{open_decompressed_layer_reader, CompressionFormat};
 use ferro_core::registry::{parse_image_reference, RegistryClient};
 #[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
@@ -11972,6 +11972,92 @@ fn handle_docker_compat_connection(
                     .collect::<Vec<_>>();
                 let body = serde_json::to_string(&history).map_err(|error| error.to_string())?;
                 http_response(200, body.as_bytes(), "application/json")
+            }
+            ("GET", path) if path.starts_with("/images/") && path.ends_with("/get") => {
+                let encoded_name = path.trim_start_matches("/images/").trim_end_matches("/get");
+                let name = percent_decode_query_component(encoded_name)?;
+                let reference = resolve_reference(&store, &name)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let manifest = parse_image_manifest(&reference.manifest_json)
+                    .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
+                let config_path =
+                    resolve_config_path_with_store(runtime_dir.as_ref(), &name, &store)
+                        .map_err(|error| format!("docker: image config unavailable: {error}"))?
+                        .ok_or_else(|| "docker: image config blob is unavailable".to_string())?;
+                let layer_paths =
+                    resolve_layer_paths_with_store(runtime_dir.as_ref(), &name, &store)
+                        .map_err(|error| format!("docker: image layer unavailable: {error}"))?;
+                if layer_paths.len() != manifest.layers.len() {
+                    return Err("docker: image layer metadata does not match stored blobs".into());
+                }
+
+                let config_name = format!(
+                    "{}.json",
+                    manifest
+                        .config
+                        .digest
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&manifest.config.digest)
+                );
+                let layer_names = (0..layer_paths.len())
+                    .map(|index| format!("layer-{index}/layer.tar"))
+                    .collect::<Vec<_>>();
+                let manifest_entry = serde_json::json!([{
+                    "Config": config_name,
+                    "RepoTags": [reference.reference.clone()],
+                    "Layers": layer_names,
+                }]);
+                let mut repositories = serde_json::Map::new();
+                if let Some(colon) = reference.reference.rfind(':') {
+                    if colon > reference.reference.rfind('/').unwrap_or(0) {
+                        let repository = &reference.reference[..colon];
+                        let tag = &reference.reference[colon + 1..];
+                        repositories.insert(
+                            repository.to_string(),
+                            serde_json::json!({tag: reference.digest}),
+                        );
+                    }
+                }
+
+                let mut archive = Vec::new();
+                {
+                    let mut builder = tar::Builder::new(&mut archive);
+                    let append_bytes = |builder: &mut tar::Builder<&mut Vec<u8>>,
+                                        path: &str,
+                                        bytes: &[u8]|
+                     -> Result<(), String> {
+                        let mut header = tar::Header::new_gnu();
+                        header.set_size(bytes.len() as u64);
+                        header.set_mode(0o644);
+                        header.set_cksum();
+                        builder
+                            .append_data(&mut header, path, bytes)
+                            .map_err(|error| format!("docker: image export {path}: {error}"))
+                    };
+                    let config = std::fs::read(&config_path)
+                        .map_err(|error| format!("docker: image export config: {error}"))?;
+                    append_bytes(&mut builder, &config_name, &config)?;
+                    let manifest_bytes = serde_json::to_vec(&manifest_entry)
+                        .map_err(|error| format!("docker: image export manifest: {error}"))?;
+                    append_bytes(&mut builder, "manifest.json", &manifest_bytes)?;
+                    let repositories_bytes = serde_json::to_vec(&repositories)
+                        .map_err(|error| format!("docker: image export repositories: {error}"))?;
+                    append_bytes(&mut builder, "repositories", &repositories_bytes)?;
+                    for (layer_name, layer_path) in layer_names.iter().zip(layer_paths.iter()) {
+                        let mut reader = open_decompressed_layer_reader(layer_path)
+                            .map_err(|error| format!("docker: image export layer: {error}"))?;
+                        let mut layer = Vec::new();
+                        reader
+                            .read_to_end(&mut layer)
+                            .map_err(|error| format!("docker: image export layer: {error}"))?;
+                        append_bytes(&mut builder, layer_name, &layer)?;
+                    }
+                    builder
+                        .finish()
+                        .map_err(|error| format!("docker: finish image export: {error}"))?;
+                }
+                http_response(200, &archive, "application/x-tar")
             }
             ("POST", "/images/create") => {
                 let from_image = query

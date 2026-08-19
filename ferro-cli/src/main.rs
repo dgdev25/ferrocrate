@@ -411,6 +411,9 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     Exec {
         container: String,
+        /// Allocate a rootful kernel PTY for the command.
+        #[arg(long)]
+        tty: bool,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
@@ -3011,7 +3014,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 handle_restart(&runtime, &container, timeout)
             }
             #[cfg(target_os = "linux")]
-            Commands::Exec { container, cmd } => handle_exec(&runtime, &container, &cmd),
+            Commands::Exec {
+                container,
+                tty,
+                cmd,
+            } => handle_exec(&runtime, &container, &cmd, tty),
             Commands::Pull { image, lazy } => {
                 handle_pull(&image_store, &image, lazy, &surface_authorization)
             }
@@ -5211,7 +5218,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 request("GET", path).map(|body| print!("{}", String::from_utf8_lossy(&body)))
             }
         })(),
-        Commands::Exec { container, cmd } => (|| -> Result<(), String> {
+        Commands::Exec {
+            container,
+            tty,
+            cmd,
+        } => (|| -> Result<(), String> {
             if cmd.is_empty() {
                 return Err("exec: command is required".to_string());
             }
@@ -5219,7 +5230,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 "Cmd": cmd,
                 "AttachStdout": true,
                 "AttachStderr": true,
-                "Tty": false,
+                "Tty": tty,
             });
             let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
             let create_body = request_with_body(
@@ -5238,7 +5249,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 .ok_or_else(|| "remote exec create response omitted Id".to_string())?;
             let start = serde_json::to_vec(&serde_json::json!({
                 "Detach": false,
-                "Tty": false,
+                "Tty": tty,
             }))
             .map_err(|error| error.to_string())?;
             let raw = request_with_body(
@@ -8680,7 +8691,12 @@ fn parse_capabilities(entries: &[String]) -> Result<Vec<caps::Capability>, Strin
 }
 
 #[cfg(target_os = "linux")]
-fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> Result<(), String> {
+fn handle_exec(
+    runtime: &ContainerRuntime,
+    container: &str,
+    cmd: &[String],
+    tty: bool,
+) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("exec: container is required".to_string());
     }
@@ -8688,9 +8704,12 @@ fn handle_exec(runtime: &ContainerRuntime, container: &str, cmd: &[String]) -> R
         return Err("exec: command is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
-    let result = runtime
-        .exec(&resolved, cmd)
-        .map_err(|err| err.to_string())?;
+    let result = if tty {
+        runtime.exec_tty(&resolved, cmd)
+    } else {
+        runtime.exec(&resolved, cmd)
+    }
+    .map_err(|err| err.to_string())?;
     if !result.stdout.is_empty() {
         print!("{}", result.stdout);
     }
@@ -18144,6 +18163,7 @@ volumes:
         let _guard = TestRuntimeDir::new();
         let err = dispatch(Commands::Exec {
             container: "c1".to_string(),
+            tty: false,
             cmd: vec![],
         })
         .expect_err("missing command");

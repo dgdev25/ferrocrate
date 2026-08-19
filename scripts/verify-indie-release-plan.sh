@@ -74,4 +74,26 @@ if ! grep -Fq 'The current repository-wide roadmap contains ' "$plan"; then
 fi
 
 bash scripts/perf/check-benchmark-register.sh
+
+# Keep the current Docker API matrix count synchronized with its authoritative
+# evidence and the release plan. Historical evidence may retain older counts,
+# but the current-head record and plan must agree with the Rust matrix.
+matrix="ferro-cli/tests/api_compat_matrix.rs"
+[[ -f "$matrix" ]] || { echo "missing Docker API matrix: $matrix" >&2; exit 1; }
+declared="$(grep -c '^[[:space:]]*ApiCase {' "$matrix")"
+implemented="$(grep -c 'coverage: Coverage::Implemented' "$matrix")"
+unsupported="$(grep -c 'coverage: Coverage::Unsupported' "$matrix")"
+current_evidence="$(find docs/evidence/verification -maxdepth 1 -type f -name '2026-08-19-docker-api-matrix-tty-boundary-current-head.md' -print -quit)"
+[[ -n "$current_evidence" ]] || {
+  echo "missing current Docker API matrix evidence" >&2
+  exit 1
+}
+grep -Fq "The matrix now contains $declared declared cases: $implemented implemented and $unsupported explicitly" "$current_evidence" || {
+  echo "Docker API matrix evidence count is stale (expected $declared/$implemented/$unsupported)" >&2
+  exit 1
+}
+grep -Fq "authoritative at $declared declared cases:" "$plan" || {
+  echo "indie release plan Docker API matrix count is stale (expected $declared)" >&2
+  exit 1
+}
 echo "indie release plan gate passed: eight status rows, required public artifacts, no workflows"

@@ -613,12 +613,9 @@ CMD ["cat", "/hello.txt"]
             .args([
                 "exec",
                 "ferro-e2e-ebpf-web",
-                "wget",
-                "-q",
-                "-O",
-                "-",
-                "--timeout=3",
-                "http://127.0.0.1/",
+                "sh",
+                "-c",
+                "for address in 127.0.0.1 $(hostname -i); do wget -q -O - --timeout=3 http://$address/ >/dev/null || exit 1; done",
             ])
             .output()
             .expect("in-namespace service probe");

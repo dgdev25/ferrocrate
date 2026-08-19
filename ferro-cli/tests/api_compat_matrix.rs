@@ -107,6 +107,13 @@ const API_MATRIX: &[ApiCase] = &[
         body: r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"RestartPolicy":{"Name":"unless-stopped","MaximumRetryCount":0}}}"#,
     },
     ApiCase {
+        method: "POST",
+        path: "/containers/create?name=matrix-tty-unsupported",
+        coverage: Coverage::Unsupported,
+        expected_status: 400,
+        body: r#"{"Image":"busybox","Cmd":["sh"],"Tty":true}"#,
+    },
+    ApiCase {
         method: "GET",
         path: "/containers/matrix-container/logs?stdout=1&stderr=1",
         coverage: Coverage::Implemented,

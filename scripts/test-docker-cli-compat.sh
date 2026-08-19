@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 strict="${FERROCRATE_DOCKER_CLI_REQUIRED:-0}"
+rebuild_stale="${FERROCRATE_DOCKER_CLI_REBUILD_STALE:-0}"
 
 if ! command -v docker >/dev/null 2>&1; then
   if [[ "$strict" == "1" || "$strict" == "true" ]]; then
@@ -20,6 +21,14 @@ if [[ ! -x "$bin" ]]; then
   fi
   echo "docker CLI compatibility smoke skipped (missing Ferrocrate binary: $bin)"
   exit 0
+fi
+if [[ "$bin" -ot "$repo_root/ferro-cli/src/main.rs" ]]; then
+  if [[ "$rebuild_stale" == "1" || "$rebuild_stale" == "true" ]] &&
+    [[ "$bin" == "$repo_root/target/release/ferro-cli" ]]; then
+    echo "docker CLI compatibility smoke: rebuilding stale Ferrocrate binary" >&2
+    cargo build -p ferro-cli --release >/dev/null
+    bin="$repo_root/target/release/ferro-cli"
+  fi
 fi
 if [[ "$bin" -ot "$repo_root/ferro-cli/src/main.rs" ]]; then
   if [[ "$strict" == "1" || "$strict" == "true" ]]; then

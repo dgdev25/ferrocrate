@@ -56,7 +56,16 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/test-docker-cli-compat.sh \
   scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh
 bash scripts/verify-indie-release-plan.sh
-bash scripts/test-docker-cli-compat.sh
+if command -v docker >/dev/null 2>&1; then
+  # A release gate must never turn a present Docker installation into a stale
+  # binary skip. The smoke helper rebuilds the default release CLI when its
+  # source is newer, then runs in strict mode so failures remain visible.
+  FERROCRATE_DOCKER_CLI_REQUIRED=1 \
+    FERROCRATE_DOCKER_CLI_REBUILD_STALE=1 \
+    bash scripts/test-docker-cli-compat.sh
+else
+  bash scripts/test-docker-cli-compat.sh
+fi
 bash scripts/test-rootless-install.sh
 bash scripts/test-rootless-subid-diagnostics.sh
 bash scripts/test-reliability-matrix-preflight.sh

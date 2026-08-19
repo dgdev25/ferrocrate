@@ -14026,12 +14026,12 @@ fn stream_docker_logs(
         if emitted == 0 {
             let initial = docker_tail_logs(&raw, tail)?;
             if !initial.is_empty() {
-                write_chunk(stream, initial.as_bytes())?;
+                write_chunk(stream, &docker_raw_stream(&initial, ""))?;
             }
             emitted = raw.len();
         } else if raw.len() >= emitted {
             if raw.len() > emitted {
-                write_chunk(stream, &raw.as_bytes()[emitted..])?;
+                write_chunk(stream, &docker_raw_stream(&raw[emitted..], ""))?;
                 emitted = raw.len();
             }
         } else {
@@ -14039,7 +14039,17 @@ fn stream_docker_logs(
             // beginning rather than indexing stale bytes.
             emitted = 0;
         }
+        let terminal = runtime
+            .inspect(id)
+            .map(|record| !matches!(record.status.as_str(), "running" | "paused"))
+            .unwrap_or(true);
         stream.flush().map_err(|error| error.to_string())?;
+        if terminal && raw.len() <= emitted {
+            stream
+                .write_all(b"0\r\n\r\n")
+                .map_err(|error| error.to_string())?;
+            break Ok(());
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
 }

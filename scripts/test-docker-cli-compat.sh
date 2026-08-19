@@ -142,6 +142,14 @@ docker -H "$host" image inspect "$committed_image" >/dev/null
 docker -H "$host" image rm "$committed_image" >/dev/null
 docker -H "$host" rm "$name" >/dev/null
 
+follow_name="docker-cli-logs-follow-$$"
+docker -H "$host" create --network none --name "$follow_name" "$image" \
+  /bin/busybox sh -c 'echo ferrocrate-logs-follow; /bin/busybox sleep 1' >/dev/null
+docker -H "$host" start "$follow_name" >/dev/null
+docker -H "$host" logs --follow "$follow_name" >"$runtime_dir/logs-follow.stdout"
+grep -q 'ferrocrate-logs-follow' "$runtime_dir/logs-follow.stdout"
+docker -H "$host" rm "$follow_name" >/dev/null
+
 # Exercise the real Docker CLI hijack/attach path against a long-lived
 # workload. The API-level handshake tests do not prove that the external
 # client can consume the post-start raw stream and return cleanly. Use the
@@ -192,4 +200,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/diff/exec/export/cp/commit/attach/stop/kill/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/logs-follow/diff/exec/export/cp/commit/attach/stop/kill/rm/events"

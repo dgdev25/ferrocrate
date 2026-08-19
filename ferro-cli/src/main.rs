@@ -8946,6 +8946,36 @@ fn compose_project_key(project: &ComposeProject) -> String {
 }
 
 #[cfg(target_os = "linux")]
+fn compose_default_network_name(project_dir: &Path) -> Result<String, String> {
+    let raw = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ferrocrate");
+    let mut project = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while project.starts_with('_') {
+        project.remove(0);
+    }
+    while project.ends_with('_') {
+        project.pop();
+    }
+    if project.is_empty() {
+        project = "ferrocrate".to_string();
+    }
+    let name = format!("{project}_default");
+    validate_network_name(&name)?;
+    Ok(name)
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_compose_service(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
@@ -9013,30 +9043,56 @@ fn prepare_compose_service(
 fn ensure_compose_networks(
     project: &ComposeProject,
     runtime_dir: &Path,
+    default_network: &str,
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
 ) -> Result<Vec<String>, String> {
-    let Some(networks) = project.compose.networks.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let mut names = networks.keys().cloned().collect::<Vec<_>>();
-    names.sort();
+    let networks = project.compose.networks.as_ref();
+    let default_needed = project.compose.services.values().any(|service| {
+        if service.network_mode.is_some() {
+            return false;
+        }
+        service.networks.as_ref().is_none_or(|names| {
+            names.is_empty() || names.iter().any(|name| name.trim() == "default")
+        })
+    });
+    let mut definitions = networks
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .map(|(name, definition)| {
+            let effective_name = if name == "default" {
+                default_network.to_string()
+            } else {
+                name.clone()
+            };
+            (
+                effective_name,
+                definition.driver.clone(),
+                definition.external,
+            )
+        })
+        .collect::<Vec<_>>();
+    if default_needed
+        && !definitions
+            .iter()
+            .any(|(name, _, _)| name == default_network)
+    {
+        definitions.push((default_network.to_string(), None, false));
+    }
+    definitions.sort_by(|left, right| left.0.cmp(&right.0));
     let mut records = load_networks(runtime_dir)?;
     let mut created = Vec::new();
-    for name in names {
+    for (name, driver, external) in definitions {
         if is_builtin_network_mode(&name) {
             continue;
         }
-        let definition = networks
-            .get(&name)
-            .ok_or_else(|| format!("compose: missing network definition {name}"))?;
-        if definition.external {
+        if external {
             if records.iter().any(|record| record.name == name) {
                 continue;
             }
             return Err(format!("compose: external network {name} was not found"));
         }
-        let driver = definition.driver.as_deref().unwrap_or("bridge");
+        let driver = driver.as_deref().unwrap_or("bridge");
         if driver != "bridge" {
             return Err(format!(
                 "compose: network {name} uses unsupported driver {driver}"
@@ -9149,6 +9205,7 @@ fn handle_compose(
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let default_network = compose_default_network_name(project_dir)?;
     match command {
         ComposeCommands::Up { profile, detach: _ } => {
             // Compose is a detached CLI operation: services must outlive the
@@ -9231,6 +9288,7 @@ fn handle_compose(
             ensure_compose_networks(
                 &project,
                 &runtime_dir(),
+                &default_network,
                 &parent_origin,
                 &surface_authorization,
             )?;
@@ -9252,6 +9310,7 @@ fn handle_compose(
                         store,
                         volume_store,
                         project_dir,
+                        &default_network,
                         &prepared.name,
                         service,
                         &prepared.instance,
@@ -9330,6 +9389,7 @@ fn handle_compose(
                     store,
                     volume_store,
                     project_dir,
+                    &default_network,
                     &prepared.name,
                     service,
                     &prepared.instance,
@@ -9381,6 +9441,7 @@ fn handle_compose(
                     store,
                     volume_store,
                     project_dir,
+                    &default_network,
                     &prepared.name,
                     service,
                     Some(&prepared.instance),
@@ -9829,7 +9890,11 @@ fn compose_predecessor_outcome_digest(child: &ferro_compose::FanoutChild) -> [u8
 }
 
 #[cfg(target_os = "linux")]
-fn compose_service_network(service: &ComposeService, name: &str) -> Result<String, String> {
+fn compose_service_network(
+    service: &ComposeService,
+    name: &str,
+    default_network: &str,
+) -> Result<String, String> {
     if service.network_mode.is_some()
         && service
             .networks
@@ -9849,10 +9914,10 @@ fn compose_service_network(service: &ComposeService, name: &str) -> Result<Strin
         };
     }
     let Some(networks) = service.networks.as_ref() else {
-        return Ok("bridge".to_string());
+        return Ok(default_network.to_string());
     };
     if networks.is_empty() {
-        return Ok("bridge".to_string());
+        return Ok(default_network.to_string());
     }
     if networks.len() > 1 {
         return Err(format!(
@@ -9861,7 +9926,7 @@ fn compose_service_network(service: &ComposeService, name: &str) -> Result<Strin
     }
     let network = networks[0].trim();
     if network.is_empty() || network == "default" {
-        Ok("bridge".to_string())
+        Ok(default_network.to_string())
     } else {
         validate_network_name(network)?;
         Ok(network.to_string())
@@ -9875,6 +9940,7 @@ fn run_compose_service(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
     project_dir: &Path,
+    default_network: &str,
     name: &str,
     service: &ComposeService,
     instance_override: Option<&str>,
@@ -9887,7 +9953,7 @@ fn run_compose_service(
             "compose: service {name} image prerequisite was not prepared"
         ));
     };
-    let requested_network = compose_service_network(service, name)?;
+    let requested_network = compose_service_network(service, name, default_network)?;
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
@@ -9973,6 +10039,7 @@ fn compose_service_execution_digest(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
     project_dir: &Path,
+    default_network: &str,
     name: &str,
     service: &ComposeService,
     instance: &str,
@@ -9992,7 +10059,7 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
-    let network = compose_service_network(service, name)?;
+    let network = compose_service_network(service, name, default_network)?;
     let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
         let mut value = parse_entrypoint(entrypoint)?;
         value.extend_from_slice(&cmd);
@@ -15902,14 +15969,14 @@ volumes:
             serde_json::from_value(serde_json::json!({"networks": ["app-net"]}))
                 .expect("custom network service");
         assert_eq!(
-            super::compose_service_network(&custom, "api").expect("custom network"),
+            super::compose_service_network(&custom, "api", "bridge").expect("custom network"),
             "app-net"
         );
 
         let multiple: ferro_compose::Service =
             serde_json::from_value(serde_json::json!({"networks": ["app-net", "metrics-net"]}))
                 .expect("multiple network service");
-        let error = super::compose_service_network(&multiple, "api")
+        let error = super::compose_service_network(&multiple, "api", "bridge")
             .expect_err("multiple attachments are bounded");
         assert!(error.contains("multiple networks"));
     }
@@ -15927,9 +15994,14 @@ volumes:
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let authorization = test_surface_authorization(runtime_dir.path());
         let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
-        let error =
-            super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
-                .expect_err("overlay driver is bounded");
+        let error = super::ensure_compose_networks(
+            &project,
+            runtime_dir.path(),
+            "bridge",
+            &origin,
+            &authorization,
+        )
+        .expect_err("overlay driver is bounded");
         assert!(error.contains("unsupported driver overlay"));
     }
 
@@ -15946,9 +16018,14 @@ volumes:
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let authorization = test_surface_authorization(runtime_dir.path());
         let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
-        let error =
-            super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
-                .expect_err("missing external network");
+        let error = super::ensure_compose_networks(
+            &project,
+            runtime_dir.path(),
+            "bridge",
+            &origin,
+            &authorization,
+        )
+        .expect_err("missing external network");
         assert!(error.contains("external network shared was not found"));
         assert!(super::load_networks(runtime_dir.path())
             .expect("networks")
@@ -15969,9 +16046,14 @@ volumes:
         };
         let authorization = test_surface_authorization(runtime_dir.path());
         let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
-        let created =
-            super::ensure_compose_networks(&project, runtime_dir.path(), &origin, &authorization)
-                .expect("provision custom bridge");
+        let created = super::ensure_compose_networks(
+            &project,
+            runtime_dir.path(),
+            "bridge",
+            &origin,
+            &authorization,
+        )
+        .expect("provision custom bridge");
         assert_eq!(created, vec!["app-net".to_string()]);
         assert_eq!(
             super::load_networks(runtime_dir.path())
@@ -15986,6 +16068,35 @@ volumes:
                 .map(|entry| entry.networks.as_slice()),
             Some(["app-net".to_string()].as_slice())
         );
+        assert_eq!(super::network_kernel_effect_count(), 1);
+    }
+
+    #[test]
+    fn compose_default_network_is_project_scoped_and_provisioned_for_implicit_services() {
+        super::reset_network_kernel_effect_count();
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let project_dir = runtime_dir.path().join("my-app");
+        std::fs::create_dir_all(&project_dir).expect("project directory");
+        let project = super::ComposeProject {
+            path: project_dir.join("compose.yml"),
+            compose: serde_json::from_value(serde_json::json!({
+                "services": {"web": {"image": "alpine:3.20"}}
+            }))
+            .expect("compose project"),
+        };
+        let default_name = super::compose_default_network_name(&project_dir).expect("name");
+        assert_eq!(default_name, "my-app_default");
+        let authorization = test_surface_authorization(runtime_dir.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let created = super::ensure_compose_networks(
+            &project,
+            runtime_dir.path(),
+            &default_name,
+            &origin,
+            &authorization,
+        )
+        .expect("default network");
+        assert_eq!(created, vec![default_name]);
         assert_eq!(super::network_kernel_effect_count(), 1);
     }
 

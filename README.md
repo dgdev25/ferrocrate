@@ -37,15 +37,19 @@ AI behavior is local and bounded: `FERROCRATE_AI=0` disables inference,
 monitoring, and adaptive lifecycle paths; predictive signals do not perform
 general-purpose scheduling, and automatic cgroup changes require the separate
 operator gate `FERROCRATE_AI_ACT=1` plus a configured ceiling. Training and
-online data collection have independent consent and approval gates.
+online data collection have independent consent and approval gates. Anomaly
+detection uses bounded warm-up and z-score/neural signals, and adaptive restart
+uses bounded backoff and failure-pattern heuristics; neither is a general
+autonomous policy learner. CPU sampling and several model/provider integrations
+remain experimental.
 
 ## Docker comparison
 
 The latest valid three-round, no-skip host-local ten-feature comparison uses
 the `alpine:3.20` fixture. The current comparison snapshot is maintained in
 the [`benchmark register`](docs/evidence/performance/benchmark-register.md),
-with detailed [`iptables`](docs/evidence/performance/2026-08-19-docker-comparison-current-head-fa803a22-iptables.md)
-and [`nftables`](docs/evidence/performance/2026-08-19-docker-comparison-current-head-fa803a22-nftables.md)
+with detailed [`iptables`](docs/evidence/performance/2026-08-20-docker-comparison-current-head-525f76e0-iptables.md)
+and [`nftables`](docs/evidence/performance/2026-08-20-docker-comparison-current-head-525f76e0-nftables.md)
 reports archived with host, backend, image, and round metadata. The register's
 top table includes the Docker-versus-Ferrocrate percentage difference for all
 ten measured features.

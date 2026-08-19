@@ -9613,6 +9613,46 @@ fn compose_predecessor_outcome_digest(child: &ferro_compose::FanoutChild) -> [u8
 }
 
 #[cfg(target_os = "linux")]
+fn compose_service_network(service: &ComposeService, name: &str) -> Result<String, String> {
+    if service.network_mode.is_some()
+        && service
+            .networks
+            .as_ref()
+            .is_some_and(|nets| !nets.is_empty())
+    {
+        return Err(format!(
+            "compose: service {name} cannot combine network_mode with networks"
+        ));
+    }
+    if let Some(mode) = service.network_mode.as_deref() {
+        return match mode {
+            "bridge" | "host" | "none" => Ok(mode.to_string()),
+            other => Err(format!(
+                "compose: unsupported network_mode {other} for service {name}"
+            )),
+        };
+    }
+    let Some(networks) = service.networks.as_ref() else {
+        return Ok("bridge".to_string());
+    };
+    if networks.is_empty() {
+        return Ok("bridge".to_string());
+    }
+    if networks.len() > 1 {
+        return Err(format!(
+            "compose: service {name} declares multiple networks; one durable attachment is supported"
+        ));
+    }
+    let network = networks[0].trim();
+    if network.is_empty() || network == "default" {
+        Ok("bridge".to_string())
+    } else {
+        validate_network_name(network)?;
+        Ok(network.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn run_compose_service(
     runtime: &ContainerRuntime,
@@ -9631,13 +9671,7 @@ fn run_compose_service(
             "compose: service {name} image prerequisite was not prepared"
         ));
     };
-    if let Some(networks) = service.networks.as_ref() {
-        if networks.iter().any(|net| net != "default") {
-            return Err(format!(
-                "compose: custom networks not supported for service {name}"
-            ));
-        }
-    }
+    let requested_network = compose_service_network(service, name)?;
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
@@ -9671,17 +9705,6 @@ fn run_compose_service(
         } else {
             format!("{name}-{idx}")
         };
-        let network_mode = match service.network_mode.as_deref() {
-            None => "bridge",
-            Some("bridge") => "bridge",
-            Some("host") => "host",
-            Some("none") => "none",
-            Some(other) => {
-                return Err(format!(
-                    "compose: unsupported network_mode {other} for service {name}"
-                ))
-            }
-        };
         handle_run(
             &runtime_dir(),
             runtime,
@@ -9689,7 +9712,7 @@ fn run_compose_service(
             volume_store,
             &image,
             &cmd,
-            network_mode,
+            &requested_network,
             &configured_network_backend,
             &bind_mounts,
             &[],
@@ -9753,16 +9776,7 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
-    let network = match service.network_mode.as_deref() {
-        None | Some("bridge") => "bridge",
-        Some("host") => "host",
-        Some("none") => "none",
-        Some(other) => {
-            return Err(format!(
-                "compose: unsupported network_mode {other} for service {name}"
-            ))
-        }
-    };
+    let network = compose_service_network(service, name)?;
     let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
         let mut value = parse_entrypoint(entrypoint)?;
         value.extend_from_slice(&cmd);
@@ -9790,7 +9804,7 @@ fn compose_service_execution_digest(
             None,
             Some(instance),
             &ports,
-            network,
+            &network,
             configured_network_backend,
         )
         .map_err(|error| error.to_string())?;
@@ -15660,6 +15674,25 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_service_network_selects_one_custom_attachment() {
+        let custom: ferro_compose::Service =
+            serde_json::from_value(serde_json::json!({"networks": ["app-net"]}))
+                .expect("custom network service");
+        assert_eq!(
+            super::compose_service_network(&custom, "api").expect("custom network"),
+            "app-net"
+        );
+
+        let multiple: ferro_compose::Service =
+            serde_json::from_value(serde_json::json!({"networks": ["app-net", "metrics-net"]}))
+                .expect("multiple network service");
+        let error = super::compose_service_network(&multiple, "api")
+            .expect_err("multiple attachments are bounded");
+        assert!(error.contains("multiple networks"));
     }
 
     #[test]

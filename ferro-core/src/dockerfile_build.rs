@@ -1809,6 +1809,7 @@ struct CopySpec {
     dest: String,
     chmod: Option<u32>,
     parents: bool,
+    excludes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2115,6 +2116,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
     let mut args = Vec::new();
     let mut chmod = None;
     let mut parents = false;
+    let mut excludes = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
         let token = tokens[index];
@@ -2128,6 +2130,24 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
             index += 1;
         } else if token == "--parents" {
             parents = true;
+        } else if let Some(pattern) = token.strip_prefix("--exclude=") {
+            if pattern.trim().is_empty() {
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY --exclude requires a non-empty pattern".to_string(),
+                ));
+            }
+            excludes.push(pattern.to_string());
+        } else if token == "--exclude" {
+            let pattern = tokens.get(index + 1).ok_or_else(|| {
+                DockerfileBuildError::Invalid("COPY --exclude requires a pattern".to_string())
+            })?;
+            if pattern.trim().is_empty() {
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY --exclude requires a non-empty pattern".to_string(),
+                ));
+            }
+            excludes.push((*pattern).to_string());
+            index += 1;
         } else if token.starts_with("--") {
             return Err(DockerfileBuildError::Unsupported(format!(
                 "COPY flag {token} is not supported"
@@ -2156,6 +2176,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         dest,
         chmod,
         parents,
+        excludes,
     }))
 }
 
@@ -3365,7 +3386,13 @@ fn copy_from_context(
             } else {
                 dest_root.clone()
             };
-            copy_path_recursive_mode(&source, &dest, spec.chmod)?;
+            copy_path_recursive_mode_with_excludes(
+                &source,
+                &dest,
+                spec.chmod,
+                &spec.excludes,
+                Path::new(""),
+            )?;
         }
     }
     Ok(())
@@ -3380,6 +3407,19 @@ fn copy_path_recursive_mode(
     dst: &Path,
     chmod: Option<u32>,
 ) -> Result<(), DockerfileBuildError> {
+    copy_path_recursive_mode_with_excludes(src, dst, chmod, &[], Path::new(""))
+}
+
+fn copy_path_recursive_mode_with_excludes(
+    src: &Path,
+    dst: &Path,
+    chmod: Option<u32>,
+    excludes: &[String],
+    relative: &Path,
+) -> Result<(), DockerfileBuildError> {
+    if !relative.as_os_str().is_empty() && copy_path_is_excluded(relative, excludes) {
+        return Ok(());
+    }
     let metadata = fs::metadata(src)?;
     if metadata.is_dir() {
         fs::create_dir_all(dst)?;
@@ -3387,7 +3427,13 @@ fn copy_path_recursive_mode(
             let entry = entry?;
             let path = entry.path();
             let name = entry.file_name();
-            copy_path_recursive_mode(&path, &dst.join(name), chmod)?;
+            copy_path_recursive_mode_with_excludes(
+                &path,
+                &dst.join(&name),
+                chmod,
+                excludes,
+                &relative.join(name),
+            )?;
         }
     } else {
         if let Some(parent) = dst.parent() {
@@ -3399,6 +3445,19 @@ fn copy_path_recursive_mode(
         apply_copy_mode(dst, mode)?;
     }
     Ok(())
+}
+
+fn copy_path_is_excluded(relative: &Path, patterns: &[String]) -> bool {
+    let path = relative.to_string_lossy();
+    let basename = relative
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    patterns.iter().any(|pattern| {
+        dockerignore_matches(pattern, &path)
+            || basename
+                .as_deref()
+                .is_some_and(|name| dockerignore_matches(pattern, name))
+    })
 }
 
 #[cfg(unix)]
@@ -4025,6 +4084,14 @@ mod tests {
         assert_eq!(stages[0].copy_paths[0].chmod, Some(0o755));
         let parents = parse_stages("FROM scratch\nCOPY --parents src/app /opt\n").unwrap();
         assert!(parents[0].copy_paths[0].parents);
+        let excludes =
+            parse_stages("FROM scratch\nCOPY --exclude=*.tmp --exclude secret src /opt\n").unwrap();
+        assert_eq!(excludes[0].copy_paths[0].excludes, ["*.tmp", "secret"]);
+        for directive in ["COPY --exclude= app /app"] {
+            let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
+                .expect_err("empty exclude pattern must fail");
+            assert!(error.to_string().contains("COPY --exclude"));
+        }
 
         let error = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
             .expect_err("unsupported copy flags must not be silently ignored");
@@ -4064,6 +4131,7 @@ mod tests {
                 dest: "/materialized".into(),
                 chmod: Some(0o640),
                 parents: false,
+                excludes: Vec::new(),
             }],
         )
         .unwrap();
@@ -4092,6 +4160,7 @@ mod tests {
                 dest: "/opt".into(),
                 chmod: None,
                 parents: true,
+                excludes: Vec::new(),
             }],
         )
         .unwrap();
@@ -4108,10 +4177,37 @@ mod tests {
                 dest: "/opt".into(),
                 chmod: None,
                 parents: true,
+                excludes: Vec::new(),
             }],
         )
         .expect_err("parent traversal must be rejected");
         assert!(error.to_string().contains("parent traversal"));
+    }
+
+    #[test]
+    fn copy_exclude_filters_matching_files_and_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("keep.txt"), "keep").unwrap();
+        std::fs::write(source.join("skip.tmp"), "skip").unwrap();
+        std::fs::write(source.join("nested").join("secret"), "secret").unwrap();
+        let destination = temp.path().join("destination");
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["source".into()],
+                dest: "/app".into(),
+                chmod: None,
+                parents: false,
+                excludes: vec!["*.tmp".into(), "secret".into()],
+            }],
+        )
+        .unwrap();
+        assert!(destination.join("app/keep.txt").exists());
+        assert!(!destination.join("app/skip.tmp").exists());
+        assert!(!destination.join("app/nested/secret").exists());
     }
 
     #[test]

@@ -5,9 +5,11 @@ const UDP_HEADER_LEN: usize = 8;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const IP_PROTOCOL_TCP: u8 = 6;
 const IP_PROTOCOL_UDP: u8 = 17;
-// The TC checksum helpers update both the wire checksum fields and skb
-// checksum/offload metadata. Redirected veth packets can carry CHECKSUM_PARTIAL
-// state into loopback, where no NIC completes it.
+// The TC checksum helpers update wire checksum fields and the checksum
+// accumulator where the kernel permits it. They do not provide a BPF-visible
+// operation that clears skb CHECKSUM_PARTIAL state; redirected veth packets can
+// therefore still carry an offload seed into loopback, where no NIC completes
+// it.
 #[cfg(target_arch = "bpf")]
 const BPF_F_PSEUDO_HDR: u64 = 1 << 4;
 #[cfg(target_arch = "bpf")]
@@ -509,9 +511,9 @@ mod tc {
 
     fn store_byte(ctx: &TcContext, offset: usize, value: u8) -> Result<(), PacketError> {
         // Header bytes are written after the skb-aware L3/L4 checksum
-        // helpers.  Ask the kernel to materialize the skb checksum state so
-        // a redirect to loopback cannot carry a CHECKSUM_PARTIAL seed that
-        // would otherwise require a physical NIC to finish.
+        // helpers. RECOMPUTE_CSUM keeps the skb checksum accumulator coherent,
+        // but does not materialize CHECKSUM_PARTIAL into a complete wire
+        // checksum; the redirect path must still qualify that boundary live.
         ctx.store(offset, &value, super::BPF_F_RECOMPUTE_CSUM)
             .map_err(|_| PacketError::Truncated)
     }

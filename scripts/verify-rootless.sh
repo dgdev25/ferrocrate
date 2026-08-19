@@ -53,7 +53,7 @@ has_subid_entry() {
   local path="$1" name="$2" numeric_id="$3"
   [[ -r "$path" ]] || return 1
   awk -F: -v name="$name" -v numeric_id="$numeric_id" \
-    '$1 == name || $1 == numeric_id { found=1 } END { exit !found }' "$path"
+    '$1 == name || $1 == numeric_id { if ($2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0) found=1 } END { exit !found }' "$path"
 }
 if has_subid_entry "$subuid_file" "$user" "$user_id"; then
   echo "rootless.subuid=pass"

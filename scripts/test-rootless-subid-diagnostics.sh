@@ -53,3 +53,19 @@ grep -q '^rootless.newuidmap=missing-or-untrusted$' "$strict_output"
 grep -q '^rootless.slirp4netns=missing-or-untrusted$' "$strict_output"
 grep -q '^rootless.bwrap=missing-or-untrusted$' "$strict_output"
 echo "rootless strict missing-subid regression passed"
+
+printf '%s:not-a-number:0\n' "$(id -u)" >"$tmp_dir/malformed-subuid"
+printf '%s:200000:not-a-range\n' "$(id -g)" >"$tmp_dir/malformed-subgid"
+set +e
+PATH="$strict_bin:$PATH" \
+FERROCRATE_ROOTLESS_SUBUID_FILE="$tmp_dir/malformed-subuid" \
+FERROCRATE_ROOTLESS_SUBGID_FILE="$tmp_dir/malformed-subgid" \
+XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+FERROCRATE_ROOTLESS_STRICT=1 \
+bash "$repo_root/scripts/verify-rootless.sh" >"$strict_output" 2>&1
+malformed_rc=$?
+set -e
+[[ "$malformed_rc" -eq 1 ]]
+grep -q '^rootless.subuid=missing$' "$strict_output"
+grep -q '^rootless.subgid=missing$' "$strict_output"
+echo "rootless strict malformed-subid regression passed"

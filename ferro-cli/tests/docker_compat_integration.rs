@@ -3,6 +3,7 @@
 #[path = "cli_integration.rs"]
 mod cli_fixture;
 
+use base64::Engine;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -208,6 +209,26 @@ impl DaemonHarness {
             .parse()
             .unwrap();
         (code, body.to_string())
+    }
+
+    fn request_bytes_raw(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> String {
+        let header = format!(
+            "{method} {path} HTTP/1.1\r\nHost: docker\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = UnixStream::connect(&self.socket_path).expect("connect daemon socket");
+        stream.write_all(header.as_bytes()).expect("write headers");
+        stream.write_all(body).expect("write body");
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        String::from_utf8(response).expect("response utf8")
     }
 }
 
@@ -508,6 +529,24 @@ fn docker_compat_changes_reports_added_rootfs_entries() {
         fs::read(rootfs.join("added")).expect("archive output"),
         b"written through the Docker archive API"
     );
+    let raw = harness.request_bytes_raw(
+        "GET",
+        &format!("/v1.45/containers/{id}/archive?path=%2Fadded"),
+        "application/x-tar",
+        &[],
+    );
+    let (headers, _) = raw
+        .split_once("\r\n\r\n")
+        .expect("archive response headers");
+    let stat = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("X-Docker-Container-Path-Stat: "))
+        .expect("Docker archive path-stat header");
+    let stat = base64::engine::general_purpose::STANDARD
+        .decode(stat)
+        .expect("decode path-stat header");
+    let stat: serde_json::Value = serde_json::from_slice(&stat).expect("path-stat JSON");
+    assert_eq!(stat["name"], "added");
 
     let (status, body) = harness.request("GET", &format!("/v1.45/containers/{id}/changes"));
     assert_eq!(status, 200, "changes response={body}");

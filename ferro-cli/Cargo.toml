@@ -23,6 +23,7 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 flate2 = "1.0"
 tar = "0.4"
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 caps = { workspace = true }
@@ -30,7 +31,6 @@ nix = { workspace = true }
 ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
 
 [dev-dependencies]
-base64 = "0.22"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 proptest = { workspace = true }
 

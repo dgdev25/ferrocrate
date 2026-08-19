@@ -4,6 +4,8 @@
 use crate::network_lifecycle::{
     canonical_bridge_name, last_committed_bridge_identity, NetworkCreateRecord, NetworkRecord,
 };
+#[cfg(target_os = "linux")]
+use base64::Engine;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 #[cfg(target_os = "linux")]
@@ -86,6 +88,8 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::net::UnixListener;
 #[cfg(all(unix, target_os = "linux"))]
@@ -11175,7 +11179,13 @@ fn handle_docker_compat_connection(
                         .finish()
                         .map_err(|error| format!("docker: finish archive: {error}"))?;
                 }
-                http_response(200, &archive, "application/x-tar")
+                let stat = docker_archive_path_stat(&selected)?;
+                http_response_with_headers(
+                    200,
+                    &archive,
+                    "application/x-tar",
+                    &[("X-Docker-Container-Path-Stat", stat.as_str())],
+                )
             }
             ("PUT", path) if path.starts_with("/containers/") && path.ends_with("/archive") => {
                 let requested_id = path
@@ -13527,6 +13537,36 @@ fn docker_timestamp(unix_seconds: u64) -> String {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_archive_path_stat(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("docker: archive stat failed: {error}"))?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let link_target = if metadata.file_type().is_symlink() {
+        std::fs::read_link(path)
+            .ok()
+            .and_then(|value| value.to_str().map(str::to_owned))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let stat = serde_json::json!({
+        "name": name,
+        "size": metadata.len(),
+        "mode": metadata.mode(),
+        "mtime": docker_timestamp(metadata.mtime().max(0) as u64),
+        "linkTarget": link_target,
+    });
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&stat)
+            .map_err(|error| format!("docker: archive stat encoding failed: {error}"))?,
+    );
+    Ok(encoded)
+}
+
+#[cfg(target_os = "linux")]
 fn docker_pending_inspect_payload(id: &str, spec: &DockerCreateSpec) -> serde_json::Value {
     let labels = spec
         .labels
@@ -13788,6 +13828,16 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
 
 #[cfg(target_os = "linux")]
 fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
+    http_response_with_headers(status, body, content_type, &[])
+}
+
+#[cfg(target_os = "linux")]
+fn http_response_with_headers(
+    status: u16,
+    body: &[u8],
+    content_type: &str,
+    headers: &[(&str, &str)],
+) -> Vec<u8> {
     let status_line = match status {
         200 => "200 OK",
         201 => "201 Created",
@@ -13802,6 +13852,9 @@ fn http_response(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
     out.extend_from_slice(format!("HTTP/1.1 {status_line}\r\n").as_bytes());
     out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    for (name, value) in headers {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out.extend_from_slice(body);
     out

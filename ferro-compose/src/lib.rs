@@ -19,6 +19,28 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ServiceNetworks {
+    List(Vec<String>),
+    Map(HashMap<String, serde_yaml::Value>),
+}
+
+fn deserialize_service_networks<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<ServiceNetworks>::deserialize(deserializer)?;
+    Ok(value.map(|networks| match networks {
+        ServiceNetworks::List(names) => names,
+        ServiceNetworks::Map(entries) => {
+            let mut names = entries.into_keys().collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+    }))
+}
+
 /// Errors that can occur during compose file parsing or validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
@@ -83,7 +105,10 @@ pub struct Service {
     /// Volume mount specifications.
     pub volumes: Option<Vec<String>>,
 
-    /// Networks to attach the service to.
+    /// Networks to attach the service to. Compose list syntax and mapping
+    /// syntax are both accepted; mapping values such as aliases are retained
+    /// for future endpoint metadata while the network names drive attachment.
+    #[serde(default, deserialize_with = "deserialize_service_networks")]
     pub networks: Option<Vec<String>>,
 
     /// Network mode (e.g., "host", "service:web").
@@ -414,6 +439,42 @@ services:
             ComposeError::Validation(msg) => assert!(msg.contains("unknown service")),
             _ => panic!("unexpected error"),
         }
+    }
+
+    #[test]
+    fn service_network_mapping_syntax_preserves_sorted_names() {
+        let content = r#"
+services:
+  api:
+    image: alpine:latest
+    networks:
+      zeta:
+        aliases: [api]
+      alpha: {}
+networks:
+  alpha: {}
+  zeta: {}
+"#;
+        let compose = ComposeFile::parse(content, &HashMap::new()).expect("mapping syntax");
+        assert_eq!(
+            compose.services["api"].networks.as_deref(),
+            Some(["alpha".to_string(), "zeta".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn service_network_list_syntax_remains_compatible() {
+        let content = r#"
+services:
+  api:
+    image: alpine:latest
+    networks: [default]
+"#;
+        let compose = ComposeFile::parse(content, &HashMap::new()).expect("list syntax");
+        assert_eq!(
+            compose.services["api"].networks.as_deref(),
+            Some(["default".to_string()].as_slice())
+        );
     }
 }
 mod fanout;

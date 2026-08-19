@@ -93,11 +93,13 @@ fn applies_and_enforces_seccomp_profile_in_isolated_child() {
                 ferro_core::seccomp::SyscallRule {
                     names: vec!["write".to_string()],
                     action: "SCMP_ACT_ALLOW".to_string(),
+                    errno_ret: None,
                     args: None,
                 },
                 ferro_core::seccomp::SyscallRule {
                     names: vec!["exit".to_string(), "exit_group".to_string()],
                     action: "SCMP_ACT_ALLOW".to_string(),
+                    errno_ret: None,
                     args: None,
                 },
             ],
@@ -132,4 +134,62 @@ fn applies_and_enforces_seccomp_profile_in_isolated_child() {
     assert_eq!(unsafe { nix::libc::waitpid(child, &mut status, 0) }, child);
     assert_eq!(status, 0, "seccomp probe child exited unexpectedly");
     assert_eq!(marker[0], 1, "getpid should be denied by the loaded filter");
+}
+
+#[test]
+fn applies_profile_configured_errno_return() {
+    let mut pipe_fds = [0; 2];
+    assert_eq!(unsafe { nix::libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+    let child = unsafe { nix::libc::fork() };
+    assert!(child >= 0, "fork seccomp errno probe");
+    if child == 0 {
+        unsafe { nix::libc::close(pipe_fds[0]) };
+        let profile = ferro_core::seccomp::SeccompProfile {
+            default_action: "SCMP_ACT_ERRNO".to_string(),
+            default_errno_ret: Some(13),
+            architectures: vec![if cfg!(target_arch = "x86_64") {
+                "SCMP_ARCH_X86_64"
+            } else if cfg!(target_arch = "aarch64") {
+                "SCMP_ARCH_AARCH64"
+            } else {
+                "SCMP_ARCH_X86"
+            }
+            .to_string()],
+            syscalls: vec![ferro_core::seccomp::SyscallRule {
+                names: vec![
+                    "write".to_string(),
+                    "exit".to_string(),
+                    "exit_group".to_string(),
+                ],
+                action: "SCMP_ACT_ALLOW".to_string(),
+                errno_ret: None,
+                args: None,
+            }],
+        };
+        let marker = if ferro_core::seccomp::apply_seccomp_profile(&profile).is_err() {
+            0_u8
+        } else {
+            let result = unsafe { nix::libc::syscall(nix::libc::SYS_getpid) };
+            let errno = unsafe { *nix::libc::__errno_location() };
+            u8::from(result == -1 && errno == 13)
+        };
+        unsafe {
+            nix::libc::write(pipe_fds[1], (&marker as *const u8).cast(), 1);
+            nix::libc::_exit(0);
+        }
+    }
+    unsafe { nix::libc::close(pipe_fds[1]) };
+    let mut marker = [0_u8];
+    assert_eq!(
+        unsafe { nix::libc::read(pipe_fds[0], marker.as_mut_ptr().cast(), 1) },
+        1
+    );
+    unsafe { nix::libc::close(pipe_fds[0]) };
+    let mut status = 0;
+    assert_eq!(unsafe { nix::libc::waitpid(child, &mut status, 0) }, child);
+    assert_eq!(status, 0);
+    assert_eq!(
+        marker[0], 1,
+        "configured errno should be returned by seccomp"
+    );
 }

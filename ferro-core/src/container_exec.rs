@@ -125,7 +125,13 @@ pub fn exec_in_container(
     command: &[String],
 ) -> Result<ExecResult, ContainerExecError> {
     let args = build_nsenter_args(target_pid, command)?;
-    execute_command("nsenter", &args)
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    execute_command(&nsenter, &args)
 }
 
 pub fn exec_in_container_with_timeout(
@@ -134,10 +140,16 @@ pub fn exec_in_container_with_timeout(
     timeout: Duration,
 ) -> Result<ExecResult, ContainerExecError> {
     let args = build_nsenter_args(target_pid, command)?;
-    execute_command_with_timeout("nsenter", &args, timeout)
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    execute_command_with_timeout(&nsenter, &args, timeout)
 }
 
-fn execute_command(binary: &str, args: &[String]) -> Result<ExecResult, ContainerExecError> {
+fn execute_command(binary: &Path, args: &[String]) -> Result<ExecResult, ContainerExecError> {
     let output = Command::new(binary).args(args).output()?;
     Ok(ExecResult {
         exit_code: output.status.code().unwrap_or(-1),
@@ -147,7 +159,7 @@ fn execute_command(binary: &str, args: &[String]) -> Result<ExecResult, Containe
 }
 
 fn execute_command_with_timeout(
-    binary: &str,
+    binary: &Path,
     args: &[String],
     timeout: Duration,
 ) -> Result<ExecResult, ContainerExecError> {
@@ -198,7 +210,7 @@ fn execute_process(
     collect_output(child, status.code().unwrap_or(-1))
 }
 
-fn spawn_command(binary: &str, args: &[String]) -> Result<Child, ContainerExecError> {
+fn spawn_command(binary: &Path, args: &[String]) -> Result<Child, ContainerExecError> {
     Ok(Command::new(binary)
         .args(args)
         .stdout(Stdio::piped())
@@ -232,6 +244,7 @@ fn collect_output(mut child: Child, exit_code: i32) -> Result<ExecResult, Contai
 #[cfg(test)]
 mod tests {
     use super::{build_nsenter_args, execute_command, execute_command_with_timeout};
+    use std::path::Path;
     use std::time::Duration;
 
     #[test]
@@ -268,7 +281,7 @@ mod tests {
     #[test]
     fn captures_exit_code_and_output() {
         let args = vec!["-c".to_string(), "echo exec-ok && exit 7".to_string()];
-        let result = execute_command("sh", &args).expect("command should run");
+        let result = execute_command(Path::new("/bin/sh"), &args).expect("command should run");
         assert_eq!(result.exit_code, 7);
         assert!(result.stdout.contains("exec-ok"));
     }
@@ -276,8 +289,9 @@ mod tests {
     #[test]
     fn times_out_long_running_command() {
         let args = vec!["-c".to_string(), "sleep 0.2".to_string()];
-        let result = execute_command_with_timeout("sh", &args, Duration::from_millis(50))
-            .expect("command should run");
+        let result =
+            execute_command_with_timeout(Path::new("/bin/sh"), &args, Duration::from_millis(50))
+                .expect("command should run");
         assert_eq!(result.exit_code, 124);
         assert!(result.stderr.contains("timed out"));
     }

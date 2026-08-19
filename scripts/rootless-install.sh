@@ -8,12 +8,13 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--upgrade] [--dry-run] [--strict]
+Usage: rootless-install.sh [--binary PATH] [--socket PATH] [--enable] [--upgrade] [--uninstall] [--dry-run] [--strict]
 
 Installs ~/.local/bin/ferrocrate and a systemd user unit. --enable starts the
 unit immediately when systemd --user is available. --upgrade atomically replaces
 an existing per-user binary and unit. Use --dry-run to inspect the plan without
-writing files. --strict fails before mutation when required rootless host
+writing files. --uninstall removes only the installed per-user binary and unit.
+--strict fails before mutation when required rootless host
 prerequisites are unavailable.
 EOF
 }
@@ -22,6 +23,7 @@ binary=""
 socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ferrocrate.sock"
 enable=0
 upgrade=0
+uninstall=0
 dry_run=0
 strict=0
 while (($#)); do
@@ -30,6 +32,7 @@ while (($#)); do
     --socket) socket="${2:?missing path after --socket}"; shift 2 ;;
     --enable) enable=1; shift ;;
     --upgrade) upgrade=1; shift ;;
+    --uninstall) uninstall=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --strict) strict=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -37,10 +40,10 @@ while (($#)); do
   esac
 done
 
-if [[ -z "$binary" ]]; then
+if (( ! uninstall )) && [[ -z "$binary" ]]; then
   binary="$(command -v ferrocrate || true)"
 fi
-if [[ -z "$binary" ]]; then
+if (( ! uninstall )) && [[ -z "$binary" ]]; then
   candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/ferrocrate"
   [[ -x "$candidate" ]] && binary="$candidate"
 fi
@@ -50,11 +53,11 @@ if [[ -z "$binary" ]]; then
   candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/ferro-cli"
   [[ -x "$candidate" ]] && binary="$candidate"
 fi
-if [[ -z "$binary" || ! -x "$binary" ]]; then
+if (( ! uninstall )) && [[ -z "$binary" || ! -x "$binary" ]]; then
   echo "rootless-install: ferrocrate/ferro-cli executable not found; pass --binary PATH" >&2
   exit 1
 fi
-if [[ "$binary" != /* || "$binary" == *[$'\t\n\r "%']* ]]; then
+if (( ! uninstall )) && [[ "$binary" != /* || "$binary" == *[$'\t\n\r "%']* ]]; then
   echo "rootless-install: binary must be an absolute path without unit-file metacharacters" >&2
   exit 1
 fi
@@ -70,12 +73,32 @@ subuid_file="${FERROCRATE_ROOTLESS_SUBUID_FILE:-/etc/subuid}"
 subgid_file="${FERROCRATE_ROOTLESS_SUBGID_FILE:-/etc/subgid}"
 echo "rootless.install.user=$user"
 echo "rootless.install.uid=$uid"
-echo "rootless.install.binary=$binary"
+if (( ! uninstall )); then
+  echo "rootless.install.binary=$binary"
+fi
 echo "rootless.install.socket=$socket"
-if ((upgrade)); then
+if ((uninstall)); then
+  echo "rootless.install.mode=uninstall"
+elif ((upgrade)); then
   echo "rootless.install.mode=upgrade"
 else
   echo "rootless.install.mode=install"
+fi
+
+# Uninstall is deliberately independent of host prerequisites: it must remain
+# available when a host no longer supports user namespaces or cgroup delegation.
+# The targets are fixed user-owned paths, and no runtime/state data is removed.
+if ((uninstall)); then
+  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  unit_path="$unit_dir/ferrocrate.service"
+  installed_binary="$HOME/.local/bin/ferrocrate"
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user is-enabled ferrocrate.service >/dev/null 2>&1; then
+    systemctl --user disable --now ferrocrate.service >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$installed_binary" "$unit_path"
+  rmdir -- "$unit_dir" 2>/dev/null || true
+  echo "rootless.install.uninstall=pass"
+  exit 0
 fi
 
 prerequisite_failures=0

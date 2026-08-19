@@ -49,6 +49,19 @@ grep -q 'use --upgrade' "$tmp_home/duplicate.txt"
 run_installer --upgrade >"$tmp_home/upgrade.txt"
 grep -q '^rootless.install.mode=upgrade$' "$tmp_home/upgrade.txt"
 
+# Uninstall removes only the user-owned binary and unit, leaving the runtime
+# directory and unrelated files untouched.
+run_installer --uninstall >"$tmp_home/uninstall.txt"
+grep -q '^rootless.install.mode=uninstall$' "$tmp_home/uninstall.txt"
+test ! -e "$tmp_home/.local/bin/ferrocrate"
+test ! -e "$tmp_home/config/systemd/user/ferrocrate.service"
+test -d "$runtime_dir"
+
+# Reinstall so the upgrade rollback checks exercise an installed transaction.
+run_installer >"$tmp_home/reinstall.txt"
+test -x "$tmp_home/.local/bin/ferrocrate"
+test -f "$tmp_home/config/systemd/user/ferrocrate.service"
+
 # Fault-inject the second half of an upgrade and verify that the paired
 # binary/unit transaction restores both previous artifacts.
 sha_before_binary="$(sha256sum "$tmp_home/.local/bin/ferrocrate" | awk '{print $1}')"

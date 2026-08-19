@@ -12512,8 +12512,13 @@ fn handle_docker_compat_connection(
                 }
             }
             ("GET", "/images/json") => {
+                let show_all = parse_docker_bool_query(query.get("all"), "all")?;
+                let include_digests = parse_docker_bool_query(query.get("digests"), "digests")?;
                 let filters = parse_docker_filters(&query)?;
                 let mut images = store.list_references().map_err(|err| err.to_string())?;
+                if !show_all {
+                    images.retain(|record| !docker_image_is_dangling(record));
+                }
                 images.retain(|record| docker_image_matches_filters(record, &filters));
                 images = docker_image_apply_time_bounds(images, &filters)?;
                 images.sort_by(|left, right| {
@@ -12525,11 +12530,23 @@ fn handle_docker_compat_connection(
                 let entries: Vec<serde_json::Value> = images
                     .into_iter()
                     .map(|record| {
-                        serde_json::json!({
-                            "Id": record.digest,
-                            "RepoTags": vec![record.reference],
-                            "Created": record.created_at_unix,
-                        })
+                        let mut entry = serde_json::Map::new();
+                        entry.insert("Id".to_string(), serde_json::json!(record.digest));
+                        entry.insert(
+                            "RepoTags".to_string(),
+                            serde_json::json!([record.reference]),
+                        );
+                        entry.insert(
+                            "Created".to_string(),
+                            serde_json::json!(record.created_at_unix),
+                        );
+                        if include_digests {
+                            entry.insert(
+                                "RepoDigests".to_string(),
+                                serde_json::json!(docker_image_repo_digests(&record)),
+                            );
+                        }
+                        serde_json::Value::Object(entry)
                     })
                     .collect();
                 let json = serde_json::to_string(&entries)
@@ -13725,6 +13742,25 @@ fn docker_image_matches_filters(
 }
 
 #[cfg(target_os = "linux")]
+fn docker_image_is_dangling(record: &ferro_core::image_store::ImageRecord) -> bool {
+    record.reference.starts_with("sha256:") || record.reference.contains("@sha256:")
+}
+
+#[cfg(target_os = "linux")]
+fn docker_image_repo_digests(record: &ferro_core::image_store::ImageRecord) -> Vec<String> {
+    if docker_image_is_dangling(record) {
+        return Vec::new();
+    }
+    let repository = record
+        .reference
+        .rsplit_once(':')
+        .filter(|(prefix, tag)| !tag.is_empty() && !prefix.ends_with('/'))
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(record.reference.as_str());
+    vec![format!("{repository}@{}", record.digest)]
+}
+
+#[cfg(target_os = "linux")]
 fn parse_docker_image_search_query(
     query: &HashMap<String, String>,
 ) -> Result<(String, usize), String> {
@@ -13824,8 +13860,7 @@ fn docker_image_prune_matches_filters(
     filters: &HashMap<String, Vec<String>>,
 ) -> bool {
     if let Some(value) = filters.get("dangling").and_then(|values| values.first()) {
-        let dangling =
-            record.reference.starts_with("sha256:") || record.reference.contains("@sha256:");
+        let dangling = docker_image_is_dangling(record);
         if dangling != (value == "true") {
             return false;
         }
@@ -15210,19 +15245,20 @@ mod tests {
         docker_container_matches_filters, docker_container_prune_matches_filters,
         docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
-        docker_image_matches_filters, docker_image_prune_matches_filters,
-        docker_image_search_results, docker_inspect_payload, docker_manifest_layer_size,
-        docker_network_ipv6_config, docker_network_matches_filters, docker_pending_inspect_payload,
-        docker_pending_matches_filters, docker_pending_prune_matches_filters, docker_raw_stream,
-        docker_runtime_healthcheck, docker_stats_payload, docker_tail_logs, docker_top_payload,
-        docker_volume_matches_filters, effective_readonly, ensure_context_routing_available,
-        extract_docker_build_context, handle_build, handle_containers, handle_context,
-        handle_events, handle_exec, handle_image_prune, handle_images, handle_inspect, handle_kill,
-        handle_logs, handle_migrate_compose_report, handle_network, handle_pause, handle_pull,
-        handle_push, handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop,
-        handle_top, handle_unpause, handle_volume, handle_wait, host_build_arch,
-        import_rvf_image_at, normalize_docker_api_path, parse_bind_mounts, parse_build_contexts,
-        parse_build_secrets, parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
+        docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
+        docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
+        docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
+        docker_pending_inspect_payload, docker_pending_matches_filters,
+        docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
+        docker_stats_payload, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
+        effective_readonly, ensure_context_routing_available, extract_docker_build_context,
+        handle_build, handle_containers, handle_context, handle_events, handle_exec,
+        handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
+        handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
+        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
+        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
+        normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
+        parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_image_search_query, parse_docker_kill_signal,
         parse_docker_limit_query, parse_docker_network_create_spec, parse_docker_stop_timeout,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
@@ -18904,6 +18940,31 @@ volumes:
         let unsupported =
             serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
         assert!(validate_docker_image_prune_filters(&unsupported).is_err());
+    }
+
+    #[test]
+    fn docker_image_list_projects_digest_references_and_dangling_state() {
+        let tagged = ferro_core::image_store::ImageRecord {
+            reference: "registry.example/app:latest".to_string(),
+            digest: "sha256:abc".to_string(),
+            manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 1,
+        };
+        let dangling = ferro_core::image_store::ImageRecord {
+            reference: "sha256:dead".to_string(),
+            digest: "sha256:dead".to_string(),
+            manifest_media_type: tagged.manifest_media_type.clone(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 2,
+        };
+        assert!(!docker_image_is_dangling(&tagged));
+        assert!(docker_image_is_dangling(&dangling));
+        assert_eq!(
+            docker_image_repo_digests(&tagged),
+            vec!["registry.example/app@sha256:abc"]
+        );
+        assert!(docker_image_repo_digests(&dangling).is_empty());
     }
 
     #[test]

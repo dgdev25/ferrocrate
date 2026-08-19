@@ -21,6 +21,7 @@ run() {
 cleanup() {
   if [[ -n "${DOCKER_COMPAT_PID:-}" ]]; then
     kill "${DOCKER_COMPAT_PID}" >/dev/null 2>&1 || true
+    wait "${DOCKER_COMPAT_PID}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -37,6 +38,19 @@ COMPOSE_FILE="${TMP_DIR}/compose.yml"
 DOCKERFILE="${TMP_DIR}/Dockerfile"
 HELLO_FILE="${TMP_DIR}/hello.txt"
 SOCKET="${FERROCRATE_RUNTIME_DIR}/ferro.sock"
+DOCKER_COMPAT_LOG="${TMP_DIR}/docker-compat.log"
+HTTP_TIMEOUT="${FERROCRATE_E2E_HTTP_TIMEOUT:-10}"
+
+docker_curl() {
+  # A daemon/socket regression must fail with bounded diagnostics rather than
+  # leaving a guest qualification run hung indefinitely.
+  if ! curl --fail --silent --show-error --max-time "${HTTP_TIMEOUT}" \
+    --unix-socket "${SOCKET}" "$@"; then
+    echo "Docker-compatible daemon request failed (timeout=${HTTP_TIMEOUT}s); daemon log:" >&2
+    sed -n '1,160p' "${DOCKER_COMPAT_LOG}" >&2 || true
+    return 1
+  fi
+}
 
 # 1) Pull + run + logs + exec + stop + rm
 IMAGE_CANDIDATES=(
@@ -119,13 +133,20 @@ run "${BIN}" compose -f "${COMPOSE_FILE}" up
 run "${BIN}" compose -f "${COMPOSE_FILE}" down
 
 # 4) Docker socket compatibility (basic)
-"${BIN}" daemon --docker-compat --socket "${SOCKET}" &
+"${BIN}" daemon --docker-compat --socket "${SOCKET}" >"${DOCKER_COMPAT_LOG}" 2>&1 &
 DOCKER_COMPAT_PID=$!
-# give it a moment
-sleep 0.5
-run curl --unix-socket "${SOCKET}" http://localhost/_ping
-run curl --unix-socket "${SOCKET}" http://localhost/version
-run curl --unix-socket "${SOCKET}" http://localhost/containers/json
+for _ in $(seq 1 50); do
+  [[ -S "${SOCKET}" ]] && break
+  sleep 0.1
+done
+if [[ ! -S "${SOCKET}" ]]; then
+  echo "Docker-compatible daemon did not create its socket; daemon log:" >&2
+  sed -n '1,160p' "${DOCKER_COMPAT_LOG}" >&2 || true
+  exit 1
+fi
+run docker_curl http://localhost/_ping
+run docker_curl http://localhost/version
+run docker_curl http://localhost/containers/json
 
 # 5) Rootless bridge (optional)
 if [[ "${FERROCRATE_ROOTLESS_NETNS:-}" == "1" ]]; then

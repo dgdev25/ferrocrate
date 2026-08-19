@@ -6695,8 +6695,43 @@ fn parse_entrypoint(value: &str) -> Result<Vec<String>, String> {
     Ok(trimmed.split_whitespace().map(|s| s.to_string()).collect())
 }
 
+fn resolve_command_path(bin: &str) -> Option<PathBuf> {
+    if bin.trim().is_empty() {
+        return None;
+    }
+    let candidates = if Path::new(bin).components().count() > 1 {
+        vec![PathBuf::from(bin)]
+    } else {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(bin))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    candidates.into_iter().find(|candidate| {
+        let Ok(metadata) = std::fs::metadata(candidate) else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
+}
+
 fn command_exists(bin: &str) -> bool {
-    process::Command::new(bin).arg("--version").output().is_ok()
+    resolve_command_path(bin).is_some()
 }
 
 fn validate_compression(value: &str) -> Result<String, String> {
@@ -8840,12 +8875,14 @@ fn select_scanner(requested: &str) -> Result<String, String> {
 }
 
 fn run_scanner(scanner: &str, rootfs: &Path) -> Result<String, String> {
+    let scanner_path = resolve_command_path(scanner)
+        .ok_or_else(|| format!("scan: scanner executable is unavailable: {scanner}"))?;
     let output = match scanner {
-        "trivy" => process::Command::new("trivy")
+        "trivy" => process::Command::new(&scanner_path)
             .args(["fs", "--quiet", "--format", "json"])
             .arg(rootfs)
             .output(),
-        "grype" => process::Command::new("grype")
+        "grype" => process::Command::new(&scanner_path)
             .args(["dir:"])
             .arg(rootfs)
             .args(["--output", "json"])
@@ -18177,6 +18214,26 @@ volumes:
         );
         assert!(!attributes.contains_key("Env"));
         assert!(!attributes.contains_key("Secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_resolution_requires_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("command resolver tempdir");
+        let candidate = temp.path().join("scanner");
+        std::fs::write(&candidate, b"not executable").expect("write candidate");
+        assert_eq!(
+            super::resolve_command_path(candidate.to_str().unwrap()),
+            None
+        );
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
+            .expect("make candidate executable");
+        assert_eq!(
+            super::resolve_command_path(candidate.to_str().unwrap()),
+            Some(candidate)
+        );
     }
 
     #[test]

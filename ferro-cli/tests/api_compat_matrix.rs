@@ -115,6 +115,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        path: "/containers/matrix-container/logs?follow=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/matrix-container/changes",
         coverage: Coverage::Implemented,
         expected_status: 200,

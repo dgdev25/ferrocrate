@@ -11276,6 +11276,11 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/logs");
                 let tail = query.get("tail").cloned();
+                let follow = query
+                    .get("follow")
+                    .map(|value| parse_docker_bool_query(Some(value), "follow"))
+                    .transpose()?
+                    .unwrap_or(false);
                 let pending = state
                     .pending
                     .lock()
@@ -11286,7 +11291,7 @@ fn handle_docker_compat_connection(
                     // container before it has a runtime log file.
                     return Ok(http_response(200, &[], "text/plain"));
                 }
-                if query.get("follow").is_some_and(|value| value == "1") {
+                if follow {
                     // Validate the container and tail before committing to a
                     // long-lived chunked response.
                     let raw = runtime.logs(&id).map_err(|err| err.to_string())?;

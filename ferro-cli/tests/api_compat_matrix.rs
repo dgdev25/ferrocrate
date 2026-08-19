@@ -644,9 +644,11 @@ fn docker_api_compatibility_matrix() {
         }
         if case.path.ends_with("/stats?stream=0") {
             let stats: serde_json::Value = serde_json::from_str(&body).expect("stats JSON");
-            assert!(stats.get("memory_stats").is_some());
-            assert!(stats.get("cpu_stats").is_some());
-            assert!(stats.get("pids_stats").is_some());
+            assert_eq!(stats["memory_stats"]["usage"], 0);
+            assert_eq!(stats["memory_stats"]["limit"], 0);
+            assert_eq!(stats["cpu_stats"]["cpu_usage"]["total_usage"], 0);
+            assert_eq!(stats["pids_stats"]["current"], 0);
+            assert_eq!(stats["pids_stats"]["limit_reached"], 0);
         }
         if case.path.ends_with("/changes") && case.path.contains("matrix-container") {
             let changes: serde_json::Value = serde_json::from_str(&body).expect("changes JSON");

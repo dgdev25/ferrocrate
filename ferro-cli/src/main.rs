@@ -11417,7 +11417,15 @@ fn handle_docker_compat_connection(
                         // observation read-only and avoid creating runtime
                         // state merely to satisfy an inspect/stats request.
                         let _ = error;
-                        ferro_core::cgroups::CgroupStats::default()
+                        ferro_core::cgroups::CgroupStats {
+                            memory_current: Some(0),
+                            memory_max: Some(0),
+                            pids_current: Some(0),
+                            pids_limit_reached: Some(0),
+                            cpu_usage_usec: Some(0),
+                            cpu_user_usec: Some(0),
+                            cpu_system_usec: Some(0),
+                        }
                     }
                     Err(error) => return Err(error.to_string()),
                 };

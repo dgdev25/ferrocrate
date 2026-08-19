@@ -3698,7 +3698,26 @@ impl ContainerRuntime {
             ));
         }
         self.mediate_existing(Action::ContainerUpdate, id, |runtime, proof, intent| {
-            runtime.update_resource_limits_authorized(proof, intent, id, limits)
+            runtime.update_resource_limits_authorized(proof, intent, id, limits, None)
+        })
+    }
+
+    /// Apply resource limits and an optional restart-policy change as one
+    /// authorized durable mutation. This prevents Docker's combined update
+    /// request from publishing only its first field when persistence fails.
+    pub fn update_resources_and_restart_policy(
+        &self,
+        id: &str,
+        limits: ResourceLimitRecord,
+        restart_policy: Option<RestartPolicy>,
+    ) -> Result<(), RuntimeError> {
+        if limits.cpu_quota.is_some() != limits.cpu_period.is_some() {
+            return Err(RuntimeError::InvalidState(
+                "cpu quota and period must be supplied together".into(),
+            ));
+        }
+        self.mediate_existing(Action::ContainerUpdate, id, |runtime, proof, intent| {
+            runtime.update_resource_limits_authorized(proof, intent, id, limits, restart_policy)
         })
     }
 
@@ -3742,6 +3761,7 @@ impl ContainerRuntime {
         _intent: Option<&crate::witness::DurableIntent>,
         id: &str,
         limits: ResourceLimitRecord,
+        restart_policy: Option<RestartPolicy>,
     ) -> Result<(), RuntimeError> {
         let mut record = self
             .store
@@ -3776,6 +3796,9 @@ impl ContainerRuntime {
         manager.replace_limits(&group, &to_cgroup(Some(&limits))?)?;
 
         record.resource_limits = Some(limits);
+        if let Some(restart_policy) = restart_policy {
+            record.restart_policy = restart_policy;
+        }
         let operation_id = record
             .pending_mutation
             .as_ref()

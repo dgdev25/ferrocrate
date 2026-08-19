@@ -11733,13 +11733,8 @@ fn handle_docker_compat_connection(
                     pids_max: update.pids_max.unwrap_or(current_limits.pids_max),
                 };
                 runtime
-                    .update_resource_limits(&id, limits)
+                    .update_resources_and_restart_policy(&id, limits, update.restart_policy)
                     .map_err(|error| error.to_string())?;
-                if let Some(restart_policy) = update.restart_policy {
-                    runtime
-                        .update_restart_policy(&id, restart_policy)
-                        .map_err(|error| error.to_string())?;
-                }
                 let body = serde_json::json!({"Warnings": []});
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }

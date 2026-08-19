@@ -218,6 +218,14 @@ fn unsupported_kernel_peer_pidfd_error_fails_at_the_socket_boundary() {
 }
 
 #[test]
+fn unsupported_peer_pidfd_explains_secure_kernel_requirement() {
+    let message = PrincipalResolutionError::PeerPidfdUnsupported.to_string();
+    assert!(message.contains("SO_PEERPIDFD"));
+    assert!(message.contains("secure CRI peer identity"));
+    assert!(message.contains("upgrade the kernel"));
+}
+
+#[test]
 fn pidfd_for_a_different_process_fails_closed() {
     let mut reader = FakeProcReader::fixture();
     reader.insert(

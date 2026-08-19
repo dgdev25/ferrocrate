@@ -278,7 +278,7 @@ pub enum PrincipalResolutionError {
     PeerCredentials(#[source] Errno),
     #[error("operating system peer pidfd lookup failed")]
     PeerPidfd(#[source] Errno),
-    #[error("the kernel does not provide a peer pidfd")]
+    #[error("the kernel does not provide SO_PEERPIDFD; secure CRI peer identity requires a kernel with peer-pidfd support (upgrade the kernel or use a supported local socket host)")]
     PeerPidfdUnsupported,
     #[error("required process identity fact is unavailable: {fact}")]
     ProcUnavailable {

@@ -10528,12 +10528,9 @@ fn validate_docker_exec_start(tty: bool) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
-    if tty {
-        return Err(
-            "docker: Tty=true is unsupported for exec creation; Ferrocrate currently supports non-TTY exec only"
-                .to_string(),
-        );
-    }
+    // The TTY preference is retained by the Docker client and applied at
+    // start; the rootful runtime allocates the PTY there.
+    let _ = tty;
     Ok(())
 }
 
@@ -18317,10 +18314,8 @@ volumes:
     }
 
     #[test]
-    fn docker_exec_create_rejects_tty_instead_of_downgrading() {
-        let error = validate_docker_exec_create(true)
-            .expect_err("TTY exec creation must not be silently downgraded to pipes");
-        assert!(error.contains("Tty=true is unsupported for exec creation"));
+    fn docker_exec_create_accepts_tty_for_rootful_runtime_path() {
+        assert!(validate_docker_exec_create(true).is_ok());
         assert!(validate_docker_exec_create(false).is_ok());
     }
 

@@ -10111,6 +10111,8 @@ struct DockerExecSpec {
 struct DockerExecCreateRequest {
     #[serde(rename = "Cmd")]
     cmd: Vec<String>,
+    #[serde(rename = "Tty", default)]
+    tty: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -10164,6 +10166,17 @@ fn validate_docker_exec_start(tty: bool) -> Result<(), String> {
     if tty {
         return Err(
             "docker: Tty=true is unsupported for exec; Ferrocrate currently supports non-TTY exec only"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
+    if tty {
+        return Err(
+            "docker: Tty=true is unsupported for exec creation; Ferrocrate currently supports non-TTY exec only"
                 .to_string(),
         );
     }
@@ -11648,6 +11661,10 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/exec") => {
+                let request: DockerExecCreateRequest = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("docker: invalid exec create payload: {error}"))?;
+                validate_docker_exec_create(request.tty)?;
+                validate_docker_exec_command(&request.cmd)?;
                 let container = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/exec");
@@ -11658,9 +11675,6 @@ fn handle_docker_compat_connection(
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                     docker_resolve_id(&runtime, &pending, container)?
                 };
-                let request: DockerExecCreateRequest = serde_json::from_slice(&request.body)
-                    .map_err(|error| format!("docker: invalid exec create payload: {error}"))?;
-                validate_docker_exec_command(&request.cmd)?;
                 let id = docker_compat_id("e", &state.next_id);
                 state
                     .execs
@@ -14783,12 +14797,13 @@ mod tests {
         split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_container_name,
         validate_docker_container_prune_filters, validate_docker_exec_command,
-        validate_docker_exec_start, validate_docker_image_prune_filters,
-        validate_docker_network_filters, validate_docker_volume_filters, validate_network_backend,
-        validate_network_mode, validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands,
-        ConfigCommands, ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent,
-        DockerEventStore, DockerExecCreateRequest, DockerHealthSpec, MigrateCommands,
-        NetworkCommands, RvfCommands, VolumeCommands, WitnessCommands,
+        validate_docker_exec_create, validate_docker_exec_start,
+        validate_docker_image_prune_filters, validate_docker_network_filters,
+        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
+        validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
+        ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
+        DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
+        VolumeCommands, WitnessCommands,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -17426,6 +17441,14 @@ volumes:
             .expect_err("TTY exec must not be silently downgraded to merged pipes");
         assert!(error.contains("Tty=true is unsupported for exec"));
         assert!(validate_docker_exec_start(false).is_ok());
+    }
+
+    #[test]
+    fn docker_exec_create_rejects_tty_instead_of_downgrading() {
+        let error = validate_docker_exec_create(true)
+            .expect_err("TTY exec creation must not be silently downgraded to pipes");
+        assert!(error.contains("Tty=true is unsupported for exec creation"));
+        assert!(validate_docker_exec_create(false).is_ok());
     }
 
     #[test]

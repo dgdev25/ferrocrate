@@ -115,6 +115,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/containers/matrix-container/exec",
+        coverage: Coverage::Unsupported,
+        expected_status: 400,
+        body: r#"{"Cmd":["true"],"Tty":true}"#,
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/create?name=matrix-tty-unsupported",
         coverage: Coverage::Unsupported,
         expected_status: 400,

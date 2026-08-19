@@ -965,6 +965,14 @@ fn docker_create_identity_is_inspectable_before_start() {
     assert_eq!(inspect["Id"], id);
     assert_eq!(inspect["Name"], "/created-before-start");
     assert_eq!(inspect["State"]["Status"], "created");
+    assert_eq!(inspect["NetworkSettings"]["IPAddress"], "");
+    assert_eq!(
+        inspect["NetworkSettings"]["Networks"]["bridge"]["NetworkID"],
+        "bridge"
+    );
+    assert!(inspect["NetworkSettings"]["Networks"]["bridge"]["DNSNames"]
+        .as_array()
+        .is_some_and(|names| names.is_empty()));
 
     let (status, body) = harness.request("GET", "/containers/json?all=1", "");
     assert_eq!(status, 200, "list response: {body}");
@@ -979,6 +987,10 @@ fn docker_create_identity_is_inspectable_before_start() {
     let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("post-restart JSON");
     assert_eq!(inspect["Id"], id);
     assert_eq!(inspect["State"]["Status"], "created");
+    assert_eq!(
+        inspect["NetworkSettings"]["Networks"]["bridge"]["NetworkID"],
+        "bridge"
+    );
 
     let (status, body) = harness.request(
         "POST",

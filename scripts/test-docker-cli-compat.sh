@@ -109,6 +109,8 @@ docker -H "$host" start "$name" >/dev/null
 docker -H "$host" exec "$name" /bin/busybox true >/dev/null
 docker -H "$host" stats --no-stream "$name" >/dev/null
 docker -H "$host" top "$name" >/dev/null
+docker -H "$host" pause "$name" >/dev/null
+docker -H "$host" unpause "$name" >/dev/null
 wait_status="$(docker -H "$host" wait "$name")"
 [[ "$wait_status" == "0" ]] || {
   echo "Docker CLI wait returned unexpected status: $wait_status" >&2
@@ -166,4 +168,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/stats/top/wait/logs/diff/exec/export/cp/commit/attach/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/history/save/load/tag/inspect/rmi/image-prune/create/start/stats/top/pause/unpause/wait/logs/diff/exec/export/cp/commit/attach/rm/events"

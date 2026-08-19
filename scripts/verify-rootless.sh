@@ -56,7 +56,7 @@ fi
 # mount probe above while denying that nested combination, so report it
 # separately instead of letting Compose fail after container state is created.
 if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
-  unshare --user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
+  unshare --user --map-root-user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
   echo "rootless.bwrap_nested=pass"
 else
   echo "rootless.bwrap_nested=missing"

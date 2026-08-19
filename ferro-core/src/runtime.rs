@@ -5656,7 +5656,10 @@ fn build_command(
         // unprivileged caller. Pair it with a user namespace. Avoid invoking
         // setuid mapping helpers after no_new_privs is installed; callers
         // needing subordinate-ID mappings use the authenticated mapping path.
-        unshare_cmd.args(["--user", "--net", "--"]);
+        // Map the caller to root in the outer user namespace so bubblewrap
+        // can reuse its privileges instead of creating a denied nested user
+        // namespace on hardened hosts.
+        unshare_cmd.args(["--user", "--map-root-user", "--net", "--"]);
         // Keep the process stopped after `unshare` has created its network
         // namespace. The parent attaches slirp4netns at this point, then
         // releases the workload with a second SIGCONT. This avoids both the
@@ -14070,10 +14073,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.len() >= 9);
-        assert!(args[args.len() - 9].ends_with("/unshare"));
+        assert!(args[args.len() - 10].ends_with("/unshare"));
         assert_eq!(
-            &args[args.len() - 8..args.len() - 5],
-            ["--user", "--net", "--"]
+            &args[args.len() - 9..args.len() - 5],
+            ["--user", "--map-root-user", "--net", "--"]
         );
         assert!(args[args.len() - 5].ends_with("/sh"));
         assert_eq!(args[args.len() - 4], "-c");
@@ -14105,10 +14108,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.len() >= 9);
-        assert!(args[args.len() - 9].ends_with("/unshare"));
+        assert!(args[args.len() - 10].ends_with("/unshare"));
         assert_eq!(
-            &args[args.len() - 8..args.len() - 5],
-            ["--user", "--net", "--"]
+            &args[args.len() - 9..args.len() - 5],
+            ["--user", "--map-root-user", "--net", "--"]
         );
         assert!(args[args.len() - 5].ends_with("/sh"));
         assert_eq!(args[args.len() - 4], "-c");

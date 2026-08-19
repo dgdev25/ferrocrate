@@ -137,7 +137,7 @@ done
 # by the workload path before any installation mutation. Non-strict installs
 # remain usable for host/none networking, but strict installs fail closed.
 if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 && \
-  unshare --user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
+  unshare --user --map-root-user --net --fork sh -c 'exec bwrap --ro-bind / / true' >/dev/null 2>&1; then
   echo "rootless.install.bwrap_nested=pass"
 else
   echo "rootless.install.bwrap_nested=missing"

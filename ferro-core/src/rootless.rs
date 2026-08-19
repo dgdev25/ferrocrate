@@ -169,7 +169,10 @@ pub fn nested_bubblewrap_diagnostic() -> Result<(), String> {
         "unshare executable is unavailable or not a trusted root-owned executable".to_string()
     })?;
     let output = Command::new(unshare)
-        .args(["--user", "--net", "--fork", "--"])
+        // Map the caller to root inside the newly-created user namespace.
+        // Without this explicit mapping, bubblewrap attempts a second user
+        // namespace and is rejected by otherwise-capable hosts.
+        .args(["--user", "--map-root-user", "--net", "--fork", "--"])
         .arg(bwrap)
         .args(["--ro-bind", "/", "/", "true"])
         .output()

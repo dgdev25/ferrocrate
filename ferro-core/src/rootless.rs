@@ -583,7 +583,10 @@ mod tests {
         let helper = temp.path().join("newuidmap");
         fs::write(&helper, "#!/bin/sh\nexit 0\n").expect("write helper");
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("executable");
+        // Keep the fixture untrusted even when the test suite runs as root:
+        // temporary files are root-owned in that case, so ownership alone
+        // would otherwise satisfy the production trust predicate.
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o777)).expect("executable");
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", temp.path());
         let resolved = trusted_executable_path("newuidmap");
@@ -602,7 +605,10 @@ mod tests {
         let bwrap = temp.path().join("bwrap");
         fs::write(&bwrap, "#!/bin/sh\nexit 0\n").expect("write bwrap");
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).expect("executable");
+        // A root-owned temporary 0755 helper is trusted when tests run under
+        // sudo.  Group/other write permission makes this fixture untrusted in
+        // both rootful and unprivileged test environments.
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o777)).expect("executable");
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", temp.path());
         let resolved = super::bubblewrap_path();

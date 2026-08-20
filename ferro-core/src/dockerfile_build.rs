@@ -4641,7 +4641,7 @@ mod tests {
     use super::{
         apply_onbuild_triggers, build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
-        export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
+        create_build_dir, export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
         parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_onbuild,
         parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
@@ -4651,6 +4651,18 @@ mod tests {
         REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn build_scratch_is_scoped_to_runtime_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+
+        let scratch = create_build_dir(&runtime, "context").unwrap();
+
+        assert!(scratch.starts_with(runtime.join("build")));
+        assert!(scratch.is_dir());
+    }
 
     #[test]
     fn build_preparation_is_side_effect_free_and_binds_context() {

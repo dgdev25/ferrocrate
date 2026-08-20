@@ -145,15 +145,31 @@ run "${BIN}" compose -f "${COMPOSE_FILE}" down
 "${BIN}" daemon --docker-compat --socket "${SOCKET}" >"${DOCKER_COMPAT_LOG}" 2>&1 &
 DOCKER_COMPAT_PID=$!
 docker_compat_ready=0
+docker_compat_unavailable=0
 for _ in $(seq 1 "${daemon_ready_attempts}"); do
-  if [[ -S "${SOCKET}" ]] && curl --fail --silent --show-error \
-      --max-time "${HTTP_TIMEOUT}" --unix-socket "${SOCKET}" \
-      http://localhost/_ping >/dev/null 2>&1; then
-    docker_compat_ready=1
-    break
+  if [[ -S "${SOCKET}" ]]; then
+    ping_status=""
+    if ping_status="$(curl --silent --show-error --max-time "${HTTP_TIMEOUT}" \
+        --output "${TMP_DIR}/docker-ping-body" --write-out '%{http_code}' \
+        --unix-socket "${SOCKET}" http://localhost/_ping 2>/dev/null)"; then
+      if [[ "${ping_status}" == "200" ]]; then
+        docker_compat_ready=1
+        break
+      fi
+      if [[ "${ping_status}" == "503" ]] &&
+          grep -q 'SO_PEERPIDFD' "${TMP_DIR}/docker-ping-body"; then
+        docker_compat_unavailable=1
+        break
+      fi
+    fi
   fi
   sleep 0.1
 done
+if [[ "${docker_compat_unavailable}" == 1 ]]; then
+  echo "Docker-compatible daemon unavailable on this host: missing SO_PEERPIDFD" >&2
+  sed -n '1,4p' "${TMP_DIR}/docker-ping-body" >&2 || true
+  exit 77
+fi
 if [[ "${docker_compat_ready}" != 1 ]]; then
   echo "Docker-compatible daemon did not become ready at /_ping; daemon log:" >&2
   sed -n '1,160p' "${DOCKER_COMPAT_LOG}" >&2 || true

@@ -878,6 +878,11 @@ impl RuntimeService for CriRuntime {
         };
         let mut record = record;
         if record.network_mode != "none" {
+            if !nix::unistd::Uid::effective().is_root() {
+                return Err(Status::failed_precondition(
+                    "rootless CRI bridge sandboxes are not supported yet; use network_namespace=none or run the CRI service rootful",
+                ));
+            }
             let netns_name = format!("cri-{}", &record.id[12..]);
             let network = sandbox_network_for(&record.id);
             record.netns_name = Some(netns_name.clone());

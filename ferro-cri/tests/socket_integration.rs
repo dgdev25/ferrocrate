@@ -706,6 +706,42 @@ async fn cri_process_kill_recovers_sqlite_metadata_on_restart() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn cri_rootless_bridge_request_fails_before_kernel_mutation() {
+    if nix::unistd::Uid::effective().is_root() {
+        return;
+    }
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-rootless-bridge-boundary.sock");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let error = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "rootless-bridge-boundary-pod".into(),
+                    uid: "rootless-bridge-boundary-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "rootless-bridge-boundary-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "bridge".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect_err("rootless CRI bridge must fail closed");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("rootless CRI bridge sandboxes"));
+    daemon.kill().expect("stop CRI daemon");
+    let _ = daemon.wait();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cri_store_publication_crash_recovers_sandbox_metadata() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
     let runtime = tempfile::tempdir().expect("runtime tempdir");

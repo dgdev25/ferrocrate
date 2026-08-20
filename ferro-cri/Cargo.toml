@@ -17,6 +17,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-prost = "0.14"
 rusqlite = { version = "0.37", features = ["bundled"] }
+nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

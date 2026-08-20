@@ -9172,22 +9172,6 @@ fn ensure_compose_networks(
         !external && driver.as_deref().unwrap_or("bridge") == "bridge"
     });
     let rootless_compose = !nix::unistd::Uid::effective().is_root() && needs_rootful_bridge;
-    if needs_rootful_bridge {
-        // Rootless bridge provisioning is a Compose-level shared-network
-        // operation and is unsupported regardless of whether per-container
-        // slirp networking was explicitly enabled. Detect the caller's
-        // privilege directly so the runtime's default-on rootless networking
-        // cannot accidentally bypass this fail-closed boundary.
-        let rootless_enabled = !nix::unistd::Uid::effective().is_root();
-        if let Some(message) = compose_rootless_bridge_boundary(
-            rootless_enabled,
-            nix::unistd::Uid::effective().is_root(),
-        ) {
-            if !rootless_enabled {
-                return Err(message.to_string());
-            }
-        }
-    }
     let mut records = load_networks(runtime_dir)?;
     let mut created = Vec::new();
     for (name, driver, external) in definitions {
@@ -9208,6 +9192,13 @@ fn ensure_compose_networks(
         }
         validate_network_name(&name)?;
         if records.iter().any(|record| record.name == name) {
+            continue;
+        }
+        // Rootless containers receive an isolated slirp4netns network. The
+        // first service becomes the network leader and subsequent services
+        // join that leader's namespace, so no privileged bridge record or
+        // kernel mutation is needed at Compose-up time.
+        if rootless_compose {
             continue;
         }
         let record = create_network_record(&name, None, None, None, None)?;
@@ -9265,13 +9256,10 @@ fn ensure_compose_networks(
 }
 
 #[cfg(target_os = "linux")]
-fn compose_rootless_bridge_boundary(
-    rootless_enabled: bool,
-    effective_root: bool,
-) -> Option<&'static str> {
-    (rootless_enabled && !effective_root).then_some(
-        "compose: bridge network provisioning is unsupported in rootless mode; use network_mode: none or a pre-existing externally managed rootless network",
-    )
+fn compose_rootless_network_mode(_logical: &str, leader_pid: Option<u32>) -> String {
+    leader_pid
+        .map(|pid| format!("container:pid:{pid}"))
+        .unwrap_or_else(|| "bridge".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -9289,7 +9277,10 @@ fn compose_rootless_network_binding(
         return Ok((logical, None));
     }
     if let Some(pid) = leaders.get(&logical) {
-        return Ok((format!("container:pid:{pid}"), Some(logical)));
+        return Ok((
+            compose_rootless_network_mode(&logical, Some(*pid)),
+            Some(logical),
+        ));
     }
     if let Ok(records) = runtime.list() {
         if let Some(record) = records
@@ -9299,7 +9290,7 @@ fn compose_rootless_network_binding(
             return Ok((format!("container:pid:{}", record.pid), Some(logical)));
         }
     }
-    Ok((logical.clone(), Some(logical)))
+    Ok((compose_rootless_network_mode(&logical, None), Some(logical)))
 }
 
 #[cfg(target_os = "linux")]
@@ -16491,13 +16482,15 @@ volumes:
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn rootless_compose_bridge_boundary_is_actionable_and_fail_closed() {
-        let error = super::compose_rootless_bridge_boundary(true, false)
-            .expect("rootless bridge provisioning must be rejected");
-        assert!(error.contains("bridge network provisioning is unsupported"));
-        assert!(error.contains("network_mode: none"));
-        assert!(super::compose_rootless_bridge_boundary(false, false).is_none());
-        assert!(super::compose_rootless_bridge_boundary(true, true).is_none());
+    fn rootless_compose_named_network_uses_slirp_leader_or_shared_namespace() {
+        assert_eq!(
+            super::compose_rootless_network_mode("project_default", None),
+            "bridge"
+        );
+        assert_eq!(
+            super::compose_rootless_network_mode("project_default", Some(4242)),
+            "container:pid:4242"
+        );
     }
 
     #[cfg(target_os = "linux")]

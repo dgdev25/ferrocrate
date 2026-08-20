@@ -178,7 +178,7 @@ fn rootless_compose_services_share_the_project_network_namespace() {
     let workspace = project.join("workspace");
     fs::create_dir_all(&workspace).expect("workspace");
     let compose = compose_fixture(
-        "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/leader; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/follower; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    depends_on:\n      leader:\n        condition: service_started\n",
+        "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/leader; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    networks: [appnet]\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/follower; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    networks: [appnet]\n    depends_on:\n      leader:\n        condition: service_started\nnetworks:\n  appnet: {}\n",
     );
     fs::create_dir_all(&project).expect("project");
     fs::write(project.join("compose.yml"), compose).expect("compose file");

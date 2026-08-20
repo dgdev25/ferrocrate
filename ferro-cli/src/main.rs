@@ -14901,6 +14901,11 @@ fn docker_inspect_payload(
             "Env": record.env,
             "Cmd": record.command,
             "Tty": false,
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "OpenStdin": false,
+            "StdinOnce": false,
             "WorkingDir": record.workdir,
             "User": record.user,
             "Labels": record.labels,
@@ -15078,6 +15083,11 @@ fn docker_pending_inspect_payload(
             "Env": spec.env,
             "Cmd": spec.cmd,
             "Tty": false,
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "OpenStdin": false,
+            "StdinOnce": false,
             "WorkingDir": spec.workdir,
             "User": spec.user,
             "Labels": labels,
@@ -19156,6 +19166,9 @@ volumes:
         };
         let payload = docker_pending_inspect_payload("pending", &pending, false);
         assert_eq!(payload["Config"]["Tty"], false);
+        assert_eq!(payload["Config"]["AttachStdout"], true);
+        assert_eq!(payload["Config"]["AttachStderr"], true);
+        assert_eq!(payload["Config"]["OpenStdin"], false);
         assert_eq!(payload["Config"]["Healthcheck"]["Test"][0], "CMD-SHELL");
         assert_eq!(
             payload["Config"]["Healthcheck"]["Interval"],

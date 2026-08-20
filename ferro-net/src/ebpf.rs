@@ -1308,8 +1308,7 @@ pub fn build_bpftool_load_with_map_cmd(
 /// monitor.  Each loaded tracepoint program owns one map instance, so event
 /// names are part of the path and cannot collide during multi-event setup.
 pub fn security_monitor_ring_map_path(pin_root: &str, event: &str) -> String {
-    let _ = event;
-    format!("{pin_root}/{SECURITY_MONITOR_RING_MAP_NAME}")
+    format!("{pin_root}/{event}-events")
 }
 
 pub fn build_tc_attach_cmd(iface: &str, pin_path: &str, direction: &str) -> Vec<String> {
@@ -1686,7 +1685,7 @@ mod lifecycle_tests {
         );
         assert_eq!(
             super::security_monitor_ring_map_path("/sys/fs/bpf/ferrocrate-security", "open"),
-            "/sys/fs/bpf/ferrocrate-security/FERRO_SECURITY_EVENTS"
+            "/sys/fs/bpf/ferrocrate-security/open-events"
         );
     }
 

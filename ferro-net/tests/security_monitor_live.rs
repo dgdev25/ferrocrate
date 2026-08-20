@@ -40,7 +40,7 @@ fn security_monitor_loads_attaches_delivers_and_cleans_up() {
 
     let installed = install_security_monitor(&config).expect("load and attach producer");
     assert_eq!(installed, vec!["openat"]);
-    let map_path = pin_root.join("FERRO_SECURITY_EVENTS");
+    let map_path = pin_root.join("openat-events");
     let mut ring = SecurityMonitorRingBuffer::open(&map_path).expect("open pinned ring map");
 
     let _ = fs::read_to_string("/etc/hostname").expect("trigger openat");

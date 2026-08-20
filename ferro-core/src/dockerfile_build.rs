@@ -2785,6 +2785,16 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                         "RUN cache mount does not accept required".to_string(),
                     ));
                 }
+                if source.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN cache mount source/from is not supported".to_string(),
+                    ));
+                }
+                if read_only {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN cache mount readonly mode is not supported".to_string(),
+                    ));
+                }
                 let target = target.ok_or_else(|| {
                     DockerfileBuildError::Invalid("cache mount requires target".to_string())
                 })?;
@@ -5652,6 +5662,8 @@ mod tests {
             "--mount=type=cache,target=relative echo value",
             "--mount=type=cache,target=/tmp/../escape echo value",
             "--mount=type=cache,target=/tmp,id=bad/slash echo value",
+            "--mount=type=cache,target=/tmp,source=seed echo value",
+            "--mount=type=cache,target=/tmp,readonly echo value",
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }

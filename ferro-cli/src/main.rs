@@ -6376,11 +6376,17 @@ fn docker_build_cache_entries(runtime_dir: &Path) -> Vec<serde_json::Value> {
                 .get("dockerfile_digest")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
+            let stage_count = entry
+                .get("stage_layer_digests")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default();
             serde_json::json!({
                 "ID": key,
                 "CreatedAt": created_at,
                 "Size": size,
-                "Description": format!("context={context} dockerfile={dockerfile}"),
+                "StageCount": stage_count,
+                "Description": format!("context={context} dockerfile={dockerfile} stages={stage_count}"),
             })
         })
         .collect::<Vec<_>>();
@@ -18717,7 +18723,8 @@ volumes:
                 "created_at_unix": 20,
                 "layer_size": 8,
                 "context_digest": "ctx-new",
-                "dockerfile_digest": "df-new"
+                "dockerfile_digest": "df-new",
+                "stage_layer_digests": ["sha256:stage-a", "sha256:stage-b"]
             }
         });
         std::fs::write(
@@ -18732,8 +18739,9 @@ volumes:
         assert_eq!(projected[0]["CreatedAt"], 20);
         assert_eq!(
             projected[0]["Description"],
-            "context=ctx-new dockerfile=df-new"
+            "context=ctx-new dockerfile=df-new stages=2"
         );
+        assert_eq!(projected[0]["StageCount"], 2);
     }
 
     #[test]

@@ -22,6 +22,15 @@ trap 'rm -rf -- "$tmp_root"' EXIT
 cp "$register" "$tmp_root/register.md"
 cp "$iptables_path" "$tmp_root/$iptables"
 cp "$nftables_path" "$tmp_root/$nftables"
+# Exercise stale metadata and B-001 links: a refresh must update both the
+# visible snapshot and the register's latest measured-row references.
+sed -i \
+  -e 's/Latest benchmark-relevant implementation head: `[^`]*`/Latest benchmark-relevant implementation head: `stale-head`/' \
+  -e 's/The latest paired refresh was completed at head `[^`]*`/The latest paired refresh was completed at head `stale-head`/' \
+  -e 's/milliseconds from commit `[^`]*`/milliseconds from commit `stale-head`/' \
+  -e 's#docker-comparison-current-head-[^)]*-iptables.md#docker-comparison-current-head-stale-head-iptables.md#g' \
+  -e 's#docker-comparison-current-head-[^)]*-nftables.md#docker-comparison-current-head-stale-head-nftables.md#g' \
+  "$tmp_root/register.md"
 before_hash="$(sha256sum "$tmp_root/register.md" | awk '{print $1}')"
 python3 "$updater" "$tmp_root/$iptables" "$tmp_root/$nftables" --register "$tmp_root/register.md" >"$tmp_root/proposal.md"
 after_dry_hash="$(sha256sum "$tmp_root/register.md" | awk '{print $1}')"
@@ -33,6 +42,9 @@ after_dry_hash="$(sha256sum "$tmp_root/register.md" | awk '{print $1}')"
 python3 "$updater" "$tmp_root/$iptables" "$tmp_root/$nftables" --register "$tmp_root/register.md" --apply
 bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$tmp_root/register.md"
 grep -q 'Current comparison snapshot' "$tmp_root/register.md"
+grep -Fq 'Latest benchmark-relevant implementation head: `'"$latest_head"'`' "$tmp_root/register.md"
+grep -q "docker-comparison-current-head-${latest_head}-iptables.md" "$tmp_root/register.md"
+grep -q "docker-comparison-current-head-${latest_head}-nftables.md" "$tmp_root/register.md"
 grep -q '58 unique benchmark IDs' <(bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$tmp_root/register.md")
 
 echo "benchmark register updater regression checks passed"

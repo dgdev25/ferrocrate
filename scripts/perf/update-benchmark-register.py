@@ -55,6 +55,59 @@ def relative_report(register: Path, report: Path) -> str:
     return os.path.relpath(report, register.parent).replace(os.sep, "/")
 
 
+def report_head(path: Path) -> str:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"- Ferrocrate commit: `?([^`\s]+)`?\s*$", line)
+        if match:
+            return match.group(1)
+    raise SystemExit(f"{path}: missing Ferrocrate commit metadata")
+
+
+def update_register_metadata(
+    text: str, head: str, ip_link: str, nft_link: str
+) -> str:
+    text, replacements = re.subn(
+        r"(The latest paired refresh was completed at head `)[^`]+(`)",
+        rf"\g<1>{head}\g<2>",
+        text,
+        count=1,
+    )
+    if replacements != 1:
+        raise SystemExit("register is missing latest paired refresh metadata")
+    text, replacements = re.subn(
+        r"(Latest benchmark-relevant implementation head: `)[^`]+(`)",
+        rf"\g<1>{head}\g<2>",
+        text,
+        count=1,
+    )
+    if replacements != 1:
+        raise SystemExit("register is missing latest implementation metadata")
+    text, replacements = re.subn(
+        r"(milliseconds from commit `)[^`]+(` on the current Ubuntu host)",
+        rf"\g<1>{head}\g<2>",
+        text,
+        count=1,
+    )
+    if replacements != 1:
+        raise SystemExit("register is missing snapshot commit metadata")
+
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if not re.match(r"\| B-00(?:[1-9]|10) \|", line):
+            continue
+        lines[index] = re.sub(
+            r"\]\([^)]*-docker-comparison-current-head-[^)]+-iptables\.md\)",
+            f"]({ip_link})",
+            line,
+        )
+        lines[index] = re.sub(
+            r"\]\([^)]*-docker-comparison-current-head-[^)]+-nftables\.md\)",
+            f"]({nft_link})",
+            lines[index],
+        )
+    return "".join(lines)
+
+
 def snapshot(iptables: dict[str, tuple[str, str]], nftables: dict[str, tuple[str, str]], ip_link: str, nft_link: str) -> str:
     lines = [
         "| Feature | Docker (iptables) | Ferrocrate (iptables) | Delta | Relative | Docker (nftables) | Ferrocrate (nftables) | Delta | Relative | Detailed reports |",
@@ -85,6 +138,12 @@ def main() -> int:
 
     iptables = parse_report(args.iptables_report)
     nftables = parse_report(args.nftables_report)
+    ip_head = report_head(args.iptables_report)
+    nft_head = report_head(args.nftables_report)
+    if ip_head != nft_head:
+        raise SystemExit(
+            f"paired reports have different Ferrocrate commits: {ip_head} vs {nft_head}"
+        )
     ip_link = relative_report(args.register, args.iptables_report)
     nft_link = relative_report(args.register, args.nftables_report)
     table = snapshot(iptables, nftables, ip_link, nft_link)
@@ -100,6 +159,7 @@ def main() -> int:
         raise SystemExit("register snapshot table header not found")
     replacement = section[:table_start].rstrip() + "\n\n" + table + "\n\n"
     updated = text[:start] + replacement + text[start + end - start :]
+    updated = update_register_metadata(updated, ip_head, ip_link, nft_link)
     if not args.apply:
         print(table)
         return 0

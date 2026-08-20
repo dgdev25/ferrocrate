@@ -131,6 +131,20 @@ else
   missing=1
 fi
 
+# Cgroup v2 being mounted is not sufficient for rootless resource controls:
+# the caller must also own a delegated hierarchy. Probe only permissions and
+# directory shape; never create a cgroup or write controller state here.
+cgroup_relative="$(awk -F: '$1 == 0 { print $3; exit }' /proc/self/cgroup 2>/dev/null || true)"
+cgroup_root="${FERROCRATE_CGROUP_ROOT:-/sys/fs/cgroup${cgroup_relative}}"
+if [[ -d "$cgroup_root" && -w "$cgroup_root" && -w "$cgroup_root/cgroup.procs" ]]; then
+  echo "rootless.cgroup_delegation=pass"
+else
+  echo "rootless.cgroup_delegation=missing"
+  echo "rootless.cgroup_delegation_reason=caller hierarchy is not writable: $cgroup_root"
+  echo "warning: rootless cgroup limits require a delegated user systemd scope (systemd-run --user --scope -p Delegate=yes) or a caller-owned FERROCRATE_CGROUP_ROOT" >&2
+  missing=1
+fi
+
 if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" ]]; then
   echo "rootless.xdg_runtime_dir=pass"
 else

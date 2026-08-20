@@ -19,6 +19,7 @@ bash "$repo_root/scripts/verify-rootless.sh" >"$output" 2>&1
 
 grep -q '^rootless.subuid=pass$' "$output"
 grep -q '^rootless.subgid=pass$' "$output"
+grep -q '^rootless.cgroup_delegation=' "$output"
 echo "rootless numeric subid diagnostic regression passed"
 
 # Hermetic strict-mode negative control: make the operational probes pass with
@@ -49,6 +50,7 @@ set -e
 [[ "$strict_rc" -eq 1 ]]
 grep -q '^rootless.subuid=missing$' "$strict_output"
 grep -q '^rootless.subgid=missing$' "$strict_output"
+grep -q '^rootless.cgroup_delegation=' "$strict_output"
 # Helper trust is deliberately not asserted here: the release gate may run as
 # root, in which case the hermetic stubs are root-owned and pass the ownership
 # check. The invariant under test is the strict failure caused by missing
@@ -69,6 +71,7 @@ set -e
 [[ "$flag_rc" -eq 1 ]]
 grep -q '^rootless.subuid=missing$' "$strict_output"
 grep -q '^rootless.subgid=missing$' "$strict_output"
+grep -q '^rootless.cgroup_delegation=' "$strict_output"
 echo "rootless --strict flag regression passed"
 
 printf '%s:not-a-number:0\n' "$(id -u)" >"$tmp_dir/malformed-subuid"

@@ -3595,6 +3595,7 @@ fn run_stage_commands(
                     std::process::id()
                 ))
             };
+            reject_cache_path_symlinks(&cache)?;
             fs::create_dir_all(&cache)?;
             reject_cache_symlinks(&cache)?;
             fs::create_dir_all(&target)?;
@@ -3872,6 +3873,22 @@ fn reject_cache_symlinks(path: &Path) -> Result<(), DockerfileBuildError> {
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
             reject_cache_symlinks(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_cache_path_symlinks(path: &Path) -> Result<(), DockerfileBuildError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "cache mount path contains a symlink: {}",
+                    current.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -4728,8 +4745,8 @@ mod tests {
         parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_onbuild,
         parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
-        validate_mount_target, BuildCacheEntry, CacheSharing, CopyOwner,
+        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner, save_build_cache,
+        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CacheSharing, CopyOwner,
         OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
@@ -5501,6 +5518,19 @@ mod tests {
         let error = validate_mount_target(root.path(), "/run/secrets/token", "secret")
             .expect_err("symlinked mount target must fail closed");
         assert!(error.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_path_rejects_symlinked_intermediate_components() {
+        let root = tempfile::tempdir().expect("cache root");
+        std::fs::create_dir(root.path().join("private")).expect("private");
+        std::os::unix::fs::symlink("/tmp", root.path().join("private/link")).expect("symlink");
+        let error = reject_cache_path_symlinks(&root.path().join("private/link/cache"))
+            .expect_err("symlinked cache path must fail closed");
+        assert!(error
+            .to_string()
+            .contains("cache mount path contains a symlink"));
     }
 
     #[test]

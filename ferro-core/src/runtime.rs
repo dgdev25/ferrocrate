@@ -9669,6 +9669,9 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
         enable_ipv6: std::env::var("FERROCRATE_ROOTLESS_IPV6")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false),
+        outbound_addr6: std::env::var("FERROCRATE_ROOTLESS_OUTBOUND_IPV6")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
         api_socket: api_socket.map(|path| path.display().to_string()),
     };
     let cmd = match build_slirp4netns_cmd(pid, &config) {

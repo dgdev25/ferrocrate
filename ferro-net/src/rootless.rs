@@ -1,4 +1,5 @@
 use crate::validate::{validate_cidr, validate_interface_name};
+use std::net::Ipv6Addr;
 use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +7,9 @@ pub struct RootlessNetConfig {
     pub tap_name: String,
     pub cidr: String,
     pub enable_ipv6: bool,
+    /// Optional host IPv6 address for slirp4netns outbound traffic.
+    /// This is deliberately opt-in because it must be routable on the host.
+    pub outbound_addr6: Option<String>,
     pub api_socket: Option<String>,
 }
 
@@ -17,6 +21,15 @@ impl RootlessNetConfig {
 
         // Validate cidr using validate module
         validate_cidr(&self.cidr).map_err(|e| format!("Invalid CIDR: {}", e))?;
+
+        if let Some(address) = &self.outbound_addr6 {
+            if !self.enable_ipv6 {
+                return Err("outbound IPv6 address requires IPv6 to be enabled".to_string());
+            }
+            address
+                .parse::<Ipv6Addr>()
+                .map_err(|_| format!("Invalid outbound IPv6 address: {address}"))?;
+        }
 
         Ok(())
     }
@@ -35,6 +48,11 @@ pub fn build_slirp4netns_cmd(pid: u32, config: &RootlessNetConfig) -> Result<Vec
         } else {
             String::new()
         },
+        config
+            .outbound_addr6
+            .as_ref()
+            .map(|address| format!("--outbound-addr6={address}"))
+            .unwrap_or_default(),
         "--cidr".to_string(),
         config.cidr.clone(),
         config
@@ -89,6 +107,7 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: false,
+            outbound_addr6: None,
             api_socket: None,
         };
         let cmd = build_slirp4netns_cmd(1234, &config).unwrap();
@@ -112,6 +131,7 @@ mod tests {
             tap_name: "tap-long-name1".to_string(),
             cidr: "192.168.0.0/16".to_string(),
             enable_ipv6: false,
+            outbound_addr6: None,
             api_socket: None,
         };
         let cmd = build_slirp4netns_cmd(9999, &config).unwrap();
@@ -135,6 +155,7 @@ mod tests {
             tap_name: "tap@0".to_string(), // Invalid character
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: false,
+            outbound_addr6: None,
             api_socket: None,
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
@@ -146,6 +167,7 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "invalid-cidr".to_string(), // Invalid CIDR
             enable_ipv6: false,
+            outbound_addr6: None,
             api_socket: None,
         };
         assert!(build_slirp4netns_cmd(1234, &config).is_err());
@@ -157,6 +179,7 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: true,
+            outbound_addr6: None,
             api_socket: None,
         };
         let command = build_slirp4netns_cmd(1234, &config).unwrap();
@@ -169,12 +192,53 @@ mod tests {
             tap_name: "tap0".to_string(),
             cidr: "10.0.2.0/24".to_string(),
             enable_ipv6: false,
+            outbound_addr6: None,
             api_socket: Some("/run/ferro/slirp.sock".to_string()),
         };
         let command = build_slirp4netns_cmd(1234, &config).unwrap();
         assert!(command
             .iter()
             .any(|argument| argument == "--api-socket=/run/ferro/slirp.sock"));
+    }
+
+    #[test]
+    fn adds_outbound_ipv6_only_when_explicitly_configured() {
+        let config = RootlessNetConfig {
+            tap_name: "tap0".to_string(),
+            cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: true,
+            outbound_addr6: Some("2001:db8::1".to_string()),
+            api_socket: None,
+        };
+        let command = build_slirp4netns_cmd(1234, &config).unwrap();
+        assert!(command.iter().any(|argument| argument == "--enable-ipv6"));
+        assert!(command
+            .iter()
+            .any(|argument| argument == "--outbound-addr6=2001:db8::1"));
+    }
+
+    #[test]
+    fn rejects_outbound_ipv6_without_ipv6() {
+        let config = RootlessNetConfig {
+            tap_name: "tap0".to_string(),
+            cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: false,
+            outbound_addr6: Some("2001:db8::1".to_string()),
+            api_socket: None,
+        };
+        assert!(build_slirp4netns_cmd(1234, &config).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_outbound_ipv6() {
+        let config = RootlessNetConfig {
+            tap_name: "tap0".to_string(),
+            cidr: "10.0.2.0/24".to_string(),
+            enable_ipv6: true,
+            outbound_addr6: Some("not-an-ipv6-address".to_string()),
+            api_socket: None,
+        };
+        assert!(build_slirp4netns_cmd(1234, &config).is_err());
     }
 
     #[test]

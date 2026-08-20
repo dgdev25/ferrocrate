@@ -18,6 +18,7 @@ use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use lzma_rust2::XzReader;
 #[cfg(unix)]
 use nix::mount::{mount, MsFlags};
 use serde::{Deserialize, Serialize};
@@ -3436,8 +3437,9 @@ fn extract_add_archive(
     let read = probe.read(&mut header)?;
     let gzip = read >= 2 && header[..2] == [0x1f, 0x8b];
     let bzip = read >= 3 && &header[..3] == b"BZh";
+    let xz = read >= 6 && &header[..6] == b"\xfd7zXZ\0";
     let plain_tar = read >= 262 && &header[257..262] == b"ustar";
-    if !gzip && !bzip && !plain_tar {
+    if !gzip && !bzip && !xz && !plain_tar {
         return Ok(false);
     }
     fs::create_dir_all(destination)?;
@@ -3451,6 +3453,13 @@ fn extract_add_archive(
     } else if bzip {
         extract_add_tar(
             BzDecoder::new(File::open(source)?),
+            destination,
+            chmod,
+            excludes,
+        )?;
+    } else if xz {
+        extract_add_tar(
+            XzReader::new(File::open(source)?, true),
             destination,
             chmod,
             excludes,
@@ -4340,9 +4349,10 @@ mod tests {
     }
 
     #[test]
-    fn add_extracts_tar_gzip_and_bzip_archives_without_path_escape() {
+    fn add_extracts_tar_gzip_bzip_and_xz_archives_without_path_escape() {
         use bzip2::{write::BzEncoder, Compression as BzCompression};
         use flate2::{write::GzEncoder, Compression};
+        use lzma_rust2::{XzOptions, XzWriter};
         use std::io::{Cursor, Write};
 
         let temp = tempfile::tempdir().unwrap();
@@ -4367,6 +4377,10 @@ mod tests {
         let mut encoder = BzEncoder::new(Vec::new(), BzCompression::default());
         encoder.write_all(&bytes).unwrap();
         fs::write(&bzip_path, encoder.finish().unwrap()).unwrap();
+        let xz_path = temp.path().join("payload.tar.xz");
+        let mut encoder = XzWriter::new(Vec::new(), XzOptions::default()).unwrap();
+        encoder.write_all(&bytes).unwrap();
+        fs::write(&xz_path, encoder.finish().unwrap()).unwrap();
 
         let stages = parse_stages("FROM scratch\nADD --chmod=600 payload.tar /app\n").unwrap();
         assert!(stages[0].copy_paths[0].extract_archives);
@@ -4380,6 +4394,7 @@ mod tests {
                     "payload.tar".into(),
                     "payload.tar.gz".into(),
                     "payload.tar.bz2".into(),
+                    "payload.tar.xz".into(),
                 ],
                 dest: "/app".into(),
                 chmod: Some(0o600),

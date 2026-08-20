@@ -2763,9 +2763,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     None => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("shared") => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("private") => CacheSharing::Private,
-                    Some(value) => return Err(DockerfileBuildError::Unsupported(format!(
+                    Some(value) => {
+                        return Err(DockerfileBuildError::Unsupported(format!(
                         "RUN cache mount sharing={value} is not supported; use shared or private"
-                    ))),
+                    )))
+                    }
                 };
                 if required.is_some() {
                     return Err(DockerfileBuildError::Unsupported(

@@ -40,6 +40,74 @@ pub fn exec_in_rootless_rootfs(
     readonly_rootfs: bool,
     timeout: Option<Duration>,
 ) -> Result<ExecResult, ContainerExecError> {
+    let command = build_rootless_bwrap(
+        rootfs,
+        command,
+        env,
+        workdir,
+        mounts,
+        tmpfs_mounts,
+        readonly_rootfs,
+    )?;
+    execute_process(command, timeout)
+}
+
+/// Execute a rootless command with stdout/stderr attached to one PTY.
+///
+/// Bubblewrap recreates the same rootfs and mount boundary as ordinary
+/// rootless exec; the PTY only changes the transport semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_in_rootless_rootfs_tty(
+    rootfs: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tmpfs_mounts: &[(String, Option<String>)],
+    readonly_rootfs: bool,
+) -> Result<ExecResult, ContainerExecError> {
+    let mut command = build_rootless_bwrap(
+        rootfs,
+        command,
+        env,
+        workdir,
+        mounts,
+        tmpfs_mounts,
+        readonly_rootfs,
+    )?;
+    let pty = nix::pty::openpty(None, None)
+        .map_err(|error| ContainerExecError::Io(std::io::Error::other(error)))?;
+    let slave = File::from(pty.slave);
+    let mut child = command
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave))
+        .spawn()?;
+    let master = File::from(pty.master);
+    let mut output = Vec::new();
+    if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
+        if error.raw_os_error() != Some(nix::libc::EIO) {
+            return Err(ContainerExecError::Io(error));
+        }
+    }
+    let status = child.wait()?;
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output).into_owned(),
+        stderr: String::new(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_rootless_bwrap(
+    rootfs: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tmpfs_mounts: &[(String, Option<String>)],
+    readonly_rootfs: bool,
+) -> Result<Command, ContainerExecError> {
     if command.is_empty() {
         return Err(ContainerExecError::EmptyCommand);
     }
@@ -104,7 +172,7 @@ pub fn exec_in_rootless_rootfs(
         bwrap.arg("--setenv").arg(key).arg(value);
     }
     bwrap.arg(&command[0]).args(&command[1..]);
-    execute_process(bwrap, timeout)
+    Ok(bwrap)
 }
 
 /// Build nsenter arguments for executing a command in all namespaces of target pid.
@@ -381,6 +449,22 @@ mod tests {
             &[],
             false,
             None,
+        )
+        .expect_err("traversal target must fail before helper launch");
+        assert!(error.to_string().contains("invalid mount target"));
+    }
+
+    #[test]
+    fn rootless_tty_mount_target_validation_rejects_traversal_before_bwrap() {
+        let root = tempfile::tempdir().expect("rootfs tempdir");
+        let error = super::exec_in_rootless_rootfs_tty(
+            root.path(),
+            &["/bin/true".to_string()],
+            &[],
+            None,
+            &[("/tmp/source".to_string(), "../escape".to_string(), false)],
+            &[],
+            false,
         )
         .expect_err("traversal target must fail before helper launch");
         assert!(error.to_string().contains("invalid mount target"));

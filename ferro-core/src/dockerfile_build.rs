@@ -4163,6 +4163,12 @@ fn copy_context_dir(
     ignore_patterns: &[String],
 ) -> Result<(), DockerfileBuildError> {
     fs::create_dir_all(dst)?;
+    // `DirEntry::path()` preserves the spelling of the source path.  When a
+    // relative context is used, a lexical `Path::starts_with` comparison can
+    // miss that the destination is inside the source tree.  Canonicalize the
+    // already-created destination once per recursion level so the exclusion
+    // remains correct for both relative and absolute callers.
+    let canonical_dst = fs::canonicalize(dst)?;
     let mut entries = Vec::new();
     for entry in fs::read_dir(src)? {
         entries.push(entry?);
@@ -4170,6 +4176,15 @@ fn copy_context_dir(
     entries.sort_by_key(|entry| entry.path());
     for entry in entries {
         let path = entry.path();
+        // A caller may place its runtime directory inside the Dockerfile
+        // context (common in tests and valid for local CLI workflows). Build
+        // scratch now lives under that runtime directory, so do not recurse
+        // back into the destination while copying the source context.
+        if canonical_dst.starts_with(
+            fs::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()),
+        ) {
+            continue;
+        }
         let relative = path.strip_prefix(root).unwrap_or(&path);
         if path == dockerfile_path {
             continue;
@@ -4578,9 +4593,18 @@ fn copy_path_recursive_mode_with_excludes(
     let metadata = fs::metadata(src)?;
     if metadata.is_dir() {
         fs::create_dir_all(dst)?;
+        // The runtime/build scratch directory can be nested inside the build
+        // context.  Exclude that destination subtree while walking the
+        // source, otherwise `COPY . /` recursively copies its own output.
+        let canonical_dst = fs::canonicalize(dst)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let path = entry.path();
+            if canonical_dst.starts_with(
+                fs::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()),
+            ) {
+                continue;
+            }
             let name = entry.file_name();
             copy_path_recursive_mode_with_excludes(
                 &path,

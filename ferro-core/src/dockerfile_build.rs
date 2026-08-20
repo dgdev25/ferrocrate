@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tar::Builder;
+use flate2::read::GzDecoder;
+use tar::{Archive, Builder};
 use thiserror::Error;
 
 /// Maximum layer size (1GB) to prevent memory exhaustion attacks
@@ -1810,6 +1811,7 @@ struct CopySpec {
     chmod: Option<u32>,
     parents: bool,
     excludes: Vec<String>,
+    extract_archives: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1896,7 +1898,8 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 }
             }
             "ADD" => {
-                if let Some(copy) = parse_copy_spec(&interpolated)? {
+                if let Some(mut copy) = parse_copy_spec(&interpolated)? {
+                    copy.extract_archives = true;
                     stage.copy_paths.push(copy);
                 }
             }
@@ -2177,6 +2180,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         chmod,
         parents,
         excludes,
+        extract_archives: false,
     }))
 }
 
@@ -3393,6 +3397,16 @@ fn copy_from_context(
             } else {
                 dest_root.clone()
             };
+            let archive_dest = if spec.extract_archives {
+                &dest_root
+            } else {
+                &dest
+            };
+            if spec.extract_archives
+                && extract_add_archive(&source, archive_dest, &spec.excludes)?
+            {
+                continue;
+            }
             copy_path_recursive_mode_with_excludes(
                 &source,
                 &dest,
@@ -3400,6 +3414,73 @@ fn copy_from_context(
                 &spec.excludes,
                 Path::new(""),
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// Extract a local tar or gzip-compressed tar for Dockerfile `ADD`.
+///
+/// Returns `false` for ordinary files, preserving Docker's copy behavior. The
+/// archive path is validated before extraction and links/special files are
+/// rejected so a build context cannot escape the destination root.
+fn extract_add_archive(
+    source: &Path,
+    destination: &Path,
+    excludes: &[String],
+) -> Result<bool, DockerfileBuildError> {
+    let mut probe = File::open(source)?;
+    let mut header = [0_u8; 512];
+    let read = probe.read(&mut header)?;
+    let gzip = read >= 2 && header[..2] == [0x1f, 0x8b];
+    let plain_tar = read >= 262 && &header[257..262] == b"ustar";
+    if !gzip && !plain_tar {
+        return Ok(false);
+    }
+    fs::create_dir_all(destination)?;
+    if gzip {
+        extract_add_tar(GzDecoder::new(File::open(source)?), destination, excludes)?;
+    } else {
+        extract_add_tar(File::open(source)?, destination, excludes)?;
+    }
+    Ok(true)
+}
+
+fn extract_add_tar<R: Read>(
+    reader: R,
+    destination: &Path,
+    excludes: &[String],
+) -> Result<(), DockerfileBuildError> {
+    let mut archive = Archive::new(reader);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let relative = entry.path()?.into_owned();
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(DockerfileBuildError::Invalid(
+                "ADD archive entry escapes destination".to_string(),
+            ));
+        }
+        if copy_path_is_excluded(&relative, excludes) {
+            continue;
+        }
+        let target = destination.join(&relative);
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            fs::create_dir_all(&target)?;
+        } else if entry_type.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            entry.unpack(&target)?;
+        } else {
+            return Err(DockerfileBuildError::Unsupported(format!(
+                "ADD archive entry type is unsupported: {}",
+                relative.display()
+            )));
         }
     }
     Ok(())
@@ -4138,6 +4219,7 @@ mod tests {
                 chmod: Some(0o640),
                 parents: false,
                 excludes: Vec::new(),
+                extract_archives: false,
             }],
         )
         .unwrap();
@@ -4167,6 +4249,7 @@ mod tests {
                 chmod: None,
                 parents: true,
                 excludes: Vec::new(),
+                extract_archives: false,
             }],
         )
         .unwrap();
@@ -4184,6 +4267,7 @@ mod tests {
                 chmod: None,
                 parents: true,
                 excludes: Vec::new(),
+                extract_archives: false,
             }],
         )
         .expect_err("parent traversal must be rejected");
@@ -4208,6 +4292,7 @@ mod tests {
                 chmod: None,
                 parents: false,
                 excludes: vec!["*.tmp".into(), "secret".into()],
+                extract_archives: false,
             }],
         )
         .unwrap();
@@ -4225,10 +4310,84 @@ mod tests {
                 chmod: None,
                 parents: false,
                 excludes: vec!["*.tmp".into()],
+                extract_archives: false,
             }],
         )
         .unwrap();
         assert!(!explicit_destination.join("app/skip.tmp").exists());
+    }
+
+    #[test]
+    fn add_extracts_tar_and_gzip_archives_without_path_escape() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::{Cursor, Write};
+
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("payload.tar");
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("nested/payload.txt").unwrap();
+            header.set_size(7);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append(&header, Cursor::new(b"payload"))
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        fs::write(&archive_path, &bytes).unwrap();
+        let gzip_path = temp.path().join("payload.tar.gz");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        fs::write(&gzip_path, encoder.finish().unwrap()).unwrap();
+
+        let stages = parse_stages("FROM scratch\nADD payload.tar /app\n").unwrap();
+        assert!(stages[0].copy_paths[0].extract_archives);
+        let destination = temp.path().join("destination");
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["payload.tar".into(), "payload.tar.gz".into()],
+                dest: "/app".into(),
+                chmod: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(destination.join("app/nested/payload.txt")).unwrap(),
+            "payload"
+        );
+
+        let escape_path = temp.path().join("escape.tar");
+        let mut escape = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path("escape.txt").unwrap();
+        header.as_mut_bytes()[..14].fill(0);
+        header.as_mut_bytes()[..14].copy_from_slice(b"../escape.txt\0");
+        header.set_size(6);
+        header.set_cksum();
+        escape.append(&header, Cursor::new(b"escape")).unwrap();
+        fs::write(escape_path, escape.into_inner().unwrap()).unwrap();
+        let error = super::copy_from_context(
+            temp.path(),
+            &temp.path().join("safe"),
+            &[super::CopySpec {
+                srcs: vec!["escape.tar".into()],
+                dest: "/app".into(),
+                chmod: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: true,
+            }],
+        )
+        .expect_err("ADD archive traversal must fail closed");
+        assert!(error.to_string().contains("escapes destination"));
     }
 
     #[test]

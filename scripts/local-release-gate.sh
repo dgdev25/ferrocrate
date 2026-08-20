@@ -43,6 +43,7 @@ fi
 
 echo "[gate] rootless installer/uninstall lifecycle checks"
 bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
+  scripts/rootless-provision.sh scripts/test-rootless-provision.sh \
   scripts/uninstall.sh scripts/test-uninstall.sh \
   scripts/install.sh scripts/test-install-rollback.sh \
   scripts/test-rootless-subid-diagnostics.sh \
@@ -72,6 +73,7 @@ else
   bash scripts/test-docker-cli-compat.sh
 fi
 bash scripts/test-rootless-install.sh
+bash scripts/test-rootless-provision.sh
 bash scripts/test-rootless-subid-diagnostics.sh
 bash scripts/test-reliability-matrix-preflight.sh
 bash scripts/test-uninstall.sh

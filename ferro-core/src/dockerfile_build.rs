@@ -2487,6 +2487,7 @@ struct CacheMount {
 struct SecretMount {
     target: String,
     id: String,
+    required: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2641,11 +2642,15 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                         "RUN secret mount does not accept sharing".to_string(),
                     ));
                 }
-                if required != Some("true") && required.is_some() {
-                    return Err(DockerfileBuildError::Unsupported(
-                        "RUN secret mount required=false is not supported".to_string(),
-                    ));
-                }
+                let required = match required {
+                    None | Some("true") => true,
+                    Some("false") => false,
+                    Some(value) => {
+                        return Err(DockerfileBuildError::Invalid(format!(
+                            "RUN secret mount required must be true or false, got {value}"
+                        )))
+                    }
+                };
                 let id = id.ok_or_else(|| {
                     DockerfileBuildError::Invalid("secret mount requires id".to_string())
                 })?;
@@ -2656,6 +2661,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 secret_mounts.push(SecretMount {
                     target: validate_cache_target(&target)?,
                     id,
+                    required,
                 });
             }
             Some("ssh") => {
@@ -3227,12 +3233,15 @@ fn run_stage_commands(
         }
 
         for mount in &run.secret_mounts {
-            let source = secrets.get(&mount.id).ok_or_else(|| {
-                DockerfileBuildError::Invalid(format!(
+            let Some(source) = secrets.get(&mount.id) else {
+                if !mount.required {
+                    continue;
+                }
+                return Err(DockerfileBuildError::Invalid(format!(
                     "secret mount source was not provided for id {}",
                     mount.id
-                ))
-            })?;
+                )));
+            };
             let metadata = fs::symlink_metadata(source).map_err(|err| {
                 DockerfileBuildError::Invalid(format!("secret {} cannot be read: {err}", mount.id))
             })?;
@@ -3260,7 +3269,9 @@ fn run_stage_commands(
         }
         let mut secret_mounted = Vec::new();
         for (index, mount) in run.secret_mounts.iter().enumerate() {
-            let source = secrets.get(&mount.id).expect("secret source prevalidated");
+            let Some(source) = secrets.get(&mount.id) else {
+                continue;
+            };
             let target = validate_mount_target(&rootfs, &mount.target, "secret")?;
             let backup = rootfs.join(format!(".ferrocrate-secret-backup-{index}"));
             let existed = target.exists();
@@ -4788,6 +4799,13 @@ mod tests {
         .expect("secret mount parses");
         assert_eq!(run.secret_mounts[0].id, "token");
         assert_eq!(run.secret_mounts[0].target, "/run/secrets/token");
+        assert!(run.secret_mounts[0].required);
+        let optional = parse_run(
+            "--mount=type=secret,id=optional,required=false echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("optional secret mount parses");
+        assert!(!optional.secret_mounts[0].required);
         let ssh = parse_run(
             "--mount=type=ssh echo value",
             &["/bin/sh".into(), "-c".into()],
@@ -4846,7 +4864,7 @@ mod tests {
     }
 
     #[test]
-    fn run_mount_rejects_unsupported_sharing_and_required_options() {
+    fn run_mount_rejects_unsupported_sharing_and_invalid_required_options() {
         let locked = parse_run(
             "--mount=type=cache,target=/root/.cache,sharing=locked true",
             &["/bin/sh".into(), "-c".into()],
@@ -4862,11 +4880,11 @@ mod tests {
         assert!(invalid.to_string().contains("sharing requires a value"));
 
         let secret = parse_run(
-            "--mount=type=secret,id=token,required=false cat /run/secrets/token",
+            "--mount=type=secret,id=token,required=maybe cat /run/secrets/token",
             &["/bin/sh".into(), "-c".into()],
         )
-        .expect_err("optional secret mounts are not implemented");
-        assert!(secret.to_string().contains("required=false"));
+        .expect_err("invalid required values must fail closed");
+        assert!(secret.to_string().contains("true or false"));
     }
 
     #[test]

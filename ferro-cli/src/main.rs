@@ -11038,6 +11038,7 @@ impl DockerEventStore {
             ("container", "container"),
             ("image", "image"),
             ("network", "network"),
+            ("plugin", "plugin"),
             ("volume", "volume"),
         ];
         let filters = query
@@ -11064,6 +11065,7 @@ impl DockerEventStore {
         let filter_containers = filter_values("container");
         let filter_images = filter_values("image");
         let filter_networks = filter_values("network");
+        let filter_plugins = filter_values("plugin");
         let filter_volumes = filter_values("volume");
         let filter_scopes = filter_values("scope");
         let filter_labels = filter_values("label");
@@ -11113,6 +11115,7 @@ impl DockerEventStore {
                     "container" => filter_containers.as_ref(),
                     "image" => filter_images.as_ref(),
                     "network" => filter_networks.as_ref(),
+                    "plugin" => filter_plugins.as_ref(),
                     "volume" => filter_volumes.as_ref(),
                     _ => None,
                 };
@@ -11197,7 +11200,16 @@ fn docker_event_request_attributes(body: &[u8]) -> BTreeMap<String, String> {
         return BTreeMap::new();
     };
     let mut attributes = BTreeMap::new();
-    for key in ["name", "Name", "Image", "Driver", "NetworkID", "Container"] {
+    for key in [
+        "name",
+        "Name",
+        "Image",
+        "Driver",
+        "NetworkID",
+        "Container",
+        "PluginName",
+        "PluginID",
+    ] {
         if let Some(text) = object.get(key).and_then(serde_json::Value::as_str) {
             if !text.is_empty() && text.len() <= MAX_TEXT {
                 attributes.insert(key.to_string(), text.to_string());
@@ -11246,6 +11258,8 @@ fn docker_event_response_attributes(response: &[u8]) -> BTreeMap<String, String>
         "Image",
         "NetworkID",
         "Container",
+        "PluginName",
+        "PluginID",
     ] {
         let Some(value) = object.get(key).and_then(serde_json::Value::as_str) else {
             continue;
@@ -11300,6 +11314,8 @@ fn docker_event_kind(method: &str, path: &str) -> Option<(&'static str, String)>
         "image"
     } else if path.contains("/networks/") {
         "network"
+    } else if path.contains("/plugins/") {
+        "plugin"
     } else if path.contains("/volumes/") {
         "volume"
     } else {
@@ -11324,7 +11340,12 @@ fn docker_event_resource(path: &str) -> Option<String> {
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let resource = segments
         .windows(2)
-        .find(|pair| matches!(pair[0], "containers" | "images" | "networks" | "volumes"))
+        .find(|pair| {
+            matches!(
+                pair[0],
+                "containers" | "images" | "networks" | "plugins" | "volumes"
+            )
+        })
         .map(|pair| pair[1])?;
     if matches!(
         resource,
@@ -13848,6 +13869,7 @@ fn parse_docker_event_filters(
         "image",
         "label",
         "network",
+        "plugin",
         "scope",
         "type",
         "volume",
@@ -18625,6 +18647,48 @@ volumes:
             docker_event_kind("DELETE", "/images/i1"),
             Some(("image", "untag".to_string()))
         );
+    }
+
+    #[test]
+    fn docker_event_plugin_routes_and_filters_are_supported() {
+        assert_eq!(
+            docker_event_kind("POST", "/plugins/example/enable"),
+            Some(("plugin", "enable".to_string()))
+        );
+        assert_eq!(
+            docker_event_resource("/plugins/example/enable"),
+            Some("example".to_string())
+        );
+
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/plugins/example/enable",
+                204,
+                br#"{"Name":"example","PluginID":"plugin-1"}"#,
+                br#"{"Id":"plugin-1","Name":"example"}"#,
+            )
+            .unwrap();
+
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_string(),
+            r#"{"type":["plugin"],"plugin":["example"],"event":["enable"]}"#.to_string(),
+        );
+        let events = store.query(&query).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "plugin");
+        assert_eq!(events[0].resource.as_deref(), Some("example"));
+        assert_eq!(
+            events[0].attributes.get("PluginID"),
+            Some(&"plugin-1".to_string())
+        );
+
+        let mut direct = HashMap::new();
+        direct.insert("plugin".to_string(), "example".to_string());
+        assert_eq!(store.query(&direct).unwrap().len(), 1);
     }
 
     #[test]

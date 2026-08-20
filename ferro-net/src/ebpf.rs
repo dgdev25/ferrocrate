@@ -892,6 +892,17 @@ pub struct SecurityMonitorConfig {
 /// Kernel delivery must never be able to grow a daemon process without bound.
 pub const SECURITY_MONITOR_MAX_BUFFER_EVENTS: usize = 1024;
 const SECURITY_MONITOR_MAX_PAYLOAD_BYTES: usize = 4096;
+/// Fixed wire width emitted by the security-monitor eBPF ring buffer.
+///
+/// The producer uses a deliberately simple native-independent layout: a
+/// NUL-padded UTF-8 event name, little-endian pid/uid/timestamp fields, and a
+/// NUL-padded UTF-8 payload. Keeping the record fixed-width lets the consumer
+/// reject truncated or oversized kernel data before it reaches the durable
+/// receipt sink.
+pub const SECURITY_MONITOR_EVENT_NAME_BYTES: usize = 32;
+pub const SECURITY_MONITOR_EVENT_PAYLOAD_BYTES: usize = 256;
+pub const SECURITY_MONITOR_EVENT_WIRE_BYTES: usize =
+    SECURITY_MONITOR_EVENT_NAME_BYTES + 4 + 4 + 8 + SECURITY_MONITOR_EVENT_PAYLOAD_BYTES;
 /// Receipts are durable, but the monitor must not turn an unbounded event
 /// stream into unbounded disk usage. Operators can rotate this file between
 /// runs after exporting the records they need.
@@ -932,6 +943,74 @@ impl SecurityMonitorEvent {
             payload,
         })
     }
+
+    /// Decode one bounded record from the security-monitor ring-buffer ABI.
+    ///
+    /// This function is independent of Aya's map handle so admission and
+    /// buffering can be tested without a privileged BPF filesystem. The caller
+    /// must pass exactly one complete wire record.
+    pub fn decode_kernel_record(bytes: &[u8]) -> Result<Self, ExecError> {
+        if bytes.len() != SECURITY_MONITOR_EVENT_WIRE_BYTES {
+            return Err(ExecError::CommandFailed {
+                cmd: "decode security monitor ring-buffer record".to_string(),
+                stderr: format!(
+                    "record has {} bytes; expected {}",
+                    bytes.len(),
+                    SECURITY_MONITOR_EVENT_WIRE_BYTES
+                ),
+            });
+        }
+        let name = decode_nul_padded(&bytes[..SECURITY_MONITOR_EVENT_NAME_BYTES], "event name")?;
+        let pid_offset = SECURITY_MONITOR_EVENT_NAME_BYTES;
+        let pid =
+            u32::from_le_bytes(bytes[pid_offset..pid_offset + 4].try_into().map_err(|_| {
+                ExecError::CommandFailed {
+                    cmd: "decode security monitor ring-buffer record".to_string(),
+                    stderr: "pid field is truncated".to_string(),
+                }
+            })?);
+        let uid_offset = pid_offset + 4;
+        let uid =
+            u32::from_le_bytes(bytes[uid_offset..uid_offset + 4].try_into().map_err(|_| {
+                ExecError::CommandFailed {
+                    cmd: "decode security monitor ring-buffer record".to_string(),
+                    stderr: "uid field is truncated".to_string(),
+                }
+            })?);
+        let timestamp_offset = uid_offset + 4;
+        let timestamp_ns = u64::from_le_bytes(
+            bytes[timestamp_offset..timestamp_offset + 8]
+                .try_into()
+                .map_err(|_| ExecError::CommandFailed {
+                    cmd: "decode security monitor ring-buffer record".to_string(),
+                    stderr: "timestamp field is truncated".to_string(),
+                })?,
+        );
+        let payload_offset = timestamp_offset + 8;
+        let payload = decode_nul_padded(
+            &bytes[payload_offset..payload_offset + SECURITY_MONITOR_EVENT_PAYLOAD_BYTES],
+            "event payload",
+        )?;
+        Self::new(&name, pid, uid, timestamp_ns, payload)
+    }
+}
+
+fn decode_nul_padded(bytes: &[u8], field: &str) -> Result<String, ExecError> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let value = std::str::from_utf8(&bytes[..end]).map_err(|_| ExecError::CommandFailed {
+        cmd: "decode security monitor ring-buffer record".to_string(),
+        stderr: format!("{field} is not valid UTF-8"),
+    })?;
+    if value.chars().any(char::is_control) {
+        return Err(ExecError::CommandFailed {
+            cmd: "decode security monitor ring-buffer record".to_string(),
+            stderr: format!("{field} contains control characters"),
+        });
+    }
+    Ok(value.to_string())
 }
 
 /// Fixed-capacity event queue for the eventual ring-buffer consumer.
@@ -949,6 +1028,14 @@ impl SecurityMonitorBuffer {
             self.dropped = self.dropped.saturating_add(1);
         }
         self.events.push_back(event);
+    }
+
+    /// Decode and queue one kernel ring-buffer record. Invalid records never
+    /// alter queue length or drop accounting.
+    pub fn ingest_kernel_record(&mut self, bytes: &[u8]) -> Result<(), ExecError> {
+        let event = SecurityMonitorEvent::decode_kernel_record(bytes)?;
+        self.push(event);
+        Ok(())
     }
 
     pub fn pop(&mut self) -> Option<SecurityMonitorEvent> {
@@ -1317,7 +1404,9 @@ mod lifecycle_tests {
         build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
         hex_bytes, normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
         SecurityMonitorBuffer, SecurityMonitorEvent, SecurityMonitorReceiptWriter,
-        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER, SECURITY_MONITOR_MAX_BUFFER_EVENTS,
+        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER, SECURITY_MONITOR_EVENT_NAME_BYTES,
+        SECURITY_MONITOR_EVENT_PAYLOAD_BYTES, SECURITY_MONITOR_EVENT_WIRE_BYTES,
+        SECURITY_MONITOR_MAX_BUFFER_EVENTS,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1376,6 +1465,59 @@ mod lifecycle_tests {
         let error = SecurityMonitorEvent::new("open", 1, 1, 1, oversized)
             .expect_err("oversized payload must fail closed");
         assert!(error.to_string().contains("payload exceeds bounded size"));
+    }
+
+    #[test]
+    fn security_monitor_decodes_fixed_wire_record_and_ingests_it() {
+        let mut bytes = vec![0_u8; SECURITY_MONITOR_EVENT_WIRE_BYTES];
+        bytes[..4].copy_from_slice(b"open");
+        let pid_offset = SECURITY_MONITOR_EVENT_NAME_BYTES;
+        bytes[pid_offset..pid_offset + 4].copy_from_slice(&42_u32.to_le_bytes());
+        bytes[pid_offset + 4..pid_offset + 8].copy_from_slice(&1000_u32.to_le_bytes());
+        bytes[pid_offset + 8..pid_offset + 16].copy_from_slice(&7_u64.to_le_bytes());
+        let payload_offset = pid_offset + 16;
+        bytes[payload_offset..payload_offset + 7].copy_from_slice(b"allowed");
+        let event = SecurityMonitorEvent::decode_kernel_record(&bytes).expect("decode");
+        assert_eq!(event.event, "open");
+        assert_eq!(event.pid, 42);
+        assert_eq!(event.uid, 1000);
+        assert_eq!(event.timestamp_ns, 7);
+        assert_eq!(event.payload, "allowed");
+
+        let mut buffer = SecurityMonitorBuffer::default();
+        buffer.ingest_kernel_record(&bytes).expect("ingest");
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.dropped(), 0);
+        assert_eq!(buffer.pop().expect("event"), event);
+    }
+
+    #[test]
+    fn security_monitor_rejects_malformed_wire_records_before_queue_mutation() {
+        let mut buffer = SecurityMonitorBuffer::default();
+        let error = buffer
+            .ingest_kernel_record(&[0_u8; SECURITY_MONITOR_EVENT_WIRE_BYTES - 1])
+            .expect_err("truncated record");
+        assert!(error.to_string().contains("expected"));
+        assert!(buffer.is_empty());
+
+        let mut bytes = vec![0_u8; SECURITY_MONITOR_EVENT_WIRE_BYTES];
+        bytes[..SECURITY_MONITOR_EVENT_NAME_BYTES].fill(0xff);
+        let error = buffer
+            .ingest_kernel_record(&bytes)
+            .expect_err("invalid UTF-8");
+        assert!(error.to_string().contains("UTF-8"));
+        assert!(buffer.is_empty());
+
+        bytes.fill(0);
+        let payload_offset = SECURITY_MONITOR_EVENT_NAME_BYTES + 16;
+        bytes[..4].copy_from_slice(b"open");
+        bytes[payload_offset..payload_offset + SECURITY_MONITOR_EVENT_PAYLOAD_BYTES].fill(0);
+        bytes[payload_offset] = 1;
+        let error = buffer
+            .ingest_kernel_record(&bytes)
+            .expect_err("control payload");
+        assert!(error.to_string().contains("control"));
+        assert!(buffer.is_empty());
     }
 
     #[test]

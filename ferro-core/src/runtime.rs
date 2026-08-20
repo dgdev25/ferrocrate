@@ -5653,7 +5653,14 @@ fn build_command(
     // (for example, FROM scratch with a static binary) cannot execute the
     // launcher after chroot. Bubblewrap enters the image after the launcher
     // barrier without requiring a shell or dynamic loader in the image.
-    let rootfs_chroot_launcher = running_as_root && rootfs_dir.is_some();
+    // The internal rootfs launcher is dispatched by the production CLI/CRI
+    // binaries. Unit and integration test executables use the same runtime
+    // library but do not implement that private argv entry point; invoking a
+    // test harness as the launcher leaves the replacement process running
+    // forever instead of executing the image command. Fall back to the
+    // direct chroot path for those executables.
+    let rootfs_chroot_launcher =
+        running_as_root && rootfs_dir.is_some() && rootfs_launcher_available();
 
     let mut command = if rootfs_chroot_launcher {
         let launcher = std::env::current_exe().map_err(RuntimeError::Io)?;
@@ -5926,6 +5933,16 @@ fn build_command(
     }
 
     Ok(command)
+}
+
+fn rootfs_launcher_available() -> bool {
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    matches!(
+        executable.file_stem().and_then(|stem| stem.to_str()),
+        Some("ferro-cli") | Some("ferro-cri")
+    )
 }
 
 fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {

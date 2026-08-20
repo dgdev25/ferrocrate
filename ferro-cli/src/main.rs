@@ -13669,6 +13669,14 @@ fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_status_for_error(err: &str) -> u16 {
     let lowered = err.to_lowercase();
+    // A local Docker socket can be present while the host kernel cannot prove
+    // the peer process identity required by the authorization protocol. This
+    // is an unavailable host capability, not malformed client input; return a
+    // stable service-unavailable response so clients and readiness probes can
+    // distinguish it from ordinary API validation failures.
+    if lowered.contains("so_peerpidfd") {
+        return 503;
+    }
     if lowered.contains("still running") {
         return 409;
     }
@@ -15237,6 +15245,7 @@ fn http_response_with_headers(
         400 => "400 Bad Request",
         404 => "404 Not Found",
         409 => "409 Conflict",
+        503 => "503 Service Unavailable",
         500 => "500 Internal Server Error",
         _ => "200 OK",
     };
@@ -15661,6 +15670,22 @@ mod tests {
             super::docker_status_for_error("container c1 is still running"),
             409
         );
+    }
+
+    #[test]
+    fn docker_status_for_missing_peer_pidfd_is_service_unavailable() {
+        assert_eq!(
+            super::docker_status_for_error(
+                "docker peer authentication failed: the kernel does not provide SO_PEERPIDFD; secure CRI peer identity requires a supported kernel"
+            ),
+            503
+        );
+        let response = super::http_response(
+            503,
+            br#"{"message":"peer identity unavailable"}"#,
+            "application/json",
+        );
+        assert!(response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n"));
     }
 
     #[test]

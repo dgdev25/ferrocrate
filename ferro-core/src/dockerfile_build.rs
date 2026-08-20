@@ -2581,6 +2581,8 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         let mut source = None;
         let mut tmpfs_size = None;
         let mut read_only = false;
+        let mut sharing = None;
+        let mut required = None;
         for option in mount.split(',') {
             let (key, value) = option.split_once('=').unwrap_or((option, ""));
             match key {
@@ -2593,7 +2595,17 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 "tmpfs-size" | "size" if !value.is_empty() => {
                     tmpfs_size = Some(parse_limit_value("tmpfs-size", value)?)
                 }
-                "sharing" | "required" => {}
+                "sharing" => {
+                    if value.is_empty() {
+                        return Err(DockerfileBuildError::Invalid(
+                            "RUN cache mount sharing requires a value".to_string(),
+                        ));
+                    }
+                    sharing = Some(value);
+                }
+                "required" => {
+                    required = Some(if value.is_empty() { "true" } else { value });
+                }
                 _ => {
                     return Err(DockerfileBuildError::Unsupported(format!(
                         "RUN --mount option is not supported: {key}"
@@ -2603,6 +2615,18 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         }
         match kind {
             Some("cache") => {
+                if let Some(sharing) = sharing {
+                    if !sharing.eq_ignore_ascii_case("shared") {
+                        return Err(DockerfileBuildError::Unsupported(format!(
+                            "RUN cache mount sharing={sharing} is not supported; only shared is available"
+                        )));
+                    }
+                }
+                if required.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN cache mount does not accept required".to_string(),
+                    ));
+                }
                 let target = target.ok_or_else(|| {
                     DockerfileBuildError::Invalid("cache mount requires target".to_string())
                 })?;
@@ -2612,6 +2636,16 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 cache_mounts.push(CacheMount { target, id });
             }
             Some("secret") => {
+                if sharing.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN secret mount does not accept sharing".to_string(),
+                    ));
+                }
+                if required != Some("true") && required.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN secret mount required=false is not supported".to_string(),
+                    ));
+                }
                 let id = id.ok_or_else(|| {
                     DockerfileBuildError::Invalid("secret mount requires id".to_string())
                 })?;
@@ -2625,6 +2659,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 });
             }
             Some("ssh") => {
+                if sharing.is_some() || required.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN ssh mount sharing/required options are not supported".to_string(),
+                    ));
+                }
                 let id = validate_secret_id(id.unwrap_or("default"))?;
                 let target = target
                     .map(str::to_string)
@@ -2641,6 +2680,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 ssh_mounts.push(SshMount { target, id });
             }
             Some("tmpfs") => {
+                if sharing.is_some() || required.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN tmpfs mount sharing/required options are not supported".to_string(),
+                    ));
+                }
                 let target = target.ok_or_else(|| {
                     DockerfileBuildError::Invalid("tmpfs mount requires target".to_string())
                 })?;
@@ -2660,6 +2704,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 });
             }
             Some("bind") => {
+                if sharing.is_some() || required.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN bind mount sharing/required options are not supported".to_string(),
+                    ));
+                }
                 let source = source.unwrap_or(".").trim();
                 if source.is_empty() {
                     return Err(DockerfileBuildError::Invalid(
@@ -4794,6 +4843,30 @@ mod tests {
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }
+    }
+
+    #[test]
+    fn run_mount_rejects_unsupported_sharing_and_required_options() {
+        let locked = parse_run(
+            "--mount=type=cache,target=/root/.cache,sharing=locked true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("locked cache sharing must not be silently ignored");
+        assert!(locked.to_string().contains("only shared is available"));
+
+        let invalid = parse_run(
+            "--mount=type=cache,target=/root/.cache,sharing= true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("empty cache sharing must fail closed");
+        assert!(invalid.to_string().contains("sharing requires a value"));
+
+        let secret = parse_run(
+            "--mount=type=secret,id=token,required=false cat /run/secrets/token",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("optional secret mounts are not implemented");
+        assert!(secret.to_string().contains("required=false"));
     }
 
     #[test]

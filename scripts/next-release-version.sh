@@ -37,9 +37,10 @@ done
 
 [[ -n "$bump" ]] || bump=patch
 semver_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+awk_semver_re='^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'
 
 if [[ -z "$from" ]]; then
-  from="$(git tag --list 'v*' | awk -v re="$semver_re" '$0 ~ re' | sort -V | tail -n 1)"
+  from="$(git tag --list 'v*' | awk -v re="$awk_semver_re" '$0 ~ re' | sort -V | tail -n 1)"
 fi
 if [[ -z "$from" ]]; then
   echo "no stable v-prefixed semantic-version tag found; pass --from vMAJOR.MINOR.PATCH" >&2

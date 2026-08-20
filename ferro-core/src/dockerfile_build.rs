@@ -560,7 +560,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
     let context_hash = build_context_binding_digest(
-        &hash_context_dir(context_dir, dockerfile_path)?,
+        &hash_context_dir_excluding(context_dir, dockerfile_path, Some(runtime_dir))?,
         named_contexts,
     )?;
     let named_contexts = canonicalize_named_contexts(named_contexts)?;
@@ -1638,6 +1638,14 @@ fn hash_context_dir(
     context_dir: &Path,
     dockerfile_path: &Path,
 ) -> Result<String, DockerfileBuildError> {
+    hash_context_dir_excluding(context_dir, dockerfile_path, None)
+}
+
+fn hash_context_dir_excluding(
+    context_dir: &Path,
+    dockerfile_path: &Path,
+    excluded_root: Option<&Path>,
+) -> Result<String, DockerfileBuildError> {
     let ignore_patterns = load_dockerignore_patterns(context_dir)?;
     let mut files = Vec::new();
     collect_context_files(
@@ -1645,6 +1653,7 @@ fn hash_context_dir(
         context_dir,
         dockerfile_path,
         &ignore_patterns,
+        excluded_root,
         &mut files,
     )?;
     files.sort();
@@ -1714,11 +1723,21 @@ fn collect_context_files(
     path: &Path,
     dockerfile_path: &Path,
     ignore_patterns: &[String],
+    excluded_root: Option<&Path>,
     out: &mut Vec<PathBuf>,
 ) -> Result<(), DockerfileBuildError> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let entry_path = entry.path();
+        if excluded_root.is_some_and(|excluded| {
+            let resolved_entry = fs::canonicalize(&entry_path)
+                .unwrap_or_else(|_| entry_path.to_path_buf());
+            let resolved_excluded = fs::canonicalize(excluded)
+                .unwrap_or_else(|_| excluded.to_path_buf());
+            resolved_entry == resolved_excluded || resolved_entry.starts_with(&resolved_excluded)
+        }) {
+            continue;
+        }
         if entry_path == dockerfile_path {
             continue;
         }
@@ -1737,7 +1756,14 @@ fn collect_context_files(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_context_files(base, &entry_path, dockerfile_path, ignore_patterns, out)?;
+            collect_context_files(
+                base,
+                &entry_path,
+                dockerfile_path,
+                ignore_patterns,
+                excluded_root,
+                out,
+            )?;
         } else if file_type.is_file() {
             out.push(relative);
         }
@@ -4942,6 +4968,37 @@ mod tests {
             .expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
+    }
+
+    #[test]
+    fn repeated_build_ignores_runtime_scratch_nested_in_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").expect("write");
+        fs::write(temp.path().join("hello.txt"), "stable").expect("write file");
+
+        let runtime_dir = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime_dir.join("images")).expect("open store");
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/repeat:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .expect("first build");
+        let second = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/repeat:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .expect("second build");
+        assert_eq!(first.layer_digest, second.layer_digest);
     }
 
     #[test]

@@ -778,6 +778,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         final_stage.cmd.clone(),
         final_stage.stop_signal.as_deref(),
         final_stage.author.as_deref(),
+        &final_stage.onbuild,
         &final_stage.exposed_ports,
         &final_stage.volumes,
     );
@@ -1008,6 +1009,7 @@ fn build_config_json(
     cmd: Option<Vec<String>>,
     stop_signal: Option<&str>,
     author: Option<&str>,
+    onbuild: &[String],
     exposed_ports: &[String],
     volumes: &[String],
 ) -> String {
@@ -1055,6 +1057,11 @@ fn build_config_json(
             "Labels": labels,
             "Healthcheck": health,
             "StopSignal": stop_signal,
+            "OnBuild": if onbuild.is_empty() {
+                None
+            } else {
+                Some(onbuild)
+            },
             "ExposedPorts": exposed,
             "Volumes": volumes
         },
@@ -1862,6 +1869,7 @@ struct StageSpec {
     user: Option<String>,
     stop_signal: Option<String>,
     author: Option<String>,
+    onbuild: Vec<String>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     shell: Vec<String>,
@@ -1906,6 +1914,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 user: None,
                 stop_signal: None,
                 author: None,
+                onbuild: Vec::new(),
                 entrypoint: None,
                 cmd: None,
                 shell: vec!["/bin/sh".to_string(), "-c".to_string()],
@@ -2000,9 +2009,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 stage.author = Some(parse_maintainer(&interpolated)?);
             }
             "ONBUILD" => {
-                return Err(DockerfileBuildError::Unsupported(format!(
-                    "instruction {keyword} is not supported"
-                )));
+                stage.onbuild.push(parse_onbuild(&interpolated)?);
             }
             other => {
                 return Err(DockerfileBuildError::Unsupported(format!(
@@ -3131,6 +3138,29 @@ fn parse_maintainer(raw: &str) -> Result<String, DockerfileBuildError> {
         ));
     }
     Ok(maintainer.to_string())
+}
+
+fn parse_onbuild(raw: &str) -> Result<String, DockerfileBuildError> {
+    let trigger = raw.trim();
+    let keyword = trigger
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| DockerfileBuildError::Invalid("ONBUILD requires a trigger".to_string()))?;
+    if matches!(
+        keyword.to_ascii_uppercase().as_str(),
+        "FROM" | "MAINTAINER" | "ONBUILD"
+    ) {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "ONBUILD cannot trigger {keyword}"
+        )));
+    }
+    if trigger.as_bytes().contains(&0) {
+        return Err(DockerfileBuildError::Invalid(
+            "ONBUILD trigger contains NUL".to_string(),
+        ));
+    }
+    Ok(trigger.to_string())
 }
 
 fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, DockerfileBuildError> {
@@ -4527,8 +4557,8 @@ mod tests {
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
-        parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_run,
-        parse_stages, parse_stop_signal, prepare_dockerfile_build,
+        parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_onbuild,
+        parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
         registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
         validate_mount_target, BuildCacheEntry, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
@@ -4676,6 +4706,19 @@ mod tests {
         );
         assert!(parse_maintainer("").is_err());
         assert!(parse_maintainer("bad\0author").is_err());
+    }
+
+    #[test]
+    fn onbuild_triggers_are_preserved_and_forbidden_nested_instructions_fail() {
+        let stages = parse_stages("FROM scratch\nONBUILD COPY . /src\nONBUILD RUN make\n")
+            .expect("ONBUILD triggers should parse");
+        assert_eq!(stages[0].onbuild, ["COPY . /src", "RUN make"]);
+        for trigger in ["", "FROM alpine", "MAINTAINER legacy", "ONBUILD RUN true"] {
+            assert!(
+                parse_onbuild(trigger).is_err(),
+                "invalid ONBUILD: {trigger}"
+            );
+        }
     }
 
     #[test]
@@ -5442,11 +5485,10 @@ mod tests {
                 .as_deref(),
             Some("legacy")
         );
-        for directive in ["ONBUILD RUN echo hi"] {
-            let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
-                .expect_err("unsupported directive must fail deterministically");
-            assert!(error.to_string().contains("instruction"), "{error}");
-        }
+        assert_eq!(
+            parse_stages("FROM scratch\nONBUILD RUN echo hi\n").unwrap()[0].onbuild,
+            ["RUN echo hi"]
+        );
     }
 
     #[cfg(unix)]

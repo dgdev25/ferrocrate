@@ -31,7 +31,7 @@ pub fn generate_apparmor_profile(container_id: &str) -> Result<String, MacProfil
         // abstraction includes can reference optional tunables (for example
         // `@{HOMEDIRS}`), causing an explicitly enabled profile to fail closed
         // before the workload starts on otherwise valid hosts.
-        "profile ferrocrate-{id} flags=(attach_disconnected,mediate_deleted) {{\n  network,\n  file,\n  capability,\n  deny /proc/kcore rw,\n}}\n",
+        "profile ferrocrate-{id} flags=(attach_disconnected,mediate_deleted) {{\n  network,\n  file,\n  deny /proc/kcore rw,\n  deny /etc/shadow r,\n  deny /etc/shadow- r,\n  deny /etc/gshadow r,\n  deny /etc/gshadow- r,\n  deny /**/etc/shadow r,\n  deny /**/etc/shadow- r,\n  deny /**/etc/gshadow r,\n  deny /**/etc/gshadow- r,\n}}\n",
         id = container_id
     ))
 }
@@ -54,6 +54,9 @@ mod tests {
         let profile = generate_apparmor_profile("abc123").expect("profile");
         assert!(profile.contains("profile ferrocrate-abc123"));
         assert!(profile.contains("deny /proc/kcore"));
+        assert!(profile.contains("deny /**/etc/shadow r"));
+        assert!(profile.contains("deny /etc/shadow r"));
+        assert!(!profile.contains("  capability,\n"));
         assert!(!profile.contains("#include"));
     }
 

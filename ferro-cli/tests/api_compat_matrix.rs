@@ -784,6 +784,16 @@ fn docker_api_compatibility_matrix() {
                 "pending create must be removed by prune: {body}"
             );
         }
+        if case.path == "/system/df" {
+            let payload: serde_json::Value =
+                serde_json::from_str(&body).expect("system df response is JSON");
+            assert!(
+                payload
+                    .get("BuildCache")
+                    .is_some_and(serde_json::Value::is_array),
+                "system df must project BuildCache: {body}"
+            );
+        }
         if case.path.ends_with("/json?size=1") {
             let payload: serde_json::Value =
                 serde_json::from_str(&body).expect("size inspect response is JSON");

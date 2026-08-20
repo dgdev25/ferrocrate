@@ -52,6 +52,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/perf/docker-volume-io-comparison.sh \
   scripts/test-state-migrations.sh \
   scripts/test-default-dependency-graph.sh \
+  scripts/test-selinux-enforcement.sh \
   scripts/next-release-version.sh scripts/test-next-release-version.sh \
   scripts/generate-release-index.sh scripts/test-generate-release-index.sh \
   scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \

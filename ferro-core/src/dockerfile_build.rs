@@ -16,6 +16,8 @@ use crate::registry::{RegistryAuth, RegistryClient};
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
 #[cfg(unix)]
 use nix::mount::{mount, MsFlags};
 use serde::{Deserialize, Serialize};
@@ -38,7 +40,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use flate2::read::GzDecoder;
 use tar::{Archive, Builder};
 use thiserror::Error;
 
@@ -3403,12 +3404,7 @@ fn copy_from_context(
                 &dest
             };
             if spec.extract_archives
-                && extract_add_archive(
-                    &source,
-                    archive_dest,
-                    spec.chmod,
-                    &spec.excludes,
-                )?
+                && extract_add_archive(&source, archive_dest, spec.chmod, &spec.excludes)?
             {
                 continue;
             }
@@ -3439,14 +3435,22 @@ fn extract_add_archive(
     let mut header = [0_u8; 512];
     let read = probe.read(&mut header)?;
     let gzip = read >= 2 && header[..2] == [0x1f, 0x8b];
+    let bzip = read >= 3 && &header[..3] == b"BZh";
     let plain_tar = read >= 262 && &header[257..262] == b"ustar";
-    if !gzip && !plain_tar {
+    if !gzip && !bzip && !plain_tar {
         return Ok(false);
     }
     fs::create_dir_all(destination)?;
     if gzip {
         extract_add_tar(
             GzDecoder::new(File::open(source)?),
+            destination,
+            chmod,
+            excludes,
+        )?;
+    } else if bzip {
+        extract_add_tar(
+            BzDecoder::new(File::open(source)?),
             destination,
             chmod,
             excludes,
@@ -4336,7 +4340,8 @@ mod tests {
     }
 
     #[test]
-    fn add_extracts_tar_and_gzip_archives_without_path_escape() {
+    fn add_extracts_tar_gzip_and_bzip_archives_without_path_escape() {
+        use bzip2::{write::BzEncoder, Compression as BzCompression};
         use flate2::{write::GzEncoder, Compression};
         use std::io::{Cursor, Write};
 
@@ -4350,9 +4355,7 @@ mod tests {
             header.set_size(7);
             header.set_mode(0o644);
             header.set_cksum();
-            builder
-                .append(&header, Cursor::new(b"payload"))
-                .unwrap();
+            builder.append(&header, Cursor::new(b"payload")).unwrap();
             builder.finish().unwrap();
         }
         fs::write(&archive_path, &bytes).unwrap();
@@ -4360,6 +4363,10 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&bytes).unwrap();
         fs::write(&gzip_path, encoder.finish().unwrap()).unwrap();
+        let bzip_path = temp.path().join("payload.tar.bz2");
+        let mut encoder = BzEncoder::new(Vec::new(), BzCompression::default());
+        encoder.write_all(&bytes).unwrap();
+        fs::write(&bzip_path, encoder.finish().unwrap()).unwrap();
 
         let stages = parse_stages("FROM scratch\nADD --chmod=600 payload.tar /app\n").unwrap();
         assert!(stages[0].copy_paths[0].extract_archives);
@@ -4369,7 +4376,11 @@ mod tests {
             temp.path(),
             &destination,
             &[super::CopySpec {
-                srcs: vec!["payload.tar".into(), "payload.tar.gz".into()],
+                srcs: vec![
+                    "payload.tar".into(),
+                    "payload.tar.gz".into(),
+                    "payload.tar.bz2".into(),
+                ],
                 dest: "/app".into(),
                 chmod: Some(0o600),
                 parents: false,

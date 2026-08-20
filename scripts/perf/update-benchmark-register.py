@@ -67,7 +67,7 @@ def update_register_metadata(
     text: str, head: str, ip_link: str, nft_link: str
 ) -> str:
     text, replacements = re.subn(
-        r"(The latest paired refresh was completed at head `)[^`]+(`)",
+        r"(The latest paired refresh was completed at (?:implementation )?head `)[^`]+(`)",
         rf"\g<1>{head}\g<2>",
         text,
         count=1,
@@ -83,7 +83,7 @@ def update_register_metadata(
     if replacements != 1:
         raise SystemExit("register is missing latest implementation metadata")
     text, replacements = re.subn(
-        r"(milliseconds from commit `)[^`]+(` on the current Ubuntu host)",
+        r"(milliseconds from (?:implementation )?commit `)[^`]+(` on the current Ubuntu host)",
         rf"\g<1>{head}\g<2>",
         text,
         count=1,

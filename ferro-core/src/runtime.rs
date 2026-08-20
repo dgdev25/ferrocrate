@@ -7090,6 +7090,9 @@ fn setup_network(
         &netns_name,
         &["ip", "link", "set", "eth0", "up"],
     ))?;
+    if active_backend == NetworkBackend::Ebpf {
+        disable_ebpf_veth_offloads(&netns_name)?;
+    }
     // Published-port requests originating on the host loopback retain their
     // 127/8 source while eBPF redirects them onto the container veth. Linux's
     // default loose reverse-path filter rejects that valid hairpin packet
@@ -10267,6 +10270,31 @@ fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
     ];
     out.extend(args.iter().map(|val| (*val).to_string()));
     out
+}
+
+/// eBPF published-port redirects can hand a container-originated skb directly
+/// to loopback, where no physical NIC exists to complete CHECKSUM_PARTIAL.
+/// Materialize the checksum at the namespace veth boundary by disabling TX
+/// checksum and segmentation offloads on the container-side peer. This is
+/// deliberately scoped to the eBPF backend; iptables/nftables retain the
+/// kernel's normal offload path. Missing or untrusted ethtool is a strict
+/// prerequisite failure rather than a silent correctness downgrade.
+fn disable_ebpf_veth_offloads(netns_name: &str) -> Result<(), RuntimeError> {
+    let ethtool = crate::rootless::trusted_executable_path("ethtool").ok_or_else(|| {
+        RuntimeError::Network(
+            "eBPF published-port networking requires a trusted root-owned ethtool executable"
+                .to_string(),
+        )
+    })?;
+    let ethtool = ethtool.to_str().ok_or_else(|| {
+        RuntimeError::Network("trusted ethtool path is not valid UTF-8".to_string())
+    })?;
+    run_cmd(&ip_netns_exec(
+        netns_name,
+        &[
+            ethtool, "-K", "eth0", "tx", "off", "tso", "off", "gso", "off", "gro", "off",
+        ],
+    ))
 }
 
 const IP_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";

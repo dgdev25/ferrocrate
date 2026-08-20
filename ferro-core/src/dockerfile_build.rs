@@ -2569,11 +2569,27 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
             .split_once('=')
             .ok_or_else(|| DockerfileBuildError::Invalid("invalid HEALTHCHECK flag".to_string()))?;
         match key {
-            "interval" => interval = parse_duration_to_nanos(val),
-            "timeout" => timeout = parse_duration_to_nanos(val),
-            "retries" => retries = val.parse::<u32>().ok(),
-            "start-period" => start_period = parse_duration_to_nanos(val),
-            _ => {}
+            "interval" => interval = Some(parse_healthcheck_duration("interval", val)?),
+            "timeout" => timeout = Some(parse_healthcheck_duration("timeout", val)?),
+            "retries" => {
+                let value = val.parse::<u32>().map_err(|_| {
+                    DockerfileBuildError::Invalid(
+                        "HEALTHCHECK retries must be a positive integer".to_string(),
+                    )
+                })?;
+                if value == 0 {
+                    return Err(DockerfileBuildError::Invalid(
+                        "HEALTHCHECK retries must be a positive integer".to_string(),
+                    ));
+                }
+                retries = Some(value);
+            }
+            "start-period" => start_period = Some(parse_healthcheck_duration("start-period", val)?),
+            _ => {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "unsupported HEALTHCHECK flag: --{key}"
+                )))
+            }
         }
     }
 
@@ -2584,12 +2600,22 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
     let test = if mode.eq_ignore_ascii_case("CMD") {
         rest.split_whitespace().map(|s| s.to_string()).collect()
     } else if mode.eq_ignore_ascii_case("CMD-SHELL") {
+        if rest.is_empty() {
+            return Err(DockerfileBuildError::Invalid(
+                "HEALTHCHECK command must not be empty".to_string(),
+            ));
+        }
         vec!["/bin/sh".to_string(), "-c".to_string(), rest]
     } else {
         return Err(DockerfileBuildError::Invalid(
             "unsupported HEALTHCHECK mode".to_string(),
         ));
     };
+    if test.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "HEALTHCHECK command must not be empty".to_string(),
+        ));
+    }
 
     Ok(Some(HealthcheckSpec {
         test,
@@ -2598,6 +2624,18 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
         retries: retries.unwrap_or(3),
         start_period_nanos: start_period.unwrap_or(0),
     }))
+}
+
+fn parse_healthcheck_duration(name: &str, value: &str) -> Result<u64, DockerfileBuildError> {
+    let nanos = parse_duration_to_nanos(value).ok_or_else(|| {
+        DockerfileBuildError::Invalid(format!("HEALTHCHECK {name} must be a valid duration"))
+    })?;
+    if nanos == 0 {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "HEALTHCHECK {name} must be greater than zero"
+        )));
+    }
+    Ok(nanos)
 }
 
 fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildError> {
@@ -4371,11 +4409,12 @@ mod tests {
         build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
-        load_build_cache, load_stage_checkpoints, parse_env, parse_labels, parse_limit_value,
-        parse_run, parse_stages, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
-        prune_build_cache, registry_cache_descriptor, registry_cache_reference, resolve_copy_owner,
-        save_build_cache, stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
-        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
+        load_build_cache, load_stage_checkpoints, parse_env, parse_healthcheck, parse_labels,
+        parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
+        registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
+        validate_mount_target, BuildCacheEntry, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -4452,6 +4491,33 @@ mod tests {
         let error = parse_stages("FROM scratch\nWORKDIR ../../escape\n")
             .expect_err("WORKDIR must not escape image root");
         assert!(error.to_string().contains("escapes the image root"));
+    }
+
+    #[test]
+    fn healthcheck_rejects_malformed_flags_and_empty_commands() {
+        let health = parse_healthcheck(
+            "--interval=2s --timeout=500ms --retries=4 --start-period=1s CMD-SHELL curl -f http://localhost",
+        )
+        .expect("valid healthcheck parses")
+        .expect("healthcheck is enabled");
+        assert_eq!(health.interval_nanos, 2_000_000_000);
+        assert_eq!(health.timeout_nanos, 500_000_000);
+        assert_eq!(health.retries, 4);
+        assert_eq!(health.start_period_nanos, 1_000_000_000);
+
+        for input in [
+            "--interval=wat CMD-SHELL true",
+            "--retries=0 CMD-SHELL true",
+            "--unknown=1 CMD-SHELL true",
+            "CMD-SHELL",
+            "CMD",
+        ] {
+            assert!(
+                parse_healthcheck(input).is_err(),
+                "malformed healthcheck should fail: {input}"
+            );
+        }
+        assert!(parse_healthcheck("NONE").unwrap().is_none());
     }
 
     #[test]

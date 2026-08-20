@@ -16865,6 +16865,8 @@ volumes:
     #[cfg(target_os = "linux")]
     #[test]
     fn compose_default_network_name_rejects_empty_project_path_components() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let _project_name = super::ScopedEnv::set("COMPOSE_PROJECT_NAME", None);
         let fallback =
             super::compose_default_network_name(std::path::Path::new("/")).expect("fallback");
         assert_eq!(fallback, "ferrocrate_default");

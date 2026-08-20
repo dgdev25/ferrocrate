@@ -14900,6 +14900,7 @@ fn docker_inspect_payload(
         "Config": {
             "Env": record.env,
             "Cmd": record.command,
+            "Tty": false,
             "WorkingDir": record.workdir,
             "User": record.user,
             "Labels": record.labels,
@@ -15076,6 +15077,7 @@ fn docker_pending_inspect_payload(
         "Config": {
             "Env": spec.env,
             "Cmd": spec.cmd,
+            "Tty": false,
             "WorkingDir": spec.workdir,
             "User": spec.user,
             "Labels": labels,
@@ -19153,6 +19155,7 @@ volumes:
             created_at_unix: 0,
         };
         let payload = docker_pending_inspect_payload("pending", &pending, false);
+        assert_eq!(payload["Config"]["Tty"], false);
         assert_eq!(payload["Config"]["Healthcheck"]["Test"][0], "CMD-SHELL");
         assert_eq!(
             payload["Config"]["Healthcheck"]["Interval"],

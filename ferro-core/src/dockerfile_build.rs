@@ -4124,8 +4124,13 @@ fn safe_context_destination(
     Ok(root.join(relative))
 }
 
-fn create_build_dir(_runtime_dir: &Path, name: &str) -> Result<PathBuf, DockerfileBuildError> {
-    let root = std::env::temp_dir().join("ferrocrate-build");
+fn create_build_dir(runtime_dir: &Path, name: &str) -> Result<PathBuf, DockerfileBuildError> {
+    // Keep build scratch state under the caller's runtime directory. A global
+    // `/tmp/ferrocrate-build` root can be left owned by a privileged daemon and
+    // then make an otherwise unprivileged Docker-compatible build fail with
+    // EACCES. Per-runtime allocation also prevents concurrent daemons from
+    // sharing build context names or cleanup state.
+    let root = runtime_dir.join("build");
     fs::create_dir_all(&root)?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

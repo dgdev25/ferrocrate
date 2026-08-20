@@ -1,6 +1,6 @@
 use crate::validate::{validate_cidr, validate_interface_name};
-use std::net::Ipv6Addr;
 use serde_json::json;
+use std::net::Ipv6Addr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootlessNetConfig {

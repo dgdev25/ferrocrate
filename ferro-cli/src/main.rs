@@ -243,6 +243,15 @@ pub enum Commands {
         #[arg(long = "secret")]
         secret: Vec<String>,
     },
+    /// Prune old local Dockerfile build-cache records deterministically.
+    #[cfg(target_os = "linux")]
+    BuildCachePrune {
+        /// Maximum number of newest cache records to retain.
+        #[arg(long = "max-entries", default_value_t = 64)]
+        max_entries: usize,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
+    },
     /// Inspect or extract an opt-in native RVF image.
     Rvf {
         #[command(subcommand)]
@@ -2878,6 +2887,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &build_context,
                 &secret,
             ),
+            #[cfg(target_os = "linux")]
+            Commands::BuildCachePrune {
+                max_entries,
+                format,
+            } => handle_build_cache_prune(&runtime_dir, max_entries, &format),
             Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
             Commands::SystemDf { format } => {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
@@ -6300,6 +6314,29 @@ fn docker_directory_usage(root: &Path) -> u64 {
         .filter_map(Result::ok)
         .map(|entry| docker_directory_usage(&entry.path()))
         .fold(0u64, u64::saturating_add)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_build_cache_prune(
+    runtime_dir: &Path,
+    max_entries: usize,
+    format: &str,
+) -> Result<(), String> {
+    let removed = ferro_core::dockerfile_build::prune_build_cache(runtime_dir, max_entries)
+        .map_err(|error| format!("build-cache prune: {error}"))?;
+    if format == "json" {
+        let body = serde_json::json!({
+            "removed": removed,
+            "max_entries": max_entries,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("build-cache prune: removed={removed} retained_max={max_entries}");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16121,6 +16158,28 @@ volumes:
                 assert!(cache_to.is_none());
                 assert!(build_context.is_empty());
                 assert!(secret.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_cache_prune_command_with_json_and_limit() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "build-cache-prune",
+            "--max-entries",
+            "3",
+            "--format",
+            "json",
+        ]);
+        match cli.command {
+            Commands::BuildCachePrune {
+                max_entries,
+                format,
+            } => {
+                assert_eq!(max_entries, 3);
+                assert_eq!(format, "json");
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -6,9 +6,9 @@
 #[cfg(any(target_arch = "bpf", bpf_target_arch))]
 mod producer {
     use aya_ebpf::{
+        btf_maps::RingBuf,
         helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns},
-        macros::{map, tracepoint},
-        maps::RingBuf,
+        macros::{btf_map, tracepoint},
         programs::TracePointContext,
     };
 
@@ -16,8 +16,8 @@ mod producer {
     const PAYLOAD_BYTES: usize = 256;
     const WIRE_BYTES: usize = EVENT_NAME_BYTES + 4 + 4 + 8 + PAYLOAD_BYTES;
 
-    #[map]
-    pub static FERRO_SECURITY_EVENTS: RingBuf = RingBuf::with_byte_size(1 << 20, 0);
+    #[btf_map]
+    pub static FERRO_SECURITY_EVENTS: RingBuf<(), { 1 << 20 }> = RingBuf::new();
 
     /// Generic syscall tracepoint producer. The userspace loader binds this
     /// section to each configured `sys_enter_*` event and identifies the

@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use aya::maps::{Map, MapData, RingBuf};
+use aya::programs::{links::FdLink, TracePoint};
+use aya::Ebpf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,7 +18,7 @@ use crate::ebpf_abi::{
 use crate::ebpf_loader::{
     sha256, validate_embedded_object, AyaKernel, KernelAdapter, KernelLoadPlan, KernelPreflight,
 };
-use crate::executor::{exec_cmd, exec_cmd_allow_missing, exec_cmd_capture, ExecError};
+use crate::executor::{exec_cmd_capture, ExecError};
 
 pub const BPFFS_ROOT: &str = "/sys/fs/bpf";
 pub const FERRO_NETWORK_ROOT: &str = "/sys/fs/bpf/ferrocrate";
@@ -1295,17 +1297,10 @@ pub fn build_bpftool_load_cmd(program: &EbpfProgram, pin_path: &str) -> Vec<Stri
 pub fn build_bpftool_load_with_map_cmd(
     program: &EbpfProgram,
     pin_path: &str,
-    map_name: &str,
-    map_pin_path: &str,
+    map_pin_root: &str,
 ) -> Vec<String> {
     let mut command = build_bpftool_load_cmd(program, pin_path);
-    command.extend([
-        "map".to_string(),
-        "name".to_string(),
-        map_name.to_string(),
-        "pinned".to_string(),
-        map_pin_path.to_string(),
-    ]);
+    command.extend(["pinmaps".to_string(), map_pin_root.to_string()]);
     command
 }
 
@@ -1313,7 +1308,8 @@ pub fn build_bpftool_load_with_map_cmd(
 /// monitor.  Each loaded tracepoint program owns one map instance, so event
 /// names are part of the path and cannot collide during multi-event setup.
 pub fn security_monitor_ring_map_path(pin_root: &str, event: &str) -> String {
-    format!("{pin_root}/{event}-events")
+    let _ = event;
+    format!("{pin_root}/{SECURITY_MONITOR_RING_MAP_NAME}")
 }
 
 pub fn build_tc_attach_cmd(iface: &str, pin_path: &str, direction: &str) -> Vec<String> {
@@ -1362,30 +1358,79 @@ pub fn install_security_monitor(config: &SecurityMonitorConfig) -> Result<Vec<St
     for normalized in events {
         let pin_path = format!("{}/{}", config.pin_root, normalized);
         let map_pin_path = security_monitor_ring_map_path(&config.pin_root, &normalized);
-        let program = EbpfProgram {
-            name: format!("ferro_security_{normalized}"),
-            object_path: config.object_path.clone(),
-            section: "tracepoint".to_string(),
-        };
-        if let Err(error) = exec_cmd(&build_bpftool_load_with_map_cmd(
-            &program,
-            &pin_path,
-            SECURITY_MONITOR_RING_MAP_NAME,
-            &map_pin_path,
-        )) {
-            cleanup_security_monitor_paths(&config.pin_root, &installed)?;
-            return Err(error);
+        let link_pin_path = format!("{pin_path}-link");
+        let mut ebpf =
+            Ebpf::load_file(&config.object_path).map_err(|error| ExecError::CommandFailed {
+                cmd: format!("load security monitor object {}", config.object_path),
+                stderr: error.to_string(),
+            })?;
+        {
+            let program = ebpf
+                .program_mut("ferro_security_tracepoint")
+                .ok_or_else(|| ExecError::CommandFailed {
+                    cmd: format!("load security monitor object {}", config.object_path),
+                    stderr: "missing ferro_security_tracepoint program".to_string(),
+                })?;
+            let program_result: Result<&mut TracePoint, _> = program.try_into();
+            let program = program_result.map_err(|error| ExecError::CommandFailed {
+                cmd: format!("load security monitor object {}", config.object_path),
+                stderr: error.to_string(),
+            })?;
+            program.load().map_err(|error| ExecError::CommandFailed {
+                cmd: format!("load security monitor event {normalized}"),
+                stderr: error.to_string(),
+            })?;
+            program
+                .pin(&pin_path)
+                .map_err(|error| ExecError::CommandFailed {
+                    cmd: format!("pin security monitor event {normalized}"),
+                    stderr: error.to_string(),
+                })?;
         }
+        ebpf.map_mut(SECURITY_MONITOR_RING_MAP_NAME)
+            .ok_or_else(|| ExecError::CommandFailed {
+                cmd: format!("load security monitor event {normalized}"),
+                stderr: format!("missing {SECURITY_MONITOR_RING_MAP_NAME} map"),
+            })?
+            .pin(&map_pin_path)
+            .map_err(|error| ExecError::CommandFailed {
+                cmd: format!("pin security monitor map {normalized}"),
+                stderr: error.to_string(),
+            })?;
+        let program = ebpf
+            .program_mut("ferro_security_tracepoint")
+            .ok_or_else(|| ExecError::CommandFailed {
+                cmd: format!("load security monitor object {}", config.object_path),
+                stderr: "missing ferro_security_tracepoint program".to_string(),
+            })?;
+        let program_result: Result<&mut TracePoint, _> = program.try_into();
+        let program = program_result.map_err(|error| ExecError::CommandFailed {
+            cmd: format!("load security monitor object {}", config.object_path),
+            stderr: error.to_string(),
+        })?;
+        let link_id = program
+            .attach("syscalls", &format!("sys_enter_{normalized}"))
+            .map_err(|error| ExecError::CommandFailed {
+                cmd: format!("attach security monitor event {normalized}"),
+                stderr: error.to_string(),
+            })?;
+        let link = program
+            .take_link(link_id)
+            .map_err(|error| ExecError::CommandFailed {
+                cmd: format!("retain security monitor event {normalized}"),
+                stderr: error.to_string(),
+            })?;
+        let fd_link = FdLink::try_from(link).map_err(|error| ExecError::CommandFailed {
+            cmd: format!("retain security monitor event {normalized}"),
+            stderr: error.to_string(),
+        })?;
+        fd_link
+            .pin(&link_pin_path)
+            .map_err(|error| ExecError::CommandFailed {
+                cmd: format!("pin security monitor link {normalized}"),
+                stderr: error.to_string(),
+            })?;
         installed.push(normalized.clone());
-        let tracepoint = format!("sys_enter_{normalized}");
-        if let Err(error) = exec_cmd(&build_tracepoint_attach_cmd(
-            &pin_path,
-            "syscalls",
-            &tracepoint,
-        )) {
-            cleanup_security_monitor_paths(&config.pin_root, &installed)?;
-            return Err(error);
-        }
         if let Err(error) = exec_cmd_capture(&[
             "bpftool".to_string(),
             "prog".to_string(),
@@ -1412,20 +1457,11 @@ fn cleanup_security_monitor_paths(pin_root: &str, events: &[String]) -> Result<(
     let mut first_error = None;
     for event in events {
         let pin_path = format!("{pin_root}/{event}");
-        let tracepoint = format!("sys_enter_{event}");
-        if let Err(error) = exec_cmd_allow_missing(&[
-            "bpftool".to_string(),
-            "prog".to_string(),
-            "detach".to_string(),
-            "pinned".to_string(),
+        for path in [
             pin_path.clone(),
-            "tracepoint".to_string(),
-            "syscalls".to_string(),
-            tracepoint,
-        ]) {
-            first_error.get_or_insert(error);
-        }
-        for path in [pin_path, security_monitor_ring_map_path(pin_root, event)] {
+            format!("{pin_path}-link"),
+            security_monitor_ring_map_path(pin_root, event),
+        ] {
             if let Err(error) = std::fs::remove_file(&path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     first_error.get_or_insert(ExecError::Io {
@@ -1500,7 +1536,6 @@ mod lifecycle_tests {
         SecurityMonitorRingBuffer, EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
         SECURITY_MONITOR_EVENT_NAME_BYTES, SECURITY_MONITOR_EVENT_PAYLOAD_BYTES,
         SECURITY_MONITOR_EVENT_WIRE_BYTES, SECURITY_MONITOR_MAX_BUFFER_EVENTS,
-        SECURITY_MONITOR_RING_MAP_NAME,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1633,8 +1668,7 @@ mod lifecycle_tests {
         let command = build_bpftool_load_with_map_cmd(
             &program,
             "/sys/fs/bpf/ferrocrate-security/open",
-            SECURITY_MONITOR_RING_MAP_NAME,
-            "/sys/fs/bpf/ferrocrate-security/open-events",
+            "/sys/fs/bpf/ferrocrate-security",
         );
         assert_eq!(
             command,
@@ -1646,16 +1680,13 @@ mod lifecycle_tests {
                 "/sys/fs/bpf/ferrocrate-security/open",
                 "type",
                 "tracepoint",
-                "map",
-                "name",
-                "FERRO_SECURITY_EVENTS",
-                "pinned",
-                "/sys/fs/bpf/ferrocrate-security/open-events",
+                "pinmaps",
+                "/sys/fs/bpf/ferrocrate-security",
             ]
         );
         assert_eq!(
             super::security_monitor_ring_map_path("/sys/fs/bpf/ferrocrate-security", "open"),
-            "/sys/fs/bpf/ferrocrate-security/open-events"
+            "/sys/fs/bpf/ferrocrate-security/FERRO_SECURITY_EVENTS"
         );
     }
 

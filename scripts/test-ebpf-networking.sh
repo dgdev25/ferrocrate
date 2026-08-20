@@ -39,6 +39,11 @@ IFS=. read -r kernel_major kernel_minor _ <<<"$(uname -r)"
 
 export FERRO_EBPF_TEST_NETWORK_ID="ferro-qualify-$$"
 export FERROCRATE_E2E_NETWORK_BACKEND=ebpf
+# This gate intentionally exercises the experimental published-port path;
+# production remains fail-closed until the live checksum/redirect qualification
+# succeeds.  Without the opt-in, the e2e fixture exits before attaching the
+# datapath and the privileged probe gives a false negative.
+export FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1
 export FERROCRATE_EBPF_SNAT_PORT_RANGE="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
 pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)"
 before_iptables="$(mktemp)"

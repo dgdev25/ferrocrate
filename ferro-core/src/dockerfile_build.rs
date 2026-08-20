@@ -1829,6 +1829,7 @@ struct CopySpec {
     dest: String,
     chmod: Option<u32>,
     owner: Option<CopyOwner>,
+    checksum: Option<String>,
     parents: bool,
     excludes: Vec<String>,
     extract_archives: bool,
@@ -1920,6 +1921,11 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 if let Some(copy) = parse_copy_from(&interpolated)? {
                     stage.copy_from.push(copy);
                 } else if let Some(copy) = parse_copy_spec(&interpolated)? {
+                    if copy.checksum.is_some() {
+                        return Err(DockerfileBuildError::Invalid(
+                            "COPY --checksum is only valid for remote ADD".to_string(),
+                        ));
+                    }
                     stage.copy_paths.push(copy);
                 }
             }
@@ -2164,6 +2170,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
     let mut args = Vec::new();
     let mut chmod = None;
     let mut owner = None;
+    let mut checksum = None;
     let mut parents = false;
     let mut excludes = Vec::new();
     let mut index = 0;
@@ -2184,6 +2191,14 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
                 DockerfileBuildError::Invalid("COPY --chown requires an owner".to_string())
             })?;
             owner = Some(parse_copy_owner(raw_owner)?);
+            index += 1;
+        } else if let Some(raw_checksum) = token.strip_prefix("--checksum=") {
+            checksum = Some(parse_copy_checksum(raw_checksum)?);
+        } else if token == "--checksum" {
+            let raw_checksum = tokens.get(index + 1).ok_or_else(|| {
+                DockerfileBuildError::Invalid("ADD --checksum requires a digest".to_string())
+            })?;
+            checksum = Some(parse_copy_checksum(raw_checksum)?);
             index += 1;
         } else if token == "--parents" {
             parents = true;
@@ -2238,10 +2253,23 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         dest,
         chmod,
         owner,
+        checksum,
         parents,
         excludes,
         extract_archives: false,
     }))
+}
+
+fn parse_copy_checksum(raw: &str) -> Result<String, DockerfileBuildError> {
+    let digest = raw.strip_prefix("sha256:").ok_or_else(|| {
+        DockerfileBuildError::Invalid("ADD --checksum requires sha256:<64 hex>".to_string())
+    })?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(DockerfileBuildError::Invalid(
+            "ADD --checksum requires sha256:<64 hex>".to_string(),
+        ));
+    }
+    Ok(digest.to_ascii_lowercase())
 }
 
 fn parse_copy_owner(raw: &str) -> Result<CopyOwner, DockerfileBuildError> {
@@ -3711,8 +3739,21 @@ fn copy_from_context(
             }
             let (source, source_name) = if spec.extract_archives && is_remote_add_source(src) {
                 let downloaded = download_add_source(src, remote_root.path())?;
+                if let Some(expected) = spec.checksum.as_ref() {
+                    let expected = format!("sha256:{expected}");
+                    if !file_matches_digest(&downloaded, &expected) {
+                        return Err(DockerfileBuildError::Invalid(format!(
+                            "ADD --checksum mismatch for {src}"
+                        )));
+                    }
+                }
                 (downloaded, remote_add_source_name(src))
             } else {
+                if spec.checksum.is_some() {
+                    return Err(DockerfileBuildError::Invalid(
+                        "ADD --checksum requires a remote HTTP(S) source".to_string(),
+                    ));
+                }
                 (
                     src_root.join(src.trim_start_matches('/')),
                     Path::new(src)
@@ -4783,6 +4824,24 @@ mod tests {
     }
 
     #[test]
+    fn add_checksum_is_strictly_validated_and_copy_rejects_it() {
+        let digest = "a".repeat(64);
+        let stages = parse_stages(&format!(
+            "FROM scratch\nADD --checksum=sha256:{digest} https://example.test/a.tar /app\n"
+        ))
+        .unwrap();
+        assert_eq!(stages[0].copy_paths[0].checksum, Some(digest.clone()));
+        assert!(parse_stages(
+            "FROM scratch\nADD --checksum=sha1:abcd https://example.test/a /app\n"
+        )
+        .is_err());
+        assert!(parse_stages(&format!(
+            "FROM scratch\nCOPY --checksum=sha256:{digest} app /app\n"
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn build_limit_values_are_strictly_positive_unsigned_integers() {
         assert_eq!(parse_limit_value("LIMIT", "4096").unwrap(), 4096);
         for value in ["", "0", "-1", "1.5", "1e3"] {
@@ -4861,6 +4920,7 @@ mod tests {
                 dest: "/materialized".into(),
                 chmod: Some(0o640),
                 owner: None,
+                checksum: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: false,
@@ -4892,6 +4952,7 @@ mod tests {
                 dest: "/opt".into(),
                 chmod: None,
                 owner: None,
+                checksum: None,
                 parents: true,
                 excludes: Vec::new(),
                 extract_archives: false,
@@ -4911,6 +4972,7 @@ mod tests {
                 dest: "/opt".into(),
                 chmod: None,
                 owner: None,
+                checksum: None,
                 parents: true,
                 excludes: Vec::new(),
                 extract_archives: false,
@@ -4937,6 +4999,7 @@ mod tests {
                 dest: "/app".into(),
                 chmod: None,
                 owner: None,
+                checksum: None,
                 parents: false,
                 excludes: vec!["*.tmp".into(), "secret".into()],
                 extract_archives: false,
@@ -4956,6 +5019,7 @@ mod tests {
                 dest: "/app".into(),
                 chmod: None,
                 owner: None,
+                checksum: None,
                 parents: false,
                 excludes: vec!["*.tmp".into()],
                 extract_archives: false,
@@ -5016,6 +5080,7 @@ mod tests {
                 dest: "/app".into(),
                 chmod: Some(0o600),
                 owner: None,
+                checksum: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
@@ -5054,6 +5119,7 @@ mod tests {
                 dest: "/app".into(),
                 chmod: None,
                 owner: None,
+                checksum: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
@@ -5101,6 +5167,7 @@ mod tests {
                 dest: "/app/".into(),
                 chmod: None,
                 owner: None,
+                checksum: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,

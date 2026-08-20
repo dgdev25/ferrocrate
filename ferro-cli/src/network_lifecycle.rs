@@ -598,18 +598,56 @@ struct JournalLock {
 impl JournalLock {
     fn acquire(runtime_dir: &Path) -> Result<Self, NetworkLifecycleError> {
         let path = lock_path(runtime_dir);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    NetworkLifecycleError::JournalBusy
-                } else {
-                    NetworkLifecycleError::JournalIo(format!("lock: {}", e))
+        for _ in 0..3 {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    let owner = std::process::id().to_string();
+                    file.write_all(owner.as_bytes()).map_err(|error| {
+                        NetworkLifecycleError::JournalIo(format!("lock owner: {error}"))
+                    })?;
+                    file.sync_all().map_err(|error| {
+                        NetworkLifecycleError::JournalIo(format!("lock sync: {error}"))
+                    })?;
+                    return Ok(JournalLock { _file: file, path });
                 }
-            })?;
-        Ok(JournalLock { _file: file, path })
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let owner = match std::fs::read_to_string(&path) {
+                        Ok(contents) => contents
+                            .trim()
+                            .parse::<u32>()
+                            .map_err(|_| NetworkLifecycleError::JournalBusy)?,
+                        Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+                            continue
+                        }
+                        Err(read_error) => {
+                            return Err(NetworkLifecycleError::JournalIo(format!(
+                                "read lock owner: {read_error}"
+                            )))
+                        }
+                    };
+                    if std::fs::metadata(format!("/proc/{owner}")).is_ok() {
+                        return Err(NetworkLifecycleError::JournalBusy);
+                    }
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => continue,
+                        Err(remove_error)
+                            if remove_error.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            continue
+                        }
+                        Err(remove_error) => {
+                            return Err(NetworkLifecycleError::JournalIo(format!(
+                                "remove stale lock: {remove_error}"
+                            )))
+                        }
+                    }
+                }
+                Err(error) => {
+                    return Err(NetworkLifecycleError::JournalIo(format!("lock: {error}")))
+                }
+            }
+        }
+        Err(NetworkLifecycleError::JournalBusy)
     }
 }
 
@@ -1961,6 +1999,25 @@ pub(crate) fn classify_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_lock_reclaims_a_dead_owner_but_not_a_live_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = lock_path(dir.path());
+
+        std::fs::write(&path, u32::MAX.to_string()).expect("write stale owner");
+        let guard = JournalLock::acquire(dir.path()).expect("reclaim stale lock");
+        let owner = std::fs::read_to_string(&path).expect("read replacement owner");
+        assert_eq!(owner, std::process::id().to_string());
+        drop(guard);
+        assert!(!path.exists());
+
+        std::fs::write(&path, std::process::id().to_string()).expect("write live owner");
+        assert!(matches!(
+            JournalLock::acquire(dir.path()),
+            Err(NetworkLifecycleError::JournalBusy)
+        ));
+    }
 
     #[test]
     fn file_backed_kernel_persists_exact_identity_across_reopen() {

@@ -11,7 +11,7 @@ libc = "0.2"
 
 # rUv ecosystem integration (Task 3.3)
 # Uses ruvector-core for lightweight HashEmbedding by default
-ruvector-core = { version = "2.0.3", default-features = false, features = ["simd", "parallel"] }
+ruvector-core = { version = "2.3.0", default-features = false, features = ["simd", "parallel"] }
 ruv-fann = { version = "0.2.0", default-features = false, features = ["std", "parallel"] }  # Neural networks for anomaly detection without binary serialization
 
 parking_lot = "0.12"   # Required for ruvector-core RwLock interop

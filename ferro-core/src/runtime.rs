@@ -3591,9 +3591,7 @@ impl ContainerRuntime {
         // supervisor has already persisted the terminal state.  Treat these
         // terminal states as a successful no-op so the following delete can
         // complete instead of reporting a spurious post-effect conflict.
-        if matches!(record.status.as_str(), "stopped" | "killed")
-            || (record.status == "exited" && record.last_exit_code == Some(0))
-        {
+        if matches!(record.status.as_str(), "stopped" | "killed" | "exited") {
             return Ok(());
         }
         stop_pid(record.pid, timeout)?;
@@ -5576,6 +5574,7 @@ fn build_bwrap_command(
     mounts: &[BindMount],
     tmpfs_mounts: &[TmpfsMount],
     readonly_rootfs: bool,
+    disable_userns: bool,
 ) -> Result<Command, RuntimeError> {
     if !command_available("bwrap") {
         return Err(RuntimeError::InvalidCommand(
@@ -5603,6 +5602,18 @@ fn build_bwrap_command(
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     bwrap.arg("--cap-drop").arg("ALL");
+    if disable_userns {
+        // Followers enter the leader's user namespace through an inherited
+        // descriptor and use a BusyBox nsenter handoff for the network. The
+        // CAP_SYS_ADMIN is required only for the BusyBox nsenter handoff;
+        // it is confined to the shared user namespace and no host namespace
+        // or host interface is exposed to the workload.
+        bwrap
+            .arg("--userns")
+            .arg("3")
+            .arg("--cap-add")
+            .arg("CAP_SYS_ADMIN");
+    }
     for mount in mounts {
         bwrap.arg(if mount.read_only {
             "--ro-bind"
@@ -5648,6 +5659,7 @@ fn build_command(
     readonly_rootfs: bool,
 ) -> Result<Command, RuntimeError> {
     let running_as_root = nix::unistd::Uid::effective().is_root();
+    let rootless_shared_netns = netns_name.is_some_and(|value| value.starts_with("pid:"));
     let direct_container_setup = running_as_root && netns_name.is_some();
     // Keep the launcher shell outside a rootful image. A shell-less OCI image
     // (for example, FROM scratch with a static binary) cannot execute the
@@ -5685,6 +5697,38 @@ fn build_command(
         let mut direct_cmd = Command::new(&cmd[0]);
         direct_cmd.args(&cmd[1..]);
         direct_cmd
+    } else if rootless_shared_netns {
+        // Join the leader's namespace in the pre-exec hook below. Keeping the
+        // workload command direct avoids requiring privileged `ip netns exec`.
+        if let Some(rootfs) = rootfs_dir {
+            let pid = netns_name
+                .and_then(|value| value.strip_prefix("pid:"))
+                .ok_or_else(|| RuntimeError::InvalidState("shared network PID missing".into()))?;
+            let pid = pid
+                .parse::<u32>()
+                .map_err(|_| RuntimeError::InvalidState("shared network PID invalid".into()))?;
+            let mut shared_cmd = vec![
+                "/bin/busybox".to_string(),
+                "nsenter".to_string(),
+                "-t".to_string(),
+                pid.to_string(),
+                "-n".to_string(),
+                "--".to_string(),
+            ];
+            shared_cmd.extend(cmd.iter().cloned());
+            build_bwrap_command(
+                rootfs,
+                &shared_cmd,
+                mounts,
+                tmpfs_mounts,
+                readonly_rootfs,
+                true,
+            )?
+        } else {
+            let mut direct_cmd = Command::new(&cmd[0]);
+            direct_cmd.args(&cmd[1..]);
+            direct_cmd
+        }
     } else if let Some(netns) = netns_name {
         let ip_path = crate::rootless::trusted_executable_path("ip").ok_or_else(|| {
             RuntimeError::InvalidCommand(
@@ -5760,7 +5804,8 @@ fn build_command(
             .arg(shell)
             .args(["-c", script.as_str(), "ferrocrate-rootless"]);
         if let Some(rootfs) = rootfs_dir.filter(|_| !running_as_root) {
-            let inner = build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs)?;
+            let inner =
+                build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?;
             unshare_cmd.arg(inner.get_program());
             unshare_cmd.args(inner.get_args());
         } else {
@@ -5782,7 +5827,7 @@ fn build_command(
             chroot_cmd.args(&cmd[1..]);
             chroot_cmd
         } else if command_available("bwrap") {
-            build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs)?
+            build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?
         } else {
             return Err(RuntimeError::InvalidCommand(
                 "rootfs execution requires root (chroot) or bubblewrap (bwrap)".to_string(),
@@ -5845,6 +5890,13 @@ fn build_command(
     } else {
         None
     };
+    let shared_netns_pid = rootless_shared_netns
+        .then(|| {
+            netns_name
+                .and_then(|value| value.strip_prefix("pid:"))
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .flatten();
     let setup_user = if direct_container_setup {
         user.map(str::to_string)
     } else {
@@ -5868,6 +5920,12 @@ fn build_command(
                 enter_runtime_netns(netns).map_err(|err| {
                     io::Error::new(err.kind(), format!("pre_exec enter netns {netns}: {err}"))
                 })?;
+            }
+            if let Some(pid) = shared_netns_pid {
+                let user_ns = fs::File::open(format!("/proc/{pid}/ns/user"))?;
+                if nix::libc::dup2(user_ns.as_raw_fd(), 3) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             if let Some(user_spec) = setup_user.as_deref() {
                 apply_runtime_identity(user_spec).map_err(|err| {
@@ -5946,6 +6004,50 @@ fn rootfs_launcher_available() -> bool {
 }
 
 fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {
+    let pid = if let Some(pid) = netns_name.strip_prefix("pid:") {
+        Some(pid.parse::<u32>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid shared network namespace PID",
+            )
+        })?)
+    } else {
+        None
+    };
+    if let Some(pid) = pid {
+        if pid == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "shared network namespace PID must be non-zero",
+            ));
+        }
+        // A rootless network namespace is owned by the leader's user
+        // namespace. Join that user namespace first; otherwise Linux rejects
+        // the subsequent network-namespace setns with EINVAL/EPERM even when
+        // both processes belong to the same Unix user.
+        let user_path = PathBuf::from(format!("/proc/{pid}/ns/user"));
+        let user_file = fs::File::open(&user_path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "open shared user namespace {}: {}",
+                    user_path.display(),
+                    err
+                ),
+            )
+        })?;
+        nix::sched::setns(user_file, nix::sched::CloneFlags::CLONE_NEWUSER)
+            .map_err(|err| io::Error::from_raw_os_error(err as i32))?;
+        let path = PathBuf::from(format!("/proc/{pid}/ns/net"));
+        let file = fs::File::open(&path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("open shared network namespace {}: {}", path.display(), err),
+            )
+        })?;
+        return nix::sched::setns(file, nix::sched::CloneFlags::CLONE_NEWNET)
+            .map_err(|err| io::Error::from_raw_os_error(err as i32));
+    }
     let path = netns::netns_path(netns_name);
     let file = fs::File::open(&path).map_err(|err| {
         io::Error::new(
@@ -6721,12 +6823,24 @@ fn setup_network(
                 "shared network namespace name is empty".to_string(),
             ));
         }
-        // Reuse the existing namespace without recording ownership. The
-        // caller remains responsible for its lifecycle; container cleanup
-        // must never delete a CRI pod sandbox namespace.
-        netns::build_ip_netns_del_cmd(shared_netns)
-            .map_err(|error| RuntimeError::Network(error.to_string()))?;
-        let path = netns::netns_path(shared_netns);
+        // Reuse the existing namespace without recording ownership. Rootless
+        // Compose uses a leader PID because an unprivileged caller cannot
+        // publish a bind-mounted /run/netns entry for its user namespace.
+        let path = if let Some(pid) = shared_netns.strip_prefix("pid:") {
+            let pid = pid.parse::<u32>().map_err(|_| {
+                RuntimeError::Network("shared network namespace PID is invalid".to_string())
+            })?;
+            if pid == 0 {
+                return Err(RuntimeError::Network(
+                    "shared network namespace PID must be non-zero".to_string(),
+                ));
+            }
+            PathBuf::from(format!("/proc/{pid}/ns/net"))
+        } else {
+            netns::build_ip_netns_del_cmd(shared_netns)
+                .map_err(|error| RuntimeError::Network(error.to_string()))?;
+            netns::netns_path(shared_netns)
+        };
         if !path.exists() {
             return Err(RuntimeError::Network(format!(
                 "shared network namespace {shared_netns} does not exist"
@@ -8910,6 +9024,17 @@ fn cleanup_network(
     record: &ContainerRecord,
     all_records: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
+    // A rootless Compose follower borrows the leader's network namespace by
+    // PID. It has no namespace ownership to revoke and the marker is not an
+    // ip-netns name; never pass it to the validated `ip netns del` builder.
+    if !record.namespace_owned
+        && record
+            .netns
+            .as_deref()
+            .is_some_and(|name| name.starts_with("pid:"))
+    {
+        return Ok(());
+    }
     if let Some(overlay_id) = record.managed_overlay.as_deref() {
         let socket = std::env::var("FERROCRATE_AGENT_SOCKET")
             .unwrap_or_else(|_| "/run/ferrocrate/agent.sock".to_string());
@@ -10390,7 +10515,10 @@ fn persisted_network_name(associated: Option<&str>, network_mode: &str) -> Optio
         && !nix::unistd::Uid::effective().is_root()
         && rootless_netns_enabled()
     {
-        return None;
+        return associated
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "bridge")
+            .map(str::to_string);
     }
     associated_network_name(associated, network_mode)
 }
@@ -12516,6 +12644,61 @@ mod tests {
     }
 
     #[test]
+    fn stop_is_idempotent_for_a_container_that_exited_nonzero() {
+        if !can_run_containers() {
+            eprintln!("SKIP: requires root privileges for container operations");
+            return;
+        }
+        let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        seed_image_store(temp.path(), "alpine:latest");
+
+        let record = runtime
+            .run(
+                "alpine:latest",
+                &["sh".to_string(), "-c".to_string(), "exit 17".to_string()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "bridge",
+                NetworkBackend::Iptables,
+                None,
+            )
+            .expect("run");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let current = runtime.inspect(&record.id).expect("inspect");
+            if current.status == "exited" {
+                assert_eq!(current.last_exit_code, Some(17));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "container did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        runtime
+            .stop(&record.id, std::time::Duration::from_millis(50))
+            .expect("stop after nonzero exit should be idempotent");
+    }
+
+    #[test]
     fn container_names_are_deterministic_and_path_safe() {
         for valid in ["web", "web_1", "web-1.2", "A9"] {
             super::validate_container_name(valid).expect("valid container name");
@@ -13628,6 +13811,17 @@ mod tests {
         assert_eq!(record.netns.as_deref(), Some("must-not-delete-by-name"));
     }
 
+    #[test]
+    fn rootless_shared_pid_namespace_is_not_deleted_with_ip_netns() {
+        let mut record = fixture_container_record("rootless-follower", "stopped");
+        record.network_name = Some("project_default".to_string());
+        record.netns = Some("pid:4242".to_string());
+        record.namespace_owned = false;
+
+        super::cleanup_network(None, &record, std::slice::from_ref(&record))
+            .expect("borrowed rootless namespace cleanup");
+    }
+
     #[derive(Default)]
     struct FakeFirewallRunner {
         live: Vec<Vec<String>>,
@@ -14211,6 +14405,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             }],
             &[],
             true,
+            false,
         )
         .expect("bubblewrap command");
         let args = command

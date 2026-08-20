@@ -8,6 +8,9 @@
 //! rootless_compose_integration -- --nocapture`. Set
 //! `FERROCRATE_ROOTLESS_TEST_IMAGE` to a compatible registry image when
 //! Docker Hub's unauthenticated pull quota is exhausted.
+//! The shared-network fixture is separately gated by
+//! `FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E=1` because it requires a host
+//! that permits nested user+network namespaces.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -160,6 +163,87 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     assert_eq!(
         fs::read_to_string(runtime.join("volumes/named/marker")).expect("named volume output"),
         "named-volume\n"
+    );
+}
+
+#[test]
+fn rootless_compose_services_share_the_project_network_namespace() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    let workspace = project.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let compose = compose_fixture(
+        "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/leader; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/follower; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    depends_on:\n      leader:\n        condition: service_started\n",
+    );
+    fs::create_dir_all(&project).expect("project");
+    fs::write(project.join("compose.yml"), compose).expect("compose file");
+
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+    let up = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "up", "--detach"])
+        .output()
+        .expect("compose up");
+    assert!(
+        up.status.success(),
+        "rootless shared-network compose up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    for _ in 0..100 {
+        if workspace.join("leader").is_file() && workspace.join("follower").is_file() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !(workspace.join("leader").is_file() && workspace.join("follower").is_file()) {
+        let diagnostics = Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .args(["logs", "follower"])
+            .output()
+            .expect("follower logs");
+        let inspect = Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .args(["inspect", "follower"])
+            .output()
+            .expect("follower inspect");
+        panic!(
+            "rootless shared-network compose did not start both services; up_stdout={} up_stderr={} logs={} logs_stderr={} inspect={} inspect_stderr={}",
+            String::from_utf8_lossy(&up.stdout),
+            String::from_utf8_lossy(&up.stderr),
+            String::from_utf8_lossy(&diagnostics.stdout),
+            String::from_utf8_lossy(&diagnostics.stderr),
+            String::from_utf8_lossy(&inspect.stdout),
+            String::from_utf8_lossy(&inspect.stderr)
+        );
+    }
+    let down = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "down"])
+        .output()
+        .expect("compose down");
+    assert!(
+        down.status.success(),
+        "rootless shared-network compose down failed: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("leader")).expect("leader namespace"),
+        fs::read_to_string(workspace.join("follower")).expect("follower namespace")
     );
 }
 

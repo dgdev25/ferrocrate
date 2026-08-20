@@ -2483,6 +2483,72 @@ fn parse_copy_mode(raw: &str) -> Result<u32, DockerfileBuildError> {
         .map_err(|_| DockerfileBuildError::Invalid(format!("invalid COPY --chmod mode: {raw}")))
 }
 
+fn parse_cache_owner_id(kind: &str, raw: &str) -> Result<u32, DockerfileBuildError> {
+    if raw.is_empty() {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "cache mount {kind} must be an unsigned integer"
+        )));
+    }
+    raw.parse::<u32>().map_err(|_| {
+        DockerfileBuildError::Invalid(format!(
+            "cache mount {kind} must be an unsigned integer: {raw}"
+        ))
+    })
+}
+
+fn apply_cache_mount_metadata(
+    cache: &Path,
+    target: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    mode: Option<u32>,
+) -> Result<(), DockerfileBuildError> {
+    if let Some(mode) = mode {
+        #[cfg(unix)]
+        {
+            fs::set_permissions(cache, fs::Permissions::from_mode(mode))?;
+            fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (cache, target, mode);
+            return Err(DockerfileBuildError::Unsupported(
+                "cache mount mode requires a Unix host".to_string(),
+            ));
+        }
+    }
+    if uid.is_some() || gid.is_some() {
+        #[cfg(unix)]
+        {
+            use nix::unistd::{chown, Gid, Uid};
+            use std::os::unix::fs::MetadataExt;
+            let current = fs::metadata(cache)?;
+            let owner = Uid::from_raw(uid.unwrap_or(current.uid()));
+            let group = Gid::from_raw(gid.unwrap_or(current.gid()));
+            chown(cache, Some(owner), Some(group)).map_err(|error| {
+                DockerfileBuildError::Invalid(format!(
+                    "cache mount cannot set owner {}:{}: {error}",
+                    owner, group
+                ))
+            })?;
+            chown(target, Some(owner), Some(group)).map_err(|error| {
+                DockerfileBuildError::Invalid(format!(
+                    "cache mount cannot set target owner {}:{}: {error}",
+                    owner, group
+                ))
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (cache, target, uid, gid);
+            return Err(DockerfileBuildError::Unsupported(
+                "cache mount uid/gid requires a Unix host".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_arg(value: &str) -> Result<(String, String), DockerfileBuildError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2584,6 +2650,9 @@ struct CacheMount {
     target: String,
     id: String,
     sharing: CacheSharing,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2737,6 +2806,9 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         let mut read_only = false;
         let mut sharing = None;
         let mut required = None;
+        let mut uid = None;
+        let mut gid = None;
+        let mut mode = None;
         for option in mount.split(',') {
             let (key, value) = option.split_once('=').unwrap_or((option, ""));
             match key {
@@ -2757,6 +2829,9 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     }
                     sharing = Some(value);
                 }
+                "uid" => uid = Some(value),
+                "gid" => gid = Some(value),
+                "mode" => mode = Some(value),
                 "required" => {
                     required = Some(if value.is_empty() { "true" } else { value });
                 }
@@ -2795,6 +2870,13 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                         "RUN cache mount readonly mode is not supported".to_string(),
                     ));
                 }
+                let uid = uid
+                    .map(|value| parse_cache_owner_id("uid", value))
+                    .transpose()?;
+                let gid = gid
+                    .map(|value| parse_cache_owner_id("gid", value))
+                    .transpose()?;
+                let mode = mode.map(parse_copy_mode).transpose()?;
                 let target = target.ok_or_else(|| {
                     DockerfileBuildError::Invalid("cache mount requires target".to_string())
                 })?;
@@ -2805,6 +2887,9 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     target,
                     id,
                     sharing,
+                    uid,
+                    gid,
+                    mode,
                 });
             }
             Some("secret") => {
@@ -3630,6 +3715,7 @@ fn run_stage_commands(
             if persist {
                 copy_path_recursive(&cache, &target)?;
             }
+            apply_cache_mount_metadata(&cache, &target, mount.uid, mount.gid, mount.mode)?;
             mounted.push((target, backup, cache, existed, persist, lock));
         }
         let mut secret_mounted = Vec::new();
@@ -5644,6 +5730,15 @@ mod tests {
         assert_eq!(run.cache_mounts[0].id, "compiler");
         assert_eq!(run.cache_mounts[0].sharing, CacheSharing::Shared);
 
+        let metadata = parse_run(
+            "--mount=type=cache,target=/root/.cache,id=compiler,uid=1000,gid=1001,mode=0750 echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("cache metadata parses");
+        assert_eq!(metadata.cache_mounts[0].uid, Some(1000));
+        assert_eq!(metadata.cache_mounts[0].gid, Some(1001));
+        assert_eq!(metadata.cache_mounts[0].mode, Some(0o750));
+
         let private = parse_run(
             "--mount=type=cache,target=/root/.cache,id=compiler,sharing=private echo value",
             &["/bin/sh".into(), "-c".into()],
@@ -5664,6 +5759,8 @@ mod tests {
             "--mount=type=cache,target=/tmp,id=bad/slash echo value",
             "--mount=type=cache,target=/tmp,source=seed echo value",
             "--mount=type=cache,target=/tmp,readonly echo value",
+            "--mount=type=cache,target=/tmp,uid=bad echo value",
+            "--mount=type=cache,target=/tmp,mode=0999 echo value",
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }

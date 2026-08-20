@@ -52,6 +52,15 @@ docker_curl() {
   fi
 }
 
+# Native builds and first-run runtime initialization can take longer on older
+# guest kernels/filesystems. Keep readiness bounded while allowing callers to
+# choose a stricter or more patient qualification budget.
+daemon_ready_attempts="${FERROCRATE_E2E_DAEMON_READY_ATTEMPTS:-200}"
+if ! [[ "${daemon_ready_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "FERROCRATE_E2E_DAEMON_READY_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+
 # 1) Pull + run + logs + exec + stop + rm
 IMAGE_CANDIDATES=(
   "${FERROCRATE_E2E_IMAGE:-registry-1.docker.io/library/alpine:latest}"
@@ -136,7 +145,7 @@ run "${BIN}" compose -f "${COMPOSE_FILE}" down
 "${BIN}" daemon --docker-compat --socket "${SOCKET}" >"${DOCKER_COMPAT_LOG}" 2>&1 &
 DOCKER_COMPAT_PID=$!
 docker_compat_ready=0
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "${daemon_ready_attempts}"); do
   if [[ -S "${SOCKET}" ]] && curl --fail --silent --show-error \
       --max-time "${HTTP_TIMEOUT}" --unix-socket "${SOCKET}" \
       http://localhost/_ping >/dev/null 2>&1; then

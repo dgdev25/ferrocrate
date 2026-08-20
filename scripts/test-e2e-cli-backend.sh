@@ -10,6 +10,7 @@ grep -Fq 'network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"' "$script"
 grep -Fq '"${BIN}" run --network-backend "${network_backend}"' "$script"
 grep -Fq '"${BIN}" run --network-backend "${network_backend}" local/test:dev' "$script"
 grep -Fq 'docker_compat_ready=0' "$script"
+grep -Fq 'daemon_ready_attempts="${FERROCRATE_E2E_DAEMON_READY_ATTEMPTS:-200}"' "$script"
 grep -Fq 'http://localhost/_ping >/dev/null 2>&1' "$script"
 grep -Fq 'did not become ready at /_ping' "$script"
 

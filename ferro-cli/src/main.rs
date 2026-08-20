@@ -14898,6 +14898,7 @@ fn docker_inspect_payload(
         "Name": format!("/{name}"),
         "Image": record.image,
         "Config": {
+            "Image": record.image,
             "Env": record.env,
             "Cmd": record.command,
             "Tty": false,
@@ -15080,6 +15081,7 @@ fn docker_pending_inspect_payload(
         "Name": format!("/{}", spec.name.as_deref().unwrap_or(id)),
         "Image": spec.image,
         "Config": {
+            "Image": spec.image,
             "Env": spec.env,
             "Cmd": spec.cmd,
             "Tty": false,
@@ -19165,6 +19167,7 @@ volumes:
             created_at_unix: 0,
         };
         let payload = docker_pending_inspect_payload("pending", &pending, false);
+        assert_eq!(payload["Config"]["Image"], "busybox");
         assert_eq!(payload["Config"]["Tty"], false);
         assert_eq!(payload["Config"]["AttachStdout"], true);
         assert_eq!(payload["Config"]["AttachStderr"], true);

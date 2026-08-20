@@ -64,7 +64,8 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/perf/test-update-benchmark-register.sh \
   scripts/verify-indie-release-plan.sh \
   scripts/test-docker-cli-compat.sh \
-  scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh
+  scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh \
+  scripts/test-build-release-target-dir.sh scripts/test-fixtures/cargo
 bash scripts/verify-indie-release-plan.sh
 if command -v docker >/dev/null 2>&1; then
   # A release gate must never turn a present Docker installation into a stale
@@ -109,6 +110,7 @@ bash scripts/test-release-provenance.sh
 bash scripts/test-sign-binaries.sh
 bash scripts/build-release-artifacts.sh \
   --version "$version" --channel public --output-dir "$artifact_dir"
+bash scripts/test-build-release-target-dir.sh
 bash scripts/verify-release-channel-artifacts.sh \
   --channel public --version "$version" --artifact-dir "$artifact_dir"
 

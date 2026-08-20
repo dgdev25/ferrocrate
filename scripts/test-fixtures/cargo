@@ -5,3 +5,8 @@ target_dir="${CARGO_TARGET_DIR:-target}"
 mkdir -p "$target_dir/release"
 printf '#!/bin/sh\nexit 0\n' > "$target_dir/release/ferro-cli"
 chmod +x "$target_dir/release/ferro-cli"
+# The release packager embeds the security-monitor eBPF object produced by the
+# real ferro-net build script. Keep the hermetic Cargo fixture representative
+# of that contract without invoking a compiler or toolchain.
+mkdir -p "$target_dir/release/build/fixture/out"
+printf 'fixture-security-ebpf\n' > "$target_dir/release/build/fixture/out/ferro-security-ebpf"

@@ -64,6 +64,14 @@ if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1; then
     echo "rootless.bwrap_nested=pass"
   else
     probe_reason=$(printf '%s' "$bwrap_nested_probe" | tr '\n' ' ' | tr -s ' ' | cut -c1-240)
+    # Ubuntu's AppArmor userns policy can deny the mapping after the namespace
+    # is created, producing only the generic uid_map EPERM from unshare. Read
+    # the kernel policy knob when available so operators get a precise,
+    # actionable diagnosis without weakening the policy automatically.
+    if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] &&
+       [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]]; then
+      probe_reason="AppArmor restricts unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns=1); provide an approved profile or set the host policy to 0"
+    fi
     echo "rootless.bwrap_nested=missing"
     echo "rootless.bwrap_nested_reason=${probe_reason:-probe exited unsuccessfully}"
     echo "warning: bridge-mode rootless workloads may be unavailable because nested bubblewrap user namespaces are denied" >&2

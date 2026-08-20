@@ -2574,6 +2574,13 @@ struct RunSpec {
 struct CacheMount {
     target: String,
     id: String,
+    sharing: CacheSharing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheSharing {
+    Shared,
+    Private,
 }
 
 #[derive(Debug, Clone)]
@@ -2752,13 +2759,16 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         }
         match kind {
             Some("cache") => {
-                if let Some(sharing) = sharing {
-                    if !sharing.eq_ignore_ascii_case("shared") {
+                let sharing = match sharing {
+                    None => CacheSharing::Shared,
+                    Some(value) if value.eq_ignore_ascii_case("shared") => CacheSharing::Shared,
+                    Some(value) if value.eq_ignore_ascii_case("private") => CacheSharing::Private,
+                    Some(value) => {
                         return Err(DockerfileBuildError::Unsupported(format!(
-                            "RUN cache mount sharing={sharing} is not supported; only shared is available"
-                        )));
+                            "RUN cache mount sharing={value} is not supported; use shared or private"
+                        )))
                     }
-                }
+                };
                 if required.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
                         "RUN cache mount does not accept required".to_string(),
@@ -2770,7 +2780,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 let target = validate_cache_target(target)?;
                 let id = id.unwrap_or(target.trim_start_matches('/'));
                 let id = validate_cache_id(id)?;
-                cache_mounts.push(CacheMount { target, id });
+                cache_mounts.push(CacheMount { target, id, sharing });
             }
             Some("secret") => {
                 if sharing.is_some() {
@@ -3571,12 +3581,23 @@ fn run_stage_commands(
             if existed {
                 fs::rename(&target, &backup)?;
             }
-            let cache = cache_root.join(&mount.id);
+            let persist = mount.sharing == CacheSharing::Shared;
+            let cache = if persist {
+                cache_root.join(&mount.id)
+            } else {
+                cache_root.join("private").join(format!(
+                    "{}-{index}-{}",
+                    mount.id,
+                    std::process::id()
+                ))
+            };
             fs::create_dir_all(&cache)?;
-            fs::create_dir_all(&target)?;
             reject_cache_symlinks(&cache)?;
-            copy_path_recursive(&cache, &target)?;
-            mounted.push((target, backup, cache, existed));
+            fs::create_dir_all(&target)?;
+            if persist {
+                copy_path_recursive(&cache, &target)?;
+            }
+            mounted.push((target, backup, cache, existed, persist));
         }
         let mut secret_mounted = Vec::new();
         for (index, mount) in run.secret_mounts.iter().enumerate() {
@@ -3612,10 +3633,13 @@ fn run_stage_commands(
                         fs::rename(backup, target)?;
                     }
                 }
-                for (target, backup, _cache, existed) in mounted.iter().rev() {
+                for (target, backup, cache, existed, persist) in mounted.iter().rev() {
                     let _ = fs::remove_dir_all(target);
                     if *existed {
                         fs::rename(backup, target)?;
+                    }
+                    if !persist {
+                        let _ = fs::remove_dir_all(cache);
                     }
                 }
                 for (_source, target, backup, existed) in ssh_mounted.iter().rev() {
@@ -3677,17 +3701,22 @@ fn run_stage_commands(
                 fs::rename(backup, target)?;
             }
         }
-        for (target, backup, cache, existed) in mounted.into_iter().rev() {
+        for (target, backup, cache, existed, persist) in mounted.into_iter().rev() {
             if target.exists() {
-                if let Err(err) = reject_cache_symlinks(&target) {
-                    cleanup_error.get_or_insert(err);
-                } else if let Err(err) = copy_path_recursive(&target, &cache) {
-                    cleanup_error.get_or_insert(err);
+                if persist {
+                    if let Err(err) = reject_cache_symlinks(&target) {
+                        cleanup_error.get_or_insert(err);
+                    } else if let Err(err) = copy_path_recursive(&target, &cache) {
+                        cleanup_error.get_or_insert(err);
+                    }
                 }
                 let _ = fs::remove_dir_all(&target);
             }
             if existed {
                 fs::rename(backup, target)?;
+            }
+            if !persist {
+                let _ = fs::remove_dir_all(cache);
             }
         }
         for (_source, target, backup, existed) in ssh_mounted.into_iter().rev() {
@@ -4697,7 +4726,7 @@ mod tests {
         parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
         registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
-        validate_mount_target, BuildCacheEntry, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        validate_mount_target, BuildCacheEntry, CacheSharing, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
         REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
@@ -5481,6 +5510,14 @@ mod tests {
         assert_eq!(run.cache_mounts.len(), 1);
         assert_eq!(run.cache_mounts[0].target, "/root/.cache");
         assert_eq!(run.cache_mounts[0].id, "compiler");
+        assert_eq!(run.cache_mounts[0].sharing, CacheSharing::Shared);
+
+        let private = parse_run(
+            "--mount=type=cache,target=/root/.cache,id=compiler,sharing=private echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("private cache sharing parses");
+        assert_eq!(private.cache_mounts[0].sharing, CacheSharing::Private);
 
         for invalid in [
             "--mount=type=cache,target=relative echo value",
@@ -5498,7 +5535,7 @@ mod tests {
             &["/bin/sh".into(), "-c".into()],
         )
         .expect_err("locked cache sharing must not be silently ignored");
-        assert!(locked.to_string().contains("only shared is available"));
+        assert!(locked.to_string().contains("use shared or private"));
 
         let invalid = parse_run(
             "--mount=type=cache,target=/root/.cache,sharing= true",

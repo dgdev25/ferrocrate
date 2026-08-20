@@ -65,6 +65,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/verify-indie-release-plan.sh \
   scripts/test-docker-cli-compat.sh \
   scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh \
+  scripts/test-ebpf-networking.sh scripts/test-ebpf-networking-backend.sh \
   scripts/test-build-release-target-dir.sh scripts/test-fixtures/cargo
 bash scripts/verify-indie-release-plan.sh
 if command -v docker >/dev/null 2>&1; then
@@ -88,6 +89,7 @@ bash scripts/test-state-migrations.sh
 bash scripts/test-default-dependency-graph.sh
 bash scripts/test-rootless-cri-oci.sh
 bash scripts/test-e2e-cli-backend.sh
+bash scripts/test-ebpf-networking-backend.sh
 bash scripts/perf/test-check-docker-comparison.sh
 bash scripts/perf/test-check-benchmark-register.sh
 bash scripts/perf/test-update-benchmark-register.sh

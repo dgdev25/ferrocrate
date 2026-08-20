@@ -3403,7 +3403,12 @@ fn copy_from_context(
                 &dest
             };
             if spec.extract_archives
-                && extract_add_archive(&source, archive_dest, &spec.excludes)?
+                && extract_add_archive(
+                    &source,
+                    archive_dest,
+                    spec.chmod,
+                    &spec.excludes,
+                )?
             {
                 continue;
             }
@@ -3427,6 +3432,7 @@ fn copy_from_context(
 fn extract_add_archive(
     source: &Path,
     destination: &Path,
+    chmod: Option<u32>,
     excludes: &[String],
 ) -> Result<bool, DockerfileBuildError> {
     let mut probe = File::open(source)?;
@@ -3439,9 +3445,14 @@ fn extract_add_archive(
     }
     fs::create_dir_all(destination)?;
     if gzip {
-        extract_add_tar(GzDecoder::new(File::open(source)?), destination, excludes)?;
+        extract_add_tar(
+            GzDecoder::new(File::open(source)?),
+            destination,
+            chmod,
+            excludes,
+        )?;
     } else {
-        extract_add_tar(File::open(source)?, destination, excludes)?;
+        extract_add_tar(File::open(source)?, destination, chmod, excludes)?;
     }
     Ok(true)
 }
@@ -3449,6 +3460,7 @@ fn extract_add_archive(
 fn extract_add_tar<R: Read>(
     reader: R,
     destination: &Path,
+    chmod: Option<u32>,
     excludes: &[String],
 ) -> Result<(), DockerfileBuildError> {
     let mut archive = Archive::new(reader);
@@ -3471,11 +3483,17 @@ fn extract_add_tar<R: Read>(
         let entry_type = entry.header().entry_type();
         if entry_type.is_dir() {
             fs::create_dir_all(&target)?;
+            if let Some(mode) = chmod {
+                apply_copy_mode(&target, mode)?;
+            }
         } else if entry_type.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
             entry.unpack(&target)?;
+            if let Some(mode) = chmod {
+                apply_copy_mode(&target, mode)?;
+            }
         } else {
             return Err(DockerfileBuildError::Unsupported(format!(
                 "ADD archive entry type is unsupported: {}",
@@ -4343,8 +4361,9 @@ mod tests {
         encoder.write_all(&bytes).unwrap();
         fs::write(&gzip_path, encoder.finish().unwrap()).unwrap();
 
-        let stages = parse_stages("FROM scratch\nADD payload.tar /app\n").unwrap();
+        let stages = parse_stages("FROM scratch\nADD --chmod=600 payload.tar /app\n").unwrap();
         assert!(stages[0].copy_paths[0].extract_archives);
+        assert_eq!(stages[0].copy_paths[0].chmod, Some(0o600));
         let destination = temp.path().join("destination");
         super::copy_from_context(
             temp.path(),
@@ -4352,7 +4371,7 @@ mod tests {
             &[super::CopySpec {
                 srcs: vec!["payload.tar".into(), "payload.tar.gz".into()],
                 dest: "/app".into(),
-                chmod: None,
+                chmod: Some(0o600),
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
@@ -4362,6 +4381,15 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("app/nested/payload.txt")).unwrap(),
             "payload"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &fs::metadata(destination.join("app/nested/payload.txt"))
+                    .unwrap()
+                    .permissions()
+            ) & 0o777,
+            0o600
         );
 
         let escape_path = temp.path().join("escape.tar");

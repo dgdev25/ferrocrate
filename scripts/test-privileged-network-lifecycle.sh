@@ -270,6 +270,10 @@ grep -F "in use by extant container association" "$runtime_dir/rm-associated.log
   >/dev/null || fail "network rm refused association with an unexpected error"
 
 kill "$container_pid" 2>/dev/null || true
+deadline=$((SECONDS + 5))
+while kill -0 "$container_pid" 2>/dev/null && (( SECONDS < deadline )); do
+  sleep 0.01
+done
 ferro_net rm "$container_id" \
   || fail "public container removal failed after association refusal"
 

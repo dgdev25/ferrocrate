@@ -3913,6 +3913,7 @@ fn acquire_cache_lock(path: &Path) -> Result<File, DockerfileBuildError> {
     }
     let lock = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)?;

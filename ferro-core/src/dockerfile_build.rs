@@ -1960,7 +1960,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             "EXPOSE" => {
                 stage
                     .exposed_ports
-                    .extend(interpolated.split_whitespace().map(|val| val.to_string()));
+                    .extend(parse_exposed_ports(&interpolated)?);
             }
             "VOLUME" => {
                 stage.volumes.extend(parse_volume_paths(&interpolated)?);
@@ -3014,6 +3014,38 @@ fn parse_labels(raw: &str) -> Result<HashMap<String, String>, DockerfileBuildErr
         }
     }
     Ok(out)
+}
+
+fn parse_exposed_ports(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "EXPOSE requires at least one port".to_string(),
+        ));
+    }
+    tokens
+        .into_iter()
+        .map(|token| {
+            let (port, protocol) = token
+                .split_once('/')
+                .map_or((token, "tcp"), |(p, proto)| (p, proto));
+            let port = port.parse::<u16>().map_err(|_| {
+                DockerfileBuildError::Invalid(format!("EXPOSE port is invalid: {token}"))
+            })?;
+            if port == 0 {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "EXPOSE port is invalid: {token}"
+                )));
+            }
+            let protocol = protocol.to_ascii_lowercase();
+            if !matches!(protocol.as_str(), "tcp" | "udp" | "sctp") {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "EXPOSE protocol is invalid: {token}"
+                )));
+            }
+            Ok(format!("{port}/{protocol}"))
+        })
+        .collect()
 }
 
 fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, DockerfileBuildError> {
@@ -4409,12 +4441,12 @@ mod tests {
         build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
-        load_build_cache, load_stage_checkpoints, parse_env, parse_healthcheck, parse_labels,
-        parse_limit_value, parse_run, parse_stages, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
-        validate_mount_target, BuildCacheEntry, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
-        REGISTRY_CACHE_KIND_ANNOTATION,
+        load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
+        parse_healthcheck, parse_labels, parse_limit_value, parse_run, parse_stages,
+        prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
+        registry_cache_descriptor, registry_cache_reference, resolve_copy_owner, save_build_cache,
+        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
+        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -4518,6 +4550,20 @@ mod tests {
             );
         }
         assert!(parse_healthcheck("NONE").unwrap().is_none());
+    }
+
+    #[test]
+    fn expose_normalizes_supported_protocols_and_rejects_invalid_ports() {
+        assert_eq!(
+            parse_exposed_ports("80 443/TCP 5353/udp 989/sctp").unwrap(),
+            ["80/tcp", "443/tcp", "5353/udp", "989/sctp"]
+        );
+        for input in ["0", "65536", "abc", "80/http", ""] {
+            assert!(
+                parse_exposed_ports(input).is_err(),
+                "invalid EXPOSE: {input}"
+            );
+        }
     }
 
     #[test]

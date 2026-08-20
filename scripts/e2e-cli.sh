@@ -135,12 +135,18 @@ run "${BIN}" compose -f "${COMPOSE_FILE}" down
 # 4) Docker socket compatibility (basic)
 "${BIN}" daemon --docker-compat --socket "${SOCKET}" >"${DOCKER_COMPAT_LOG}" 2>&1 &
 DOCKER_COMPAT_PID=$!
+docker_compat_ready=0
 for _ in $(seq 1 50); do
-  [[ -S "${SOCKET}" ]] && break
+  if [[ -S "${SOCKET}" ]] && curl --fail --silent --show-error \
+      --max-time "${HTTP_TIMEOUT}" --unix-socket "${SOCKET}" \
+      http://localhost/_ping >/dev/null 2>&1; then
+    docker_compat_ready=1
+    break
+  fi
   sleep 0.1
 done
-if [[ ! -S "${SOCKET}" ]]; then
-  echo "Docker-compatible daemon did not create its socket; daemon log:" >&2
+if [[ "${docker_compat_ready}" != 1 ]]; then
+  echo "Docker-compatible daemon did not become ready at /_ping; daemon log:" >&2
   sed -n '1,160p' "${DOCKER_COMPAT_LOG}" >&2 || true
   exit 1
 fi

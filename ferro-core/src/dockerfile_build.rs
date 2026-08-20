@@ -2156,6 +2156,11 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
             }
             excludes.push((*pattern).to_string());
             index += 1;
+        } else if matches!(token, "--link" | "--link=true" | "--link=false") {
+            // Each COPY is materialized into the stage's new context layer
+            // before that layer is applied to the rootfs.  That already gives
+            // this builder COPY --link's observable layer-isolation behavior;
+            // cache/export metadata remains outside this single-layer model.
         } else if token.starts_with("--") {
             return Err(DockerfileBuildError::Unsupported(format!(
                 "COPY flag {token} is not supported"
@@ -3797,7 +3802,7 @@ mod tests {
     fn builds_minimal_dockerfile() {
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
-        fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").expect("write");
+        fs::write(&dockerfile, "FROM scratch\nCOPY --link . /\n").expect("write");
         fs::write(temp.path().join("hello.txt"), "hi").expect("write file");
 
         let runtime_dir = temp.path().join("runtime");
@@ -4298,6 +4303,13 @@ mod tests {
         let error = parse_stages("FROM scratch\nCOPY --chmod=999 app /app\n")
             .expect_err("invalid modes must be rejected");
         assert!(error.to_string().contains("invalid COPY --chmod mode"));
+    }
+
+    #[test]
+    fn copy_link_flag_is_accepted_for_layer_isolated_materialization() {
+        let stages = parse_stages("FROM scratch\nCOPY --link app /app\n").unwrap();
+        assert_eq!(stages[0].copy_paths[0].srcs, vec!["app"]);
+        assert_eq!(stages[0].copy_paths[0].dest, "/app");
     }
 
     #[test]

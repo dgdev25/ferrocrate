@@ -150,7 +150,7 @@ pub fn prepare_dockerfile_build_with_contexts(
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
     let context_digest = build_context_binding_digest(
-        &hash_context_dir(context_dir, dockerfile_path)?,
+        &hash_context_dir_excluding(context_dir, dockerfile_path, Some(runtime_dir))?,
         named_contexts,
     )?;
     let canonical_tag = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
@@ -4999,6 +4999,40 @@ mod tests {
         )
         .expect("second build");
         assert_eq!(first.layer_digest, second.layer_digest);
+    }
+
+    #[test]
+    fn prepared_plan_ignores_nested_runtime_scratch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").expect("write");
+        fs::write(temp.path().join("hello.txt"), "stable").expect("write file");
+        let runtime_dir = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime_dir.join("images")).expect("open store");
+
+        let first = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/prepared:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .expect("first plan");
+        fs::create_dir_all(runtime_dir.join("build/context-previous/src")).expect("scratch");
+        fs::write(
+            runtime_dir.join("build/context-previous/src/generated.txt"),
+            "must not bind",
+        )
+        .expect("scratch file");
+        let second = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/prepared:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .expect("second plan");
+        assert_eq!(first.plan_digest(), second.plan_digest());
     }
 
     #[test]

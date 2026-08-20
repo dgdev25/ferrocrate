@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use aya::maps::{Map, MapData, RingBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1021,6 +1022,50 @@ pub struct SecurityMonitorBuffer {
     dropped: u64,
 }
 
+/// Userspace handle for a pinned security-monitor eBPF ring buffer.
+///
+/// The map is opened by file descriptor through Aya; no shell command is
+/// involved. Callers can poll with drain_to, then persist decoded events using
+/// the existing receipt writer.
+pub struct SecurityMonitorRingBuffer {
+    ring: RingBuf<MapData>,
+}
+
+impl SecurityMonitorRingBuffer {
+    /// Open an already-pinned ring-buffer map.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ExecError> {
+        let path = path.as_ref();
+        if !path.is_absolute() {
+            return Err(ExecError::CommandFailed {
+                cmd: "open security monitor ring buffer".to_string(),
+                stderr: "ring-buffer pin path must be absolute".to_string(),
+            });
+        }
+        let map = MapData::from_pin(path).map_err(|error| ExecError::CommandFailed {
+            cmd: format!("open security monitor ring buffer {}", path.display()),
+            stderr: error.to_string(),
+        })?;
+        let ring = Map::from_map_data(map)
+            .and_then(RingBuf::try_from)
+            .map_err(|error| ExecError::CommandFailed {
+                cmd: format!("open security monitor ring buffer {}", path.display()),
+                stderr: error.to_string(),
+            })?;
+        Ok(Self { ring })
+    }
+
+    /// Drain all currently available records into the bounded event buffer.
+    pub fn drain_to(&mut self, buffer: &mut SecurityMonitorBuffer) -> Result<usize, ExecError> {
+        let mut drained = 0;
+        while let Some(record) = self.ring.next() {
+            let event = SecurityMonitorEvent::decode_kernel_record(&record)?;
+            buffer.push(event);
+            drained += 1;
+        }
+        Ok(drained)
+    }
+}
+
 impl SecurityMonitorBuffer {
     pub fn push(&mut self, event: SecurityMonitorEvent) {
         if self.events.len() == SECURITY_MONITOR_MAX_BUFFER_EVENTS {
@@ -1404,9 +1449,9 @@ mod lifecycle_tests {
         build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
         hex_bytes, normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
         SecurityMonitorBuffer, SecurityMonitorEvent, SecurityMonitorReceiptWriter,
-        EGRESS_CLASSIFIER, INGRESS_CLASSIFIER, SECURITY_MONITOR_EVENT_NAME_BYTES,
-        SECURITY_MONITOR_EVENT_PAYLOAD_BYTES, SECURITY_MONITOR_EVENT_WIRE_BYTES,
-        SECURITY_MONITOR_MAX_BUFFER_EVENTS,
+        SecurityMonitorRingBuffer, EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
+        SECURITY_MONITOR_EVENT_NAME_BYTES, SECURITY_MONITOR_EVENT_PAYLOAD_BYTES,
+        SECURITY_MONITOR_EVENT_WIRE_BYTES, SECURITY_MONITOR_MAX_BUFFER_EVENTS,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1518,6 +1563,15 @@ mod lifecycle_tests {
             .expect_err("control payload");
         assert!(error.to_string().contains("control"));
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn security_monitor_ring_buffer_rejects_relative_pin_paths_before_kernel_access() {
+        let error = match SecurityMonitorRingBuffer::open("security-monitor-events") {
+            Ok(_) => panic!("relative pin path must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("absolute"));
     }
 
     #[test]

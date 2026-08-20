@@ -43,7 +43,7 @@ pub use ebpf::{
     cleanup_security_monitor, embedded_object_abi, embedded_object_sha256,
     install_security_monitor, EbpfError, EbpfMetrics, EbpfNetwork, EbpfNetworkConfig,
     SecurityMonitorBuffer, SecurityMonitorConfig, SecurityMonitorEvent,
-    SecurityMonitorReceiptWriter, SECURITY_MONITOR_EVENT_NAME_BYTES,
+    SecurityMonitorReceiptWriter, SecurityMonitorRingBuffer, SECURITY_MONITOR_EVENT_NAME_BYTES,
     SECURITY_MONITOR_EVENT_PAYLOAD_BYTES, SECURITY_MONITOR_EVENT_WIRE_BYTES,
 };
 

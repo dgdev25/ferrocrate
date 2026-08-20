@@ -93,7 +93,10 @@ def update_register_metadata(
 
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
-        if not re.match(r"\| B-00(?:[1-9]|10) \|", line):
+        # The ten baseline IDs are B-001..B-010.  Keep the alternation
+        # explicit: `B-00(?:[1-9]|10)` accidentally matches B-0010 instead of
+        # the intended B-010 and left the tenth row's report links stale.
+        if not re.match(r"\| B-(?:00[1-9]|010) \|", line):
             continue
         lines[index] = re.sub(
             r"\]\([^)]*-docker-comparison-current-head-[^)]+-iptables\.md\)",

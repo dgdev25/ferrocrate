@@ -1730,10 +1730,10 @@ fn collect_context_files(
         let entry = entry?;
         let entry_path = entry.path();
         if excluded_root.is_some_and(|excluded| {
-            let resolved_entry = fs::canonicalize(&entry_path)
-                .unwrap_or_else(|_| entry_path.to_path_buf());
-            let resolved_excluded = fs::canonicalize(excluded)
-                .unwrap_or_else(|_| excluded.to_path_buf());
+            let resolved_entry =
+                fs::canonicalize(&entry_path).unwrap_or_else(|_| entry_path.to_path_buf());
+            let resolved_excluded =
+                fs::canonicalize(excluded).unwrap_or_else(|_| excluded.to_path_buf());
             resolved_entry == resolved_excluded || resolved_entry.starts_with(&resolved_excluded)
         }) {
             continue;
@@ -2763,11 +2763,9 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     None => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("shared") => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("private") => CacheSharing::Private,
-                    Some(value) => {
-                        return Err(DockerfileBuildError::Unsupported(format!(
-                            "RUN cache mount sharing={value} is not supported; use shared or private"
-                        )))
-                    }
+                    Some(value) => return Err(DockerfileBuildError::Unsupported(format!(
+                        "RUN cache mount sharing={value} is not supported; use shared or private"
+                    ))),
                 };
                 if required.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
@@ -2780,7 +2778,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 let target = validate_cache_target(target)?;
                 let id = id.unwrap_or(target.trim_start_matches('/'));
                 let id = validate_cache_id(id)?;
-                cache_mounts.push(CacheMount { target, id, sharing });
+                cache_mounts.push(CacheMount {
+                    target,
+                    id,
+                    sharing,
+                });
             }
             Some("secret") => {
                 if sharing.is_some() {
@@ -4235,9 +4237,8 @@ fn copy_context_dir(
         // context (common in tests and valid for local CLI workflows). Build
         // scratch now lives under that runtime directory, so do not recurse
         // back into the destination while copying the source context.
-        if canonical_dst.starts_with(
-            fs::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()),
-        ) {
+        if canonical_dst.starts_with(fs::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()))
+        {
             continue;
         }
         let relative = path.strip_prefix(root).unwrap_or(&path);
@@ -4655,9 +4656,9 @@ fn copy_path_recursive_mode_with_excludes(
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let path = entry.path();
-            if canonical_dst.starts_with(
-                fs::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()),
-            ) {
+            if canonical_dst
+                .starts_with(fs::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()))
+            {
                 continue;
             }
             let name = entry.file_name();
@@ -4719,15 +4720,15 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 mod tests {
     use super::{
         apply_onbuild_triggers, build_cache_path, build_from_dockerfile_with_store_and_compression,
-        build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
-        create_build_dir, export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
-        load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
+        build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
+        dockerignore_matches, export_build_cache, file_matches_digest, import_build_cache,
+        layer_blob_path, load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
         parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_onbuild,
         parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
         registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
-        validate_mount_target, BuildCacheEntry, CacheSharing, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
-        REGISTRY_CACHE_KIND_ANNOTATION,
+        validate_mount_target, BuildCacheEntry, CacheSharing, CopyOwner,
+        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 

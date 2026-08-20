@@ -18,7 +18,7 @@ use crate::ebpf_abi::{
 use crate::ebpf_loader::{
     sha256, validate_embedded_object, AyaKernel, KernelAdapter, KernelLoadPlan, KernelPreflight,
 };
-use crate::executor::{exec_cmd_capture, ExecError};
+use crate::executor::ExecError;
 
 pub const BPFFS_ROOT: &str = "/sys/fs/bpf";
 pub const FERRO_NETWORK_ROOT: &str = "/sys/fs/bpf/ferrocrate";
@@ -1430,16 +1430,6 @@ pub fn install_security_monitor(config: &SecurityMonitorConfig) -> Result<Vec<St
                 stderr: error.to_string(),
             })?;
         installed.push(normalized.clone());
-        if let Err(error) = exec_cmd_capture(&[
-            "bpftool".to_string(),
-            "prog".to_string(),
-            "show".to_string(),
-            "pinned".to_string(),
-            pin_path,
-        ]) {
-            cleanup_security_monitor_paths(&config.pin_root, &installed)?;
-            return Err(error);
-        }
     }
     Ok(installed)
 }

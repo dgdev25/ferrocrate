@@ -1015,7 +1015,8 @@ fn build_config_json(
             "Interval": spec.interval_nanos,
             "Timeout": spec.timeout_nanos,
             "Retries": spec.retries,
-            "StartPeriod": spec.start_period_nanos
+            "StartPeriod": spec.start_period_nanos,
+            "StartInterval": spec.start_interval_nanos
         })
     });
 
@@ -2509,6 +2510,7 @@ struct HealthcheckSpec {
     timeout_nanos: u64,
     retries: u32,
     start_period_nanos: u64,
+    start_interval_nanos: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2566,6 +2568,7 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
     let mut timeout = None;
     let mut retries = None;
     let mut start_period = None;
+    let mut start_interval = None;
 
     while let Some(tok) = tokens.peek().cloned() {
         if !tok.starts_with("--") {
@@ -2593,6 +2596,9 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
                 retries = Some(value);
             }
             "start-period" => start_period = Some(parse_healthcheck_duration("start-period", val)?),
+            "start-interval" => {
+                start_interval = Some(parse_healthcheck_duration("start-interval", val)?);
+            }
             _ => {
                 return Err(DockerfileBuildError::Invalid(format!(
                     "unsupported HEALTHCHECK flag: --{key}"
@@ -2631,6 +2637,7 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
         timeout_nanos: timeout.unwrap_or(5_000_000_000),
         retries: retries.unwrap_or(3),
         start_period_nanos: start_period.unwrap_or(0),
+        start_interval_nanos: start_interval.unwrap_or(5_000_000_000),
     }))
 }
 
@@ -4588,7 +4595,7 @@ mod tests {
     #[test]
     fn healthcheck_rejects_malformed_flags_and_empty_commands() {
         let health = parse_healthcheck(
-            "--interval=2s --timeout=500ms --retries=4 --start-period=1s CMD-SHELL curl -f http://localhost",
+            "--interval=2s --timeout=500ms --retries=4 --start-period=1s --start-interval=250ms CMD-SHELL curl -f http://localhost",
         )
         .expect("valid healthcheck parses")
         .expect("healthcheck is enabled");
@@ -4596,6 +4603,7 @@ mod tests {
         assert_eq!(health.timeout_nanos, 500_000_000);
         assert_eq!(health.retries, 4);
         assert_eq!(health.start_period_nanos, 1_000_000_000);
+        assert_eq!(health.start_interval_nanos, 250_000_000);
 
         for input in [
             "--interval=wat CMD-SHELL true",

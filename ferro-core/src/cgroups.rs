@@ -321,8 +321,25 @@ impl CgroupV2Manager {
 /// enable, limit write, and process attach operations have different remedies.
 fn write_cgroup_file(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let path = path.as_ref();
-    fs::write(path, contents)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
+    fs::write(path, contents).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format_cgroup_io_error(path, error, !nix::unistd::Uid::effective().is_root()),
+        )
+    })
+}
+
+fn format_cgroup_io_error(path: &Path, error: io::Error, rootless: bool) -> String {
+    if rootless
+        && error.kind() == io::ErrorKind::PermissionDenied
+        && path.starts_with("/sys/fs/cgroup")
+    {
+        return format!(
+            "{}: {error}; rootless cgroup operation was denied; launch under a delegated user systemd scope (for example `systemd-run --user --scope -p Delegate=yes`) or set FERROCRATE_CGROUP_ROOT to a caller-owned delegated hierarchy",
+            path.display()
+        );
+    }
+    format!("{}: {error}", path.display())
 }
 
 fn read_u64(path: PathBuf) -> Result<Option<u64>, CgroupError> {
@@ -400,13 +417,24 @@ fn read_cpu_stat(path: PathBuf) -> Result<CpuStat, CgroupError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
+    use super::{format_cgroup_io_error, CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
     use std::fs;
     use std::sync::{Mutex, OnceLock};
 
     fn ai_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn rootless_permission_errors_include_delegation_remediation() {
+        let message = format_cgroup_io_error(
+            std::path::Path::new("/sys/fs/cgroup/user.slice/session.scope/memory.max"),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
+            true,
+        );
+        assert!(message.contains("systemd-run --user --scope -p Delegate=yes"));
+        assert!(message.contains("FERROCRATE_CGROUP_ROOT"));
     }
 
     #[test]

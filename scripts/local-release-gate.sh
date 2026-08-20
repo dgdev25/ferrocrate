@@ -34,6 +34,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$repo_root"
+release_target="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$release_target" != /* ]]; then
+  release_target="$repo_root/$release_target"
+fi
 if (( ! skip_format )); then
   echo "[gate] cargo fmt --check"
   cargo fmt --all -- --check
@@ -68,6 +72,7 @@ if command -v docker >/dev/null 2>&1; then
   # source is newer, then runs in strict mode so failures remain visible.
   FERROCRATE_DOCKER_CLI_REQUIRED=1 \
     FERROCRATE_DOCKER_CLI_REBUILD_STALE=1 \
+    FERROCRATE_BIN="$release_target/release/ferro-cli" \
     bash scripts/test-docker-cli-compat.sh
 else
   bash scripts/test-docker-cli-compat.sh

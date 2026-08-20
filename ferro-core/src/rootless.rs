@@ -5,9 +5,6 @@ use crate::authorization::{
     Action, ResourceKind,
 };
 use crate::linux_namespaces::{create_namespaces, NamespaceError, NamespaceType};
-use nix::sched::{unshare, CloneFlags};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{fork, ForkResult};
 use nix::unistd::{Gid, Uid, User};
 use std::fs;
 use std::io;
@@ -45,41 +42,19 @@ pub struct RootlessConfig {
     pub gid_mapping: RootlessMapping,
 }
 
-/// Probe whether this process can create a user namespace without changing
-/// the caller's namespace.  The probe runs `unshare(CLONE_NEWUSER)` in a
-/// short-lived child and reports only the child's exit status.  Mapping files,
-/// subordinate-ID ranges, and helper binaries can all be present while the
-/// host/container policy still rejects user namespaces, so callers should use
-/// this alongside [`RootlessConfig::from_system`].
+/// Probe whether this process can create the mapped user namespace used by
+/// rootless launchers without changing the caller's namespace. Use the
+/// trusted `unshare --map-root-user` helper instead of manually writing map
+/// files: distributions may require `newuidmap`/`newgidmap` or other policy
+/// handling that the helper performs for us.
 pub fn user_namespace_available() -> bool {
-    match unsafe { fork() } {
-        Ok(ForkResult::Child) => {
-            let status = if unshare(CloneFlags::CLONE_NEWUSER).is_ok()
-                && fs::write("/proc/self/setgroups", b"deny\n").is_ok()
-                && fs::write(
-                    "/proc/self/uid_map",
-                    format!("0 {} 1\n", Uid::current().as_raw()),
-                )
-                .is_ok()
-                && fs::write(
-                    "/proc/self/gid_map",
-                    format!("0 {} 1\n", Gid::current().as_raw()),
-                )
-                .is_ok()
-            {
-                0
-            } else {
-                1
-            };
-            // The child must not run Rust destructors or touch the parent's
-            // process state after fork.
-            unsafe { nix::libc::_exit(status) }
-        }
-        Ok(ForkResult::Parent { child }) => {
-            matches!(waitpid(child, None), Ok(WaitStatus::Exited(_, 0)))
-        }
-        Err(_) => false,
-    }
+    let Some(unshare) = trusted_executable_path("unshare") else {
+        return false;
+    };
+    Command::new(unshare)
+        .args(["--user", "--map-root-user", "--fork", "--", "true"])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Probe the mapped user namespace that the rootless launcher requires and

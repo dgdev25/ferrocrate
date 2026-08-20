@@ -777,6 +777,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         final_stage.entrypoint.clone(),
         final_stage.cmd.clone(),
         final_stage.stop_signal.as_deref(),
+        final_stage.author.as_deref(),
         &final_stage.exposed_ports,
         &final_stage.volumes,
     );
@@ -1006,6 +1007,7 @@ fn build_config_json(
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     stop_signal: Option<&str>,
+    author: Option<&str>,
     exposed_ports: &[String],
     volumes: &[String],
 ) -> String {
@@ -1041,6 +1043,7 @@ fn build_config_json(
 
     json!({
         "created": "1970-01-01T00:00:00Z",
+        "author": author,
         "architecture": "amd64",
         "os": "linux",
         "config": {
@@ -1858,6 +1861,7 @@ struct StageSpec {
     workdir: Option<String>,
     user: Option<String>,
     stop_signal: Option<String>,
+    author: Option<String>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     shell: Vec<String>,
@@ -1901,6 +1905,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 workdir: None,
                 user: None,
                 stop_signal: None,
+                author: None,
                 entrypoint: None,
                 cmd: None,
                 shell: vec!["/bin/sh".to_string(), "-c".to_string()],
@@ -1991,7 +1996,10 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
             "STOPSIGNAL" => {
                 stage.stop_signal = Some(parse_stop_signal(&interpolated)?);
             }
-            "MAINTAINER" | "ONBUILD" => {
+            "MAINTAINER" => {
+                stage.author = Some(parse_maintainer(&interpolated)?);
+            }
+            "ONBUILD" => {
                 return Err(DockerfileBuildError::Unsupported(format!(
                     "instruction {keyword} is not supported"
                 )));
@@ -3113,6 +3121,16 @@ fn parse_stop_signal(raw: &str) -> Result<String, DockerfileBuildError> {
     Err(DockerfileBuildError::Invalid(format!(
         "STOPSIGNAL is invalid: {signal}"
     )))
+}
+
+fn parse_maintainer(raw: &str) -> Result<String, DockerfileBuildError> {
+    let maintainer = raw.trim();
+    if maintainer.is_empty() || maintainer.contains('\0') {
+        return Err(DockerfileBuildError::Invalid(
+            "MAINTAINER requires a non-empty value".to_string(),
+        ));
+    }
+    Ok(maintainer.to_string())
 }
 
 fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, DockerfileBuildError> {
@@ -4509,11 +4527,12 @@ mod tests {
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
-        parse_healthcheck, parse_labels, parse_limit_value, parse_run, parse_stages,
-        parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
-        prune_build_cache, registry_cache_descriptor, registry_cache_reference, resolve_copy_owner,
-        save_build_cache, stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
-        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
+        parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_run,
+        parse_stages, parse_stop_signal, prepare_dockerfile_build,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
+        registry_cache_reference, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
+        validate_mount_target, BuildCacheEntry, CopyOwner, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -4645,6 +4664,18 @@ mod tests {
                 "invalid STOPSIGNAL: {input}"
             );
         }
+    }
+
+    #[test]
+    fn maintainer_is_preserved_as_author_metadata_and_rejects_empty_values() {
+        let stages = parse_stages("FROM scratch\nMAINTAINER Ferro Team <team@example.test>\n")
+            .expect("MAINTAINER should parse");
+        assert_eq!(
+            stages[0].author.as_deref(),
+            Some("Ferro Team <team@example.test>")
+        );
+        assert!(parse_maintainer("").is_err());
+        assert!(parse_maintainer("bad\0author").is_err());
     }
 
     #[test]
@@ -5405,7 +5436,13 @@ mod tests {
                 .as_deref(),
             Some("SIGTERM")
         );
-        for directive in ["MAINTAINER legacy", "ONBUILD RUN echo hi"] {
+        assert_eq!(
+            parse_stages("FROM scratch\nMAINTAINER legacy\n").unwrap()[0]
+                .author
+                .as_deref(),
+            Some("legacy")
+        );
+        for directive in ["ONBUILD RUN echo hi"] {
             let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
                 .expect_err("unsupported directive must fail deterministically");
             assert!(error.to_string().contains("instruction"), "{error}");

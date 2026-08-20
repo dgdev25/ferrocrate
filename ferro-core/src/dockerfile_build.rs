@@ -255,6 +255,11 @@ struct BuildCacheEntry {
     dockerfile_digest: String,
     #[serde(default)]
     base_digests: Vec<String>,
+    /// Layer digests for every stage in Dockerfile execution order. Keeping
+    /// the complete stage graph in cache provenance prevents an imported
+    /// final-layer record from being mistaken for a complete build graph.
+    #[serde(default)]
+    stage_layer_digests: Vec<String>,
     layer_digest: String,
     layer_size: i64,
     layer_media_type: String,
@@ -772,6 +777,17 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         .checked_sub(1)
         .ok_or_else(|| DockerfileBuildError::Invalid("no stages built".to_string()))?;
     let final_stage = &stages[final_idx];
+    let stage_layer_digests = built
+        .iter()
+        .map(|output| {
+            output
+                .as_ref()
+                .map(|stage| stage.layer_digest.clone())
+                .ok_or_else(|| {
+                    DockerfileBuildError::Invalid("stage provenance missing".to_string())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let final_output = built[final_idx]
         .take()
         .ok_or_else(|| DockerfileBuildError::Invalid("final stage was not built".to_string()))?;
@@ -841,6 +857,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 context_digest: context_hash.clone(),
                 dockerfile_digest: dockerfile_digest.clone(),
                 base_digests: base_digests.clone(),
+                stage_layer_digests,
                 layer_digest: final_output.layer_digest.clone(),
                 layer_size: final_output.layer_size,
                 layer_media_type: final_output.layer_media_type,
@@ -1182,6 +1199,11 @@ fn validate_imported_cache_entry(
         || entry.cache_key != key
         || !valid_hex_digest(&entry.layer_digest)
         || !valid_hex_digest(&entry.config_digest)
+        || entry.stage_layer_digests.is_empty()
+        || entry
+            .stage_layer_digests
+            .iter()
+            .any(|digest| !valid_hex_digest(digest))
         || entry.layer_size < 0
         || entry.layer_media_type.is_empty()
         || serde_json::from_str::<serde_json::Value>(&entry.config_json).is_err()
@@ -5260,6 +5282,8 @@ mod tests {
         assert!(!entry.context_digest.is_empty());
         assert!(!entry.dockerfile_digest.is_empty());
         assert_eq!(entry.base_digests, vec!["scratch"]);
+        assert_eq!(entry.stage_layer_digests.len(), 1);
+        assert!(entry.stage_layer_digests[0].starts_with("sha256:"));
         assert!(!runtime_dir.join("images/build-cache.json.tmp").exists());
     }
 
@@ -5388,6 +5412,7 @@ mod tests {
                     context_digest: String::new(),
                     dockerfile_digest: String::new(),
                     base_digests: Vec::new(),
+                    stage_layer_digests: Vec::new(),
                     layer_digest: format!("sha256:{key}"),
                     layer_size: 1,
                     layer_media_type: "application/octet-stream".to_string(),
@@ -5418,6 +5443,7 @@ mod tests {
                     context_digest: String::new(),
                     dockerfile_digest: String::new(),
                     base_digests: Vec::new(),
+                    stage_layer_digests: Vec::new(),
                     layer_digest: format!("sha256:{key}"),
                     layer_size: 1,
                     layer_media_type: "application/octet-stream".to_string(),
@@ -5448,6 +5474,7 @@ mod tests {
                 context_digest: String::new(),
                 dockerfile_digest: String::new(),
                 base_digests: Vec::new(),
+                stage_layer_digests: vec![format!("sha256:{}", "3".repeat(64))],
                 layer_digest: format!("sha256:{}", "1".repeat(64)),
                 layer_size: 1,
                 layer_media_type: "application/octet-stream".to_string(),
@@ -5532,6 +5559,35 @@ mod tests {
         });
         fs::write(&source, serde_json::to_vec(&payload).unwrap()).unwrap();
         let error = import_build_cache(runtime.path(), &source).expect_err("invalid cache");
+        assert!(error.to_string().contains("provenance validation"));
+        assert!(!build_cache_path(runtime.path()).exists());
+    }
+
+    #[test]
+    fn import_build_cache_rejects_malformed_stage_provenance() {
+        let runtime = tempfile::tempdir().unwrap();
+        let source = runtime.path().join("invalid-stage-cache.json");
+        let key = "a".repeat(64);
+        let digest = format!("sha256:{}", "0".repeat(64));
+        let payload = serde_json::json!({
+            key.clone(): {
+                "cache_key": key,
+                "created_at_unix": 1,
+                "context_digest": "context",
+                "dockerfile_digest": "dockerfile",
+                "base_digests": ["scratch"],
+                "stage_layer_digests": ["not-a-digest"],
+                "layer_digest": digest,
+                "layer_size": 1,
+                "layer_media_type": "application/octet-stream",
+                "config_digest": format!("sha256:{}", "1".repeat(64)),
+                "config_json": "{}",
+                "manifest_json": "{}"
+            }
+        });
+        fs::write(&source, serde_json::to_vec(&payload).unwrap()).unwrap();
+        let error = import_build_cache(runtime.path(), &source)
+            .expect_err("malformed stage provenance must fail closed");
         assert!(error.to_string().contains("provenance validation"));
         assert!(!build_cache_path(runtime.path()).exists());
     }

@@ -5637,6 +5637,10 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/volumes/{}", percent_encode_path_component(name)),
         )
         .map(|_| ()),
+        Commands::BuildCachePrune { .. } => Err(
+            "remote build-cache prune: Docker transport has no cache-only prune endpoint; run it on the selected Ferrocrate host"
+                .to_string(),
+        ),
         _ => {
             Err("selected remote context has no transport mapping for this command yet".to_string())
         }
@@ -20362,6 +20366,18 @@ volumes:
             .expect("remote context should claim run")
             .expect_err("invalid volumes must be rejected");
         assert!(result.contains("volume must be"), "error={result}");
+
+        let cache_prune =
+            Cli::try_parse_from(["ferrocrate", "build-cache-prune", "--max-entries", "2"])
+                .expect("parse remote cache prune")
+                .command;
+        let result = dispatch_remote_context(&cache_prune)
+            .expect("remote context should claim cache prune")
+            .expect_err("cache prune must be explicit unsupported remotely");
+        assert!(
+            result.contains("cache-only prune endpoint"),
+            "error={result}"
+        );
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },

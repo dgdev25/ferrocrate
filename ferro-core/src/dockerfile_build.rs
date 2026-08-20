@@ -238,6 +238,7 @@ struct BaseImageInfo {
     layers: Vec<PathBuf>,
     descriptors: Vec<Descriptor>,
     digest: Option<String>,
+    onbuild: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -568,6 +569,10 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     for stage in stages.iter() {
         let base_info = resolve_base_image(store, runtime_dir, &stage.base, authority)?;
         base_infos.push(base_info);
+    }
+    let mut stages = stages;
+    for (stage, base_info) in stages.iter_mut().zip(&base_infos) {
+        apply_onbuild_triggers(stage, &base_info.onbuild)?;
     }
     let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
     let base_digests = base_infos
@@ -3964,6 +3969,7 @@ fn resolve_base_image(
             layers: Vec::new(),
             descriptors: Vec::new(),
             digest: None,
+            onbuild: Vec::new(),
         });
     }
 
@@ -3981,11 +3987,86 @@ fn resolve_base_image(
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
     let layers = resolve_layer_paths_with_store(runtime_dir, base, store)
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
+    let onbuild = load_base_onbuild_triggers(runtime_dir, &manifest.config.digest)?;
     Ok(BaseImageInfo {
         layers,
         descriptors: manifest.layers,
         digest: Some(record.digest),
+        onbuild,
     })
+}
+
+fn load_base_onbuild_triggers(
+    runtime_dir: &Path,
+    config_digest: &str,
+) -> Result<Vec<String>, DockerfileBuildError> {
+    let path = config_path(runtime_dir, config_digest);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path)?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| DockerfileBuildError::Invalid(format!("base config JSON: {err}")))?;
+    let Some(values) = config
+        .get("config")
+        .and_then(|value| value.get("OnBuild"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    values
+        .iter()
+        .map(|value| {
+            let trigger = value.as_str().ok_or_else(|| {
+                DockerfileBuildError::Invalid("base OnBuild entry must be a string".to_string())
+            })?;
+            parse_onbuild(trigger)
+        })
+        .collect()
+}
+
+fn apply_onbuild_triggers(
+    stage: &mut StageSpec,
+    triggers: &[String],
+) -> Result<(), DockerfileBuildError> {
+    for trigger in triggers {
+        let parsed = parse_stages(&format!("FROM scratch\n{trigger}\n"))?;
+        let instruction = parsed
+            .first()
+            .ok_or_else(|| DockerfileBuildError::Invalid("empty ONBUILD trigger".to_string()))?;
+        stage.copy_from.extend(instruction.copy_from.clone());
+        stage.copy_paths.extend(instruction.copy_paths.clone());
+        stage.env.extend(instruction.env.clone());
+        stage.args.extend(instruction.args.clone());
+        stage.labels.extend(instruction.labels.clone());
+        if instruction.workdir.is_some() {
+            stage.workdir = instruction.workdir.clone();
+        }
+        if instruction.user.is_some() {
+            stage.user = instruction.user.clone();
+        }
+        if instruction.author.is_some() {
+            stage.author = instruction.author.clone();
+        }
+        if instruction.stop_signal.is_some() {
+            stage.stop_signal = instruction.stop_signal.clone();
+        }
+        stage
+            .exposed_ports
+            .extend(instruction.exposed_ports.clone());
+        stage.volumes.extend(instruction.volumes.clone());
+        if instruction.entrypoint.is_some() {
+            stage.entrypoint = instruction.entrypoint.clone();
+        }
+        if instruction.cmd.is_some() {
+            stage.cmd = instruction.cmd.clone();
+        }
+        if instruction.healthcheck.is_some() {
+            stage.healthcheck = instruction.healthcheck.clone();
+        }
+        stage.run.extend(instruction.run.clone());
+    }
+    Ok(())
 }
 
 fn resolve_stage_root(
@@ -4553,7 +4634,7 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cache_path, build_from_dockerfile_with_store_and_compression,
+        apply_onbuild_triggers, build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
@@ -4719,6 +4800,20 @@ mod tests {
                 "invalid ONBUILD: {trigger}"
             );
         }
+    }
+
+    #[test]
+    fn onbuild_application_merges_triggered_instructions_into_derived_stage() {
+        let mut stage = parse_stages("FROM base\nRUN echo child\n")
+            .expect("derived stage should parse")
+            .remove(0);
+        apply_onbuild_triggers(
+            &mut stage,
+            &["ENV FROM_BASE=1".to_string(), "RUN make".to_string()],
+        )
+        .expect("triggers should apply");
+        assert!(stage.env.iter().any(|entry| entry == "FROM_BASE=1"));
+        assert_eq!(stage.run.len(), 2);
     }
 
     #[test]

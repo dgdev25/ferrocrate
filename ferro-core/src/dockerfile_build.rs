@@ -1625,15 +1625,22 @@ fn build_cache_key(
     base_infos: &[BaseImageInfo],
 ) -> String {
     let mut buf = Vec::new();
-    buf.extend_from_slice(dockerfile.as_bytes());
-    buf.extend_from_slice(context_hash.as_bytes());
-    buf.extend_from_slice(format!("{compression:?}").as_bytes());
+    buf.extend_from_slice(b"ferrocrate/build-cache/v2\0");
+    append_cache_key_field(&mut buf, dockerfile.as_bytes());
+    append_cache_key_field(&mut buf, context_hash.as_bytes());
+    append_cache_key_field(&mut buf, format!("{compression:?}").as_bytes());
     for info in base_infos {
-        if let Some(digest) = &info.digest {
-            buf.extend_from_slice(digest.as_bytes());
-        }
+        append_cache_key_field(
+            &mut buf,
+            info.digest.as_deref().unwrap_or("scratch").as_bytes(),
+        );
     }
     hex::encode(rvf_crypto::shake256_256(&buf))
+}
+
+fn append_cache_key_field(buffer: &mut Vec<u8>, value: &[u8]) {
+    buffer.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(value);
 }
 
 fn hash_context_dir(
@@ -4783,15 +4790,16 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_onbuild_triggers, build_cache_path, build_from_dockerfile_with_store_and_compression,
-        build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
-        dockerignore_matches, export_build_cache, file_matches_digest, import_build_cache,
-        layer_blob_path, load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
-        parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer, parse_onbuild,
-        parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner, save_build_cache,
-        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CacheSharing, CopyOwner,
+        apply_onbuild_triggers, build_cache_key, build_cache_path,
+        build_from_dockerfile_with_store_and_compression, build_stage_dependency_graph,
+        build_stage_execution_batches, create_build_dir, dockerignore_matches, export_build_cache,
+        file_matches_digest, import_build_cache, layer_blob_path, load_build_cache,
+        load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
+        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
+        parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
+        prune_build_cache, registry_cache_descriptor, registry_cache_reference,
+        reject_cache_path_symlinks, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
+        validate_mount_target, BaseImageInfo, BuildCacheEntry, CacheSharing, CopyOwner,
         OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
@@ -5157,6 +5165,42 @@ mod tests {
         assert!(!entry.dockerfile_digest.is_empty());
         assert_eq!(entry.base_digests, vec!["scratch"]);
         assert!(!runtime_dir.join("images/build-cache.json.tmp").exists());
+    }
+
+    #[test]
+    fn build_cache_key_binds_fields_and_scratch_identity() {
+        let scratch = BaseImageInfo {
+            layers: Vec::new(),
+            descriptors: Vec::new(),
+            digest: None,
+            onbuild: Vec::new(),
+        };
+        let keyed = BaseImageInfo {
+            digest: Some("sha256:base".to_string()),
+            ..scratch.clone()
+        };
+        let scratch_key = build_cache_key(
+            "FROM scratch\n",
+            CompressionFormat::Gzip,
+            "context",
+            &[scratch],
+        );
+        let keyed_key = build_cache_key(
+            "FROM scratch\n",
+            CompressionFormat::Gzip,
+            "context",
+            &[keyed],
+        );
+        assert_ne!(scratch_key, keyed_key);
+        assert_ne!(
+            scratch_key,
+            build_cache_key(
+                "FROM scratch\nRUN true\n",
+                CompressionFormat::Gzip,
+                "context",
+                &[]
+            )
+        );
     }
 
     #[test]

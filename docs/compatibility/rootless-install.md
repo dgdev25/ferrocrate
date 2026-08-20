@@ -24,3 +24,12 @@ required namespaces. Set `FERROCRATE_ROOTLESS_NETNS=0` for an explicitly
 network-isolated deployment. The `--rootless-network` installer option remains
 available for compatibility and persists `FERROCRATE_ROOTLESS_NETNS=1` in the
 generated user service; upgrades preserve an existing explicit setting.
+
+## Optional IPv6 egress
+
+Set `FERROCRATE_ROOTLESS_IPV6=1` to request slirp4netns IPv6 support. If the
+host has a routed IPv6 address that should be used for outbound traffic, also
+set `FERROCRATE_ROOTLESS_OUTBOUND_IPV6` to that address. Ferrocrate validates
+the value and passes it as slirp4netns `--outbound-addr6`; it does not allocate
+or route an address on the host. A host with only link-local IPv6 will therefore
+remain unable to provide global IPv6 egress or published IPv6 traffic.

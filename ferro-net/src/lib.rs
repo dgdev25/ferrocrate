@@ -45,6 +45,7 @@ pub use ebpf::{
     SecurityMonitorBuffer, SecurityMonitorConfig, SecurityMonitorEvent,
     SecurityMonitorReceiptWriter, SecurityMonitorRingBuffer, SECURITY_MONITOR_EVENT_NAME_BYTES,
     SECURITY_MONITOR_EVENT_PAYLOAD_BYTES, SECURITY_MONITOR_EVENT_WIRE_BYTES,
+    SECURITY_MONITOR_RING_MAP_NAME,
 };
 
 // Re-export veth execution functions

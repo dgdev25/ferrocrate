@@ -889,6 +889,9 @@ pub struct SecurityMonitorConfig {
     pub events: Vec<String>,
 }
 
+/// Stable map name exported by the packaged security-monitor object.
+pub const SECURITY_MONITOR_RING_MAP_NAME: &str = "FERRO_SECURITY_EVENTS";
+
 /// Maximum number of decoded security-monitor events retained in memory.
 /// Kernel delivery must never be able to grow a daemon process without bound.
 pub const SECURITY_MONITOR_MAX_BUFFER_EVENTS: usize = 1024;
@@ -1277,6 +1280,35 @@ pub fn build_bpftool_load_cmd(program: &EbpfProgram, pin_path: &str) -> Vec<Stri
     ]
 }
 
+/// Build the typed `bpftool prog load` command for a security monitor program
+/// and explicitly pin its ring-buffer map.  Explicit map pinning is required
+/// because the userspace Aya consumer opens the map by path; relying on
+/// bpftool's implicit map lifetime would leave no durable hand-off between
+/// the loader and consumer.
+pub fn build_bpftool_load_with_map_cmd(
+    program: &EbpfProgram,
+    pin_path: &str,
+    map_name: &str,
+    map_pin_path: &str,
+) -> Vec<String> {
+    let mut command = build_bpftool_load_cmd(program, pin_path);
+    command.extend([
+        "map".to_string(),
+        "name".to_string(),
+        map_name.to_string(),
+        "pinned".to_string(),
+        map_pin_path.to_string(),
+    ]);
+    command
+}
+
+/// Return the per-event ring-buffer map pin path used by the security
+/// monitor.  Each loaded tracepoint program owns one map instance, so event
+/// names are part of the path and cannot collide during multi-event setup.
+pub fn security_monitor_ring_map_path(pin_root: &str, event: &str) -> String {
+    format!("{pin_root}/{event}-events")
+}
+
 pub fn build_tc_attach_cmd(iface: &str, pin_path: &str, direction: &str) -> Vec<String> {
     vec![
         "tc".into(),
@@ -1322,12 +1354,18 @@ pub fn install_security_monitor(config: &SecurityMonitorConfig) -> Result<Vec<St
     let mut installed = Vec::new();
     for normalized in events {
         let pin_path = format!("{}/{}", config.pin_root, normalized);
+        let map_pin_path = security_monitor_ring_map_path(&config.pin_root, &normalized);
         let program = EbpfProgram {
             name: format!("ferro_security_{normalized}"),
             object_path: config.object_path.clone(),
             section: "tracepoint".to_string(),
         };
-        if let Err(error) = exec_cmd(&build_bpftool_load_cmd(&program, &pin_path)) {
+        if let Err(error) = exec_cmd(&build_bpftool_load_with_map_cmd(
+            &program,
+            &pin_path,
+            SECURITY_MONITOR_RING_MAP_NAME,
+            &map_pin_path,
+        )) {
             cleanup_security_monitor_paths(&config.pin_root, &installed)?;
             return Err(error);
         }
@@ -1380,12 +1418,14 @@ fn cleanup_security_monitor_paths(pin_root: &str, events: &[String]) -> Result<(
         ]) {
             first_error.get_or_insert(error);
         }
-        if let Err(error) = std::fs::remove_file(&pin_path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                first_error.get_or_insert(ExecError::Io {
-                    cmd: format!("remove pinned security monitor {pin_path}"),
-                    source: error,
-                });
+        for path in [pin_path, security_monitor_ring_map_path(pin_root, event)] {
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    first_error.get_or_insert(ExecError::Io {
+                        cmd: format!("remove pinned security monitor {path}"),
+                        source: error,
+                    });
+                }
             }
         }
     }
@@ -1446,12 +1486,14 @@ mod lifecycle_tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        build_pinned_map_delete_command, build_pinned_map_update_command, embedded_object_sha256,
-        hex_bytes, normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
+        build_bpftool_load_with_map_cmd, build_pinned_map_delete_command,
+        build_pinned_map_update_command, embedded_object_sha256, hex_bytes,
+        normalize_security_events, EbpfError, EbpfNetwork, EbpfNetworkConfig,
         SecurityMonitorBuffer, SecurityMonitorEvent, SecurityMonitorReceiptWriter,
         SecurityMonitorRingBuffer, EGRESS_CLASSIFIER, INGRESS_CLASSIFIER,
         SECURITY_MONITOR_EVENT_NAME_BYTES, SECURITY_MONITOR_EVENT_PAYLOAD_BYTES,
         SECURITY_MONITOR_EVENT_WIRE_BYTES, SECURITY_MONITOR_MAX_BUFFER_EVENTS,
+        SECURITY_MONITOR_RING_MAP_NAME,
     };
     use crate::ebpf_abi::{
         EndpointKey, EndpointValue, MetaConfig, PolicyKey, PolicyValue, PortKey, PortValue,
@@ -1572,6 +1614,42 @@ mod lifecycle_tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("absolute"));
+    }
+
+    #[test]
+    fn security_monitor_load_pins_ring_map_with_stable_per_event_path() {
+        let program = super::EbpfProgram {
+            name: "ferro_security_open".to_string(),
+            object_path: "/usr/lib/ferrocrate/ferro-security.o".to_string(),
+            section: "tracepoint".to_string(),
+        };
+        let command = build_bpftool_load_with_map_cmd(
+            &program,
+            "/sys/fs/bpf/ferrocrate-security/open",
+            SECURITY_MONITOR_RING_MAP_NAME,
+            "/sys/fs/bpf/ferrocrate-security/open-events",
+        );
+        assert_eq!(
+            command,
+            vec![
+                "bpftool",
+                "prog",
+                "load",
+                "/usr/lib/ferrocrate/ferro-security.o",
+                "/sys/fs/bpf/ferrocrate-security/open",
+                "type",
+                "tracepoint",
+                "map",
+                "name",
+                "FERRO_SECURITY_EVENTS",
+                "pinned",
+                "/sys/fs/bpf/ferrocrate-security/open-events",
+            ]
+        );
+        assert_eq!(
+            super::security_monitor_ring_map_path("/sys/fs/bpf/ferrocrate-security", "open"),
+            "/sys/fs/bpf/ferrocrate-security/open-events"
+        );
     }
 
     #[test]

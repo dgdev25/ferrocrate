@@ -2906,7 +2906,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     "Images": images.iter().map(|image| serde_json::json!({"Id": image.digest, "RepoTags": [image.reference], "Created": image.created_at_unix, "Size": docker_manifest_layer_size(&image.manifest_json), "SharedSize": 0, "Containers": containers.iter().filter(|container| container.image == image.reference).count()})).collect::<Vec<_>>(),
                     "Containers": containers.iter().map(|container| serde_json::json!({"Id": container.id, "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(), "Image": container.image, "ImageID": "", "SizeRw": 0, "SizeRootFs": 0})).collect::<Vec<_>>(),
                     "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0}})).collect::<Vec<_>>(),
-                    "BuildCache": [],
+                    "BuildCache": docker_build_cache_entries(&runtime_dir),
                 });
                 if format == "json" {
                     println!(
@@ -6337,6 +6337,52 @@ fn handle_build_cache_prune(
         println!("build-cache prune: removed={removed} retained_max={max_entries}");
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_build_cache_entries(runtime_dir: &Path) -> Vec<serde_json::Value> {
+    let path = runtime_dir.join("images").join("build-cache.json");
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(entries) = serde_json::from_slice::<HashMap<String, serde_json::Value>>(&bytes) else {
+        return Vec::new();
+    };
+    let mut projected = entries
+        .into_iter()
+        .map(|(key, entry)| {
+            let created_at = entry
+                .get("created_at_unix")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            let size = entry
+                .get("layer_size")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default()
+                .max(0);
+            let context = entry
+                .get("context_digest")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let dockerfile = entry
+                .get("dockerfile_digest")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            serde_json::json!({
+                "ID": key,
+                "CreatedAt": created_at,
+                "Size": size,
+                "Description": format!("context={context} dockerfile={dockerfile}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    projected.sort_by(|left, right| {
+        right["CreatedAt"]
+            .as_u64()
+            .cmp(&left["CreatedAt"].as_u64())
+            .then_with(|| left["ID"].as_str().cmp(&right["ID"].as_str()))
+    });
+    projected
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11787,7 +11833,7 @@ fn handle_docker_compat_connection(
                         "Mountpoint": volume.path,
                         "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0},
                     })).collect::<Vec<_>>(),
-                    "BuildCache": [],
+                    "BuildCache": docker_build_cache_entries(&runtime_dir),
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -15735,11 +15781,12 @@ mod tests {
         append_export_rootfs, bind_run_network, build_error_is_retryable, build_health_config,
         build_limits, context_endpoint_available, context_endpoint_is_local,
         decode_docker_raw_stream, desktop_forward_enabled, discover_rootless_socket, dispatch,
-        dispatch_remote_context, docker_chunked_headers, docker_container_apply_time_bounds,
-        docker_container_matches_filters, docker_container_prune_matches_filters,
-        docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
-        docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
-        docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
+        dispatch_remote_context, docker_build_cache_entries, docker_chunked_headers,
+        docker_container_apply_time_bounds, docker_container_matches_filters,
+        docker_container_prune_matches_filters, docker_directory_usage, docker_event_kind,
+        docker_event_payload, docker_event_resource, docker_event_response_attributes,
+        docker_hijack_headers, docker_image_apply_time_bounds, docker_image_is_dangling,
+        docker_image_matches_filters, docker_image_prune_matches_filters,
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
         docker_pending_inspect_payload, docker_pending_matches_filters,
@@ -18608,6 +18655,41 @@ volumes:
         #[cfg(unix)]
         std::os::unix::fs::symlink("payload", temp.path().join("link")).expect("symlink");
         assert_eq!(docker_directory_usage(temp.path()), 5);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_system_df_projects_build_cache_provenance_in_newest_order() {
+        let temp = tempfile::tempdir().expect("runtime");
+        std::fs::create_dir_all(temp.path().join("images")).expect("images");
+        let entries = serde_json::json!({
+            "older": {
+                "created_at_unix": 10,
+                "layer_size": 4,
+                "context_digest": "ctx-old",
+                "dockerfile_digest": "df-old"
+            },
+            "newer": {
+                "created_at_unix": 20,
+                "layer_size": 8,
+                "context_digest": "ctx-new",
+                "dockerfile_digest": "df-new"
+            }
+        });
+        std::fs::write(
+            temp.path().join("images/build-cache.json"),
+            serde_json::to_vec(&entries).expect("cache json"),
+        )
+        .expect("cache");
+        let projected = docker_build_cache_entries(temp.path());
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0]["ID"], "newer");
+        assert_eq!(projected[0]["Size"], 8);
+        assert_eq!(projected[0]["CreatedAt"], 20);
+        assert_eq!(
+            projected[0]["Description"],
+            "context=ctx-new dockerfile=df-new"
+        );
     }
 
     #[test]

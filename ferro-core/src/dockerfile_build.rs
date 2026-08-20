@@ -471,7 +471,14 @@ fn build_one_stage(
             ignore_patterns,
         )?;
     } else {
-        copy_from_context(context_dir, &context_root, &stage.copy_paths)?;
+        let mut copy_paths = stage.copy_paths.clone();
+        for spec in &mut copy_paths {
+            if let Some(owner) = spec.owner.as_ref() {
+                let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
+                spec.owner = Some(CopyOwner::Numeric(uid, gid));
+            }
+        }
+        copy_from_context(context_dir, &context_root, &copy_paths)?;
     }
     for copy in &stage.copy_from {
         let source_root = resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
@@ -1815,10 +1822,16 @@ struct CopySpec {
     srcs: Vec<String>,
     dest: String,
     chmod: Option<u32>,
-    owner: Option<(u32, u32)>,
+    owner: Option<CopyOwner>,
     parents: bool,
     excludes: Vec<String>,
     extract_archives: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CopyOwner {
+    Numeric(u32, u32),
+    Named { user: String, group: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -2206,36 +2219,41 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
     }))
 }
 
-fn parse_copy_owner(raw: &str) -> Result<(u32, u32), DockerfileBuildError> {
+fn parse_copy_owner(raw: &str) -> Result<CopyOwner, DockerfileBuildError> {
     let mut parts = raw.split(':');
-    let uid = parts
-        .next()
-        .unwrap_or_default()
-        .parse::<u32>()
-        .map_err(|_| {
-            DockerfileBuildError::Unsupported(
-                "COPY --chown currently requires numeric uid[:gid] values".to_string(),
-            )
-        })?;
-    let gid = match parts.next() {
-        Some(value) if !value.is_empty() => value.parse::<u32>().map_err(|_| {
-            DockerfileBuildError::Unsupported(
-                "COPY --chown currently requires numeric uid[:gid] values".to_string(),
-            )
-        })?,
+    let user = parts.next().unwrap_or_default().trim();
+    if user.is_empty() {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY --chown user must not be empty".to_string(),
+        ));
+    }
+    let group = match parts.next() {
+        Some(value) if !value.is_empty() => Some(value.trim().to_string()),
         Some(_) => {
             return Err(DockerfileBuildError::Invalid(
                 "COPY --chown gid must not be empty".to_string(),
             ))
         }
-        None => uid,
+        None => None,
     };
     if parts.next().is_some() {
         return Err(DockerfileBuildError::Invalid(
             "COPY --chown accepts only uid[:gid]".to_string(),
         ));
     }
-    Ok((uid, gid))
+    if let Ok(uid) = user.parse::<u32>() {
+        if let Some(group) = group.as_deref() {
+            if let Ok(gid) = group.parse::<u32>() {
+                return Ok(CopyOwner::Numeric(uid, gid));
+            }
+        } else {
+            return Ok(CopyOwner::Numeric(uid, uid));
+        }
+    }
+    Ok(CopyOwner::Named {
+        user: user.to_string(),
+        group,
+    })
 }
 
 fn parse_copy_mode(raw: &str) -> Result<u32, DockerfileBuildError> {
@@ -3693,7 +3711,7 @@ fn copy_from_context(
             if spec.extract_archives
                 && extract_add_archive(&source, archive_dest, spec.chmod, &spec.excludes)?
             {
-                if let Some(owner) = spec.owner {
+                if let Some(owner) = spec.owner.as_ref() {
                     apply_copy_owner_recursive(archive_dest, owner)?;
                 }
                 continue;
@@ -3705,7 +3723,7 @@ fn copy_from_context(
                 &spec.excludes,
                 Path::new(""),
             )?;
-            if let Some(owner) = spec.owner {
+            if let Some(owner) = spec.owner.as_ref() {
                 apply_copy_owner_recursive(&dest, owner)?;
             }
         }
@@ -3713,10 +3731,77 @@ fn copy_from_context(
     Ok(())
 }
 
-fn apply_copy_owner_recursive(path: &Path, owner: (u32, u32)) -> Result<(), DockerfileBuildError> {
+fn resolve_copy_owner(
+    rootfs: &Path,
+    owner: &CopyOwner,
+) -> Result<(u32, u32), DockerfileBuildError> {
+    let CopyOwner::Named { user, group } = owner else {
+        let CopyOwner::Numeric(uid, gid) = owner else {
+            unreachable!();
+        };
+        return Ok((*uid, *gid));
+    };
+    let passwd = fs::read_to_string(rootfs.join("etc/passwd")).map_err(|error| {
+        DockerfileBuildError::Invalid(format!(
+            "COPY --chown user {user} cannot be resolved from base image: {error}"
+        ))
+    })?;
+    let entry = passwd
+        .lines()
+        .find_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            (fields.len() >= 4 && fields[0] == user).then(|| {
+                Some((
+                    fields[2].parse::<u32>().ok()?,
+                    fields[3].parse::<u32>().ok()?,
+                ))
+            })
+        })
+        .flatten()
+        .ok_or_else(|| {
+            DockerfileBuildError::Invalid(format!(
+                "COPY --chown user {user} is not present in the base image"
+            ))
+        })?;
+    let gid = match group {
+        None => entry.1,
+        Some(value) => {
+            if let Ok(gid) = value.parse::<u32>() {
+                gid
+            } else {
+                let groups = fs::read_to_string(rootfs.join("etc/group")).map_err(|error| {
+                    DockerfileBuildError::Invalid(format!(
+                        "COPY --chown group {value} cannot be resolved from base image: {error}"
+                    ))
+                })?;
+                groups
+                    .lines()
+                    .find_map(|line| {
+                        let fields = line.split(':').collect::<Vec<_>>();
+                        (fields.len() >= 3 && fields[0] == value)
+                            .then(|| fields[2].parse::<u32>().ok())
+                            .flatten()
+                    })
+                    .ok_or_else(|| {
+                        DockerfileBuildError::Invalid(format!(
+                            "COPY --chown group {value} is not present in the base image"
+                        ))
+                    })?
+            }
+        }
+    };
+    Ok((entry.0, gid))
+}
+
+fn apply_copy_owner_recursive(path: &Path, owner: &CopyOwner) -> Result<(), DockerfileBuildError> {
     #[cfg(unix)]
     {
         use nix::unistd::{chown, Gid, Uid};
+        let CopyOwner::Numeric(uid, gid) = owner else {
+            return Err(DockerfileBuildError::Invalid(
+                "COPY --chown owner was not resolved against the base image".to_string(),
+            ));
+        };
         let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_symlink() {
             return Err(DockerfileBuildError::Invalid(format!(
@@ -3724,16 +3809,11 @@ fn apply_copy_owner_recursive(path: &Path, owner: (u32, u32)) -> Result<(), Dock
                 path.display()
             )));
         }
-        chown(
-            path,
-            Some(Uid::from_raw(owner.0)),
-            Some(Gid::from_raw(owner.1)),
-        )
-        .map_err(|error| {
+        chown(path, Some(Uid::from_raw(*uid)), Some(Gid::from_raw(*gid))).map_err(|error| {
             DockerfileBuildError::Invalid(format!(
                 "COPY --chown cannot set {}:{} on {}: {error}",
-                owner.0,
-                owner.1,
+                uid,
+                gid,
                 path.display()
             ))
         })?;
@@ -4009,9 +4089,9 @@ mod tests {
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, load_stage_checkpoints, parse_limit_value, parse_run, parse_stages,
         prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
-        registry_cache_descriptor, registry_cache_reference, save_build_cache,
-        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, OCI_IMAGE_LAYER_MEDIA_TYPE,
-        REGISTRY_CACHE_KIND_ANNOTATION,
+        registry_cache_descriptor, registry_cache_reference, resolve_copy_owner, save_build_cache,
+        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
+        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -4625,8 +4705,44 @@ mod tests {
     #[test]
     fn copy_chown_numeric_owner_is_accepted() {
         let stages = parse_stages("FROM scratch\nCOPY --chown=1000:1001 app /app\n").unwrap();
-        assert_eq!(stages[0].copy_paths[0].owner, Some((1000, 1001)));
-        assert!(parse_stages("FROM scratch\nCOPY --chown=builder app /app\n").is_err());
+        assert_eq!(
+            stages[0].copy_paths[0].owner,
+            Some(CopyOwner::Numeric(1000, 1001))
+        );
+        assert_eq!(
+            parse_stages("FROM scratch\nCOPY --chown=builder:staff app /app\n").unwrap()[0]
+                .copy_paths[0]
+                .owner,
+            Some(CopyOwner::Named {
+                user: "builder".into(),
+                group: Some("staff".into())
+            })
+        );
+    }
+
+    #[test]
+    fn copy_chown_names_resolve_against_base_rootfs_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("etc")).unwrap();
+        std::fs::write(
+            root.path().join("etc/passwd"),
+            "builder:x:1000:1001::/home/builder:/bin/sh\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("etc/group"), "staff:x:2000:\n").unwrap();
+        let owner = CopyOwner::Named {
+            user: "builder".into(),
+            group: Some("staff".into()),
+        };
+        assert_eq!(
+            resolve_copy_owner(root.path(), &owner).unwrap(),
+            (1000, 2000)
+        );
+        let missing = CopyOwner::Named {
+            user: "missing".into(),
+            group: None,
+        };
+        assert!(resolve_copy_owner(root.path(), &missing).is_err());
     }
 
     #[test]
@@ -4656,10 +4772,16 @@ mod tests {
 
         let numeric_owner = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
             .expect("numeric COPY --chown must parse");
-        assert_eq!(numeric_owner[0].copy_paths[0].owner, Some((1000, 1000)));
-        let error = parse_stages("FROM scratch\nCOPY --chown=builder app /app\n")
-            .expect_err("named COPY --chown must fail closed");
-        assert!(error.to_string().contains("numeric uid[:gid]"));
+        assert_eq!(
+            numeric_owner[0].copy_paths[0].owner,
+            Some(CopyOwner::Numeric(1000, 1000))
+        );
+        let named = parse_stages("FROM scratch\nCOPY --chown=builder app /app\n")
+            .expect("named COPY --chown must parse");
+        assert!(matches!(
+            named[0].copy_paths[0].owner,
+            Some(CopyOwner::Named { .. })
+        ));
 
         let error = parse_stages("FROM scratch\nCOPY --chmod=999 app /app\n")
             .expect_err("invalid modes must be rejected");

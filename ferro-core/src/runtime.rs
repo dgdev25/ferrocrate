@@ -10998,12 +10998,31 @@ fn validate_security_ebpf_pin_root(pin_root: &str) -> Result<(), RuntimeError> {
 
 fn security_monitor_config(container_id: &str) -> SecurityMonitorConfig {
     SecurityMonitorConfig {
-        object_path: std::env::var("FERROCRATE_EBPF_SECURITY_OBJECT")
-            .unwrap_or_else(|_| "/usr/lib/ferrocrate/ferro-security.o".to_string()),
+        object_path: security_monitor_object_path(),
         pin_root: std::env::var("FERROCRATE_EBPF_SECURITY_PIN_ROOT")
             .unwrap_or_else(|_| format!("/sys/fs/bpf/ferrocrate-security-{container_id}")),
         events: security_ebpf_events(),
     }
+}
+
+fn security_monitor_object_path() -> String {
+    if let Ok(path) = std::env::var("FERROCRATE_EBPF_SECURITY_OBJECT") {
+        return path;
+    }
+    let system_path = Path::new("/usr/lib/ferrocrate/ferro-security.o");
+    if system_path.is_file() {
+        return system_path.display().to_string();
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(sibling) = executable
+            .parent()
+            .map(|parent| parent.join("ferro-security.o"))
+            .filter(|path| path.is_file())
+        {
+            return sibling.display().to_string();
+        }
+    }
+    system_path.display().to_string()
 }
 
 fn cleanup_security_ebpf_monitor(container_id: &str) -> Result<(), RuntimeError> {

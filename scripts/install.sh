@@ -167,13 +167,17 @@ PY
 }
 
 install_linux_release() {
-  local archive="$1" install_dir="$2" stage backup
+  local archive="$1" install_dir="$2" stage backup backup_security
   stage="$(mktemp -d)"
   backup=""
+  backup_security=""
   cleanup() {
     rm -rf "$stage"
     if [ -n "$backup" ] && [ ! -e "$install_dir/ferrocrate" ]; then
       mv "$backup" "$install_dir/ferrocrate" 2>/dev/null || true
+    fi
+    if [ -n "$backup_security" ] && [ ! -e "$install_dir/ferro-security.o" ]; then
+      mv "$backup_security" "$install_dir/ferro-security.o" 2>/dev/null || true
     fi
   }
   trap cleanup RETURN
@@ -192,10 +196,25 @@ install_linux_release() {
     log_error "Unable to install ferrocrate; restoring previous binary"
     return 1
   fi
+  if [ -f "$stage/ferrocrate/ferro-security.o" ]; then
+    chmod 0644 "$stage/ferrocrate/ferro-security.o"
+    if [ -e "$install_dir/ferro-security.o" ]; then
+      backup_security="$install_dir/.ferrocrate-security.previous.$$"
+      mv "$install_dir/ferro-security.o" "$backup_security"
+    fi
+    if ! mv "$stage/ferrocrate/ferro-security.o" "$install_dir/ferro-security.o"; then
+      log_error "Unable to install security eBPF object; restoring previous files"
+      return 1
+    fi
+  fi
   if [ -n "$backup" ]; then
     rm -f "$backup"
   fi
+  if [ -n "$backup_security" ]; then
+    rm -f "$backup_security"
+  fi
   backup=""
+  backup_security=""
   log_info "Installed to $install_dir/ferrocrate"
 }
 

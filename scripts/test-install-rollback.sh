@@ -17,9 +17,11 @@ printf 'previous\n' >"$install_dir/ferrocrate"
 
 mkdir -p "$tmp_dir/v2/ferrocrate"
 printf 'updated\n' >"$tmp_dir/v2/ferrocrate/ferrocrate"
+printf 'security-object-v2\n' >"$tmp_dir/v2/ferrocrate/ferro-security.o"
 tar -czf "$tmp_dir/v2.tar.gz" -C "$tmp_dir/v2" ferrocrate
 install_linux_release "$tmp_dir/v2.tar.gz" "$install_dir"
 test "$(cat "$install_dir/ferrocrate")" = updated
+test "$(cat "$install_dir/ferro-security.o")" = security-object-v2
 test ! -e "$install_dir/.ferrocrate.previous"
 
 # A malformed archive must leave the already-installed version untouched.
@@ -31,6 +33,7 @@ if install_linux_release "$tmp_dir/bad.tar.gz" "$install_dir"; then
   exit 1
 fi
 test "$(cat "$install_dir/ferrocrate")" = updated
+test "$(cat "$install_dir/ferro-security.o")" = security-object-v2
 test ! -e "$install_dir/.ferrocrate.previous"
 
 # Exercise the same checksum and provenance verification used by the network

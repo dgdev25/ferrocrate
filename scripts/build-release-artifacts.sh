@@ -177,7 +177,7 @@ main() {
   package_dir="$tmpdir/ferrocrate"
   mkdir -p "$package_dir"
 
-  local cli_bin desktop_bin
+  local cli_bin desktop_bin security_object
   cli_bin="$TARGET_DIR/release/$(binary_name ferro-cli "$os")"
   desktop_bin="$TARGET_DIR/release/$(binary_name ferro-desktop "$os")"
 
@@ -192,6 +192,16 @@ main() {
   fi
 
   cp "$cli_bin" "$package_dir/$(binary_name ferrocrate "$os")"
+
+  if [[ "$os" == "linux" ]]; then
+    security_object="$(find "$TARGET_DIR/release/build" -path '*/out/ferro-security-ebpf' -type f -print -quit)"
+    if [[ -z "$security_object" || ! -f "$security_object" ]]; then
+      echo "missing built security eBPF object under $TARGET_DIR/release/build" >&2
+      exit 1
+    fi
+    cp "$security_object" "$package_dir/ferro-security.o"
+    chmod 0644 "$package_dir/ferro-security.o"
+  fi
 
   if [[ "$CHANNEL" == "paid" ]]; then
     if [[ -f "$desktop_bin" ]]; then

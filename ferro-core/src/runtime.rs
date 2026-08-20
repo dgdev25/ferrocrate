@@ -5605,9 +5605,11 @@ fn build_bwrap_command(
     if disable_userns {
         // Followers enter the leader's user namespace through an inherited
         // descriptor and use a BusyBox nsenter handoff for the network. The
-        // CAP_SYS_ADMIN is required only for the BusyBox nsenter handoff;
-        // it is confined to the shared user namespace and no host namespace
-        // or host interface is exposed to the workload.
+        // CAP_SYS_ADMIN is required only for that handoff. The nested
+        // BusyBox setpriv immediately clears it from the workload's effective,
+        // permitted, inheritable, and ambient sets before the requested image
+        // command runs; it remains confined to the shared user namespace and
+        // no host namespace or host interface is exposed to the workload.
         bwrap
             .arg("--userns")
             .arg("3")
@@ -5713,6 +5715,11 @@ fn build_command(
                 "-t".to_string(),
                 pid.to_string(),
                 "-n".to_string(),
+                "--".to_string(),
+                "/bin/busybox".to_string(),
+                "setpriv".to_string(),
+                "--inh-caps=-sys_admin".to_string(),
+                "--ambient-caps=-sys_admin".to_string(),
                 "--".to_string(),
             ];
             shared_cmd.extend(cmd.iter().cloned());
@@ -14418,6 +14425,48 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(args
             .windows(2)
             .any(|window| window == ["--remount-ro", "/"]));
+        assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
+    }
+
+    #[test]
+    fn rootless_shared_network_drops_handoff_capability_before_workload() {
+        if nix::unistd::Uid::effective().is_root() || !super::command_available("bwrap") {
+            return;
+        }
+        let command = super::build_command(
+            &["/bin/true".into()],
+            &[],
+            Some(Path::new("/")),
+            false,
+            &[],
+            None,
+            None,
+            Some("pid:123"),
+            false,
+            None,
+            &[],
+            &[],
+            false,
+        )
+        .expect("shared rootless command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let handoff = [
+            "/bin/busybox",
+            "nsenter",
+            "-t",
+            "123",
+            "-n",
+            "--",
+            "/bin/busybox",
+            "setpriv",
+            "--inh-caps=-sys_admin",
+            "--ambient-caps=-sys_admin",
+            "--",
+        ];
+        assert!(args.windows(handoff.len()).any(|window| window == handoff));
         assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
     }
 

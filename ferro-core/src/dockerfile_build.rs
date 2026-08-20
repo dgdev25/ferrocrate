@@ -35,6 +35,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -2581,6 +2583,7 @@ struct CacheMount {
 enum CacheSharing {
     Shared,
     Private,
+    Locked,
 }
 
 #[derive(Debug, Clone)]
@@ -2763,9 +2766,10 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     None => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("shared") => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("private") => CacheSharing::Private,
+                    Some(value) if value.eq_ignore_ascii_case("locked") => CacheSharing::Locked,
                     Some(value) => {
                         return Err(DockerfileBuildError::Unsupported(format!(
-                        "RUN cache mount sharing={value} is not supported; use shared or private"
+                        "RUN cache mount sharing={value} is not supported; use shared, private, or locked"
                     )))
                     }
                 };
@@ -3585,7 +3589,7 @@ fn run_stage_commands(
             if existed {
                 fs::rename(&target, &backup)?;
             }
-            let persist = mount.sharing == CacheSharing::Shared;
+            let persist = mount.sharing != CacheSharing::Private;
             let cache = if persist {
                 cache_root.join(&mount.id)
             } else {
@@ -3596,13 +3600,20 @@ fn run_stage_commands(
                 ))
             };
             reject_cache_path_symlinks(&cache)?;
+            let lock = if mount.sharing == CacheSharing::Locked {
+                let lock_path = cache_root.join("locks").join(format!("{}.lock", mount.id));
+                reject_cache_path_symlinks(&lock_path)?;
+                Some(acquire_cache_lock(&lock_path)?)
+            } else {
+                None
+            };
             fs::create_dir_all(&cache)?;
             reject_cache_symlinks(&cache)?;
             fs::create_dir_all(&target)?;
             if persist {
                 copy_path_recursive(&cache, &target)?;
             }
-            mounted.push((target, backup, cache, existed, persist));
+            mounted.push((target, backup, cache, existed, persist, lock));
         }
         let mut secret_mounted = Vec::new();
         for (index, mount) in run.secret_mounts.iter().enumerate() {
@@ -3638,7 +3649,7 @@ fn run_stage_commands(
                         fs::rename(backup, target)?;
                     }
                 }
-                for (target, backup, cache, existed, persist) in mounted.iter().rev() {
+                for (target, backup, cache, existed, persist, _lock) in mounted.iter().rev() {
                     let _ = fs::remove_dir_all(target);
                     if *existed {
                         fs::rename(backup, target)?;
@@ -3706,7 +3717,7 @@ fn run_stage_commands(
                 fs::rename(backup, target)?;
             }
         }
-        for (target, backup, cache, existed, persist) in mounted.into_iter().rev() {
+        for (target, backup, cache, existed, persist, lock) in mounted.into_iter().rev() {
             if target.exists() {
                 if persist {
                     if let Err(err) = reject_cache_symlinks(&target) {
@@ -3723,6 +3734,7 @@ fn run_stage_commands(
             if !persist {
                 let _ = fs::remove_dir_all(cache);
             }
+            drop(lock);
         }
         for (_source, target, backup, existed) in ssh_mounted.into_iter().rev() {
             let _ = fs::remove_file(&target);
@@ -3892,6 +3904,38 @@ fn reject_cache_path_symlinks(path: &Path) -> Result<(), DockerfileBuildError> {
         }
     }
     Ok(())
+}
+
+fn acquire_cache_lock(path: &Path) -> Result<File, DockerfileBuildError> {
+    if let Some(parent) = path.parent() {
+        reject_cache_path_symlinks(parent)?;
+        fs::create_dir_all(parent)?;
+    }
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        #[allow(deprecated)]
+        nix::fcntl::flock(lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive).map_err(
+            |err| {
+                DockerfileBuildError::Invalid(format!(
+                    "cache mount lock {} failed: {err}",
+                    path.display()
+                ))
+            },
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = lock;
+        return Err(DockerfileBuildError::Unsupported(
+            "RUN cache mount sharing=locked requires a Unix host".to_string(),
+        ));
+    }
+    Ok(lock)
 }
 
 fn parse_user_spec(value: &str) -> Option<(u32, u32)> {
@@ -5552,6 +5596,13 @@ mod tests {
         .expect("private cache sharing parses");
         assert_eq!(private.cache_mounts[0].sharing, CacheSharing::Private);
 
+        let locked = parse_run(
+            "--mount=type=cache,target=/root/.cache,id=compiler,sharing=locked echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("locked cache sharing parses");
+        assert_eq!(locked.cache_mounts[0].sharing, CacheSharing::Locked);
+
         for invalid in [
             "--mount=type=cache,target=relative echo value",
             "--mount=type=cache,target=/tmp/../escape echo value",
@@ -5563,13 +5614,6 @@ mod tests {
 
     #[test]
     fn run_mount_rejects_unsupported_sharing_and_invalid_required_options() {
-        let locked = parse_run(
-            "--mount=type=cache,target=/root/.cache,sharing=locked true",
-            &["/bin/sh".into(), "-c".into()],
-        )
-        .expect_err("locked cache sharing must not be silently ignored");
-        assert!(locked.to_string().contains("use shared or private"));
-
         let invalid = parse_run(
             "--mount=type=cache,target=/root/.cache,sharing= true",
             &["/bin/sh".into(), "-c".into()],

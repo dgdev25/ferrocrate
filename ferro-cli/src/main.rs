@@ -5950,6 +5950,10 @@ impl ScopedEnv {
             unsafe {
                 std::env::set_var(key, value);
             }
+        } else {
+            unsafe {
+                std::env::remove_var(key);
+            }
         }
         Self {
             key: key.to_string(),
@@ -6412,7 +6416,11 @@ fn handle_build(
         return Err("build: --secret is only supported with Dockerfiles".to_string());
     }
     if let Some(source) = cache_from {
-        let auth = registry_cache_auth();
+        let auth = if source.starts_with("registry://") {
+            registry_cache_auth(source)?
+        } else {
+            None
+        };
         if source.starts_with("registry://") {
             ferro_core::dockerfile_build::import_build_cache_from_registry(
                 &runtime_dir,
@@ -6529,7 +6537,11 @@ fn handle_build(
         let rvf = ferro_core::rvf_image::build_rvf_image(&params).map_err(|e| e.to_string())?;
 
         if let Some(destination) = cache_to {
-            let auth = registry_cache_auth();
+            let auth = if destination.starts_with("registry://") {
+                registry_cache_auth(destination)?
+            } else {
+                None
+            };
             if destination.starts_with("registry://") {
                 ferro_core::dockerfile_build::export_build_cache_to_registry(
                     &runtime_dir,
@@ -6559,7 +6571,11 @@ fn handle_build(
     }
 
     if let Some(destination) = cache_to {
-        let auth = registry_cache_auth();
+        let auth = if destination.starts_with("registry://") {
+            registry_cache_auth(destination)?
+        } else {
+            None
+        };
         if destination.starts_with("registry://") {
             ferro_core::dockerfile_build::export_build_cache_to_registry(
                 &runtime_dir,
@@ -6581,10 +6597,32 @@ fn handle_build(
 }
 
 #[cfg(target_os = "linux")]
-fn registry_cache_auth() -> Option<ferro_core::registry::RegistryAuth> {
-    let username = std::env::var("FERROCRATE_REGISTRY_USERNAME").ok()?;
-    let password = std::env::var("FERROCRATE_REGISTRY_PASSWORD").ok()?;
-    Some(ferro_core::registry::RegistryAuth { username, password })
+fn registry_cache_auth(
+    reference: &str,
+) -> Result<Option<ferro_core::registry::RegistryAuth>, String> {
+    let username = std::env::var("FERROCRATE_REGISTRY_USERNAME").ok();
+    let password = std::env::var("FERROCRATE_REGISTRY_PASSWORD").ok();
+    match (username, password) {
+        (Some(username), Some(password)) => {
+            return Ok(Some(ferro_core::registry::RegistryAuth {
+                username,
+                password,
+            }));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "build: FERROCRATE_REGISTRY_USERNAME and FERROCRATE_REGISTRY_PASSWORD must be provided together"
+                    .to_string(),
+            );
+        }
+        (None, None) => {}
+    }
+    let reference = reference.strip_prefix("registry://").ok_or_else(|| {
+        "build: registry cache reference must use the registry:// prefix".to_string()
+    })?;
+    let parsed = parse_image_reference(reference).map_err(|error| error.to_string())?;
+    resolve_registry_auth(&parsed.canonical())
+        .map_err(|error| format!("build: registry credential resolution failed: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -18719,6 +18757,40 @@ volumes:
         )
         .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registry_cache_auth_uses_docker_config_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let config_dir = tempfile::tempdir().expect("docker config");
+        std::fs::write(
+            config_dir.path().join("config.json"),
+            r#"{"auths":{"registry.example":{"auth":"dXNlcjpwYXNz"}}}"#,
+        )
+        .expect("config");
+        let _config = super::ScopedEnv::set(
+            "DOCKER_CONFIG",
+            Some(config_dir.path().to_string_lossy().as_ref()),
+        );
+        let _user = super::ScopedEnv::set("FERROCRATE_REGISTRY_USERNAME", None);
+        let _password = super::ScopedEnv::set("FERROCRATE_REGISTRY_PASSWORD", None);
+        let auth = super::registry_cache_auth("registry://registry.example/team/cache:latest")
+            .expect("credential resolution")
+            .expect("configured credentials");
+        assert_eq!(auth.username, "user");
+        assert_eq!(auth.password, "pass");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registry_cache_auth_rejects_partial_environment_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let _user = super::ScopedEnv::set("FERROCRATE_REGISTRY_USERNAME", Some("user"));
+        let _password = super::ScopedEnv::set("FERROCRATE_REGISTRY_PASSWORD", None);
+        let error = super::registry_cache_auth("registry://registry.example/team/cache:latest")
+            .expect_err("partial credentials must fail closed");
+        assert!(error.contains("must be provided together"));
     }
 
     #[test]

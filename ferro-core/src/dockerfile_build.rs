@@ -1815,6 +1815,7 @@ struct CopySpec {
     srcs: Vec<String>,
     dest: String,
     chmod: Option<u32>,
+    owner: Option<(u32, u32)>,
     parents: bool,
     excludes: Vec<String>,
     extract_archives: bool,
@@ -2124,6 +2125,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
     }
     let mut args = Vec::new();
     let mut chmod = None;
+    let mut owner = None;
     let mut parents = false;
     let mut excludes = Vec::new();
     let mut index = 0;
@@ -2136,6 +2138,14 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
                 DockerfileBuildError::Invalid("COPY --chmod requires a mode".to_string())
             })?;
             chmod = Some(parse_copy_mode(raw_mode)?);
+            index += 1;
+        } else if let Some(raw_owner) = token.strip_prefix("--chown=") {
+            owner = Some(parse_copy_owner(raw_owner)?);
+        } else if token == "--chown" {
+            let raw_owner = tokens.get(index + 1).ok_or_else(|| {
+                DockerfileBuildError::Invalid("COPY --chown requires an owner".to_string())
+            })?;
+            owner = Some(parse_copy_owner(raw_owner)?);
             index += 1;
         } else if token == "--parents" {
             parents = true;
@@ -2189,10 +2199,43 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         srcs,
         dest,
         chmod,
+        owner,
         parents,
         excludes,
         extract_archives: false,
     }))
+}
+
+fn parse_copy_owner(raw: &str) -> Result<(u32, u32), DockerfileBuildError> {
+    let mut parts = raw.split(':');
+    let uid = parts
+        .next()
+        .unwrap_or_default()
+        .parse::<u32>()
+        .map_err(|_| {
+            DockerfileBuildError::Unsupported(
+                "COPY --chown currently requires numeric uid[:gid] values".to_string(),
+            )
+        })?;
+    let gid = match parts.next() {
+        Some(value) if !value.is_empty() => value.parse::<u32>().map_err(|_| {
+            DockerfileBuildError::Unsupported(
+                "COPY --chown currently requires numeric uid[:gid] values".to_string(),
+            )
+        })?,
+        Some(_) => {
+            return Err(DockerfileBuildError::Invalid(
+                "COPY --chown gid must not be empty".to_string(),
+            ))
+        }
+        None => uid,
+    };
+    if parts.next().is_some() {
+        return Err(DockerfileBuildError::Invalid(
+            "COPY --chown accepts only uid[:gid]".to_string(),
+        ));
+    }
+    Ok((uid, gid))
 }
 
 fn parse_copy_mode(raw: &str) -> Result<u32, DockerfileBuildError> {
@@ -3650,6 +3693,9 @@ fn copy_from_context(
             if spec.extract_archives
                 && extract_add_archive(&source, archive_dest, spec.chmod, &spec.excludes)?
             {
+                if let Some(owner) = spec.owner {
+                    apply_copy_owner_recursive(archive_dest, owner)?;
+                }
                 continue;
             }
             copy_path_recursive_mode_with_excludes(
@@ -3659,9 +3705,52 @@ fn copy_from_context(
                 &spec.excludes,
                 Path::new(""),
             )?;
+            if let Some(owner) = spec.owner {
+                apply_copy_owner_recursive(&dest, owner)?;
+            }
         }
     }
     Ok(())
+}
+
+fn apply_copy_owner_recursive(path: &Path, owner: (u32, u32)) -> Result<(), DockerfileBuildError> {
+    #[cfg(unix)]
+    {
+        use nix::unistd::{chown, Gid, Uid};
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "COPY --chown refuses symlink entry: {}",
+                path.display()
+            )));
+        }
+        chown(
+            path,
+            Some(Uid::from_raw(owner.0)),
+            Some(Gid::from_raw(owner.1)),
+        )
+        .map_err(|error| {
+            DockerfileBuildError::Invalid(format!(
+                "COPY --chown cannot set {}:{} on {}: {error}",
+                owner.0,
+                owner.1,
+                path.display()
+            ))
+        })?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                apply_copy_owner_recursive(&entry?.path(), owner)?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, owner);
+        Err(DockerfileBuildError::Unsupported(
+            "COPY --chown requires a Unix filesystem".to_string(),
+        ))
+    }
 }
 
 fn is_remote_add_source(source: &str) -> bool {
@@ -4534,6 +4623,13 @@ mod tests {
     }
 
     #[test]
+    fn copy_chown_numeric_owner_is_accepted() {
+        let stages = parse_stages("FROM scratch\nCOPY --chown=1000:1001 app /app\n").unwrap();
+        assert_eq!(stages[0].copy_paths[0].owner, Some((1000, 1001)));
+        assert!(parse_stages("FROM scratch\nCOPY --chown=builder app /app\n").is_err());
+    }
+
+    #[test]
     fn build_limit_values_are_strictly_positive_unsigned_integers() {
         assert_eq!(parse_limit_value("LIMIT", "4096").unwrap(), 4096);
         for value in ["", "0", "-1", "1.5", "1e3"] {
@@ -4558,9 +4654,12 @@ mod tests {
             .expect_err("empty exclude pattern must fail");
         assert!(error.to_string().contains("COPY --exclude"));
 
-        let error = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
-            .expect_err("unsupported copy flags must not be silently ignored");
-        assert!(error.to_string().contains("COPY flag --chown=1000:1000"));
+        let numeric_owner = parse_stages("FROM scratch\nCOPY --chown=1000:1000 app /app\n")
+            .expect("numeric COPY --chown must parse");
+        assert_eq!(numeric_owner[0].copy_paths[0].owner, Some((1000, 1000)));
+        let error = parse_stages("FROM scratch\nCOPY --chown=builder app /app\n")
+            .expect_err("named COPY --chown must fail closed");
+        assert!(error.to_string().contains("numeric uid[:gid]"));
 
         let error = parse_stages("FROM scratch\nCOPY --chmod=999 app /app\n")
             .expect_err("invalid modes must be rejected");
@@ -4602,6 +4701,7 @@ mod tests {
                 srcs: vec!["source".into()],
                 dest: "/materialized".into(),
                 chmod: Some(0o640),
+                owner: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: false,
@@ -4632,6 +4732,7 @@ mod tests {
                 srcs: vec!["src/app/main.txt".into()],
                 dest: "/opt".into(),
                 chmod: None,
+                owner: None,
                 parents: true,
                 excludes: Vec::new(),
                 extract_archives: false,
@@ -4650,6 +4751,7 @@ mod tests {
                 srcs: vec!["../escape.txt".into()],
                 dest: "/opt".into(),
                 chmod: None,
+                owner: None,
                 parents: true,
                 excludes: Vec::new(),
                 extract_archives: false,
@@ -4675,6 +4777,7 @@ mod tests {
                 srcs: vec!["source".into()],
                 dest: "/app".into(),
                 chmod: None,
+                owner: None,
                 parents: false,
                 excludes: vec!["*.tmp".into(), "secret".into()],
                 extract_archives: false,
@@ -4693,6 +4796,7 @@ mod tests {
                 srcs: vec!["source/skip.tmp".into()],
                 dest: "/app".into(),
                 chmod: None,
+                owner: None,
                 parents: false,
                 excludes: vec!["*.tmp".into()],
                 extract_archives: false,
@@ -4752,6 +4856,7 @@ mod tests {
                 ],
                 dest: "/app".into(),
                 chmod: Some(0o600),
+                owner: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
@@ -4789,6 +4894,7 @@ mod tests {
                 srcs: vec!["escape.tar".into()],
                 dest: "/app".into(),
                 chmod: None,
+                owner: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
@@ -4835,6 +4941,7 @@ mod tests {
                 )],
                 dest: "/app/".into(),
                 chmod: None,
+                owner: None,
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,

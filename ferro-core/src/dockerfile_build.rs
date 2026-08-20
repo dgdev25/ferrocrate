@@ -2101,10 +2101,73 @@ fn parse_from(value: &str) -> Result<(String, Option<String>), DockerfileBuildEr
             "invalid FROM instruction".to_string(),
         ));
     }
-    if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("AS") {
-        return Ok((parts[0].to_string(), Some(parts[2].to_string())));
+    let mut index = 0;
+    let platform = if let Some(raw) = parts[index].strip_prefix("--platform=") {
+        index += 1;
+        Some(raw)
+    } else if parts[index].eq_ignore_ascii_case("--platform") {
+        index += 1;
+        let raw = parts.get(index).copied().ok_or_else(|| {
+            DockerfileBuildError::Invalid("FROM --platform requires a value".to_string())
+        })?;
+        index += 1;
+        Some(raw)
+    } else if parts[index].starts_with("--") {
+        return Err(DockerfileBuildError::Unsupported(format!(
+            "FROM option {} is not supported",
+            parts[index]
+        )));
+    } else {
+        None
+    };
+
+    if let Some(platform) = platform {
+        validate_from_platform(platform)?;
     }
-    Ok((parts[0].to_string(), None))
+    let base = parts.get(index).ok_or_else(|| {
+        DockerfileBuildError::Invalid("FROM requires an image reference".to_string())
+    })?;
+    index += 1;
+    let name = if index == parts.len() {
+        None
+    } else if index + 2 == parts.len() && parts[index].eq_ignore_ascii_case("AS") {
+        let name = parts[index + 1];
+        if name.is_empty() || name.starts_with('-') {
+            return Err(DockerfileBuildError::Invalid(
+                "FROM stage name must be non-empty and not start with '-'".to_string(),
+            ));
+        }
+        Some(name.to_string())
+    } else {
+        return Err(DockerfileBuildError::Invalid(
+            "FROM accepts an image followed by optional AS stage name".to_string(),
+        ));
+    };
+    Ok((base.to_string(), name))
+}
+
+fn validate_from_platform(platform: &str) -> Result<(), DockerfileBuildError> {
+    let (os, architecture) = platform.split_once('/').ok_or_else(|| {
+        DockerfileBuildError::Invalid("FROM --platform must use OS/architecture form".to_string())
+    })?;
+    if !os.eq_ignore_ascii_case("linux") {
+        return Err(DockerfileBuildError::Unsupported(format!(
+            "FROM --platform={platform} is unsupported; only linux host output is available"
+        )));
+    }
+    let expected = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "arm" => "arm",
+        other => other,
+    };
+    if !architecture.eq_ignore_ascii_case(expected) {
+        return Err(DockerfileBuildError::Unsupported(format!(
+            "FROM --platform={platform} is unsupported; only linux/{expected} is available"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildError> {
@@ -4889,6 +4952,31 @@ mod tests {
         let stages = parse_stages("FROM scratch\nCOPY --link app /app\n").unwrap();
         assert_eq!(stages[0].copy_paths[0].srcs, vec!["app"]);
         assert_eq!(stages[0].copy_paths[0].dest, "/app");
+    }
+
+    #[test]
+    fn from_platform_is_host_bound_and_rejects_ignored_tokens() {
+        let host_arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "x86" => "386",
+            "arm" => "arm",
+            other => other,
+        };
+        let stages = parse_stages(&format!(
+            "FROM --platform=linux/{host_arch} alpine AS base\n"
+        ))
+        .expect("host platform should parse");
+        assert_eq!(stages[0].base, "alpine");
+        assert_eq!(stages[0].name.as_deref(), Some("base"));
+
+        let unsupported = parse_stages("FROM --platform=windows/amd64 alpine\n")
+            .expect_err("non-Linux platform must fail closed");
+        assert!(unsupported.to_string().contains("only linux host output"));
+
+        let trailing = parse_stages("FROM alpine unexpected tokens\n")
+            .expect_err("ignored FROM tokens must fail deterministically");
+        assert!(trailing.to_string().contains("optional AS stage name"));
     }
 
     #[test]

@@ -46,6 +46,7 @@ use thiserror::Error;
 
 /// Maximum layer size (1GB) to prevent memory exhaustion attacks
 const MAX_LAYER_SIZE: usize = 1024 * 1024 * 1024;
+const MAX_ADD_REMOTE_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum DockerfileBuildError {
@@ -69,6 +70,8 @@ pub enum DockerfileBuildError {
     Authorization(String),
     #[error("registry error: {0}")]
     Registry(#[from] crate::registry::RegistryError),
+    #[error("ADD remote fetch error: {0}")]
+    RemoteFetch(#[from] reqwest::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -3364,6 +3367,7 @@ fn copy_from_context(
     dst_root: &Path,
     copies: &[CopySpec],
 ) -> Result<(), DockerfileBuildError> {
+    let remote_root = tempfile::tempdir()?;
     for spec in copies {
         let dest_root = dst_root.join(spec.dest.trim_start_matches('/'));
         let multiple = spec.srcs.len() > 1 || spec.dest.ends_with('/');
@@ -3387,15 +3391,22 @@ fn copy_from_context(
             if copy_path_is_excluded(Path::new(src.trim_start_matches('/')), &spec.excludes) {
                 continue;
             }
-            let source = src_root.join(src.trim_start_matches('/'));
+            let (source, source_name) = if spec.extract_archives && is_remote_add_source(src) {
+                let downloaded = download_add_source(src, remote_root.path())?;
+                (downloaded, remote_add_source_name(src))
+            } else {
+                (
+                    src_root.join(src.trim_start_matches('/')),
+                    Path::new(src)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "src".to_string()),
+                )
+            };
             let dest = if spec.parents {
                 dest_root.join(src.trim_start_matches('/'))
             } else if multiple {
-                let name = Path::new(src)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "src".to_string());
-                dest_root.join(name)
+                dest_root.join(source_name)
             } else {
                 dest_root.clone()
             };
@@ -3419,6 +3430,75 @@ fn copy_from_context(
         }
     }
     Ok(())
+}
+
+fn is_remote_add_source(source: &str) -> bool {
+    matches!(reqwest::Url::parse(source), Ok(url) if matches!(url.scheme(), "http" | "https"))
+}
+
+fn remote_add_source_name(source: &str) -> String {
+    reqwest::Url::parse(source)
+        .ok()
+        .and_then(|url| {
+            url.path_segments().and_then(|mut segments| {
+                segments
+                    .rfind(|segment| !segment.is_empty())
+                    .map(str::to_string)
+            })
+        })
+        .filter(|name| !name.is_empty() && name != "." && name != "..")
+        .unwrap_or_else(|| "download".to_string())
+}
+
+fn download_add_source(source: &str, destination: &Path) -> Result<PathBuf, DockerfileBuildError> {
+    let url = reqwest::Url::parse(source).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("ADD remote source is not a valid URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(DockerfileBuildError::Invalid(
+            "ADD remote source requires an http or https URL with a host".to_string(),
+        ));
+    }
+    if url.username() != "" || url.password().is_some() || url.fragment().is_some() {
+        return Err(DockerfileBuildError::Invalid(
+            "ADD remote source must not contain credentials or a fragment".to_string(),
+        ));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let response = client.get(url.clone()).send()?;
+    if !response.status().is_success() {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "ADD remote source returned HTTP {}",
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ADD_REMOTE_SIZE)
+    {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "ADD remote source exceeds {} byte limit",
+            MAX_ADD_REMOTE_SIZE
+        )));
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_ADD_REMOTE_SIZE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_ADD_REMOTE_SIZE {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "ADD remote source exceeds {} byte limit",
+            MAX_ADD_REMOTE_SIZE
+        )));
+    }
+    fs::create_dir_all(destination)?;
+    let digest = sha256_digest_bytes(source.as_bytes()).replace(':', "-");
+    let path = destination.join(format!("{digest}-download"));
+    fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 /// Extract a local tar or gzip-compressed tar for Dockerfile `ADD`.
@@ -4442,6 +4522,55 @@ mod tests {
         )
         .expect_err("ADD archive traversal must fail closed");
         assert!(error.to_string().contains("escapes destination"));
+    }
+
+    #[test]
+    fn add_fetches_bounded_remote_archive_and_uses_url_basename() {
+        use httptest::responders::status_code;
+        use httptest::{Expectation, Server};
+        use std::io::Cursor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("remote/payload.txt").unwrap();
+            header.set_size(6);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, Cursor::new(b"remote")).unwrap();
+            builder.finish().unwrap();
+        }
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(httptest::matchers::request::method_path(
+                "GET",
+                "/payload.tar",
+            ))
+            .respond_with(status_code(200).body(bytes)),
+        );
+        let destination = temp.path().join("destination");
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec![format!(
+                    "{}/payload.tar?cache=1",
+                    server.url_str("").trim_end_matches('/')
+                )],
+                dest: "/app/".into(),
+                chmod: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(destination.join("app/remote/payload.txt")).unwrap(),
+            "remote"
+        );
     }
 
     #[test]

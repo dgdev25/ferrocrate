@@ -776,6 +776,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         final_stage.user.as_deref(),
         final_stage.entrypoint.clone(),
         final_stage.cmd.clone(),
+        final_stage.stop_signal.as_deref(),
         &final_stage.exposed_ports,
         &final_stage.volumes,
     );
@@ -1004,6 +1005,7 @@ fn build_config_json(
     user: Option<&str>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
+    stop_signal: Option<&str>,
     exposed_ports: &[String],
     volumes: &[String],
 ) -> String {
@@ -1048,6 +1050,7 @@ fn build_config_json(
             "User": user,
             "Labels": labels,
             "Healthcheck": health,
+            "StopSignal": stop_signal,
             "ExposedPorts": exposed,
             "Volumes": volumes
         },
@@ -1853,6 +1856,7 @@ struct StageSpec {
     labels: HashMap<String, String>,
     workdir: Option<String>,
     user: Option<String>,
+    stop_signal: Option<String>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     shell: Vec<String>,
@@ -1895,6 +1899,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 labels: HashMap::new(),
                 workdir: None,
                 user: None,
+                stop_signal: None,
                 entrypoint: None,
                 cmd: None,
                 shell: vec!["/bin/sh".to_string(), "-c".to_string()],
@@ -1982,7 +1987,10 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                     ));
                 }
             }
-            "STOPSIGNAL" | "MAINTAINER" | "ONBUILD" => {
+            "STOPSIGNAL" => {
+                stage.stop_signal = Some(parse_stop_signal(&interpolated)?);
+            }
+            "MAINTAINER" | "ONBUILD" => {
                 return Err(DockerfileBuildError::Unsupported(format!(
                     "instruction {keyword} is not supported"
                 )));
@@ -3046,6 +3054,58 @@ fn parse_exposed_ports(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
             Ok(format!("{port}/{protocol}"))
         })
         .collect()
+}
+
+fn parse_stop_signal(raw: &str) -> Result<String, DockerfileBuildError> {
+    let signal = raw.trim();
+    if signal.is_empty() || signal.split_whitespace().count() != 1 {
+        return Err(DockerfileBuildError::Invalid(
+            "STOPSIGNAL requires one signal".to_string(),
+        ));
+    }
+    let number = signal.strip_prefix("SIG").unwrap_or(signal);
+    if number.chars().all(|character| character.is_ascii_digit()) {
+        let value = number.parse::<u16>().map_err(|_| {
+            DockerfileBuildError::Invalid("STOPSIGNAL number is invalid".to_string())
+        })?;
+        if (1..=64).contains(&value) {
+            return Ok(value.to_string());
+        }
+        return Err(DockerfileBuildError::Invalid(
+            "STOPSIGNAL number must be between 1 and 64".to_string(),
+        ));
+    }
+    let normalized = signal.to_ascii_uppercase();
+    let normalized = normalized.strip_prefix("SIG").unwrap_or(&normalized);
+    if matches!(
+        normalized,
+        "ABRT"
+            | "ALRM"
+            | "BUS"
+            | "CHLD"
+            | "CONT"
+            | "FPE"
+            | "HUP"
+            | "ILL"
+            | "INT"
+            | "KILL"
+            | "PIPE"
+            | "QUIT"
+            | "SEGV"
+            | "STOP"
+            | "TERM"
+            | "TSTP"
+            | "TTIN"
+            | "TTOU"
+            | "USR1"
+            | "USR2"
+            | "WINCH"
+    ) {
+        return Ok(format!("SIG{normalized}"));
+    }
+    Err(DockerfileBuildError::Invalid(format!(
+        "STOPSIGNAL is invalid: {signal}"
+    )))
 }
 
 fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, DockerfileBuildError> {
@@ -4443,9 +4503,9 @@ mod tests {
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
         load_build_cache, load_stage_checkpoints, parse_env, parse_exposed_ports,
         parse_healthcheck, parse_labels, parse_limit_value, parse_run, parse_stages,
-        prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
-        registry_cache_descriptor, registry_cache_reference, resolve_copy_owner, save_build_cache,
-        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
+        parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
+        prune_build_cache, registry_cache_descriptor, registry_cache_reference, resolve_copy_owner,
+        save_build_cache, stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
         OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
@@ -4562,6 +4622,19 @@ mod tests {
             assert!(
                 parse_exposed_ports(input).is_err(),
                 "invalid EXPOSE: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn stopsignal_normalizes_names_and_rejects_invalid_values() {
+        assert_eq!(parse_stop_signal("SIGTERM").unwrap(), "SIGTERM");
+        assert_eq!(parse_stop_signal("term").unwrap(), "SIGTERM");
+        assert_eq!(parse_stop_signal("9").unwrap(), "9");
+        for input in ["0", "65", "SIGNOPE", "SIGTERM extra", ""] {
+            assert!(
+                parse_stop_signal(input).is_err(),
+                "invalid STOPSIGNAL: {input}"
             );
         }
     }
@@ -5318,11 +5391,13 @@ mod tests {
 
     #[test]
     fn unsupported_directives_fail_instead_of_being_silently_ignored() {
-        for directive in [
-            "STOPSIGNAL SIGTERM",
-            "MAINTAINER legacy",
-            "ONBUILD RUN echo hi",
-        ] {
+        assert_eq!(
+            parse_stages("FROM scratch\nSTOPSIGNAL SIGTERM\n").unwrap()[0]
+                .stop_signal
+                .as_deref(),
+            Some("SIGTERM")
+        );
+        for directive in ["MAINTAINER legacy", "ONBUILD RUN echo hi"] {
             let error = parse_stages(&format!("FROM scratch\n{directive}\n"))
                 .expect_err("unsupported directive must fail deterministically");
             assert!(error.to_string().contains("instruction"), "{error}");

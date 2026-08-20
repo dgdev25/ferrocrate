@@ -1952,7 +1952,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 stage.labels.extend(labels);
             }
             "WORKDIR" => {
-                stage.workdir = Some(interpolated.to_string());
+                stage.workdir = Some(resolve_workdir(stage.workdir.as_deref(), &interpolated)?);
             }
             "USER" => {
                 stage.user = Some(interpolated.to_string());
@@ -2144,6 +2144,43 @@ fn parse_from(value: &str) -> Result<(String, Option<String>), DockerfileBuildEr
         ));
     };
     Ok((base.to_string(), name))
+}
+
+fn resolve_workdir(current: Option<&str>, requested: &str) -> Result<String, DockerfileBuildError> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested.contains('\0') {
+        return Err(DockerfileBuildError::Invalid(
+            "WORKDIR requires a non-empty path".to_string(),
+        ));
+    }
+    let mut components = Vec::new();
+    if !requested.starts_with('/') {
+        if let Some(current) = current {
+            for component in current.split('/') {
+                if !component.is_empty() && component != "." {
+                    components.push(component.to_string());
+                }
+            }
+        }
+    }
+    for component in requested.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(DockerfileBuildError::Invalid(
+                        "WORKDIR path escapes the image root".to_string(),
+                    ));
+                }
+            }
+            value => components.push(value.to_string()),
+        }
+    }
+    if components.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(format!("/{}", components.join("/")))
+    }
 }
 
 fn validate_from_platform(platform: &str) -> Result<(), DockerfileBuildError> {
@@ -4403,6 +4440,18 @@ mod tests {
         assert!(error.to_string().contains("unterminated quotes"));
         let error = parse_labels("=missing-key").expect_err("empty label key");
         assert!(error.to_string().contains("key must not be empty"));
+    }
+
+    #[test]
+    fn workdir_resolves_relative_paths_cumulatively_and_rejects_root_escape() {
+        let stages =
+            parse_stages("FROM scratch\nWORKDIR /opt/app\nWORKDIR build\nWORKDIR ../release\n")
+                .expect("relative WORKDIRs resolve");
+        assert_eq!(stages[0].workdir.as_deref(), Some("/opt/app/release"));
+
+        let error = parse_stages("FROM scratch\nWORKDIR ../../escape\n")
+            .expect_err("WORKDIR must not escape image root");
+        assert!(error.to_string().contains("escapes the image root"));
     }
 
     #[test]

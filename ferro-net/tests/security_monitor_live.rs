@@ -34,12 +34,12 @@ fn security_monitor_loads_attaches_delivers_and_cleans_up() {
     let config = SecurityMonitorConfig {
         object_path: object_path.display().to_string(),
         pin_root: pin_root.display().to_string(),
-        events: vec!["openat".to_string()],
+        events: vec!["openat".to_string(), "read".to_string()],
     };
     fs::create_dir_all(&pin_root).expect("create bpffs pin root");
 
     let installed = install_security_monitor(&config).expect("load and attach producer");
-    assert_eq!(installed, vec!["openat"]);
+    assert_eq!(installed, vec!["openat", "read"]);
     let map_path = pin_root.join("openat-events");
     let mut ring = SecurityMonitorRingBuffer::open(&map_path).expect("open pinned ring map");
 

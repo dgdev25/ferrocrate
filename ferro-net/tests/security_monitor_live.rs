@@ -19,7 +19,11 @@ fn security_monitor_loads_attaches_delivers_and_cleans_up() {
     if env::var("FERROCRATE_RUN_LIVE_EBPF_SECURITY").as_deref() != Ok("1") {
         return;
     }
-    assert_eq!(nix::unistd::geteuid().as_raw(), 0, "run this fixture as root");
+    assert_eq!(
+        nix::unistd::geteuid().as_raw(),
+        0,
+        "run this fixture as root"
+    );
 
     let object_path = env::temp_dir().join(format!(
         "ferro-security-live-{}-{}.o",

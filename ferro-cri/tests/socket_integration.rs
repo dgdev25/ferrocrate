@@ -745,7 +745,9 @@ async fn cri_rootless_bridge_request_fails_before_kernel_mutation() {
 async fn cri_store_publication_crash_recovers_sandbox_metadata() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
     let runtime = tempfile::tempdir().expect("runtime tempdir");
-    let socket = runtime.path().join("cri-sandbox-store-publication-crash.sock");
+    let socket = runtime
+        .path()
+        .join("cri-sandbox-store-publication-crash.sock");
     unsafe {
         std::env::set_var(
             "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",

@@ -505,6 +505,7 @@ fn build_one_stage(
                 .join("cache")
                 .join(format!("stage-{idx}")),
             secrets,
+            context_dir,
         )?;
         let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
         layer_bytes = rebuilt;
@@ -2296,6 +2297,7 @@ struct RunSpec {
     secret_mounts: Vec<SecretMount>,
     ssh_mounts: Vec<SshMount>,
     tmpfs_mounts: Vec<TmpfsMount>,
+    bind_mounts: Vec<BindMount>,
 }
 
 #[derive(Debug, Clone)]
@@ -2320,6 +2322,13 @@ struct SshMount {
 struct TmpfsMount {
     target: String,
     size: Option<u64>,
+    read_only: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BindMount {
+    source: String,
+    target: String,
     read_only: bool,
 }
 
@@ -2383,6 +2392,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     let mut secret_mounts = Vec::new();
     let mut ssh_mounts = Vec::new();
     let mut tmpfs_mounts = Vec::new();
+    let mut bind_mounts = Vec::new();
     while tokens
         .first()
         .is_some_and(|token| token.starts_with("--mount="))
@@ -2391,6 +2401,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         let mut kind = None;
         let mut target = None;
         let mut id = None;
+        let mut source = None;
         let mut tmpfs_size = None;
         let mut read_only = false;
         for option in mount.split(',') {
@@ -2399,7 +2410,9 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 "type" => kind = Some(value),
                 "target" | "dst" | "destination" => target = Some(value),
                 "id" => id = Some(value),
+                "source" | "src" => source = Some(value),
                 "ro" | "readonly" => read_only = true,
+                "rw" => read_only = false,
                 "tmpfs-size" | "size" if !value.is_empty() => {
                     tmpfs_size = Some(parse_limit_value("tmpfs-size", value)?)
                 }
@@ -2469,6 +2482,31 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     read_only,
                 });
             }
+            Some("bind") => {
+                let source = source.unwrap_or(".").trim();
+                if source.is_empty() {
+                    return Err(DockerfileBuildError::Invalid(
+                        "bind mount source must not be empty".to_string(),
+                    ));
+                }
+                let target = target.ok_or_else(|| {
+                    DockerfileBuildError::Invalid("bind mount requires target".to_string())
+                })?;
+                let target = validate_cache_target(target)?;
+                if bind_mounts
+                    .iter()
+                    .any(|mount: &BindMount| mount.target == target)
+                {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "duplicate bind mount target: {target}"
+                    )));
+                }
+                bind_mounts.push(BindMount {
+                    source: source.to_string(),
+                    target,
+                    read_only,
+                });
+            }
             Some(other) => {
                 return Err(DockerfileBuildError::Unsupported(format!(
                     "RUN --mount=type={other} is not supported"
@@ -2487,6 +2525,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
             || !secret_mounts.is_empty()
             || !ssh_mounts.is_empty()
             || !tmpfs_mounts.is_empty()
+            || !bind_mounts.is_empty()
         {
             return Err(DockerfileBuildError::Unsupported(
                 "cache mounts require shell-form RUN".to_string(),
@@ -2500,6 +2539,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
             secret_mounts,
             ssh_mounts,
             tmpfs_mounts,
+            bind_mounts,
         });
     }
     if shell.is_empty() {
@@ -2516,6 +2556,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         secret_mounts,
         ssh_mounts,
         tmpfs_mounts,
+        bind_mounts,
     })
 }
 
@@ -2648,6 +2689,7 @@ fn apply_stage_workdir(rootfs: &Path, workdir: Option<&str>) -> Result<(), Docke
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_stage_commands(
     rootfs: &Path,
     runs: &[RunSpec],
@@ -2656,6 +2698,7 @@ fn run_stage_commands(
     user: Option<&str>,
     cache_root: &Path,
     secrets: &HashMap<String, PathBuf>,
+    context_dir: &Path,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
     let build_limits = load_build_limits()?;
@@ -2788,6 +2831,52 @@ fn run_stage_commands(
             tmpfs_targets.push((target, existed));
         }
         let tmpfs_for_child = tmpfs_specs.clone();
+        let mut bind_specs = Vec::new();
+        let mut bind_seen = HashSet::new();
+        for mount_spec in &run.bind_mounts {
+            let source = safe_context_source(context_dir, &mount_spec.source)?;
+            let source_is_dir = fs::metadata(&source)?.is_dir();
+            let target = validate_mount_target(&rootfs, &mount_spec.target, "bind")?;
+            if !bind_seen.insert(target.clone()) {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "duplicate bind mount target: {}",
+                    mount_spec.target
+                )));
+            }
+            if tmpfs_targets.iter().any(|(path, _)| path == &target) {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "bind mount target overlaps tmpfs target: {}",
+                    mount_spec.target
+                )));
+            }
+            if target.exists() && target.is_dir() != source_is_dir {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "bind mount source/target type mismatch: {}",
+                    mount_spec.target
+                )));
+            }
+            bind_specs.push((source, target, source_is_dir, mount_spec.read_only));
+        }
+        let mut bind_mounted = Vec::new();
+        for (index, (source, target, source_is_dir, read_only)) in bind_specs.iter().enumerate() {
+            let backup = rootfs.join(format!(".ferrocrate-bind-backup-{index}"));
+            let existed = target.exists();
+            if existed {
+                fs::rename(target, &backup)?;
+            } else if *source_is_dir {
+                fs::create_dir_all(target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::File::create(target)?;
+            }
+            bind_mounted.push((source.clone(), target.clone(), backup, existed, *read_only));
+        }
+        let bind_for_child = bind_mounted
+            .iter()
+            .map(|(source, target, _, _, read_only)| (source.clone(), target.clone(), *read_only))
+            .collect::<Vec<_>>();
         // SAFETY: pre_exec runs in the child process between fork and exec to install
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
@@ -2830,6 +2919,31 @@ fn run_stage_commands(
                     .map_err(|err| {
                         io::Error::other(format!("build pre_exec mount tmpfs: {err}"))
                     })?;
+                }
+                #[cfg(unix)]
+                for (source, target, read_only) in &bind_for_child {
+                    mount(
+                        Some(source),
+                        target,
+                        Some("bind"),
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    )
+                    .map_err(|err| {
+                        io::Error::other(format!("build pre_exec mount bind: {err}"))
+                    })?;
+                    if *read_only {
+                        mount(
+                            None::<&str>,
+                            target,
+                            Some("bind"),
+                            MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                            None::<&str>,
+                        )
+                        .map_err(|err| {
+                            io::Error::other(format!("build pre_exec make bind read-only: {err}"))
+                        })?;
+                    }
                 }
                 #[cfg(unix)]
                 for (source, target) in &ssh_for_child {
@@ -2967,6 +3081,16 @@ fn run_stage_commands(
                         let _ = fs::remove_dir_all(target);
                     }
                 }
+                for (_source, target, backup, existed, _) in bind_mounted.iter().rev() {
+                    if target.is_dir() {
+                        let _ = fs::remove_dir_all(target);
+                    } else {
+                        let _ = fs::remove_file(target);
+                    }
+                    if *existed {
+                        fs::rename(backup, target)?;
+                    }
+                }
                 return Err(DockerfileBuildError::Invalid(format!(
                     "RUN sandbox spawn failed: {err}"
                 )));
@@ -3027,6 +3151,16 @@ fn run_stage_commands(
         for (target, existed) in tmpfs_targets.into_iter().rev() {
             if !existed {
                 let _ = fs::remove_dir_all(target);
+            }
+        }
+        for (_source, target, backup, existed, _) in bind_mounted.into_iter().rev() {
+            if target.is_dir() {
+                let _ = fs::remove_dir_all(&target);
+            } else {
+                let _ = fs::remove_file(&target);
+            }
+            if existed {
+                fs::rename(backup, target)?;
             }
         }
         if let Some(err) = cleanup_error {
@@ -4388,6 +4522,15 @@ mod tests {
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }
+    }
+
+    #[test]
+    fn bind_mounts_are_accepted_for_shell_runs() {
+        assert!(parse_run(
+            "--mount=type=bind,source=assets,target=/mnt,ro echo value",
+            &["/bin/sh".into(), "-c".into()]
+        )
+        .is_ok());
     }
 
     #[test]

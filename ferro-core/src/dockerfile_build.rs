@@ -488,6 +488,11 @@ fn build_one_stage(
         let source = safe_context_source(&source_root, &copy.src)?;
         let dest = safe_context_destination(&context_root, &copy.dest)?;
         copy_path_recursive(&source, &dest)?;
+        if let Some(owner) = copy.owner.as_ref() {
+            let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
+            let resolved = CopyOwner::Numeric(uid, gid);
+            apply_copy_owner_recursive(&dest, &resolved)?;
+        }
     }
 
     let (mut layer_bytes, mut layer_media_type) =
@@ -1815,6 +1820,7 @@ struct CopyFromSpec {
     from: String,
     src: String,
     dest: String,
+    owner: Option<CopyOwner>,
 }
 
 #[derive(Debug, Clone)]
@@ -2102,17 +2108,35 @@ fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildE
     }
     let mut idx = 0;
     let mut from = None;
-    if tokens[idx].starts_with("--from=") {
-        from = Some(tokens[idx].trim_start_matches("--from=").to_string());
-        idx += 1;
-    } else if tokens[idx] == "--from" {
-        if tokens.len() <= idx + 1 {
-            return Err(DockerfileBuildError::Invalid(
-                "COPY --from missing stage".to_string(),
-            ));
+    let mut owner = None;
+    while idx < tokens.len() && tokens[idx].starts_with("--") {
+        if tokens[idx].starts_with("--from=") {
+            from = Some(tokens[idx].trim_start_matches("--from=").to_string());
+            idx += 1;
+        } else if tokens[idx] == "--from" {
+            if tokens.len() <= idx + 1 {
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY --from missing stage".to_string(),
+                ));
+            }
+            from = Some(tokens[idx + 1].to_string());
+            idx += 2;
+        } else if tokens[idx].starts_with("--chown=") {
+            owner = Some(parse_copy_owner(
+                tokens[idx].trim_start_matches("--chown="),
+            )?);
+            idx += 1;
+        } else if tokens[idx] == "--chown" {
+            if tokens.len() <= idx + 1 {
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY --chown requires an owner".to_string(),
+                ));
+            }
+            owner = Some(parse_copy_owner(tokens[idx + 1])?);
+            idx += 2;
+        } else {
+            break;
         }
-        from = Some(tokens[idx + 1].to_string());
-        idx += 2;
     }
 
     let Some(from) = from else {
@@ -2128,6 +2152,7 @@ fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildE
         from,
         src: tokens[idx].to_string(),
         dest: tokens[idx + 1].to_string(),
+        owner,
     }))
 }
 
@@ -4743,6 +4768,18 @@ mod tests {
             group: None,
         };
         assert!(resolve_copy_owner(root.path(), &missing).is_err());
+    }
+
+    #[test]
+    fn copy_from_chown_is_parsed_and_retains_owner_spec() {
+        let stages = parse_stages(
+            "FROM scratch AS base\nCOPY source /out\nFROM scratch\nCOPY --from=base --chown=1000:1001 /out /app\n",
+        )
+        .unwrap();
+        assert_eq!(
+            stages[1].copy_from[0].owner,
+            Some(CopyOwner::Numeric(1000, 1001))
+        );
     }
 
     #[test]

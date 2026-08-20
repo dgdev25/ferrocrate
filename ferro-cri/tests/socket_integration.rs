@@ -706,6 +706,102 @@ async fn cri_process_kill_recovers_sqlite_metadata_on_restart() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn cri_store_publication_crash_recovers_sandbox_metadata() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-sandbox-store-publication-crash.sock");
+    unsafe {
+        std::env::set_var(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "cri-fault-injection",
+        );
+        std::env::set_var(
+            "FERROCRATE_CRI_TEST_CRASH_POINT",
+            "after-sandbox-store-publication",
+        );
+    }
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let _transport_error = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "sandbox-store-crash-pod".into(),
+                    uid: "sandbox-store-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "sandbox-store-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect_err("fault injection must terminate after sandbox publication");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon.try_wait().expect("poll CRI crash").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(daemon.try_wait().expect("wait for CRI crash").is_some());
+    unsafe {
+        std::env::remove_var("FERROCRATE_CRI_TEST_CRASH_POINT");
+    }
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    recovered
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("restarted CRI service ready");
+    let payload: Vec<u8> = rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+        .expect("open CRI state")
+        .query_row(
+            "SELECT payload FROM cri_state WHERE kind='sandboxes'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("published sandbox payload");
+    let records: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&payload).expect("decode sandbox payload");
+    let sandbox = records
+        .iter()
+        .find(|(_, record)| record["name"] == "sandbox-store-crash-pod")
+        .map(|(id, _)| id.clone())
+        .expect("published sandbox record");
+    let listed = recovered
+        .list_pod_sandbox(ListPodSandboxRequest { filter: None })
+        .await
+        .expect("list recovered sandbox")
+        .into_inner();
+    assert!(listed.items.iter().any(|item| item.id == sandbox));
+    recovered
+        .stop_pod_sandbox(StopPodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect("stop recovered sandbox");
+    recovered
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox,
+        })
+        .await
+        .expect("remove recovered sandbox");
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    unsafe {
+        std::env::remove_var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cri_store_publication_crash_recovers_container_metadata() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
     let runtime = tempfile::tempdir().expect("runtime tempdir");

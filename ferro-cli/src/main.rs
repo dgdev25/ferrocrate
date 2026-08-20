@@ -13354,6 +13354,22 @@ fn handle_docker_compat_connection(
                 404,
                 "docker: plugin pull is unsupported; install a signed local plugin manifest",
             ),
+            ("POST", path)
+                if path.starts_with("/networks/") && path.ends_with("/connect") =>
+            {
+                docker_error_response(
+                    404,
+                    "docker: network connect is unsupported; containers currently support one durable network attachment",
+                )
+            }
+            ("POST", path)
+                if path.starts_with("/networks/") && path.ends_with("/disconnect") =>
+            {
+                docker_error_response(
+                    404,
+                    "docker: network disconnect is unsupported; containers currently support one durable network attachment",
+                )
+            }
             ("POST", path) if path.starts_with("/images/") && path.ends_with("/push") => {
                 let encoded = path
                     .trim_start_matches("/images/")

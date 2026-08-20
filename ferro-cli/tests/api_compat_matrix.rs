@@ -915,6 +915,21 @@ fn unsupported_plugin_pull_reports_an_explicit_boundary() {
 }
 
 #[test]
+fn unsupported_network_attachment_mutations_report_an_explicit_boundary() {
+    let harness = DaemonHarness::spawn();
+    for operation in ["connect", "disconnect"] {
+        let path = format!("/networks/matrix-network/{operation}");
+        let (status, body) = harness.request("POST", &path, "{}");
+        assert_eq!(status, 404, "{operation} status: {body}");
+        assert!(
+            body.contains(&format!("network {operation} is unsupported"))
+                && body.contains("one durable network attachment"),
+            "{operation} body={body}"
+        );
+    }
+}
+
+#[test]
 fn docker_events_are_durable_and_filterable_over_the_socket() {
     let harness = DaemonHarness::spawn();
     let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"events-volume"}"#);

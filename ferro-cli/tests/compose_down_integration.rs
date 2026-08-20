@@ -77,6 +77,14 @@ fn live_web_record(
 
 #[test]
 fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
+    // The fixture needs a live process that the test user cannot signal. A
+    // root test process can signal PID 1, so there is no portable permission
+    // failure in that mode; retain the test for the unprivileged Compose path
+    // where this regression occurred.
+    if nix::unistd::Uid::effective().is_root() {
+        eprintln!("SKIP: requires an unprivileged caller to exercise stop denial");
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -88,10 +96,11 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id": "00112233445566778899aabbccddeeff",
         "name": "web",
-        // A deliberately absent PID makes the stop phase fail consistently;
-        // PID 1 is signalable by root and would turn this into a false
-        // privilege-dependent success.
-        "pid": 4294967294u64,
+        // PID 1 is live but owned by the host init process. An unprivileged
+        // caller cannot signal it, so the stop phase fails before deletion;
+        // unlike an absent PID, it is not converted to an exited record by
+        // startup reconciliation.
+        "pid": 1u64,
         "image": "example/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "command": ["sleep", "60"],
         "created_at_unix": 1,

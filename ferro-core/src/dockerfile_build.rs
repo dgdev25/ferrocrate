@@ -2839,26 +2839,79 @@ fn has_sensitive_mounts(stages: &[StageSpec]) -> bool {
     })
 }
 
+fn split_dockerfile_tokens(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in raw.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            character if character.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            character => current.push(character),
+        }
+    }
+    if escaped {
+        return Err(DockerfileBuildError::Invalid(
+            "Dockerfile instruction ends with an escape".to_string(),
+        ));
+    }
+    if quote.is_some() {
+        return Err(DockerfileBuildError::Invalid(
+            "Dockerfile instruction has unterminated quotes".to_string(),
+        ));
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
 fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
-    if trimmed.contains('=') {
-        return Ok(trimmed
-            .split_whitespace()
-            .filter(|entry| !entry.trim().is_empty())
-            .map(|entry| entry.to_string())
-            .collect());
+    let tokens = split_dockerfile_tokens(trimmed)?;
+    if tokens.iter().any(|entry| entry.contains('=')) {
+        if tokens
+            .iter()
+            .any(|entry| entry.split_once('=').is_none_or(|(key, _)| key.is_empty()))
+        {
+            return Err(DockerfileBuildError::Invalid(
+                "ENV key=value entries require non-empty keys".to_string(),
+            ));
+        }
+        return Ok(tokens);
     }
 
-    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
     if tokens.len() < 2 {
         return Err(DockerfileBuildError::Invalid(
             "ENV requires key and value".to_string(),
         ));
     }
-    let key = tokens[0];
+    let key = &tokens[0];
     let value = tokens[1..].join(" ");
     Ok(vec![format!("{key}={value}")])
 }
@@ -2869,9 +2922,14 @@ fn parse_labels(raw: &str) -> Result<HashMap<String, String>, DockerfileBuildErr
         return Ok(HashMap::new());
     }
     let mut out = HashMap::new();
-    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    let tokens = split_dockerfile_tokens(trimmed)?;
     for token in tokens {
         if let Some((key, value)) = token.split_once('=') {
+            if key.is_empty() {
+                return Err(DockerfileBuildError::Invalid(
+                    "LABEL key must not be empty".to_string(),
+                ));
+            }
             let value = value.trim_matches('"').trim_matches('\'');
             out.insert(key.to_string(), value.to_string());
         } else {
@@ -4276,10 +4334,10 @@ mod tests {
         build_cache_path, build_from_dockerfile_with_store_and_compression,
         build_stage_dependency_graph, build_stage_execution_batches, dockerignore_matches,
         export_build_cache, file_matches_digest, import_build_cache, layer_blob_path,
-        load_build_cache, load_stage_checkpoints, parse_limit_value, parse_run, parse_stages,
-        prepare_dockerfile_build, prepare_dockerfile_build_with_contexts, prune_build_cache,
-        registry_cache_descriptor, registry_cache_reference, resolve_copy_owner, save_build_cache,
-        stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
+        load_build_cache, load_stage_checkpoints, parse_env, parse_labels, parse_limit_value,
+        parse_run, parse_stages, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
+        prune_build_cache, registry_cache_descriptor, registry_cache_reference, resolve_copy_owner,
+        save_build_cache, stage_checkpoint_path, validate_mount_target, BuildCacheEntry, CopyOwner,
         OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
@@ -4318,6 +4376,33 @@ mod tests {
         assert_eq!(first.canonical_tag(), "registry-1.docker.io/local/app:test");
         assert!(store.list_references().unwrap().is_empty());
         assert!(!runtime.join("build-cache.json").exists());
+    }
+
+    #[test]
+    fn env_and_label_preserve_quoted_values_and_reject_unterminated_quotes() {
+        let env = parse_env(r#"APP_NAME=ferro MODE="fast build" PATH_ESCAPED=hello\ world"#)
+            .expect("quoted ENV values parse");
+        assert_eq!(
+            env,
+            [
+                "APP_NAME=ferro",
+                "MODE=fast build",
+                "PATH_ESCAPED=hello world"
+            ]
+        );
+
+        let labels = parse_labels(r#"org.example.title="Ferro Crate" org.example.kind=runtime"#)
+            .expect("quoted LABEL values parse");
+        assert_eq!(
+            labels.get("org.example.title"),
+            Some(&"Ferro Crate".to_string())
+        );
+        assert_eq!(labels.get("org.example.kind"), Some(&"runtime".to_string()));
+
+        let error = parse_env("BROKEN=\"unterminated").expect_err("unterminated quote");
+        assert!(error.to_string().contains("unterminated quotes"));
+        let error = parse_labels("=missing-key").expect_err("empty label key");
+        assert!(error.to_string().contains("key must not be empty"));
     }
 
     #[test]

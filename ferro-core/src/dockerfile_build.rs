@@ -2295,6 +2295,7 @@ struct RunSpec {
     cache_mounts: Vec<CacheMount>,
     secret_mounts: Vec<SecretMount>,
     ssh_mounts: Vec<SshMount>,
+    tmpfs_mounts: Vec<TmpfsMount>,
 }
 
 #[derive(Debug, Clone)]
@@ -2313,6 +2314,13 @@ struct SecretMount {
 struct SshMount {
     target: String,
     id: String,
+}
+
+#[derive(Debug, Clone)]
+struct TmpfsMount {
+    target: String,
+    size: Option<u64>,
+    read_only: bool,
 }
 
 fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBuildError> {
@@ -2374,6 +2382,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     let mut cache_mounts = Vec::new();
     let mut secret_mounts = Vec::new();
     let mut ssh_mounts = Vec::new();
+    let mut tmpfs_mounts = Vec::new();
     while tokens
         .first()
         .is_some_and(|token| token.starts_with("--mount="))
@@ -2382,13 +2391,19 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         let mut kind = None;
         let mut target = None;
         let mut id = None;
+        let mut tmpfs_size = None;
+        let mut read_only = false;
         for option in mount.split(',') {
             let (key, value) = option.split_once('=').unwrap_or((option, ""));
             match key {
                 "type" => kind = Some(value),
                 "target" | "dst" | "destination" => target = Some(value),
                 "id" => id = Some(value),
-                "ro" | "readonly" | "sharing" | "required" => {}
+                "ro" | "readonly" => read_only = true,
+                "tmpfs-size" | "size" if !value.is_empty() => {
+                    tmpfs_size = Some(parse_limit_value("tmpfs-size", value)?)
+                }
+                "sharing" | "required" => {}
                 _ => {
                     return Err(DockerfileBuildError::Unsupported(format!(
                         "RUN --mount option is not supported: {key}"
@@ -2435,6 +2450,25 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 }
                 ssh_mounts.push(SshMount { target, id });
             }
+            Some("tmpfs") => {
+                let target = target.ok_or_else(|| {
+                    DockerfileBuildError::Invalid("tmpfs mount requires target".to_string())
+                })?;
+                let target = validate_cache_target(target)?;
+                if tmpfs_mounts
+                    .iter()
+                    .any(|mount: &TmpfsMount| mount.target == target)
+                {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "duplicate tmpfs mount target: {target}"
+                    )));
+                }
+                tmpfs_mounts.push(TmpfsMount {
+                    target,
+                    size: tmpfs_size,
+                    read_only,
+                });
+            }
             Some(other) => {
                 return Err(DockerfileBuildError::Unsupported(format!(
                     "RUN --mount=type={other} is not supported"
@@ -2449,7 +2483,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     }
     let command = tokens.join(" ");
     if command.starts_with('[') {
-        if !cache_mounts.is_empty() || !secret_mounts.is_empty() || !ssh_mounts.is_empty() {
+        if !cache_mounts.is_empty()
+            || !secret_mounts.is_empty()
+            || !ssh_mounts.is_empty()
+            || !tmpfs_mounts.is_empty()
+        {
             return Err(DockerfileBuildError::Unsupported(
                 "cache mounts require shell-form RUN".to_string(),
             ));
@@ -2461,6 +2499,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
             cache_mounts,
             secret_mounts,
             ssh_mounts,
+            tmpfs_mounts,
         });
     }
     if shell.is_empty() {
@@ -2476,6 +2515,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
         cache_mounts,
         secret_mounts,
         ssh_mounts,
+        tmpfs_mounts,
     })
 }
 
@@ -2723,6 +2763,31 @@ fn run_stage_commands(
             .iter()
             .map(|(source, target, _, _)| (source.clone(), target.clone()))
             .collect::<Vec<_>>();
+        let mut tmpfs_specs = Vec::new();
+        let mut tmpfs_targets = Vec::new();
+        let mut tmpfs_seen = HashSet::new();
+        for mount_spec in &run.tmpfs_mounts {
+            let target = validate_mount_target(&rootfs, &mount_spec.target, "tmpfs")?;
+            if !tmpfs_seen.insert(target.clone()) {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "duplicate tmpfs mount target: {}",
+                    mount_spec.target
+                )));
+            }
+            let existed = target.exists();
+            if existed && !target.is_dir() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "tmpfs mount target is not a directory: {}",
+                    mount_spec.target
+                )));
+            }
+            if !existed {
+                fs::create_dir_all(&target)?;
+            }
+            tmpfs_specs.push((target.clone(), mount_spec.size, mount_spec.read_only));
+            tmpfs_targets.push((target, existed));
+        }
+        let tmpfs_for_child = tmpfs_specs.clone();
         // SAFETY: pre_exec runs in the child process between fork and exec to install
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
@@ -2746,6 +2811,24 @@ fn run_stage_commands(
                             err.kind(),
                             format!("build pre_exec map user namespace: {err}"),
                         )
+                    })?;
+                }
+                #[cfg(unix)]
+                for (target, size, read_only) in &tmpfs_for_child {
+                    let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
+                    if *read_only {
+                        flags |= MsFlags::MS_RDONLY;
+                    }
+                    let options = size.map(|bytes| format!("size={bytes}"));
+                    mount(
+                        None::<&str>,
+                        target,
+                        Some("tmpfs"),
+                        flags,
+                        options.as_deref(),
+                    )
+                    .map_err(|err| {
+                        io::Error::other(format!("build pre_exec mount tmpfs: {err}"))
                     })?;
                 }
                 #[cfg(unix)]
@@ -2879,6 +2962,11 @@ fn run_stage_commands(
                         fs::rename(backup, target)?;
                     }
                 }
+                for (target, existed) in tmpfs_targets.iter().rev() {
+                    if !existed {
+                        let _ = fs::remove_dir_all(target);
+                    }
+                }
                 return Err(DockerfileBuildError::Invalid(format!(
                     "RUN sandbox spawn failed: {err}"
                 )));
@@ -2934,6 +3022,11 @@ fn run_stage_commands(
             let _ = fs::remove_file(&target);
             if existed {
                 fs::rename(backup, target)?;
+            }
+        }
+        for (target, existed) in tmpfs_targets.into_iter().rev() {
+            if !existed {
+                let _ = fs::remove_dir_all(target);
             }
         }
         if let Some(err) = cleanup_error {
@@ -4266,6 +4359,32 @@ mod tests {
             "--mount=type=cache,target=relative echo value",
             "--mount=type=cache,target=/tmp/../escape echo value",
             "--mount=type=cache,target=/tmp,id=bad/slash echo value",
+        ] {
+            assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn tmpfs_mounts_are_accepted_for_shell_runs() {
+        let run = parse_run(
+            "--mount=type=tmpfs,target=/tmp,tmpfs-size=65536 echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("tmpfs mount parses");
+        assert_eq!(run.tmpfs_mounts.len(), 1);
+        assert_eq!(run.tmpfs_mounts[0].target, "/tmp");
+        assert_eq!(run.tmpfs_mounts[0].size, Some(65_536));
+        assert!(!run.tmpfs_mounts[0].read_only);
+        let read_only = parse_run(
+            "--mount=type=tmpfs,target=/run,tmpfs-size=4096,ro echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("read-only tmpfs mount parses");
+        assert!(read_only.tmpfs_mounts[0].read_only);
+        for invalid in [
+            "--mount=type=tmpfs,target=relative echo value",
+            "--mount=type=tmpfs,target=/tmp,tmpfs-size=0 echo value",
+            "--mount=type=tmpfs,target=/tmp --mount=type=tmpfs,target=/tmp echo value",
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }

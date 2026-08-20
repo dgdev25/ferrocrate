@@ -18,6 +18,8 @@ pub enum ContainerExecError {
     EmptyCommand,
     #[error("failed to execute command: {0}")]
     Io(#[from] std::io::Error),
+    #[error("invalid mount target: {0}")]
+    InvalidMountTarget(String),
 }
 
 /// Execute a command in a rootless container's bubblewrap boundary.
@@ -66,12 +68,16 @@ pub fn exec_in_rootless_rootfs(
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     for (source, target, read_only) in mounts {
+        crate::mounts::normalize_mount_target(Path::new(target))
+            .map_err(|error| ContainerExecError::InvalidMountTarget(error.to_string()))?;
         bwrap
             .arg(if *read_only { "--ro-bind" } else { "--bind" })
             .arg(source)
             .arg(format!("/{target}"));
     }
     for (target, size) in tmpfs_mounts {
+        crate::mounts::normalize_mount_target(Path::new(target))
+            .map_err(|error| ContainerExecError::InvalidMountTarget(error.to_string()))?;
         if size.is_some() {
             return Err(ContainerExecError::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -361,5 +367,22 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("tty"), "output={:?}", result.stdout);
         assert!(result.stderr.is_empty());
+    }
+
+    #[test]
+    fn rootless_mount_target_validation_rejects_traversal_before_bwrap() {
+        let root = tempfile::tempdir().expect("rootfs tempdir");
+        let error = super::exec_in_rootless_rootfs(
+            root.path(),
+            &["/bin/true".to_string()],
+            &[],
+            None,
+            &[("/tmp/source".to_string(), "../escape".to_string(), false)],
+            &[],
+            false,
+            None,
+        )
+        .expect_err("traversal target must fail before helper launch");
+        assert!(error.to_string().contains("invalid mount target"));
     }
 }

@@ -6174,7 +6174,7 @@ fn ensure_stdin_fifo(path: &Path) -> Result<(), RuntimeError> {
 fn wait_until_launch_stopped(pid: u32) -> Result<(), RuntimeError> {
     for _ in 0..500 {
         let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
-        if status.lines().any(|line| line.starts_with("State:\tT")) {
+        if launch_state_is_stopped(&status) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(1));
@@ -6183,6 +6183,14 @@ fn wait_until_launch_stopped(pid: u32) -> Result<(), RuntimeError> {
     Err(RuntimeError::InvalidState(format!(
         "launcher {pid} did not enter the ownership barrier"
     )))
+}
+
+fn launch_state_is_stopped(status: &str) -> bool {
+    status.lines().any(|line| {
+        line.strip_prefix("State:")
+            .and_then(|value| value.trim_start().chars().next())
+            .is_some_and(|state| state == 'T' || state == 't')
+    })
 }
 
 fn release_prepared_child(pid: u32) -> Result<(), RuntimeError> {
@@ -15659,5 +15667,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             super::resolve_rootfs_command(root.path(), "missing"),
             "missing"
         );
+    }
+
+    #[test]
+    fn launch_state_accepts_kernel_stop_and_tracing_stop_states() {
+        assert!(super::launch_state_is_stopped(
+            "Name:\tsh\nState:\tT (stopped)\n"
+        ));
+        assert!(super::launch_state_is_stopped(
+            "Name:\tsh\nState:\tt (tracing stop)\n"
+        ));
+        assert!(!super::launch_state_is_stopped(
+            "Name:\tsh\nState:\tS (sleeping)\n"
+        ));
     }
 }

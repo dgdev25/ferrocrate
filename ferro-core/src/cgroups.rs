@@ -155,7 +155,7 @@ impl CgroupV2Manager {
         }
 
         if let Some(memory_max) = limits.memory_max {
-            write_cgroup_file(&group_path.join("memory.max"), memory_max.to_string())?;
+            write_cgroup_file(group_path.join("memory.max"), memory_max.to_string())?;
         }
 
         if let Some(cpu_max) = &limits.cpu_max {
@@ -166,7 +166,7 @@ impl CgroupV2Manager {
         }
 
         if let Some(pids_max) = limits.pids_max {
-            write_cgroup_file(&group_path.join("pids.max"), pids_max.to_string())?;
+            write_cgroup_file(group_path.join("pids.max"), pids_max.to_string())?;
         }
 
         Ok(())

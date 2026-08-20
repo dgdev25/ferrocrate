@@ -45,6 +45,6 @@ grep -q 'Current comparison snapshot' "$tmp_root/register.md"
 grep -Fq 'Latest benchmark-relevant implementation head: `'"$latest_head"'`' "$tmp_root/register.md"
 grep -q "docker-comparison-current-head-${latest_head}-iptables.md" "$tmp_root/register.md"
 grep -q "docker-comparison-current-head-${latest_head}-nftables.md" "$tmp_root/register.md"
-grep -q '59 unique benchmark IDs' <(bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$tmp_root/register.md")
+grep -q '60 unique benchmark IDs' <(bash "$repo_root/scripts/perf/check-benchmark-register.sh" "$tmp_root/register.md")
 
 echo "benchmark register updater regression checks passed"

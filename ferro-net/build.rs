@@ -5,11 +5,17 @@ use aya_build::{build_ebpf, Package, Toolchain};
 const BPF_TOOLCHAIN: &str = "nightly-2026-02-11";
 const BPF_LINKER_VERSION: &str = "0.10.4";
 const BPF_PACKAGE: &str = "ferro-net-ebpf";
+const SECURITY_BPF_PACKAGE: &str = "ferro-security-ebpf";
 const BPF_INPUTS: &[&str] = &[
     "../ferro-net-ebpf/Cargo.toml",
     "../ferro-net-ebpf/src",
     "../ferro-net-ebpf/src/main.rs",
     "../ferro-net-ebpf/src/abi.rs",
+];
+const SECURITY_BPF_INPUTS: &[&str] = &[
+    "../ferro-security-ebpf/Cargo.toml",
+    "../ferro-security-ebpf/src",
+    "../ferro-security-ebpf/src/main.rs",
 ];
 const BPF_ENVIRONMENT: &[&str] = &[
     "AYA_BUILD_SKIP",
@@ -37,12 +43,20 @@ fn main() {
     require_bpf_linker();
 
     build_ebpf(
-        [Package {
-            name: BPF_PACKAGE,
-            root_dir: "../ferro-net-ebpf",
-            features: &["bpf"],
-            ..Package::default()
-        }],
+        [
+            Package {
+                name: BPF_PACKAGE,
+                root_dir: "../ferro-net-ebpf",
+                features: &["bpf"],
+                ..Package::default()
+            },
+            Package {
+                name: SECURITY_BPF_PACKAGE,
+                root_dir: "../ferro-security-ebpf",
+                features: &["bpf"],
+                ..Package::default()
+            },
+        ],
         Toolchain::Custom(BPF_TOOLCHAIN),
     )
     .unwrap_or_else(|error| {
@@ -68,10 +82,31 @@ fn main() {
     );
 
     println!("cargo:rustc-env=FERRO_NET_EBPF_OBJECT={}", object.display());
+
+    let security_object = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"))
+        .join(SECURITY_BPF_PACKAGE);
+    let security_metadata = fs::metadata(&security_object).unwrap_or_else(|error| {
+        panic!(
+            "aya-build did not produce the expected security eBPF object {}: {error}",
+            security_object.display()
+        )
+    });
+    assert!(
+        security_metadata.is_file() && security_metadata.len() > 0,
+        "aya-build produced an invalid security eBPF object at {}",
+        security_object.display()
+    );
+    println!(
+        "cargo:rustc-env=FERRO_SECURITY_EBPF_OBJECT={}",
+        security_object.display()
+    );
 }
 
 fn emit_rebuild_contract() {
     for input in BPF_INPUTS {
+        println!("cargo:rerun-if-changed={input}");
+    }
+    for input in SECURITY_BPF_INPUTS {
         println!("cargo:rerun-if-changed={input}");
     }
     for variable in BPF_ENVIRONMENT {

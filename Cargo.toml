@@ -6,6 +6,7 @@ members = [
   "ferro-netd",
   "ferro-mgr",
   "ferro-net-ebpf",
+  "ferro-security-ebpf",
   "ferro-mind",
   "ferro-compose",
   "ferro-cli", "ferro-desktop",

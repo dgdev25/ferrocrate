@@ -465,6 +465,9 @@ mod ebpf_abi_tests {
             "../ferro-net-ebpf/src",
             "../ferro-net-ebpf/src/main.rs",
             "../ferro-net-ebpf/src/abi.rs",
+            "../ferro-security-ebpf/Cargo.toml",
+            "../ferro-security-ebpf/src",
+            "../ferro-security-ebpf/src/main.rs",
         ] {
             assert!(build_script.contains(input), "missing rerun input {input}");
         }

@@ -764,6 +764,13 @@ pub fn embedded_object_abi() -> Result<u32, EbpfError> {
     Ok(validate_embedded_object(crate::ebpf_loader::embedded_object())?.program_abi)
 }
 
+/// Return the packaged security-monitor eBPF object bytes produced by the
+/// pinned Aya build. The runtime installer may publish these bytes to its
+/// configured system object path before loading the tracepoint program.
+pub fn embedded_security_object() -> &'static [u8] {
+    include_bytes!(env!("FERRO_SECURITY_EBPF_OBJECT"))
+}
+
 fn validate_config(config: &EbpfNetworkConfig) -> Result<(), EbpfError> {
     validate_network_id(&config.network_id)?;
     if config.interface.is_empty()

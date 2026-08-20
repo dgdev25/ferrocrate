@@ -1,0 +1,19 @@
+[package]
+name = "ferro-security-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+bpf = []
+
+[[bin]]
+name = "ferro-security-ebpf"
+path = "src/main.rs"
+test = false
+bench = false
+required-features = ["bpf"]
+
+[dependencies]
+aya-ebpf = { workspace = true }

@@ -11337,6 +11337,17 @@ fn docker_event_resource(path: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
+    // Docker's legacy event clients still consume the lowercase compatibility
+    // aliases in addition to the modern Type/Action/Actor fields. Keep them
+    // derived from the same durable record so replay and streaming responses
+    // cannot disagree.
+    let id = event.resource.clone().unwrap_or_default();
+    let from = event
+        .attributes
+        .get("Image")
+        .or_else(|| event.attributes.get("image"))
+        .cloned()
+        .unwrap_or_default();
     let actor = event.resource.as_ref().map(|resource| {
         let mut attributes = event.attributes.clone();
         attributes.insert("status".to_string(), event.action.clone());
@@ -11353,6 +11364,9 @@ fn docker_event_payload(event: &DockerEvent) -> serde_json::Value {
         event.time_nano
     };
     serde_json::json!({
+        "status": event.action,
+        "id": id,
+        "from": from,
         "Type": event.event_type,
         "Action": event.action,
         "Actor": actor.unwrap_or_else(|| serde_json::json!({"Attributes": {}})),
@@ -18981,6 +18995,9 @@ volumes:
             ]),
         };
         let payload = docker_event_payload(&event);
+        assert_eq!(payload["status"], "start");
+        assert_eq!(payload["id"], "abc123");
+        assert_eq!(payload["from"], "");
         assert_eq!(payload["Type"], "container");
         assert_eq!(payload["Action"], "start");
         assert_eq!(payload["Actor"]["ID"], "abc123");

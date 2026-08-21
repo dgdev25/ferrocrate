@@ -27,5 +27,8 @@ bash -n "$diagnostic"
 grep -Fq 'setsid "$@"' "$diagnostic"
 grep -Fq 'kill -TERM -- "-$command_pid"' "$diagnostic"
 grep -Fq 'find "$target_dir" -depth -delete' "$diagnostic"
+grep -Fq 'baseline_pin_dirs=' "$diagnostic"
+grep -Fq 'cleanup_created_classifiers' "$diagnostic"
+grep -Fq 'tc filter del dev "$dev" "$direction"' "$diagnostic"
 
 printf '%s\n' 'ebpf-networking-backend=pass'

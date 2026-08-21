@@ -35,7 +35,7 @@ fn create_tar_with_files(path: &Path, entries: &[(&str, &[u8])]) {
         }
         header.set_cksum();
         builder
-            .append(&mut header, Cursor::new(content))
+            .append(&header, Cursor::new(content))
             .expect("append raw entry");
     }
     builder.finish().expect("finish tar");

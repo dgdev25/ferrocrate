@@ -5,7 +5,7 @@ use std::time::Duration;
 
 /// Validates that an image reference matches OCI specification format.
 /// Pattern: [registry/]repository[:tag|@sha256:digest]
-fn validate_image_reference(image: &str) -> Result<(), String> {
+pub fn validate_image_reference(image: &str) -> Result<(), String> {
     // Basic validation: must contain valid characters
     // Full OCI reference regex is complex, this covers common cases
     let valid_chars = |c: char| -> bool {
@@ -21,6 +21,16 @@ fn validate_image_reference(image: &str) -> Result<(), String> {
             "image reference contains invalid characters: {}",
             image
         ));
+    }
+
+    // Reject relative path components. They never occur in a valid
+    // repository name and let a traversal-shaped reference reach downstream
+    // consumers verbatim.
+    if image
+        .split('/')
+        .any(|component| component == "." || component == "..")
+    {
+        return Err("image reference contains path traversal components".to_string());
     }
 
     // Must have at least one repository component
@@ -379,6 +389,32 @@ esac
         // Digest reference with colon before @ is valid
         // e.g., registry:5000/repo@sha256:abc
         assert!(validate_image_reference("registry:5000/repo@sha256:abc").is_ok());
+    }
+
+    #[test]
+    fn validate_image_reference_rejects_path_traversal_components() {
+        for image in [
+            "../../../etc/passwd",
+            "registry.example.com/../repo",
+            "repo/./tag",
+            "repo/..",
+            "..",
+        ] {
+            let err =
+                validate_image_reference(image).expect_err("should reject traversal reference");
+            assert!(
+                err.contains("path traversal"),
+                "unexpected error for {image}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_image_reference_accepts_separator_runs_inside_components() {
+        // Doubled separators inside a component are valid OCI names and must
+        // not be confused for traversal components.
+        assert!(validate_image_reference("foo..bar/baz:tag").is_ok());
+        assert!(validate_image_reference("foo__bar").is_ok());
     }
 
     #[test]

@@ -46,8 +46,14 @@ reserved_ports_before="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports)"
 restore_reserved_ports() {
     sysctl -q -w "net.ipv4.ip_local_reserved_ports=$reserved_ports_before" >/dev/null 2>&1 || true
 }
+stop_capture_processes() {
+    for pid in "${TCPD_PID:-}" "${LO_IN_PID:-}" "${LO_OUT_PID:-}" "${BT1:-}" "${BT2:-}"; do
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    done
+}
 cleanup() {
     restore_reserved_ports
+    stop_capture_processes
     if [[ "$target_dir_owned" == 1 ]]; then
         # A timed cargo process can still be unwinding incremental writes when
         # EXIT runs. Cleanup is best-effort and must not mask the fixture's
@@ -74,12 +80,33 @@ nstat -az > "$OUT/nstat-before.txt" 2>&1 || true
 cat /proc/net/snmp > "$OUT/snmp-before.txt"
 cat /proc/net/netstat > "$OUT/netstat-before.txt"
 
-# Packet captures: "any" covers the veth ingress hop, "lo" covers the
-# redirected loopback ingress hop.
+# Packet captures: "any" covers the veth ingress hop, while separate loopback
+# direction captures distinguish the classifier's ingress handoff from a
+# packet that actually leaves the loopback device.  This is important for the
+# published-port failure: a translated SYN-ACK can be visible on lo without
+# ever reaching the host TCP receive path.
 tcpdump -i any -n -s 0 -w "$OUT/any.pcap" >/dev/null 2>&1 &
 TCPD_PID=$!
-tcpdump -i lo -n -s 0 -w "$OUT/lo.pcap" >/dev/null 2>&1 &
-LO_PID=$!
+tcpdump -i lo -Q in -n -s 0 -w "$OUT/lo-ingress.pcap" >/dev/null 2>&1 &
+LO_IN_PID=$!
+tcpdump -i lo -Q out -n -s 0 -w "$OUT/lo-egress.pcap" >/dev/null 2>&1 &
+LO_OUT_PID=$!
+
+# Snapshot TC counters around the fixture.  Keep this best-effort because
+# minimal guests may not ship tc; the packet captures and tracepoints remain
+# the authoritative artifacts in that case.
+tc_snapshot() {
+    local path="$1"
+    {
+        echo "== lo ingress =="
+        tc -s filter show dev lo ingress 2>&1 || true
+        echo "== lo egress =="
+        tc -s filter show dev lo egress 2>&1 || true
+        echo "== qdiscs =="
+        tc -s qdisc show 2>&1 || true
+    } > "$path"
+}
+tc_snapshot "$OUT/tc-before.log"
 
 # Drop-site trace: skb:kfree_skb carries the kernel drop_reason enum.
 bpftrace -e 'tracepoint:skb:kfree_skb { printf("KFREE dev=%s reason=%d\n", comm, args->reason); }' \
@@ -106,8 +133,16 @@ RC=${PIPESTATUS[0]}
 set -e
 echo "fixture exit: $RC" >> "$OUT/fixture.log"
 
-kill "$TCPD_PID" "$LO_PID" "$BT1" "$BT2" 2>/dev/null || true
-wait "$TCPD_PID" "$LO_PID" "$BT1" "$BT2" 2>/dev/null || true
+# Capture classifier counters while the per-fixture links and filters still
+# exist.  The post-cleanup snapshot below is retained as a baseline for
+# teardown verification, but cannot explain a redirect that was dropped
+# before cleanup detached its classifier.
+tc_snapshot "$OUT/tc-during.log"
+
+stop_capture_processes
+wait "$TCPD_PID" "$LO_IN_PID" "$LO_OUT_PID" "$BT1" "$BT2" 2>/dev/null || true
+
+tc_snapshot "$OUT/tc-after.log"
 
 # After counters.
 cat /proc/net/snmp > "$OUT/snmp-after.txt"

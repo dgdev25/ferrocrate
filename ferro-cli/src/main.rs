@@ -597,6 +597,25 @@ pub enum RvfCommands {
         #[arg(long)]
         reference: Option<String>,
     },
+    /// Validate an RVF image and plan or execute its launch (native or QEMU).
+    Launch {
+        image: PathBuf,
+        /// Launcher selection: `auto` (default), `native`, or `qemu`.
+        #[arg(long, default_value = "auto", value_parser = validate_launcher_choice)]
+        launcher: String,
+        /// Guest memory in MiB for QEMU launches (16-2048).
+        #[arg(long, default_value_t = ferro_core::rvf_launcher::QEMU_MEMORY_DEFAULT_MIB)]
+        memory: u32,
+        /// Hard wall-clock cap in seconds for QEMU execution (1-300).
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+        /// Write QEMU serial output to this file instead of stdout.
+        #[arg(long)]
+        serial_file: Option<PathBuf>,
+        /// Execute the launch. Without this flag only the plan is printed.
+        #[arg(long)]
+        execute: bool,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -3358,6 +3377,118 @@ fn dispatch_rvf(command: &RvfCommands) -> Result<(), String> {
             Ok(())
         }
         RvfCommands::Import { image, reference } => import_rvf_image(image, reference.as_deref()),
+        RvfCommands::Launch {
+            image,
+            launcher,
+            memory,
+            timeout_secs,
+            serial_file,
+            execute,
+        } => handle_rvf_launch(
+            &image,
+            &launcher,
+            *memory,
+            *timeout_secs,
+            serial_file.as_deref(),
+            *execute,
+        ),
+    }
+}
+
+fn validate_launcher_choice(value: &str) -> Result<String, String> {
+    match value {
+        "auto" | "native" | "qemu" => Ok(value.to_string()),
+        other => Err(format!(
+            "invalid launcher '{other}' (expected auto, native, or qemu)"
+        )),
+    }
+}
+
+/// Validate an RVF image, select native vs QEMU execution, and optionally
+/// boot it. Native launches execute through `ferro run image.rvf`; this
+/// command plans them and points at the run command. QEMU launches boot the
+/// embedded `SEG_KERNEL` under a hard wall-clock deadline.
+fn handle_rvf_launch(
+    image: &Path,
+    launcher: &str,
+    memory_mib: u32,
+    timeout_secs: u64,
+    serial_file: Option<&Path>,
+    execute: bool,
+) -> Result<(), String> {
+    use ferro_core::rvf_launcher as launcher_api;
+
+    let parsed = ferro_core::rvf_image::read_rvf_image(image)
+        .map_err(|error| format!("rvf launch: {error}"))?;
+    let preference = match launcher {
+        "auto" => launcher_api::LauncherPreference::Auto,
+        "native" => launcher_api::LauncherPreference::Native,
+        "qemu" => launcher_api::LauncherPreference::Qemu,
+        other => return Err(format!("rvf launch: unknown launcher '{other}'")),
+    };
+    let kind = launcher_api::select_launcher(
+        &parsed.manifest,
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        preference,
+    )
+    .map_err(|error| format!("rvf launch: {error}"))?;
+
+    match kind {
+        launcher_api::LauncherKind::Native => {
+            if execute {
+                return Err(format!(
+                    "rvf launch: native execution runs through the container runtime; use: ferro run {}",
+                    image.display()
+                ));
+            }
+            println!(
+                "rvf launch: native (image arch {} matches this {}/linux host)",
+                parsed.manifest.arch,
+                std::env::consts::ARCH
+            );
+            println!("rvf launch: run it with: ferro run {}", image.display());
+            Ok(())
+        }
+        launcher_api::LauncherKind::Qemu => {
+            let kernel_dir = tempfile::tempdir().map_err(|error| format!("rvf launch: {error}"))?;
+            let kernel_path = kernel_dir.path().join("vmlinuz");
+            launcher_api::extract_kernel(&parsed, &kernel_path)
+                .map_err(|error| format!("rvf launch: {error}"))?;
+            let serial = match serial_file {
+                Some(path) => launcher_api::SerialOutput::File(path.to_path_buf()),
+                None => launcher_api::SerialOutput::Stdio,
+            };
+            let plan = launcher_api::plan_qemu_launch(
+                &parsed,
+                &kernel_path,
+                memory_mib,
+                timeout_secs,
+                &serial,
+            )
+            .map_err(|error| format!("rvf launch: {error}"))?;
+            println!(
+                "rvf launch: qemu (arch={} memory={}MiB timeout={}s)",
+                parsed.manifest.arch, plan.memory_mib, timeout_secs
+            );
+            // Display only; execution passes each element as a fixed argv item.
+            println!("rvf launch: argv: {}", plan.argv.join(" "));
+            if !execute {
+                println!("rvf launch: dry run; pass --execute to boot");
+                return Ok(());
+            }
+            let outcome = launcher_api::run_qemu_bounded(&plan, true)
+                .map_err(|error| format!("rvf launch: {error}"))?;
+            if outcome.timed_out {
+                println!(
+                    "rvf launch: qemu hit the {timeout_secs}s deadline and was terminated (exit={})",
+                    outcome.status
+                );
+            } else {
+                println!("rvf launch: qemu exited with status {}", outcome.status);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -16164,7 +16295,8 @@ mod tests {
         handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
         handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
         handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
-        handle_unpause, handle_volume, handle_wait, host_build_arch, import_rvf_image_at,
+        handle_unpause, handle_volume, handle_wait, handle_rvf_launch, host_build_arch,
+        import_rvf_image_at,
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
         parse_capabilities, parse_docker_bool_query, parse_docker_create_spec,
         parse_docker_filters, parse_docker_image_search_query, parse_docker_kill_signal,
@@ -16178,7 +16310,8 @@ mod tests {
         validate_docker_container_prune_filters, validate_docker_exec_command,
         validate_docker_exec_create, validate_docker_exec_start,
         validate_docker_image_prune_filters, validate_docker_network_filters,
-        validate_docker_volume_filters, validate_network_backend, validate_network_mode,
+        validate_docker_volume_filters, validate_launcher_choice, validate_network_backend,
+        validate_network_mode,
         validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
         DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
@@ -16834,6 +16967,167 @@ volumes:
             .join("images/blobs")
             .join(parsed.layers[0].digest.replace(':', "_"))
             .exists());
+    }
+
+    #[test]
+    fn rvf_import_rejects_foreign_architecture() {
+        let runtime = configured_cli_runtime("disabled");
+        let layer = b"layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer));
+        let foreign_arch = if host_build_arch() == "x86_64" {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let manifest = ferro_core::rvf_image::FerroImageManifest {
+            arch: foreign_arch.to_string(),
+            ..rvf_manifest_for_layer("foreign/app", &layer_digest, layer.len() as u64)
+        };
+        let image = runtime.path().join("foreign.rvf");
+        std::fs::write(&image, rvf_bytes_for_manifest(&manifest, &layer)).unwrap();
+        let error = import_rvf_image_at(&image, None, runtime.path()).unwrap_err();
+        assert!(
+            error.contains("does not match"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rvf_import_rejects_non_linux_guest_os() {
+        let runtime = configured_cli_runtime("disabled");
+        let layer = b"layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer));
+        let manifest = ferro_core::rvf_image::FerroImageManifest {
+            os: "darwin".to_string(),
+            ..rvf_manifest_for_layer("desktop/app", &layer_digest, layer.len() as u64)
+        };
+        let image = runtime.path().join("darwin.rvf");
+        std::fs::write(&image, rvf_bytes_for_manifest(&manifest, &layer)).unwrap();
+        let error = import_rvf_image_at(&image, None, runtime.path()).unwrap_err();
+        assert!(
+            error.contains("does not match"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rvf_import_rejects_garbage_manifest() {
+        let runtime = configured_cli_runtime("disabled");
+        let image = runtime.path().join("garbage.rvf");
+        let mut bytes = Vec::new();
+        ferro_core::rvf_image::write_rvf(
+            &mut bytes,
+            &[
+                ferro_core::rvf_image::RvfSegment {
+                    seg_type: ferro_core::rvf_image::SEG_MANIFEST,
+                    payload: b"{not json".to_vec(),
+                },
+                ferro_core::rvf_image::RvfSegment {
+                    seg_type: ferro_core::rvf_image::SEG_LAYER,
+                    payload: b"layer".to_vec(),
+                },
+            ],
+        )
+        .unwrap();
+        std::fs::write(&image, bytes).unwrap();
+        assert!(import_rvf_image_at(&image, None, runtime.path()).is_err());
+    }
+
+    #[test]
+    fn rvf_import_round_trip_preserves_layer_bytes() {
+        let runtime = configured_cli_runtime("disabled");
+        let layer = b"round-trip-layer-payload".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer));
+        let manifest = rvf_manifest_for_layer("rt/app", &layer_digest, layer.len() as u64);
+        let image = runtime.path().join("rt.rvf");
+        std::fs::write(&image, rvf_bytes_for_manifest(&manifest, &layer)).unwrap();
+        import_rvf_image_at(&image, None, runtime.path()).expect("import rvf");
+
+        // The published layer blob must be byte-identical to the RVF segment.
+        let blob = runtime
+            .path()
+            .join("images/blobs")
+            .join(layer_digest.replace(':', "_"));
+        assert_eq!(std::fs::read(&blob).unwrap(), layer);
+
+        // The stored manifest must reference the same digest and size.
+        let store = LocalImageStore::open(runtime.path().join("images")).expect("store");
+        let reference =
+            ferro_core::image_tagging::canonicalize_reference("rt/app:latest").unwrap();
+        let record = store
+            .resolve_reference(&reference)
+            .expect("resolve")
+            .expect("imported reference");
+        let parsed = parse_image_manifest(&record.manifest_json).expect("manifest");
+        assert_eq!(parsed.layers.len(), 1);
+        assert_eq!(parsed.layers[0].digest, layer_digest);
+        assert_eq!(parsed.layers[0].size, layer.len() as i64);
+    }
+
+    #[test]
+    fn rvf_launch_dry_run_selects_native_for_matching_host() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let image = temp.path().join("native.rvf");
+        std::fs::write(&image, rvf_image_with_kernel(host_build_arch())).unwrap();
+        handle_rvf_launch(&image, "auto", 256, 30, None, false)
+            .expect("native dry run must succeed");
+        // Forcing qemu must still plan (no execution, binary presence not required).
+        handle_rvf_launch(&image, "qemu", 64, 5, None, false)
+            .expect("forced qemu dry run must plan");
+    }
+
+    #[test]
+    fn rvf_launch_dry_run_plans_qemu_for_foreign_arch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let foreign_arch = if host_build_arch() == "amd64" {
+            "aarch64"
+        } else {
+            "amd64"
+        };
+        let image = temp.path().join("foreign.rvf");
+        std::fs::write(&image, rvf_image_with_kernel(foreign_arch)).unwrap();
+        handle_rvf_launch(&image, "auto", 128, 10, None, false)
+            .expect("foreign-arch dry run must plan qemu");
+        // Forcing native on a foreign arch must fail closed.
+        let error = handle_rvf_launch(&image, "native", 128, 10, None, false).unwrap_err();
+        assert!(error.contains("NativeArchMismatch") || error.contains("arch"), "{error}");
+    }
+
+    #[test]
+    fn rvf_launch_rejects_invalid_choice() {
+        assert!(validate_launcher_choice("auto").is_ok());
+        assert!(validate_launcher_choice("native").is_ok());
+        assert!(validate_launcher_choice("qemu").is_ok());
+        assert!(validate_launcher_choice("hyperv").is_err());
+    }
+
+    #[test]
+    fn parses_rvf_launch_command() {
+        let cli = Cli::parse_from([
+            "ferrocrate", "rvf", "launch", "img.rvf", "--launcher", "qemu", "--memory", "128",
+            "--timeout-secs", "10", "--serial-file", "/tmp/serial.log", "--execute",
+        ]);
+        match cli.command {
+            Commands::Rvf {
+                command:
+                    RvfCommands::Launch {
+                        image,
+                        launcher,
+                        memory,
+                        timeout_secs,
+                        serial_file,
+                        execute,
+                    },
+            } => {
+                assert_eq!(image, PathBuf::from("img.rvf"));
+                assert_eq!(launcher, "qemu");
+                assert_eq!(memory, 128);
+                assert_eq!(timeout_secs, 10);
+                assert_eq!(serial_file, Some(PathBuf::from("/tmp/serial.log")));
+                assert!(execute);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -18192,6 +18486,77 @@ volumes:
             &authorization,
         )
         .expect("rm network");
+    }
+
+    /// Build a manifest fixture for an RVF layer of `size` bytes.
+    fn rvf_manifest_for_layer(
+        name: &str,
+        layer_digest: &str,
+        layer_size: u64,
+    ) -> ferro_core::rvf_image::FerroImageManifest {
+        ferro_core::rvf_image::FerroImageManifest {
+            name: name.to_string(),
+            tag: "latest".to_string(),
+            entrypoint: vec!["/bin/app".to_string()],
+            cmd: vec![],
+            env: vec![],
+            arch: host_build_arch().to_string(),
+            os: "linux".to_string(),
+            created_at: "2026-08-21T00:00:00Z".to_string(),
+            format_version: 1,
+            layer_digest: layer_digest.to_string(),
+            layer_size,
+            overlay_model_type: None,
+        }
+    }
+
+    /// Serialise a two-segment RVF image (manifest + layer).
+    fn rvf_bytes_for_manifest(
+        manifest: &ferro_core::rvf_image::FerroImageManifest,
+        layer: &[u8],
+    ) -> Vec<u8> {
+        let segments = vec![
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: ferro_core::rvf_image::SEG_MANIFEST,
+                payload: serde_json::to_vec(manifest).expect("manifest"),
+            },
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: ferro_core::rvf_image::SEG_LAYER,
+                payload: layer.to_vec(),
+            },
+        ];
+        let mut bytes = Vec::new();
+        ferro_core::rvf_image::write_rvf(&mut bytes, &segments).expect("rvf bytes");
+        bytes
+    }
+
+    /// Serialise a valid three-segment RVF image with a `SEG_KERNEL` payload.
+    fn rvf_image_with_kernel(arch: &str) -> Vec<u8> {
+        use ferro_core::rvf_image::SEG_KERNEL;
+        use sha2::Digest;
+        let layer = b"kernel-boot-layer".to_vec();
+        let layer_digest = format!("sha256:{:x}", sha2::Sha256::digest(&layer));
+        let manifest = ferro_core::rvf_image::FerroImageManifest {
+            arch: arch.to_string(),
+            ..rvf_manifest_for_layer("boot/app", &layer_digest, layer.len() as u64)
+        };
+        let segments = vec![
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: ferro_core::rvf_image::SEG_MANIFEST,
+                payload: serde_json::to_vec(&manifest).expect("manifest"),
+            },
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: ferro_core::rvf_image::SEG_LAYER,
+                payload: layer,
+            },
+            ferro_core::rvf_image::RvfSegment {
+                seg_type: SEG_KERNEL,
+                payload: b"fake-kernel-elf".to_vec(),
+            },
+        ];
+        let mut bytes = Vec::new();
+        ferro_core::rvf_image::write_rvf(&mut bytes, &segments).expect("rvf bytes");
+        bytes
     }
 
     fn configured_cli_runtime(mode: &str) -> tempfile::TempDir {

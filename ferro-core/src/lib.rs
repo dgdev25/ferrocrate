@@ -63,6 +63,7 @@ pub mod pty;
 pub mod registry;
 pub mod runtime_config;
 pub mod rvf_image;
+pub mod rvf_launcher;
 pub mod sqlite_container_store;
 pub mod volume_store;
 pub mod witness;

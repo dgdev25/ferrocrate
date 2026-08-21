@@ -1156,6 +1156,146 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
     assert_eq!(status, 204, "TTY container cleanup response={response}");
 }
 
+/// Docker returns `/containers/{id}/logs` for a non-TTY container as a
+/// multiplexed raw stream: each frame carries a stream id (1=stdout,
+/// 2=stderr) and a big-endian length. The stdout/stderr query selectors
+/// must filter which frames are emitted, and unsupported time bounds must
+/// fail closed instead of silently returning unfiltered output.
+#[test]
+fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/framed-logs:latest");
+    let create_body = r#"{"Image":"compat/framed-logs:latest","Cmd":["/bin/busybox","sh","-c","printf out-line; printf err-line 1>&2"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=framed-logs HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "framed-logs create response={response}");
+
+    let (status, response) = harness.request("POST", "/v1.45/containers/framed-logs/start");
+    assert_eq!(status, 204, "framed-logs start response={response}");
+    let (status, response) =
+        harness.request("POST", "/v1.45/containers/framed-logs/wait?condition=not-running");
+    assert_eq!(status, 200, "framed-logs wait response={response}");
+
+    // Poll until both log streams are durable; bounded like the TTY fixture.
+    let mut frames = Vec::new();
+    for _ in 0..40 {
+        let response = harness.request_bytes_raw(
+            "GET",
+            "/v1.45/containers/framed-logs/logs?stdout=1&stderr=1",
+            "text/plain",
+            b"",
+        );
+        frames = http_body(&response).to_vec();
+        let text = String::from_utf8_lossy(&frames).to_string();
+        if text.contains("out-line") && text.contains("err-line") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let decoded = decode_raw_frames(&frames).expect("combined logs must be framed");
+    assert!(
+        decoded
+            .iter()
+            .any(|(stream, payload)| *stream == 1 && payload == b"out-line"),
+        "stdout frame missing: {decoded:?}"
+    );
+    assert!(
+        decoded
+            .iter()
+            .any(|(stream, payload)| *stream == 2 && payload == b"err-line"),
+        "stderr frame missing: {decoded:?}"
+    );
+
+    let response = harness.request_bytes_raw(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?stdout=1&stderr=0",
+        "text/plain",
+        b"",
+    );
+    let decoded = decode_raw_frames(http_body(&response)).expect("stdout-only logs are framed");
+    assert!(
+        decoded.iter().all(|(stream, _)| *stream == 1),
+        "stdout-only response leaked other streams: {decoded:?}"
+    );
+    assert!(
+        decoded.iter().any(|(_, payload)| payload == b"out-line"),
+        "stdout payload missing: {decoded:?}"
+    );
+
+    let response = harness.request_bytes_raw(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?stdout=0&stderr=1",
+        "text/plain",
+        b"",
+    );
+    let decoded = decode_raw_frames(http_body(&response)).expect("stderr-only logs are framed");
+    assert!(
+        decoded.iter().all(|(stream, _)| *stream == 2),
+        "stderr-only response leaked other streams: {decoded:?}"
+    );
+    assert!(
+        decoded.iter().any(|(_, payload)| payload == b"err-line"),
+        "stderr payload missing: {decoded:?}"
+    );
+
+    let (status, response) =
+        harness.request("GET", "/v1.45/containers/framed-logs/logs?stdout=0&stderr=0");
+    assert_eq!(status, 400, "both streams disabled must fail: {response}");
+    let (status, response) =
+        harness.request("GET", "/v1.45/containers/framed-logs/logs?timestamps=1");
+    assert_eq!(status, 400, "timestamps must fail closed: {response}");
+    assert!(response.contains("timestamps"), "body={response}");
+    let (status, response) =
+        harness.request("GET", "/v1.45/containers/framed-logs/logs?since=5");
+    assert_eq!(status, 400, "nonzero since must fail closed: {response}");
+    let (status, response) =
+        harness.request("GET", "/v1.45/containers/framed-logs/logs?since=not-a-number");
+    assert_eq!(status, 400, "malformed since must fail closed: {response}");
+    let (status, response) = harness.request(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?stdout=1&since=0&until=0&timestamps=0",
+    );
+    assert_eq!(status, 200, "client-default no-op bounds must pass: {response}");
+
+    let (status, response) = harness.request("DELETE", "/v1.45/containers/framed-logs");
+    assert_eq!(status, 204, "framed-logs cleanup response={response}");
+}
+
+/// Decode a complete Docker multiplexed raw stream into (stream id, payload)
+/// frames; any truncated or invalid header is an error.
+fn decode_raw_frames(raw: &[u8]) -> Result<Vec<(u8, &[u8])>, String> {
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+    while offset < raw.len() {
+        if raw.len() - offset < 8 {
+            return Err("truncated frame header".to_string());
+        }
+        let stream = raw[offset];
+        if stream != 1 && stream != 2 {
+            return Err(format!("invalid stream id {stream}"));
+        }
+        let size = u32::from_be_bytes([
+            raw[offset + 4],
+            raw[offset + 5],
+            raw[offset + 6],
+            raw[offset + 7],
+        ]) as usize;
+        offset += 8;
+        let end = offset + size;
+        if end > raw.len() {
+            return Err("truncated frame payload".to_string());
+        }
+        frames.push((stream, &raw[offset..end]));
+        offset = end;
+    }
+    Ok(frames)
+}
+
 #[test]
 fn docker_compat_healthcheck_reaches_healthy_and_reports_streak() {
     if !nix::unistd::geteuid().is_root() {

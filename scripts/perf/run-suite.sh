@@ -104,6 +104,30 @@ fi
 } >"$report_tmp"
 
 failures=0
+
+# Run a fixture in its own process group.  A number of fixtures invoke helper
+# processes (and some invoke Cargo build scripts); killing only the shell on a
+# timeout can otherwise leave those descendants compiling after the runner has
+# returned.  Keep the bound explicit and reap the complete group on expiry.
+run_bounded() {
+  local seconds="$1" log_file="$2"
+  shift 2
+  setsid "$@" >"$log_file" 2>&1 &
+  local command_pid=$!
+  local deadline=$((SECONDS + seconds))
+  while kill -0 "$command_pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      kill -TERM -- "-$command_pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL -- "-$command_pid" 2>/dev/null || true
+      wait "$command_pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$command_pid"
+}
+
 for name in "${SELECTED[@]}"; do
   script="${ROOT_DIR}/${SCRIPT[$name]}"
   started="$(date +%s%N)"
@@ -123,8 +147,7 @@ for name in "${SELECTED[@]}"; do
   fi
   log_file="$(mktemp)"
   if FERROCRATE_PERF_ENFORCE=0 FERROCRATE_PERF_ALLOW_SKIP=1 \
-      timeout --signal=TERM --kill-after=5s "$TIMEOUT_SECONDS" \
-      bash "$script" >"$log_file" 2>&1; then
+      run_bounded "$TIMEOUT_SECONDS" "$log_file" bash "$script"; then
     # A fixture may exit zero after recording an explicit host limitation.
     # Preserve that distinction in the report instead of counting a skip as
     # a successful measurement.

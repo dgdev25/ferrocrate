@@ -3,6 +3,9 @@ set -euo pipefail
 
 SOCK=${FERROCRATE_PERF_SOCKET:-/tmp/ferrocrate-perf.sock}
 IMAGE=${FERROCRATE_PERF_IMAGE:-alpine:latest}
+# Keep the default runnable on hosts that deny unprivileged user namespaces;
+# privileged bridge qualification sets FERROCRATE_PERF_NETWORK_MODE=bridge.
+NETWORK_MODE=${FERROCRATE_PERF_NETWORK_MODE:-none}
 NETWORK_BACKEND=${FERROCRATE_PERF_NETWORK_BACKEND:-iptables}
 MAX_OVERHEAD_KB=${FERROCRATE_PERF_PER_CONTAINER_MAX_KB:-2048}
 ENFORCE=${FERROCRATE_PERF_ENFORCE:-1}
@@ -28,7 +31,7 @@ if ! ps -p "$PID" >/dev/null 2>&1; then
 fi
 base_rss=$(ps -o rss= -p "$PID" | awk '{print $1+0}')
 ./target/release/ferro-cli pull "$IMAGE" >/dev/null 2>&1 || true
-if ! ./target/release/ferro-cli run --rm --network-backend "$NETWORK_BACKEND" "$IMAGE" true >/dev/null 2>&1; then
+if ! ./target/release/ferro-cli run --rm --network "$NETWORK_MODE" --network-backend "$NETWORK_BACKEND" "$IMAGE" true >/dev/null 2>&1; then
   kill "$PID" >/dev/null 2>&1 || true
   rm -f "$SOCK"
   if [ "${ALLOW_SKIP}" = "1" ]; then

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 IMAGE=${FERROCRATE_PERF_IMAGE:-alpine:latest}
+# Keep the default runnable on hosts that deny unprivileged user namespaces;
+# privileged bridge qualification sets FERROCRATE_PERF_NETWORK_MODE=bridge.
+NETWORK_MODE=${FERROCRATE_PERF_NETWORK_MODE:-none}
 NETWORK_BACKEND=${FERROCRATE_PERF_NETWORK_BACKEND:-iptables}
 WARM_RUNS=${FERROCRATE_PERF_WARM_RUNS:-5}
 COLD_SLO_MS=${FERROCRATE_PERF_STARTUP_COLD_SLO_MS:-100}
@@ -17,7 +20,7 @@ fi
 
 # Cold run: first execution after pull.
 start_ns=$(date +%s%N)
-if ! ./target/release/ferro-cli run --rm --network-backend "$NETWORK_BACKEND" "$IMAGE" true >/dev/null 2>&1; then
+if ! ./target/release/ferro-cli run --rm --network "$NETWORK_MODE" --network-backend "$NETWORK_BACKEND" "$IMAGE" true >/dev/null 2>&1; then
   if [ "${ALLOW_SKIP}" = "1" ]; then
     echo "perf.startup_skipped=1"
     echo "perf.startup_skip_reason=run_failed"
@@ -33,7 +36,7 @@ cold_ms=$(( (end_ns - start_ns) / 1000000 ))
 warm_samples=()
 for _ in $(seq 1 "$WARM_RUNS"); do
   start_ns=$(date +%s%N)
-  if ! ./target/release/ferro-cli run --rm --network-backend "$NETWORK_BACKEND" "$IMAGE" true >/dev/null 2>&1; then
+  if ! ./target/release/ferro-cli run --rm --network "$NETWORK_MODE" --network-backend "$NETWORK_BACKEND" "$IMAGE" true >/dev/null 2>&1; then
     if [ "${ALLOW_SKIP}" = "1" ]; then
       echo "perf.startup_skipped=1"
       echo "perf.startup_skip_reason=warm_run_failed"

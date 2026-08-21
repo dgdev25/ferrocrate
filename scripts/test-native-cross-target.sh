@@ -37,18 +37,30 @@ if [[ ! "$available_kb" =~ ^[0-9]+$ ]] || (( available_kb < min_free_kb )); then
   exit 77
 fi
 target_dir="$(mktemp -d /tmp/ferrocrate-cross-target.XXXXXX)"
+active_pid=""
 cleanup() {
+  # The caller may wrap this script in an outer timeout.  In that case the
+  # shell can receive TERM before run_bounded reaches its own deadline; reap
+  # the exact setsid process group here so Cargo/rustc cannot outlive the
+  # qualification runner and continue consuming CPU or disk.
+  if [[ -n "$active_pid" ]] && kill -0 "$active_pid" 2>/dev/null; then
+    kill -TERM -- "-$active_pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL -- "-$active_pid" 2>/dev/null || true
+    wait "$active_pid" 2>/dev/null || true
+  fi
   if [[ -d "$target_dir" ]]; then
     find "$target_dir" -depth -delete 2>/dev/null || true
   fi
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 run_bounded() {
   local seconds="$1"
   shift
   setsid "$@" &
   local command_pid=$!
+  active_pid="$command_pid"
   local deadline=$((SECONDS + seconds))
   while kill -0 "$command_pid" 2>/dev/null; do
     if (( SECONDS >= deadline )); then
@@ -57,11 +69,13 @@ run_bounded() {
       sleep 1
       kill -KILL -- "-$command_pid" 2>/dev/null || true
       wait "$command_pid" 2>/dev/null || true
+      active_pid=""
       return 124
     fi
     sleep 0.1
   done
   wait "$command_pid"
+  active_pid=""
 }
 
 command -v setsid >/dev/null 2>&1 || {

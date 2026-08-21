@@ -1281,7 +1281,9 @@ mod tests {
             &[provider],
             &RoutingPolicy::default(),
             "hello",
-            std::time::Duration::from_secs(1),
+            // Generous timeout: under parallel test load, process spawn can exceed 1s,
+            // which would surface as Timeout instead of NonZeroExit.
+            std::time::Duration::from_secs(30),
             &budget,
         )
         .unwrap_err();

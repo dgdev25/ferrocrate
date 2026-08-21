@@ -14,7 +14,7 @@ PATH="$repo_root/scripts/test-fixtures:$PATH" \
     --target-dir "$tmp_dir/custom-target" \
     --output-dir "$tmp_dir/release"
 
-test -x "$tmp_dir/custom-target/release/ferro-cli"
+test -x "$tmp_dir/custom-target/x86_64-unknown-linux-gnu/release/ferro-cli"
 test -f "$tmp_dir/release/ferrocrate-v0.0.1-linux-x86_64.tar.gz"
 test -f "$tmp_dir/release/ferrocrate-v0.0.1-linux-x86_64.tar.gz.provenance.json"
 

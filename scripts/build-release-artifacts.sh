@@ -239,10 +239,14 @@ main() {
 
   if [[ "$os" == "windows" ]]; then
     archive_name="ferrocrate-${VERSION}-${os}-${arch}.zip"
-    (cd "$tmpdir" && zip -qr "$OUTPUT_DIR/$archive_name" ferrocrate)
+    # Normalize file timestamps before archiving so repeated builds have the
+    # same bytes when the inputs and toolchain are unchanged.
+    find "$package_dir" -exec touch -h -d '@0' {} +
+    (cd "$tmpdir" && zip -X -q -r "$OUTPUT_DIR/$archive_name" ferrocrate)
   else
     archive_name="ferrocrate-${VERSION}-${os}-${arch}.tar.gz"
-    tar -czf "$OUTPUT_DIR/$archive_name" -C "$tmpdir" ferrocrate
+    tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 \
+      --numeric-owner -czf "$OUTPUT_DIR/$archive_name" -C "$tmpdir" ferrocrate
   fi
 
   checksum_name="ferrocrate-${VERSION}-checksums.txt"

@@ -51,8 +51,10 @@ fi
 container_id=""
 cleanup() {
   if [[ -n "${container_id}" ]]; then
-    FERROCRATE_RUNTIME_DIR="${runtime_dir}" "${cli}" stop "${container_id}" >/dev/null 2>&1 || true
-    FERROCRATE_RUNTIME_DIR="${runtime_dir}" "${cli}" rm "${container_id}" >/dev/null 2>&1 || true
+    timeout --foreground --signal=TERM --kill-after=5s 10s \
+      env FERROCRATE_RUNTIME_DIR="${runtime_dir}" "${cli}" stop "${container_id}" >/dev/null 2>&1 || true
+    timeout --foreground --signal=TERM --kill-after=5s 10s \
+      env FERROCRATE_RUNTIME_DIR="${runtime_dir}" "${cli}" rm "${container_id}" >/dev/null 2>&1 || true
   fi
   if [[ "${runtime_owned}" == 1 ]]; then
     rm -rf -- "${runtime_dir}"
@@ -71,9 +73,10 @@ export FERROCRATE_ROOTLESS_NETNS=1
 export FERROCRATE_NETWORK_BACKEND=iptables
 
 echo "pull: busybox:1.36"
-timeout "${timeout_seconds}s" "${cli}" pull busybox:1.36 >/dev/null
+timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+  "${cli}" pull busybox:1.36 >/dev/null
 
-run_output="$(timeout "${timeout_seconds}s" "${cli}" run \
+run_output="$(timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" "${cli}" run \
   --name "ferro-rootless-publish-${host_port}" \
   --network bridge --network-backend iptables \
   --publish "${host_port}:8080/tcp" busybox:1.36 \

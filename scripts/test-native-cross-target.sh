@@ -29,15 +29,15 @@ fi
 target_dir="$(mktemp -d /tmp/ferrocrate-cross-target.XXXXXX)"
 trap 'rm -rf "$target_dir"' EXIT
 
-/usr/bin/timeout --foreground "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}s" \
+/usr/bin/timeout --foreground --signal=TERM --kill-after=10s "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}s" \
   env CARGO_TARGET_DIR="$target_dir" \
 cargo "+$toolchain" check -p ferro-net --lib --target "$target"
 
-/usr/bin/timeout --foreground "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}s" \
+/usr/bin/timeout --foreground --signal=TERM --kill-after=10s "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}s" \
   env CARGO_TARGET_DIR="$target_dir" \
   cargo "+$toolchain" check -p ferro-core --lib --target "$target"
 
-/usr/bin/timeout --foreground "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}s" \
+/usr/bin/timeout --foreground --signal=TERM --kill-after=10s "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}s" \
   env CARGO_TARGET_DIR="$target_dir" \
   cargo "+$toolchain" check -p ferro-cli --target "$target"
 

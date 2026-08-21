@@ -45,11 +45,13 @@ trap cleanup EXIT
 export FERROCRATE_RUNTIME_DIR="$runtime_dir"
 export FERROCRATE_ROOTLESS_NETNS=1
 export FERROCRATE_NETWORK_BACKEND=iptables
-timeout "$timeout_seconds" "$cli" pull busybox:1.36 >/dev/null 2>&1 || {
+timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+  "$cli" pull busybox:1.36 >/dev/null 2>&1 || {
   echo "rootless TTY image pull failed" >&2
   exit 77
 }
-timeout "$timeout_seconds" "$cli" daemon --docker-compat --socket "$socket" >"$daemon_log" 2>&1 &
+timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+  "$cli" daemon --docker-compat --socket "$socket" >"$daemon_log" 2>&1 &
 daemon_pid=$!
 daemon_ready=0
 for _ in $(seq 1 "$wait_seconds"); do
@@ -91,7 +93,8 @@ inspect="$(curl --silent --show-error --fail --max-time 5 --unix-socket "$socket
   "http://localhost/v1.45/containers/$container_ref/json")"
 grep -q '"Tty":true' <<<"$inspect" || { echo "inspect did not preserve Tty=true" >&2; exit 1; }
 client_result="$runtime_dir/rootless-tty-attach-result"
-timeout "$timeout_seconds" python3 - "$socket" "$client_result" <<'PY' &
+timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+  python3 - "$socket" "$client_result" <<'PY' &
 import pathlib
 import socket
 import sys

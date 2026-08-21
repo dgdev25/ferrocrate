@@ -984,6 +984,51 @@ fn docker_compat_rootful_exec_tty_uses_public_socket() {
 }
 
 #[test]
+fn docker_compat_rootful_tty_container_create_start_and_logs() {
+    if !nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful TTY container fixture: requires root");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/tty-container:latest");
+    let create_body = r#"{"Image":"compat/tty-container:latest","Cmd":["/bin/busybox","sh","-c","printf tty-container"],"Tty":true,"HostConfig":{"NetworkMode":"none"}}"#;
+    let create_request = format!(
+        "POST /v1.45/containers/create?name=tty-container HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create_request);
+    assert_eq!(status, 201, "TTY container create response={response}");
+
+    let (status, response) = harness.request("GET", "/v1.45/containers/tty-container/json");
+    assert_eq!(status, 200, "TTY container inspect response={response}");
+    let inspect: serde_json::Value = serde_json::from_str(&response).expect("TTY inspect JSON");
+    assert_eq!(inspect["Config"]["Tty"], true, "inspect={inspect}");
+
+    let (status, response) = harness.request("POST", "/v1.45/containers/tty-container/start");
+    assert_eq!(status, 204, "TTY container start response={response}");
+
+    let mut logs = String::new();
+    for _ in 0..40 {
+        let (status, response) = harness.request(
+            "GET",
+            "/v1.45/containers/tty-container/logs?stdout=1&stderr=1",
+        );
+        assert_eq!(status, 200, "TTY container logs response={response}");
+        if response.contains("tty-container") {
+            logs = response;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(logs.contains("tty-container"), "TTY logs={logs:?}");
+
+    let (status, response) =
+        harness.request("DELETE", "/v1.45/containers/tty-container?force=true");
+    assert_eq!(status, 204, "TTY container cleanup response={response}");
+}
+
+#[test]
 fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
     let harness = DaemonHarness::spawn();
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect event stream");

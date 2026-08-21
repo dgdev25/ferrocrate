@@ -890,6 +890,7 @@ impl RuntimeService for CriRuntime {
             let mut pending = load_pending_sandbox_networks(&self.runtime_dir);
             pending.insert(record.id.clone(), record.clone());
             persist_pending_sandbox_networks(&self.runtime_dir, &pending)?;
+            maybe_crash_at_start_boundary("after-sandbox-pending-publication");
             ferro_net::create_netns(&netns_name).map_err(|error| {
                 pending.remove(&record.id);
                 let _ = persist_pending_sandbox_networks(&self.runtime_dir, &pending);
@@ -903,6 +904,7 @@ impl RuntimeService for CriRuntime {
                     "configure CRI sandbox loopback: {error}"
                 )));
             }
+            maybe_crash_at_start_boundary("after-sandbox-netns-effect");
             let config = network.config(&netns_name).map_err(Status::internal)?;
             if let Err(error) = ferro_net::sandbox::create_sandbox_network(&config) {
                 let _ = ferro_net::destroy_netns(&netns_name);
@@ -1021,6 +1023,7 @@ impl RuntimeService for CriRuntime {
             return Err(error);
         }
         if let Some(netns_name) = netns_name {
+            maybe_crash_at_start_boundary("after-sandbox-remove-store-publication");
             if let Some(network) = network.as_ref() {
                 let config = match network.config(&netns_name) {
                     Ok(config) => config,
@@ -1055,6 +1058,7 @@ impl RuntimeService for CriRuntime {
                 }
             }
         }
+        maybe_crash_at_start_boundary("after-sandbox-netns-remove-effect");
         if tracks_network {
             let mut pending = load_pending_sandbox_networks(&self.runtime_dir);
             pending.remove(&id);
@@ -1620,6 +1624,7 @@ impl RuntimeService for CriRuntime {
             runtime
                 .remove(&runtime_id)
                 .map_err(|error| Status::internal(error.to_string()))?;
+            maybe_crash_at_start_boundary("after-container-runtime-remove-effect");
         }
         let mut containers = self
             .containers

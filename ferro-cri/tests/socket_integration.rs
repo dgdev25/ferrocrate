@@ -61,6 +61,65 @@ fn spawn_cri_process(runtime: &std::path::Path, socket: &std::path::Path) -> std
         .expect("spawn CRI daemon")
 }
 
+fn running_as_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+fn set_crash_point(point: &str) {
+    unsafe {
+        std::env::set_var(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "cri-fault-injection",
+        );
+        std::env::set_var("FERROCRATE_CRI_TEST_CRASH_POINT", point);
+    }
+}
+
+fn clear_crash_point() {
+    unsafe {
+        std::env::remove_var("FERROCRATE_CRI_TEST_CRASH_POINT");
+    }
+}
+
+fn clear_crash_fixture() {
+    unsafe {
+        std::env::remove_var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE");
+    }
+}
+
+async fn wait_for_cri_crash(daemon: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon.try_wait().expect("poll CRI crash").is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        daemon.try_wait().expect("wait for CRI crash").is_some(),
+        "CRI daemon did not terminate at the injected crash point"
+    );
+}
+
+fn read_cri_state(
+    runtime: &Path,
+    kind: &str,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let payload: Vec<u8> = rusqlite::Connection::open(runtime.join("cri-state.sqlite"))
+        .expect("open CRI state")
+        .query_row(
+            "SELECT payload FROM cri_state WHERE kind=?1",
+            rusqlite::params![kind],
+            |row| row.get(0),
+        )
+        .expect("read CRI state kind");
+    serde_json::from_slice(&payload).expect("decode CRI state kind")
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering() {
@@ -940,15 +999,11 @@ async fn cri_store_publication_crash_recovers_container_metadata() {
 }
 
 #[tokio::test]
+#[ignore = "Requires rootful CRI bridge networking"]
 #[allow(clippy::await_holding_lock)]
 async fn cri_network_effect_crash_is_cleaned_from_pending_state() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
-    if Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
-        .unwrap_or(true)
-    {
+    if !running_as_root() {
         eprintln!("skipping CRI network effect fixture: root is required");
         return;
     }
@@ -1051,15 +1106,11 @@ async fn cri_network_effect_crash_is_cleaned_from_pending_state() {
 }
 
 #[tokio::test]
+#[ignore = "Requires rootful CRI bridge networking"]
 #[allow(clippy::await_holding_lock)]
 async fn cri_remove_sandbox_network_effect_crash_is_reconciled_on_restart() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
-    if Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
-        .unwrap_or(true)
-    {
+    if !running_as_root() {
         eprintln!("skipping CRI remove network effect fixture: root is required");
         return;
     }
@@ -1720,6 +1771,763 @@ async fn cri_stop_recovery_reconciles_runtime_after_effect_crash() {
     let _ = restarted.wait();
     unsafe {
         std::env::remove_var("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE");
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires rootful CRI bridge networking"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_pending_publication_crash_without_kernel_effects_is_reclaimed() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if !running_as_root() {
+        eprintln!("skipping CRI pending publication crash fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-pending-publication-crash.sock");
+    set_crash_point("after-sandbox-pending-publication");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let _ = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "pending-publication-crash-pod".into(),
+                    uid: "pending-publication-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "pending-publication-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "bridge".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect_err("fault injection must terminate before netns creation");
+    wait_for_cri_crash(&mut daemon).await;
+    clear_crash_point();
+
+    let pending = read_cri_state(runtime.path(), "pending-sandbox-networks");
+    let record = pending.values().next().expect("pending network record");
+    let namespace = record["netns_name"]
+        .as_str()
+        .expect("pending namespace")
+        .to_string();
+    let bridge = record["network"]["bridge"]
+        .as_str()
+        .expect("pending bridge")
+        .to_string();
+    assert!(
+        !ferro_net::netns_path(&namespace).exists(),
+        "crash point must fire before the namespace effect"
+    );
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe bridge")
+        .is_none());
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    recovered
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("restarted CRI service ready");
+    assert!(
+        read_cri_state(runtime.path(), "pending-sandbox-networks")
+            .is_empty(),
+        "pending network without kernel effects must be reclaimed on restart"
+    );
+    assert!(
+        !ferro_net::netns_path(&namespace).exists(),
+        "recovery must not recreate the namespace"
+    );
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe bridge after recovery")
+        .is_none());
+    let listed = recovered
+        .list_pod_sandbox(ListPodSandboxRequest { filter: None })
+        .await
+        .expect("list recovered sandboxes")
+        .into_inner();
+    assert!(
+        listed.items.is_empty(),
+        "unpublished sandbox must not reappear after recovery"
+    );
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    clear_crash_fixture();
+}
+
+#[tokio::test]
+#[ignore = "Requires rootful CRI bridge networking"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_netns_effect_crash_is_reconciled_on_restart() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if !running_as_root() {
+        eprintln!("skipping CRI netns effect crash fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-netns-effect-crash.sock");
+    set_crash_point("after-sandbox-netns-effect");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let _ = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "netns-crash-pod".into(),
+                    uid: "netns-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "netns-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "bridge".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect_err("fault injection must terminate after netns creation");
+    wait_for_cri_crash(&mut daemon).await;
+    clear_crash_point();
+
+    let pending = read_cri_state(runtime.path(), "pending-sandbox-networks");
+    let record = pending.values().next().expect("pending network record");
+    let namespace = record["netns_name"]
+        .as_str()
+        .expect("pending namespace")
+        .to_string();
+    let bridge = record["network"]["bridge"]
+        .as_str()
+        .expect("pending bridge")
+        .to_string();
+    assert!(
+        ferro_net::netns_path(&namespace).exists(),
+        "crash point must fire after the namespace effect"
+    );
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe bridge")
+        .is_none());
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    recovered
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("restarted CRI service ready");
+    assert!(
+        read_cri_state(runtime.path(), "pending-sandbox-networks")
+            .is_empty(),
+        "pending network must be reclaimed after namespace-only crash"
+    );
+    assert!(
+        !ferro_net::netns_path(&namespace).exists(),
+        "recovery must remove the leaked namespace"
+    );
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe bridge after recovery")
+        .is_none());
+    let listed = recovered
+        .list_pod_sandbox(ListPodSandboxRequest { filter: None })
+        .await
+        .expect("list recovered sandboxes")
+        .into_inner();
+    assert!(
+        listed.items.is_empty(),
+        "unpublished sandbox must not reappear after recovery"
+    );
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    clear_crash_fixture();
+}
+
+#[tokio::test]
+#[ignore = "Requires rootful CRI bridge networking"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_remove_sandbox_store_crash_is_reconciled_on_restart() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if !running_as_root() {
+        eprintln!("skipping CRI remove store crash fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-remove-store-crash.sock");
+    set_crash_point("after-sandbox-remove-store-publication");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "remove-store-crash-pod".into(),
+                    uid: "remove-store-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "remove-store-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "bridge".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("run bridge sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let _ = client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect_err("fault injection must terminate before network teardown");
+    wait_for_cri_crash(&mut daemon).await;
+    clear_crash_point();
+
+    let sandboxes = read_cri_state(runtime.path(), "sandboxes");
+    assert!(
+        !sandboxes.contains_key(&sandbox),
+        "sandbox removal must already be committed"
+    );
+    let pending = read_cri_state(runtime.path(), "pending-sandbox-networks");
+    let record = pending
+        .get(&sandbox)
+        .expect("pending removed sandbox record");
+    let namespace = record["netns_name"]
+        .as_str()
+        .expect("pending namespace")
+        .to_string();
+    let bridge = record["network"]["bridge"]
+        .as_str()
+        .expect("pending bridge")
+        .to_string();
+    assert!(
+        ferro_net::netns_path(&namespace).exists(),
+        "crash point must fire before namespace teardown"
+    );
+    assert!(
+        ferro_net::observe_bridge_identity(&bridge)
+            .expect("observe leaked bridge")
+            .is_some(),
+        "crash point must fire before bridge teardown"
+    );
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    recovered
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("restarted CRI service ready");
+    assert!(
+        read_cri_state(runtime.path(), "pending-sandbox-networks")
+            .is_empty(),
+        "pending teardown must complete on restart"
+    );
+    assert!(
+        !ferro_net::netns_path(&namespace).exists(),
+        "recovery must remove the leaked namespace"
+    );
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe removed bridge")
+        .is_none());
+    let status = recovered
+        .pod_sandbox_status(PodSandboxStatusRequest {
+            pod_sandbox_id: sandbox,
+            verbose: false,
+        })
+        .await;
+    assert!(
+        status.is_err(),
+        "removed sandbox must stay removed after recovery"
+    );
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    clear_crash_fixture();
+}
+
+#[tokio::test]
+#[ignore = "Requires rootful CRI bridge networking"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_remove_sandbox_netns_crash_clears_pending_idempotently() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if !running_as_root() {
+        eprintln!("skipping CRI remove netns crash fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-remove-netns-crash.sock");
+    set_crash_point("after-sandbox-netns-remove-effect");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "remove-netns-crash-pod".into(),
+                    uid: "remove-netns-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "remove-netns-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "bridge".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("run bridge sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let _ = client
+        .remove_pod_sandbox(RemovePodSandboxRequest {
+            pod_sandbox_id: sandbox.clone(),
+        })
+        .await
+        .expect_err("fault injection must terminate after netns teardown");
+    wait_for_cri_crash(&mut daemon).await;
+    clear_crash_point();
+
+    let pending = read_cri_state(runtime.path(), "pending-sandbox-networks");
+    let record = pending
+        .get(&sandbox)
+        .expect("pending record retained after netns teardown");
+    let namespace = record["netns_name"]
+        .as_str()
+        .expect("pending namespace")
+        .to_string();
+    let bridge = record["network"]["bridge"]
+        .as_str()
+        .expect("pending bridge")
+        .to_string();
+    assert!(
+        !ferro_net::netns_path(&namespace).exists(),
+        "crash point must fire after namespace teardown"
+    );
+    assert!(ferro_net::observe_bridge_identity(&bridge)
+        .expect("observe removed bridge")
+        .is_none());
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    recovered
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("restarted CRI service ready");
+    assert!(
+        read_cri_state(runtime.path(), "pending-sandbox-networks")
+            .is_empty(),
+        "fully torn-down pending record must be reclaimed without new effects"
+    );
+    assert!(!ferro_net::netns_path(&namespace).exists());
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    clear_crash_fixture();
+}
+
+#[tokio::test]
+#[ignore = "Requires rootful OCI execution"]
+#[allow(clippy::await_holding_lock)]
+async fn cri_remove_container_runtime_crash_rebinds_cleared_binding() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    if !running_as_root() {
+        eprintln!("skipping CRI remove container crash fixture: root is required");
+        return;
+    }
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    seed_runnable_fixture_image(runtime.path());
+    let socket = runtime.path().join("cri-remove-container-crash.sock");
+    set_crash_point("after-container-runtime-remove-effect");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let sandbox = client
+        .run_pod_sandbox(RunPodSandboxRequest {
+            config: Some(PodSandboxConfig {
+                metadata: Some(PodSandboxMetadata {
+                    name: "remove-container-crash-pod".into(),
+                    uid: "remove-container-crash-uid".into(),
+                    namespace: "default".into(),
+                    attempt: 1,
+                }),
+                hostname: "remove-container-crash-pod".into(),
+                log_directory: String::new(),
+                dns_config: String::new(),
+                network_namespace: "none".into(),
+            }),
+            runtime_handler: String::new(),
+        })
+        .await
+        .expect("sandbox")
+        .into_inner()
+        .pod_sandbox_id;
+    let container = client
+        .create_container(CreateContainerRequest {
+            pod_sandbox_id: sandbox,
+            config: Some(ContainerConfig {
+                metadata_name: "remove-crash-container".into(),
+                image: "fixture:latest".into(),
+                command: vec!["/bin/busybox".into(), "sleep".into(), "30".into()],
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            sandbox_config: None,
+        })
+        .await
+        .expect("container")
+        .into_inner()
+        .container_id;
+    client
+        .start_container(StartContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect("start container");
+    let _ = client
+        .remove_container(RemoveContainerRequest {
+            container_id: container.clone(),
+        })
+        .await
+        .expect_err("fault injection must terminate after runtime removal");
+    wait_for_cri_crash(&mut daemon).await;
+    clear_crash_point();
+
+    let containers = read_cri_state(runtime.path(), "containers");
+    let record = containers
+        .get(&container)
+        .expect("CRI container record retained after runtime removal");
+    assert!(
+        record["runtime_id"].as_str().is_some(),
+        "crash point must fire before the CRI record removal"
+    );
+
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = recovered
+        .container_status(ContainerStatusRequest {
+            container_id: container.clone(),
+            verbose: false,
+        })
+        .await
+        .expect("recovered status")
+        .into_inner()
+        .status
+        .expect("recovered container");
+    assert_eq!(status.id, container);
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Created as i32,
+        "stale runtime binding must be cleared on recovery"
+    );
+    let containers_after = read_cri_state(runtime.path(), "containers");
+    assert!(
+        containers_after[&container]["runtime_id"].as_str().is_none(),
+        "recovered CRI record must not reference the removed runtime container"
+    );
+    let runtime_records = ferro_core::runtime::ContainerRuntime::new(runtime.path())
+        .expect("open recovered container runtime")
+        .list()
+        .expect("list recovered runtime records");
+    assert!(
+        runtime_records.iter().all(|record| {
+            record
+                .labels
+                .get("io.ferrocrate.cri-container-id")
+                .is_none_or(|value| value != &container)
+        }),
+        "no runtime record for the removed container may survive"
+    );
+    recovered
+        .remove_container(RemoveContainerRequest {
+            container_id: container,
+        })
+        .await
+        .expect("remove retry after recovery");
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    clear_crash_fixture();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_journal_pending_network_without_kernel_effects_is_reclaimed() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let pending = serde_json::json!({
+        "cri-sandbox-journal": {
+            "id": "cri-sandbox-journal",
+            "name": "journal-pending-pod",
+            "uid": "journal-pending-uid",
+            "namespace": "default",
+            "state": "ready",
+            "created_at_unix": 1,
+            "network_mode": "bridge",
+            "attempt": 0,
+            "runtime_handler": "",
+            "netns_name": "cri-journal-absent",
+            "network": {
+                "bridge": "fcjn00",
+                "host_veth": "fcjn01",
+                "peer_veth": "fcjn02",
+                "gateway": "10.240.33.1",
+                "container": "10.240.33.2",
+                "prefix": 30,
+                "mtu": null
+            }
+        }
+    });
+    let connection = rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+        .expect("open seeded CRI state");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS cri_state (
+                kind TEXT PRIMARY KEY NOT NULL,
+                payload BLOB NOT NULL
+            )",
+        )
+        .expect("seed CRI state schema");
+    connection
+        .execute(
+            "INSERT INTO cri_state(kind, payload) VALUES (?1, ?2)",
+            rusqlite::params![
+                "pending-sandbox-networks",
+                serde_json::to_vec(&pending).expect("encode pending journal state")
+            ],
+        )
+        .expect("seed pending journal state");
+    drop(connection);
+    assert!(
+        !ferro_net::netns_path("cri-journal-absent").exists(),
+        "fixture precondition: no kernel namespace exists"
+    );
+    assert!(
+        ferro_net::observe_bridge_identity("fcjn00")
+            .expect("observe seeded bridge")
+            .is_none(),
+        "fixture precondition: no kernel bridge exists"
+    );
+
+    let socket = runtime.path().join("cri-journal-pending.sock");
+    unsafe {
+        std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+    }
+    let socket_for_server = socket.clone();
+    let server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_server).await;
+    });
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    client
+        .status(StatusRequest { verbose: false })
+        .await
+        .expect("recovered CRI service ready");
+
+    assert!(
+        read_cri_state(runtime.path(), "pending-sandbox-networks")
+            .is_empty(),
+        "journal-only pending network must be reclaimed without kernel effects"
+    );
+    assert!(
+        !ferro_net::netns_path("cri-journal-absent").exists(),
+        "recovery must not create kernel effects"
+    );
+    server.abort();
+    let _ = server.await;
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_journal_stale_container_runtime_binding_is_cleared_on_recovery() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let containers = serde_json::json!({
+        "cri-container-stale": {
+            "id": "cri-container-stale",
+            "sandbox_id": "cri-sandbox-stale",
+            "name": "stale-container",
+            "image": "missing:latest",
+            "command": ["true"],
+            "env": [],
+            "runtime_id": "ferro-stale-runtime-id",
+            "created_at_unix": 1
+        }
+    });
+    let connection = rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+        .expect("open seeded CRI state");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS cri_state (
+                kind TEXT PRIMARY KEY NOT NULL,
+                payload BLOB NOT NULL
+            )",
+        )
+        .expect("seed CRI state schema");
+    connection
+        .execute(
+            "INSERT INTO cri_state(kind, payload) VALUES (?1, ?2)",
+            rusqlite::params![
+                "containers",
+                serde_json::to_vec(&containers).expect("encode container journal state")
+            ],
+        )
+        .expect("seed container journal state");
+    drop(connection);
+
+    let socket = runtime.path().join("cri-journal-stale-binding.sock");
+    unsafe {
+        std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+    }
+    let socket_for_server = socket.clone();
+    let server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_server).await;
+    });
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = client
+        .container_status(ContainerStatusRequest {
+            container_id: "cri-container-stale".into(),
+            verbose: false,
+        })
+        .await
+        .expect("recovered status for stale container")
+        .into_inner()
+        .status
+        .expect("recovered container");
+    assert_eq!(status.id, "cri-container-stale");
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Created as i32,
+        "stale runtime binding must be cleared instead of reported as live"
+    );
+    let containers_after = read_cri_state(runtime.path(), "containers");
+    assert!(
+        containers_after["cri-container-stale"]["runtime_id"]
+            .as_str()
+            .is_none(),
+        "durable record must drop the stale runtime binding"
+    );
+    server.abort();
+    let _ = server.await;
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_journal_sandbox_with_missing_netns_reports_notready_and_retains_record() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let sandboxes = serde_json::json!({
+        "cri-sandbox-journal-missing": {
+            "id": "cri-sandbox-journal-missing",
+            "name": "journal-missing-pod",
+            "uid": "journal-missing-uid",
+            "namespace": "default",
+            "state": "ready",
+            "created_at_unix": 1,
+            "network_mode": "bridge",
+            "attempt": 0,
+            "runtime_handler": "",
+            "netns_name": "cri-journal-missing",
+            "network": {
+                "bridge": "fcjn03",
+                "host_veth": "fcjn04",
+                "peer_veth": "fcjn05",
+                "gateway": "10.240.33.5",
+                "container": "10.240.33.6",
+                "prefix": 30,
+                "mtu": null
+            }
+        }
+    });
+    let connection = rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+        .expect("open seeded CRI state");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS cri_state (
+                kind TEXT PRIMARY KEY NOT NULL,
+                payload BLOB NOT NULL
+            )",
+        )
+        .expect("seed CRI state schema");
+    connection
+        .execute(
+            "INSERT INTO cri_state(kind, payload) VALUES (?1, ?2)",
+            rusqlite::params![
+                "sandboxes",
+                serde_json::to_vec(&sandboxes).expect("encode sandbox journal state")
+            ],
+        )
+        .expect("seed sandbox journal state");
+    drop(connection);
+
+    let socket = runtime.path().join("cri-journal-missing-netns.sock");
+    unsafe {
+        std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
+    }
+    let socket_for_server = socket.clone();
+    let server = tokio::spawn(async move {
+        let _ = ferro_cri::server::serve(socket_for_server).await;
+    });
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = client
+        .pod_sandbox_status(PodSandboxStatusRequest {
+            pod_sandbox_id: "cri-sandbox-journal-missing".into(),
+            verbose: false,
+        })
+        .await
+        .expect("sandbox status against missing kernel namespace")
+        .into_inner()
+        .status
+        .expect("sandbox record");
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::PodSandboxState::Notready as i32,
+        "ready-state journal record with no kernel namespace must report Notready"
+    );
+    let listed = client
+        .list_pod_sandbox(ListPodSandboxRequest { filter: None })
+        .await
+        .expect("list sandboxes after reconciliation")
+        .into_inner();
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == "cri-sandbox-journal-missing"),
+        "durable sandbox record must be retained, not deleted"
+    );
+    assert!(
+        read_cri_state(runtime.path(), "pending-sandbox-networks").is_empty(),
+        "reconciliation must not inject pending teardown state for a tracked sandbox"
+    );
+    server.abort();
+    let _ = server.await;
+    unsafe {
+        std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }
 }
 

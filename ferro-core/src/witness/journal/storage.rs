@@ -47,53 +47,6 @@ impl SqliteJournalStore {
         })
     }
 
-    /// Copy a legacy sled tree set into SQLite in one durable transaction.
-    /// The ready marker is created only after SQLite commits, so an interrupted
-    /// copy can be retried without treating a partial database as authoritative.
-    #[cfg(feature = "legacy-sled-importers")]
-    pub(super) fn migrate_from_sled(
-        sled_path: &Path,
-        sqlite_path: &Path,
-        ready_marker: &Path,
-        trees: &[&str],
-    ) -> Result<(), JournalError> {
-        if ready_marker.exists() {
-            return if std::fs::read(ready_marker).ok().as_deref()
-                == Some(b"witness-sqlite-ready-v1")
-            {
-                Ok(())
-            } else {
-                Err(JournalError::Corrupt)
-            };
-        }
-        let legacy = sled::open(sled_path)?;
-        let store = Self::open(sqlite_path)?;
-        store.transaction(|transaction| {
-            for tree_name in trees {
-                let tree = legacy.open_tree(tree_name)?;
-                for entry in tree.iter() {
-                    let (key, value) = entry?;
-                    transaction.put(tree_name, &key, &value)?;
-                }
-            }
-            Ok(())
-        })?;
-        let temporary = ready_marker.with_extension("ready.tmp");
-        let mut marker = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temporary)?;
-        marker.write_all(b"witness-sqlite-ready-v1")?;
-        marker.sync_all()?;
-        std::fs::rename(&temporary, ready_marker)?;
-        if let Some(parent) = ready_marker.parent() {
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
-        }
-        Ok(())
-    }
 
     pub(super) fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>, JournalError> {
         let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
@@ -395,7 +348,6 @@ impl WitnessJournal {
 #[cfg(test)]
 mod sqlite_tests {
     use super::SqliteJournalStore;
-    #[cfg(not(feature = "legacy-sled-importers"))]
     use crate::witness::{JournalConfig, JournalMode, WitnessJournal};
     use tempfile::tempdir;
 
@@ -441,7 +393,6 @@ mod sqlite_tests {
         assert_eq!(store.get("meta", b"head").unwrap(), None);
     }
 
-    #[cfg(not(feature = "legacy-sled-importers"))]
     #[test]
     fn witness_open_rejects_legacy_directory_by_default() {
         let directory = tempdir().unwrap();
@@ -455,45 +406,5 @@ mod sqlite_tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("legacy-sled-importers"));
-    }
-
-    #[cfg(feature = "legacy-sled-importers")]
-    #[test]
-    fn sqlite_store_migrates_legacy_trees_before_marking_ready() {
-        let directory = tempdir().unwrap();
-        let sled_path = directory.path().join("witness.sled");
-        let sqlite_path = directory.path().join("witness.sqlite3");
-        let marker_path = directory.path().join("witness.sqlite3.ready");
-        let legacy = sled::open(&sled_path).unwrap();
-        legacy
-            .open_tree("witness-meta-v2")
-            .unwrap()
-            .insert(b"head", b"1")
-            .unwrap();
-        legacy
-            .open_tree("witness-records-v2")
-            .unwrap()
-            .insert([0, 0, 0, 1], b"record")
-            .unwrap();
-        legacy.flush().unwrap();
-        drop(legacy);
-
-        SqliteJournalStore::migrate_from_sled(
-            &sled_path,
-            &sqlite_path,
-            &marker_path,
-            &["witness-meta-v2", "witness-records-v2"],
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(&marker_path).unwrap(),
-            b"witness-sqlite-ready-v1"
-        );
-        let store = SqliteJournalStore::open(&sqlite_path).unwrap();
-        assert_eq!(
-            store.get("witness-meta-v2", b"head").unwrap(),
-            Some(b"1".to_vec())
-        );
-        assert_eq!(store.scan("witness-records-v2").unwrap().len(), 1);
     }
 }

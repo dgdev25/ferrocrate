@@ -1,37 +1,34 @@
-# Legacy sled importer boundary
+# Legacy Sled store retirement
 
-FerroCrate's Compose fan-out replay store is SQLite-backed at runtime. The
-historical `compose-replay.db` sled format is supported only by the explicit
-`ferro-compose` `legacy-sled` feature:
+FerroCrate's runtime stores are SQLite-backed: containers
+(`ferro-core/src/sqlite_container_store.rs`), images, volumes, witness
+journal, CRI delegation replay, and Compose fan-out replay. The optional
+`legacy-sled-importers` (ferro-core) and `legacy-sled` (ferro-compose)
+features and the `sled` dependency were removed on 2026-08-21 after the
+migration window closed. The feature-gated importers were verified green
+immediately before removal (see
+`docs/evidence/storage/2026-08-21-sled-compat-removal.md`).
+
+Current contract for a legacy Sled data directory on disk:
+
+- Every store that detects one (image `conf` marker, volume `volumes.db`,
+  container `conf` marker, `witness.sled`, delegation replay `conf` marker,
+  `compose-replay.db/conf`) fails closed with an actionable error that names
+  this document. No store silently ignores, rewrites, or deletes legacy
+  data. Users who still need Sled-era records must use a pre-removal build
+  with the importer feature to export them.
+
+Regression coverage:
 
 ```text
+cargo test -p ferro-core --lib rejects_legacy
+cargo test -p ferro-core --lib default_open_rejects_legacy_replay_directory
+cargo test -p ferro-core --test witness_journal
 cargo test -p ferro-compose
-cargo test -p ferro-compose --features legacy-sled
-cargo test -p ferro-core --features legacy-sled-importers image_store::tests
-cargo test -p ferro-core --features legacy-sled-importers volume_store::tests
-cargo test -p ferro-core --features legacy-sled-importers authorization::cri_delegation::tests
-cargo test -p ferro-core --features legacy-sled-importers witness::journal::storage::sqlite_tests
+bash scripts/test-state-migrations.sh
 ```
 
-Default builds do not include sled in `ferro-compose`'s dependency graph. If a
-legacy replay directory is present without the migration feature, opening the
-store fails closed with an actionable error; it never silently ignores or
-rewrites the old data. The feature-gated regression test verifies byte-level
-replay migration, idempotent claim rejection, and the migration marker.
-
-The same explicit boundary now applies to the ferro-core image and volume
-importers through `legacy-sled-importers`. Default core opens fail closed when
-they discover a legacy Sled directory; the opt-in feature runs the importer and
-retains the rollback source. The active container store and witness compatibility
-importer are also isolated behind `legacy-sled-importers`; default journal opens
-fail closed on legacy directories and the feature-gated test preserves the
-atomic migration and readiness marker. The shared container data model remains
-available in default builds, but the legacy `LocalContainerStore` implementation
-and its Sled dependency are now compiled only with the opt-in feature. The
-remaining work is to retire that compatibility API and remove the feature after
-the supported migration window, not to treat the active runtime as Sled-backed.
-
-The dependency-isolation check is part of `scripts/local-release-gate.sh`:
 `scripts/test-default-dependency-graph.sh` verifies that the default
-`ferro-core` and `ferro-compose` graphs contain none of `sled`, `fxhash`, or
-`instant`, while the migration suites remain explicitly feature-gated.
+`ferro-core` and `ferro-compose` graphs contain none of `sled`, `fxhash`,
+or `instant`. Since the removal, no feature of either crate can reintroduce
+Sled.

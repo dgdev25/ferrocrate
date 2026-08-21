@@ -10,8 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
 use thiserror::Error;
 
-#[cfg(feature = "legacy-sled-importers")]
-const VOLUME_INDEX_TREE: &str = "volume_index";
 const VOLUME_SQLITE_FILE: &str = "volumes.sqlite";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,10 +29,7 @@ pub enum VolumeStoreError {
     Open(#[from] rusqlite::Error),
     #[error("failed to lock volume store: {0}")]
     Lock(String),
-    #[cfg(feature = "legacy-sled-importers")]
-    #[error("failed to read legacy volume store: {0}")]
-    Legacy(#[from] sled::Error),
-    #[error("legacy volume store detected; reopen with the `legacy-sled-importers` feature")]
+    #[error("legacy Sled volume store detected; the Sled importer was removed. See docs/architecture/legacy-sled-importers.md")]
     LegacyMigrationRequired,
     #[error("failed to encode volume record: {0}")]
     Encode(#[from] serde_json::Error),
@@ -164,44 +159,12 @@ fn volume_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VolumeRec
     })
 }
 
-#[cfg(feature = "legacy-sled-importers")]
-fn migrate_legacy_sled(root: &Path, db: &Connection) -> Result<(), VolumeStoreError> {
-    let legacy_path = root.join("volumes.db");
-    let marker = root.join("volumes.sqlite.migrated");
-    if !legacy_path.exists() || marker.exists() {
-        return Ok(());
-    }
-    let legacy = sled::open(&legacy_path)?;
-    let tree = legacy.open_tree(VOLUME_INDEX_TREE)?;
-    for entry in &tree {
-        let (_, value) = entry?;
-        let record =
-            serde_json::from_slice::<VolumeRecord>(&value).map_err(VolumeStoreError::Decode)?;
-        db.execute(
-            "INSERT OR IGNORE INTO volumes
-             (name, path, driver, driver_opts, created_at_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                record.name,
-                record.path,
-                record.driver,
-                serde_json::to_string(&record.driver_opts)?,
-                record.created_at_unix as i64
-            ],
-        )?;
-    }
-    db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
-    fs::write(&marker, b"volume-store-migration-v1\n")?;
-    Ok(())
-}
-
 impl LocalVolumeStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, VolumeStoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
         let db_path = root.join(VOLUME_SQLITE_FILE);
         if !db_path.exists() && root.join("conf").exists() {
-            #[cfg(not(feature = "legacy-sled-importers"))]
             return Err(VolumeStoreError::LegacyMigrationRequired);
         }
         let connection = Connection::open(&db_path)?;
@@ -214,8 +177,6 @@ impl LocalVolumeStore {
                 created_at_unix INTEGER NOT NULL
             )",
         )?;
-        #[cfg(feature = "legacy-sled-importers")]
-        migrate_legacy_sled(&root, &connection)?;
         Ok(Self {
             db: Mutex::new(connection),
             root,
@@ -517,8 +478,6 @@ fn default_driver() -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "legacy-sled-importers")]
-    use super::VolumeRecord;
     use super::{LocalVolumeStore, VolumeStoreError};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -594,36 +553,6 @@ mod tests {
         assert_eq!(restored, "hi");
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
-    #[test]
-    fn migrates_legacy_sled_records_and_keeps_rollback_copy() {
-        let temp = tempfile::tempdir().expect("volume store");
-        let legacy = sled::open(temp.path().join("volumes.db")).expect("legacy db");
-        let tree = legacy.open_tree(super::VOLUME_INDEX_TREE).expect("tree");
-        let record = VolumeRecord {
-            name: "legacy".to_string(),
-            path: temp.path().join("legacy").display().to_string(),
-            driver: "local".to_string(),
-            driver_opts: BTreeMap::new(),
-            created_at_unix: 42,
-        };
-        tree.insert(
-            record.name.as_bytes(),
-            serde_json::to_vec(&record).expect("encode"),
-        )
-        .expect("insert");
-        tree.flush().expect("flush");
-        drop(tree);
-        drop(legacy);
-
-        let store = LocalVolumeStore::open(temp.path()).expect("migrate");
-        assert_eq!(store.get("legacy").unwrap().unwrap(), record);
-        assert!(temp.path().join("volumes.sqlite").is_file());
-        assert!(temp.path().join("volumes.sqlite.migrated").is_file());
-        assert!(temp.path().join("volumes.db").is_dir());
-    }
-
-    #[cfg(not(feature = "legacy-sled-importers"))]
     #[test]
     fn default_open_rejects_legacy_volume_directory() {
         let temp = tempfile::tempdir().unwrap();

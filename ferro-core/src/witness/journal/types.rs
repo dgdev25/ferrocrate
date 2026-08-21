@@ -106,7 +106,7 @@ impl JournalConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
-    #[error("legacy witness journal detected; reopen with the `legacy-sled-importers` feature")]
+    #[error("legacy Sled witness journal detected; the Sled importer was removed. See docs/architecture/legacy-sled-importers.md")]
     LegacyMigrationRequired,
     #[error("witness journal storage schema is unsupported; migrate or start a new epoch")]
     UnsupportedVersion,
@@ -148,9 +148,6 @@ pub enum JournalError {
     ReaderStale,
     #[error("witness journal I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[cfg(feature = "legacy-sled-importers")]
-    #[error("witness journal storage failed: {0}")]
-    Storage(#[from] sled::Error),
     #[error("witness journal sqlite storage failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("witness record failed validation: {0}")]

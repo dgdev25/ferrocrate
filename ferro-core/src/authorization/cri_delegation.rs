@@ -371,30 +371,6 @@ pub struct CriDelegationVerifier {
     replay: Mutex<Connection>,
 }
 
-#[cfg(feature = "legacy-sled-importers")]
-fn migrate_legacy_replay(path: &Path, sqlite: &Connection) -> Result<(), DelegationError> {
-    let marker = format!("{}.sqlite.migrated", path.display());
-    if std::path::Path::new(&marker).exists() || !path.join("conf").exists() {
-        return Ok(());
-    }
-    let legacy = sled::open(path).map_err(|_| DelegationError::ReplayStore)?;
-    for key in legacy.iter().keys() {
-        let key = key.map_err(|_| DelegationError::ReplayStore)?;
-        sqlite
-            .execute(
-                "INSERT OR IGNORE INTO delegation_replay (replay_key) VALUES (?1)",
-                params![key.to_vec()],
-            )
-            .map_err(|_| DelegationError::ReplayStore)?;
-    }
-    sqlite
-        .execute_batch("PRAGMA wal_checkpoint(FULL);")
-        .map_err(|_| DelegationError::ReplayStore)?;
-    std::fs::write(marker, b"cri-delegation-replay-migration-v1\n")
-        .map_err(|_| DelegationError::ReplayStore)?;
-    Ok(())
-}
-
 impl CriDelegationVerifier {
     pub fn policy_digest(&self) -> [u8; 32] {
         self.policy_digest
@@ -423,7 +399,6 @@ impl CriDelegationVerifier {
         std::fs::create_dir_all(&legacy_path).map_err(|_| DelegationError::ReplayStore)?;
         let sqlite_path = PathBuf::from(format!("{}.sqlite", legacy_path.display()));
         if !sqlite_path.exists() && legacy_path.join("conf").exists() {
-            #[cfg(not(feature = "legacy-sled-importers"))]
             return Err(DelegationError::ReplayMigrationRequired);
         }
         let replay = Connection::open(&sqlite_path).map_err(|_| DelegationError::ReplayStore)?;
@@ -444,8 +419,6 @@ impl CriDelegationVerifier {
                 )",
             )
             .map_err(|_| DelegationError::ReplayStore)?;
-        #[cfg(feature = "legacy-sled-importers")]
-        migrate_legacy_replay(&legacy_path, &replay)?;
         Ok(Self {
             keys,
             audience: audience.into(),
@@ -625,48 +598,13 @@ pub enum DelegationError {
     KeyRevoked,
     #[error("durable delegation replay store failed")]
     ReplayStore,
-    #[error("legacy delegation replay detected; reopen with the `legacy-sled-importers` feature")]
+    #[error("legacy Sled delegation replay detected; the Sled importer was removed. See docs/architecture/legacy-sled-importers.md")]
     ReplayMigrationRequired,
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "legacy-sled-importers")]
-    use super::migrate_legacy_replay;
-    #[cfg(feature = "legacy-sled-importers")]
-    use rusqlite::Connection;
 
-    #[cfg(feature = "legacy-sled-importers")]
-    #[test]
-    fn legacy_replay_keys_migrate_idempotently() {
-        let temp = tempfile::tempdir().expect("replay directory");
-        let legacy = sled::open(temp.path()).expect("legacy replay");
-        legacy
-            .insert(b"replay-key", &[1])
-            .expect("insert replay key");
-        legacy.flush().expect("flush replay key");
-        drop(legacy);
-
-        let sqlite_path = format!("{}.sqlite", temp.path().display());
-        let sqlite = Connection::open(&sqlite_path).expect("sqlite replay");
-        sqlite
-            .execute_batch("CREATE TABLE delegation_replay (replay_key BLOB PRIMARY KEY NOT NULL)")
-            .expect("schema");
-        migrate_legacy_replay(temp.path(), &sqlite).expect("migration");
-        migrate_legacy_replay(temp.path(), &sqlite).expect("idempotent migration");
-        let count: u32 = sqlite
-            .query_row("SELECT COUNT(*) FROM delegation_replay", [], |row| {
-                row.get(0)
-            })
-            .expect("count");
-        assert_eq!(count, 1);
-        assert!(
-            std::path::PathBuf::from(format!("{}.sqlite.migrated", temp.path().display()))
-                .is_file()
-        );
-    }
-
-    #[cfg(not(feature = "legacy-sled-importers"))]
     #[test]
     fn default_open_rejects_legacy_replay_directory() {
         let temp = tempfile::tempdir().expect("replay directory");

@@ -191,6 +191,26 @@ timeout -k 2 8 curl --no-buffer --silent --show-error \
 grep -a -q 'ferrocrate-attach-finite' "$runtime_dir/attach-finite.stdout"
 docker -H "$host" rm "$finite_attach_name" >/dev/null
 
+# Verify that bytes sent with the attach request body are forwarded to a
+# PTY-backed workload before the hijacked stream closes.
+stdin_attach_name="docker-cli-attach-stdin-$$"
+docker -H "$host" create --network none --name "$stdin_attach_name" --interactive --tty "$image" \
+  /bin/busybox sh -c 'read value; echo received:$value' >/dev/null
+docker -H "$host" start "$stdin_attach_name" >/dev/null
+stdin_attach_id="$(docker -H "$host" inspect --format '{{.Id}}' "$stdin_attach_name")"
+stdin_attach_status=0
+timeout -k 2 8 curl --no-buffer --silent --show-error \
+  --unix-socket "$socket" -X POST --data-binary $'ferrocrate-input\n' \
+  -H 'Connection: Upgrade' -H 'Upgrade: tcp' \
+  "http://localhost/v1.45/containers/$stdin_attach_id/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1" \
+  >"$runtime_dir/attach-stdin.stdout" || stdin_attach_status=$?
+[[ "$stdin_attach_status" == "0" ]] || {
+  echo "PTY stdin attach returned unexpected status: $stdin_attach_status" >&2
+  exit 1
+}
+grep -a -q 'received:ferrocrate-input' "$runtime_dir/attach-stdin.stdout"
+docker -H "$host" rm "$stdin_attach_name" >/dev/null
+
 # Exercise the real Docker CLI hijack/attach path against a long-lived
 # workload. The API-level handshake tests do not prove that the external
 # client can consume the post-start raw stream and return cleanly. Use the

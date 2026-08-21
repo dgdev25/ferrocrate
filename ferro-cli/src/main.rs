@@ -11765,7 +11765,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut attach_hijack: Option<(String, bool, bool, bool, bool, bool)> = None;
+    let mut attach_hijack: Option<(String, bool, bool, bool, bool, bool, Vec<u8>)> = None;
     let mut exec_hijack_output: Option<Vec<u8>> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
@@ -12295,6 +12295,7 @@ fn handle_docker_compat_connection(
                             stdin_requested,
                             stdout_requested,
                             stderr_requested,
+                            request.body.clone(),
                         ));
                     }
                     docker_hijack_headers()
@@ -13810,6 +13811,7 @@ fn handle_docker_compat_connection(
         stdin_requested,
         stdout_requested,
         stderr_requested,
+        initial_stdin,
     )) = attach_hijack
     {
         let follow_runtime =
@@ -13823,6 +13825,7 @@ fn handle_docker_compat_connection(
             stdin_requested,
             stdout_requested,
             stderr_requested,
+            &initial_stdin,
         )?;
         return Ok(());
     }
@@ -15650,6 +15653,7 @@ fn stream_docker_attach(
     stdin_requested: bool,
     stdout_requested: bool,
     stderr_requested: bool,
+    initial_stdin: &[u8],
 ) -> Result<(), String> {
     // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
     // briefly for the pending record to become a real runtime record instead
@@ -15723,6 +15727,17 @@ fn stream_docker_attach(
     } else {
         None
     };
+    if let Some(stdin) = stdin.as_mut() {
+        if !initial_stdin.is_empty() {
+            use std::io::Write as _;
+            stdin
+                .write_all(initial_stdin)
+                .map_err(|error| format!("docker: writing container stdin: {error}"))?;
+            stdin
+                .flush()
+                .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
+        }
+    }
     stream
         .set_read_timeout(Some(Duration::from_millis(250)))
         .map_err(|error| error.to_string())?;

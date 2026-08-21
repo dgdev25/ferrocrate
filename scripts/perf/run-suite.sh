@@ -109,12 +109,12 @@ for name in "${SELECTED[@]}"; do
   started="$(date +%s%N)"
   if [[ ! -x "$script" ]]; then
     echo "| $name | skipped | — | fixture missing: \`${SCRIPT[$name]}\` |" >>"$report_tmp"
-    ((failures++))
+    failures=$((failures + 1))
     continue
   fi
   if [[ "$name" != "ai-latency" && ! -x "$ROOT_DIR/target/release/ferro-cli" ]]; then
     echo "| $name | skipped | — | target/release/ferro-cli is not built |" >>"$report_tmp"
-    ((failures++))
+    failures=$((failures + 1))
     continue
   fi
   if (( DRY_RUN )); then
@@ -128,11 +128,12 @@ for name in "${SELECTED[@]}"; do
     status="passed"
   else
     status="skipped/failed"
-    ((failures++))
+    failures=$((failures + 1))
   fi
   finished="$(date +%s%N)"
   duration_ms=$(( (finished - started) / 1000000 ))
-  evidence="$(grep -E '^perf\.[A-Za-z0-9_.-]+=' "$log_file" | tr '\n' ';' | sed 's/|/\\|/g' | cut -c1-240)"
+  evidence="$(grep -E '^perf\.[A-Za-z0-9_.-]+=' "$log_file" || true)"
+  evidence="$(printf '%s' "$evidence" | tr '\n' ';' | sed 's/|/\\|/g' | cut -c1-240)"
   [[ -n "$evidence" ]] || evidence="$(tail -n 1 "$log_file" | tr '|' '/')"
   echo "| $name | $status | ${duration_ms}ms | $evidence |" >>"$report_tmp"
   rm -f "$log_file"

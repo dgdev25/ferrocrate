@@ -372,6 +372,39 @@ const API_MATRIX: &[ApiCase] = &[
         body: "",
     },
     ApiCase {
+        method: "GET",
+        // The local process listing is synthetic; an explicit ps argument
+        // set cannot be honored and fails closed.
+        path: "/containers/missing/top?ps_args=-ef",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        // Recognized Docker route without a local websocket implementation.
+        path: "/containers/missing/attach/ws",
+        coverage: Coverage::Unsupported,
+        expected_status: 501,
+        body: "",
+    },
+    ApiCase {
+        method: "PUT",
+        // noOverwriteDirNonDir is validated before the container resolves.
+        path: "/containers/missing/archive?path=%2F&noOverwriteDirNonDir=maybe",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "archive",
+    },
+    ApiCase {
+        method: "POST",
+        // Registry credential verification needs an external registry.
+        path: "/auth",
+        coverage: Coverage::Unsupported,
+        expected_status: 501,
+        body: r#"{"username":"u","password":"p"}"#,
+    },
+    ApiCase {
         method: "POST",
         path: "/containers/missing/attach",
         coverage: Coverage::Implemented,

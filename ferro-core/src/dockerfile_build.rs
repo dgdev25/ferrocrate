@@ -742,10 +742,11 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     journal.completed_stages.clear();
     journal.authorization_plan_digest = authorization_plan_digest.map(str::to_string);
     journal.image_reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
-    save_build_journal(runtime_dir, &journal)?;
-    // Checked after the journal records the attempt so a cancelled build is
-    // always journaled, and before the cache path so a cancelled build never
-    // re-publishes a cached reference either.
+    // Checked before the cache path so a cancelled build never re-publishes a
+    // cached reference. The journal itself is written only when stages will
+    // actually execute: a cache hit must not create build directories, and a
+    // cancelled or failing build is journaled by the outcome paths below.
+    let mut journaled_attempt = false;
     let outcome = control.check("build start").and_then(|()| {
         let mut cache = load_build_cache(runtime_dir)?;
         if !has_sensitive_mounts(&stages) {
@@ -788,6 +789,10 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 }
             }
         }
+        // Stages will execute: record the attempt now so interrupted builds
+        // are resumable. This is the first write that creates the build dir.
+        save_build_journal(runtime_dir, &journal)?;
+        journaled_attempt = true;
         execute_stages_and_publish(
             &stages,
             &base_infos,
@@ -811,8 +816,12 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     });
     match outcome {
         Ok(result) => {
-            journal.state = BuildJournalState::Complete;
-            save_build_journal(runtime_dir, &journal)?;
+            // A pure cache hit never created the build dir; leave no journal
+            // behind either so the no-rebuild invariant holds on disk.
+            if journaled_attempt {
+                journal.state = BuildJournalState::Complete;
+                save_build_journal(runtime_dir, &journal)?;
+            }
             Ok(result)
         }
         Err(error) => {
@@ -5421,7 +5430,7 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournal, BuildJournalState, BuildLimits,
+        BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits,
         CacheSharing, CopyOwner, DockerfileBuildError, OCI_IMAGE_LAYER_MEDIA_TYPE,
         REGISTRY_CACHE_KIND_ANNOTATION, apply_onbuild_triggers, build_cache_key, build_cache_path,
         build_from_dockerfile_with_store_and_compression, build_journal_path,
@@ -6866,6 +6875,7 @@ mod tests {
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
             &HashMap::new(),
             &secrets,
+            None,
         )
         .unwrap_or_else(|err| panic!("secret build succeeds: {err}"));
         assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
@@ -6916,6 +6926,7 @@ mod tests {
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
             &HashMap::new(),
             &HashMap::new(),
+            None,
         ) {
             Err(error) => error,
             Ok(_) => panic!("missing required secret must fail the build"),
@@ -6966,6 +6977,7 @@ mod tests {
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
             &HashMap::new(),
             &HashMap::new(),
+            None,
         )
         .unwrap_or_else(|err| panic!("optional absent secret builds normally: {err}"));
     }
@@ -7014,6 +7026,7 @@ mod tests {
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
             &HashMap::new(),
             &HashMap::new(),
+            None,
         )
         .unwrap_or_else(|err| panic!("ssh mount build succeeds: {err}"));
         assert!(

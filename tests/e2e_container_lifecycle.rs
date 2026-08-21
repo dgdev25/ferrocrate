@@ -641,6 +641,9 @@ CMD ["cat", "/hello.txt"]
                     .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
                     .unwrap_or_else(|| "<logs unavailable>".to_string()),
             );
+            panic!(
+                "eBPF in-namespace service probe failed; refusing to diagnose published-port traffic before the endpoint is healthy"
+            );
         }
         if let Ok(inspect) = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())

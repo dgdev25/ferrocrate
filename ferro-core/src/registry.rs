@@ -1,7 +1,7 @@
 use crate::image_manifest::{parse_image_manifest, ImageManifest, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 use reqwest::blocking::Client;
 use reqwest::header::{
-    HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE,
+    HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, RETRY_AFTER, WWW_AUTHENTICATE,
 };
 use reqwest::Certificate;
 use reqwest::Method;
@@ -369,13 +369,16 @@ impl RegistryClient {
     ) -> Result<reqwest::blocking::Response, RegistryError> {
         let origin = request_origin(url)?;
         let mut last_error: Option<RegistryError> = None;
+        let mut retry_delay_override_ms = None;
 
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
-                let backoff = std::cmp::min(
-                    self.config.initial_backoff_ms * (1 << (attempt - 1)),
-                    self.config.max_backoff_ms,
-                );
+                let backoff = retry_delay_override_ms.take().unwrap_or_else(|| {
+                    std::cmp::min(
+                        self.config.initial_backoff_ms * (1 << (attempt - 1)),
+                        self.config.max_backoff_ms,
+                    )
+                });
                 if backoff > 0 {
                     let jitter = (backoff as f64 * 0.1 * rand::random::<f64>()) as u64;
                     std::thread::sleep(Duration::from_millis(backoff + jitter));
@@ -421,6 +424,11 @@ impl RegistryClient {
 
             let status = response.status();
             if status.as_u16() == 429 || status.as_u16() >= 500 {
+                retry_delay_override_ms = if status.as_u16() == 429 {
+                    retry_after_delay_ms(&response, self.config.max_backoff_ms)
+                } else {
+                    None
+                };
                 last_error = Some(RegistryError::HttpStatus {
                     status: status.as_u16(),
                     body: response.text().unwrap_or_default(),
@@ -525,6 +533,18 @@ impl RegistryClient {
         }
         Ok(())
     }
+}
+
+fn retry_after_delay_ms(
+    response: &reqwest::blocking::Response,
+    max_backoff_ms: u64,
+) -> Option<u64> {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1_000).min(max_backoff_ms))
 }
 
 fn request_origin(url: &str) -> Result<String, RegistryError> {
@@ -969,6 +989,36 @@ mod tests {
         let parsed = client
             .pull_manifest(&image, None)
             .expect("transient responses should be retried");
+        assert_eq!(parsed.schema_version, 2);
+    }
+
+    #[test]
+    fn honors_zero_retry_after_for_rate_limited_manifest() {
+        let server = Server::run();
+        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/test/image/manifests/latest",
+            ))
+            .times(2)
+            .respond_with(cycle![
+                status_code(429).append_header("Retry-After", "0"),
+                status_code(200).body(manifest),
+            ]),
+        );
+
+        let client = RegistryClient::with_config(RegistryClientConfig {
+            timeout_secs: 5,
+            max_retries: 1,
+            initial_backoff_ms: 1_000,
+            max_backoff_ms: 5_000,
+        })
+        .expect("client");
+        let image = format!("{}/test/image", server.addr());
+        let parsed = client
+            .pull_manifest(&image, None)
+            .expect("rate-limited response should be retried");
         assert_eq!(parsed.schema_version, 2);
     }
 

@@ -12264,8 +12264,10 @@ fn handle_docker_compat_connection(
                     }
                 }
                 let (stdout, stderr) = runtime.logs_split(&id).unwrap_or_default();
+                let tty = runtime.inspect(&id).map(|record| record.tty).unwrap_or(false);
                 let output = if logs_requested {
-                    docker_raw_stream(
+                    docker_attach_output(
+                        tty,
                         if stdout_requested { &stdout } else { "" },
                         if stderr_requested { &stderr } else { "" },
                     )
@@ -15666,7 +15668,8 @@ fn stream_docker_attach(
     if record.pid == 0 {
         if logs_requested {
             let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
-            let frame = docker_raw_stream(
+            let frame = docker_attach_output(
+                record.tty,
                 if stdout_requested { &stdout } else { "" },
                 if stderr_requested { &stderr } else { "" },
             );
@@ -15680,7 +15683,8 @@ fn stream_docker_attach(
     let (initial_stdout, initial_stderr) =
         runtime.logs_split(id).map_err(|error| error.to_string())?;
     if logs_requested && (!initial_stdout.is_empty() || !initial_stderr.is_empty()) {
-        let frame = docker_raw_stream(
+        let frame = docker_attach_output(
+            record.tty,
             if stdout_requested {
                 &initial_stdout
             } else {
@@ -15754,7 +15758,8 @@ fn stream_docker_attach(
             emitted_stderr = 0;
         }
         if stdout.len() > emitted_stdout || stderr.len() > emitted_stderr {
-            let frame = docker_raw_stream(
+            let frame = docker_attach_output(
+                record.tty,
                 if stdout_requested {
                     &stdout[emitted_stdout..]
                 } else {
@@ -15775,6 +15780,16 @@ fn stream_docker_attach(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_attach_output(tty: bool, stdout: &str, stderr: &str) -> Vec<u8> {
+    if tty {
+        // Docker's TTY contract is a raw terminal stream: stdout and stderr
+        // share one PTY and must not receive the non-TTY eight-byte headers.
+        return stdout.as_bytes().to_vec();
+    }
+    docker_raw_stream(stdout, stderr)
 }
 
 #[cfg(target_os = "linux")]
@@ -15905,12 +15920,12 @@ mod tests {
         append_export_rootfs, bind_run_network, build_error_is_retryable, build_health_config,
         build_limits, context_endpoint_available, context_endpoint_is_local,
         decode_docker_raw_stream, desktop_forward_enabled, discover_rootless_socket, dispatch,
-        dispatch_remote_context, docker_build_cache_entries, docker_chunked_headers,
-        docker_container_apply_time_bounds, docker_container_matches_filters,
-        docker_container_prune_matches_filters, docker_directory_usage, docker_event_kind,
-        docker_event_payload, docker_event_resource, docker_event_response_attributes,
-        docker_hijack_headers, docker_image_apply_time_bounds, docker_image_is_dangling,
-        docker_image_matches_filters, docker_image_prune_matches_filters,
+        dispatch_remote_context, docker_attach_output, docker_build_cache_entries,
+        docker_chunked_headers, docker_container_apply_time_bounds,
+        docker_container_matches_filters, docker_container_prune_matches_filters,
+        docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
+        docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
+        docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
         docker_pending_inspect_payload, docker_pending_matches_filters,
@@ -19653,6 +19668,15 @@ volumes:
         assert_eq!(u32::from_be_bytes(stream[16..20].try_into().unwrap()), 4);
         assert_eq!(&stream[20..24], b"err\n");
         assert!(docker_raw_stream("", "").is_empty());
+    }
+
+    #[test]
+    fn docker_tty_attach_stream_is_raw_while_non_tty_is_multiplexed() {
+        assert_eq!(docker_attach_output(true, "out\n", "err\n"), b"out\n");
+        assert_eq!(
+            docker_attach_output(false, "out\n", "err\n"),
+            docker_raw_stream("out\n", "err\n")
+        );
     }
 
     #[test]

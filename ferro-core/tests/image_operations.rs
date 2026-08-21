@@ -203,7 +203,6 @@ fn registry_corpus_resolves_platform_manifest_from_manifest_list() {
         .respond_with(status_code(200).body(CHILD_MANIFEST_AMD64)),
     );
 
-    let client = RegistryClient::new().expect("create client");
     let image = format!("{}/library/multiarch:latest", server.addr());
     let binding = ferro_core::image_fetch::inspect_image_binding(&image)
         .expect("platform manifest should resolve");

@@ -487,15 +487,11 @@ fn resolve_manifest_json(
     // The document may be an image index: select the platform manifest and
     // address it through its digest. When index parsing or validation fails,
     // surface that explicit error instead of forwarding an unparseable body.
-    match parse_image_index(&manifest_json) {
-        Ok(index) => {
-            if let Some(digest) = select_platform_manifest(&index.manifests) {
-                let parsed = parse_image_reference(image)?;
-                let reference = format!("{}/{}@{}", parsed.registry, parsed.repository, digest);
-                return Ok(client.pull_manifest_raw(&reference, auth)?);
-            }
-        }
-        Err(index_error) => return Err(index_error.into()),
+    let index = parse_image_index(&manifest_json)?;
+    if let Some(digest) = select_platform_manifest(&index.manifests) {
+        let parsed = parse_image_reference(image)?;
+        let reference = format!("{}/{}@{}", parsed.registry, parsed.repository, digest);
+        return Ok(client.pull_manifest_raw(&reference, auth)?);
     }
 
     Err(manifest_error.into())

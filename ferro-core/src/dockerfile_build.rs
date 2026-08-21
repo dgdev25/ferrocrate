@@ -2730,6 +2730,14 @@ fn interpolate_value(value: &str, env: &[String], args: &HashMap<String, String>
     let mut out = String::new();
     let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
+        // Docker escape: `\$` yields a literal `$` so a variable reference
+        // can reach the shell unexpanded (required for SSH_AUTH_SOCK-style
+        // runtime variables inside RUN).
+        if ch == '\\' && chars.peek().copied() == Some('$') {
+            chars.next();
+            out.push('$');
+            continue;
+        }
         if ch == '$' {
             if let Some('{') = chars.peek().copied() {
                 chars.next();
@@ -3550,6 +3558,7 @@ fn run_stage_commands(
             .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
             .map(PathBuf::from);
         let mut ssh_specs = Vec::new();
+        let mut ssh_env_target: Option<String> = None;
         let mut ssh_sources = HashSet::new();
         for mount_spec in &run.ssh_mounts {
             // The current executor exposes one authorized host agent socket;
@@ -3594,12 +3603,16 @@ fn run_stage_commands(
                     mount_spec.target
                 )));
             }
+            if ssh_env_target.is_none() {
+                ssh_env_target = Some(mount_spec.target.clone());
+            }
             ssh_specs.push((source, target));
         }
-        if let Some((_, ssh_auth_sock_target)) = ssh_specs.first() {
+        if let Some(ssh_auth_sock_target) = &ssh_env_target {
             // BuildKit semantics: inside the RUN the agent socket lives at its
-            // mount point, so SSH_AUTH_SOCK must point at the in-namespace
-            // target. The host selector variable never crosses the boundary.
+            // mount point, so SSH_AUTH_SOCK must name the in-namespace target,
+            // never the host-side rootfs path (which does not exist after
+            // chroot). The host selector variable never crosses the boundary.
             cmd.env("SSH_AUTH_SOCK", ssh_auth_sock_target);
             cmd.env_remove("FERROCRATE_BUILD_SSH_AUTH_SOCK");
         }
@@ -4235,13 +4248,31 @@ fn setup_build_namespace() -> io::Result<()> {
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWNET,
     )
-    .map_err(|err| io::Error::other(err.to_string()))
+    .map_err(|err| io::Error::other(err.to_string()))?;
+    make_mount_namespace_private()
 }
 
 fn setup_build_namespace_root() -> io::Result<()> {
     use nix::sched::{unshare, CloneFlags};
     unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET)
-        .map_err(|err| io::Error::other(err.to_string()))
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    make_mount_namespace_private()
+}
+
+/// Mark the freshly unshared mount namespace private. On hosts whose root
+/// mount is shared (systemd default), bind mounts made inside the new
+/// namespace otherwise propagate back to the parent namespace and leak
+/// past the RUN's lifetime.
+fn make_mount_namespace_private() -> io::Result<()> {
+    use nix::mount::{mount, MsFlags};
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .map_err(|err| io::Error::other(format!("make mount namespace private: {err}")))
 }
 
 fn apply_user_namespace_map() -> io::Result<()> {
@@ -6109,6 +6140,26 @@ mod tests {
     }
 
     #[test]
+    fn interpolate_value_escapes_dollar_with_backslash() {
+        use super::interpolate_value;
+        // Docker semantics: `\$` is a literal `$`, so a runtime-provided
+        // variable such as SSH_AUTH_SOCK can reach the RUN shell unexpanded.
+        let env = vec!["HOME=/root".to_string()];
+        let args = HashMap::new();
+        assert_eq!(
+            interpolate_value("echo \\$SSH_AUTH_SOCK \\$HOME", &env, &args),
+            "echo $SSH_AUTH_SOCK $HOME"
+        );
+        // Unescaped references still expand from ENV.
+        assert_eq!(
+            interpolate_value("\\$HOME=$HOME", &env, &args),
+            "$HOME=/root"
+        );
+        // A lone backslash is preserved.
+        assert_eq!(interpolate_value("a\\b", &env, &args), "a\\b");
+    }
+
+    #[test]
     fn registry_cache_import_fails_closed_without_metadata_layer() {
         let registry = LocalTestRegistry::run();
         let target = tempfile::tempdir().unwrap();
@@ -6434,8 +6485,8 @@ mod tests {
             "FROM scratch\n\
              COPY busybox /busybox\n\
              SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
-             RUN --mount=type=secret,id=token grep -q TEST-SECRET-DO-NOT-USE /run/secrets/token\n\
-             RUN test ! -e /run/secrets/token\n",
+             RUN --mount=type=secret,id=token /busybox grep -q TEST-SECRET-DO-NOT-USE /run/secrets/token\n\
+             RUN /busybox test ! -e /run/secrets/token\n",
         )
         .expect("write dockerfile");
         fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
@@ -6586,8 +6637,8 @@ mod tests {
             "FROM scratch\n\
              COPY busybox /busybox\n\
              SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
-             RUN --mount=type=ssh test -S \"$SSH_AUTH_SOCK\" && test \"$SSH_AUTH_SOCK\" = /run/buildkit/ssh_agent.default\n\
-             RUN test ! -e /run/buildkit/ssh_agent.default\n",
+             RUN --mount=type=ssh /busybox test -S \\$SSH_AUTH_SOCK && /busybox test \\$SSH_AUTH_SOCK = /run/buildkit/ssh_agent.default\n\
+             RUN /busybox test ! -e /run/buildkit/ssh_agent.default\n",
         )
         .expect("write dockerfile");
         fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
@@ -6641,7 +6692,7 @@ mod tests {
             "FROM scratch\n\
              COPY busybox /busybox\n\
              SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
-             RUN --mount=type=secret,id=token grep -q TEST-SECRET-DO-NOT-USE /run/secrets/token\n",
+             RUN --mount=type=secret,id=token /busybox grep -q TEST-SECRET-DO-NOT-USE /run/secrets/token\n",
         )
         .expect("write dockerfile");
         fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
@@ -6675,7 +6726,7 @@ mod tests {
         secrets.insert("token".to_string(), secret_source);
         super::execute_dockerfile_build_authorized_with_secrets(plan, &store, permit, &secrets)
             .unwrap_or_else(|err| panic!("authorized secret build: {err}"));
-        assert!(journal.records().expect("records").len() >= 1);
+        assert!(!journal.records().expect("records").is_empty());
         assert_tree_free_of(&journal_dir, SECRET_NEEDLE, "secret");
     }
 

@@ -991,7 +991,7 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
     }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/tty-container:latest");
-    let create_body = r#"{"Image":"compat/tty-container:latest","Cmd":["/bin/busybox","sh","-c","printf tty-container; sleep 1"],"Tty":true,"HostConfig":{"NetworkMode":"none"}}"#;
+    let create_body = r#"{"Image":"compat/tty-container:latest","Cmd":["/bin/busybox","sh","-c","read line; printf tty-container:$line; sleep 1"],"Tty":true,"HostConfig":{"NetworkMode":"none"}}"#;
     let create_request = format!(
         "POST /v1.45/containers/create?name=tty-container HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         create_body.len(),
@@ -1007,6 +1007,56 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
 
     let (status, response) = harness.request("POST", "/v1.45/containers/tty-container/start");
     assert_eq!(status, 204, "TTY container start response={response}");
+
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect TTY attach socket");
+    stream
+        .write_all(
+            b"POST /v1.45/containers/tty-container/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("write TTY attach handshake");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set TTY attach timeout");
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .expect("read TTY attach headers");
+        headers.push(byte[0]);
+        assert!(headers.len() < 4096, "TTY attach headers are unbounded");
+    }
+    assert!(String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"));
+    stream
+        .write_all(b"ferrocrate-tty\n")
+        .expect("write TTY stdin");
+    stream.flush().expect("flush TTY stdin");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut attach_output = Vec::new();
+    while Instant::now() < deadline
+        && !attach_output
+            .windows(b"tty-container:ferrocrate-tty".len())
+            .any(|window| window == b"tty-container:ferrocrate-tty")
+    {
+        let mut chunk = [0_u8; 4096];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(size) => attach_output.extend_from_slice(&chunk[..size]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("read TTY attach output: {error}"),
+        }
+    }
+    assert!(
+        attach_output
+            .windows(b"tty-container:ferrocrate-tty".len())
+            .any(|window| window == b"tty-container:ferrocrate-tty"),
+        "TTY attach output did not include stdin payload: {:?}",
+        String::from_utf8_lossy(&attach_output)
+    );
 
     let (status, response) =
         harness.request("POST", "/v1.45/containers/tty-container/resize?w=100&h=40");
@@ -1034,6 +1084,35 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
     let restarted: serde_json::Value =
         serde_json::from_str(&response).expect("TTY inspect after restart JSON");
     assert_eq!(restarted["Config"]["Tty"], true, "inspect={restarted}");
+    // Restart launches the original command again, so feed the restarted PTY
+    // the same line before asserting its natural terminal state.
+    let mut restarted_stream =
+        UnixStream::connect(&harness.socket_path).expect("connect restarted TTY attach socket");
+    restarted_stream
+        .write_all(
+            b"POST /v1.45/containers/tty-container/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("write restarted TTY attach handshake");
+    restarted_stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set restarted TTY attach timeout");
+    let mut restarted_headers = Vec::new();
+    let mut restarted_byte = [0_u8; 1];
+    while !restarted_headers.ends_with(b"\r\n\r\n") {
+        restarted_stream
+            .read_exact(&mut restarted_byte)
+            .expect("read restarted TTY attach headers");
+        restarted_headers.push(restarted_byte[0]);
+        assert!(
+            restarted_headers.len() < 4096,
+            "restarted TTY headers are unbounded"
+        );
+    }
+    assert!(String::from_utf8_lossy(&restarted_headers).starts_with("HTTP/1.1 101"));
+    restarted_stream
+        .write_all(b"ferrocrate-tty-restart\n")
+        .expect("write restarted TTY stdin");
+    restarted_stream.flush().expect("flush restarted TTY stdin");
     let mut stopped = false;
     for _ in 0..80 {
         let (status, response) = harness.request("GET", "/v1.45/containers/tty-container/json");

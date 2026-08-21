@@ -41,6 +41,8 @@ use crate::mounts::{
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
 use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, stop_pid, ProcessLifecycleError};
+#[cfg(target_os = "linux")]
+use crate::pty::PtyPair;
 use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
@@ -3040,12 +3042,16 @@ impl ContainerRuntime {
             None
         };
 
+        let tty = std::env::var("FERROCRATE_RUN_TTY")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         let child_id = spawn_process_with_logs(
             &exec_cmd,
             &merged_env,
             &stdout_path,
             &stderr_path,
             false,
+            tty,
             self.store.clone_db(),
             container_id.clone(),
             Some(rootfs_dir.clone()),
@@ -3111,7 +3117,7 @@ impl ContainerRuntime {
             pid: child_id,
             image: image.to_string(),
             command: command.clone(),
-            tty: false,
+            tty,
             workdir: resolved_workdir.clone(),
             user: resolved_user.clone(),
             env: merged_env,
@@ -4015,6 +4021,7 @@ impl ContainerRuntime {
             &stdout_path,
             &stderr_path,
             true,
+            record.tty,
             self.store.clone_db(),
             record.id.clone(),
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
@@ -5509,6 +5516,7 @@ fn spawn_process_with_logs(
     stdout_path: &Path,
     stderr_path: &Path,
     append: bool,
+    tty: bool,
     store: SqliteContainerStore,
     container_id: String,
     rootfs_dir: Option<PathBuf>,
@@ -5541,7 +5549,7 @@ fn spawn_process_with_logs(
         readonly_rootfs,
     )?;
     let (child_id, child, pidfd) =
-        spawn_child_with_logs(command, stdout_path, stderr_path, append)?;
+        spawn_child_with_logs(command, stdout_path, stderr_path, append, tty)?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -5564,6 +5572,7 @@ fn spawn_process_with_logs(
             stdout_path,
             stderr_path,
             append,
+            tty,
             rootfs_dir,
             no_new_privs,
             restart_policy,
@@ -6219,6 +6228,7 @@ fn spawn_child_with_logs(
     stdout_path: &Path,
     stderr_path: &Path,
     append: bool,
+    tty: bool,
 ) -> Result<(u32, Child, OwnedFd), RuntimeError> {
     let stdout_file = if append {
         OpenOptions::new()
@@ -6253,11 +6263,53 @@ fn spawn_child_with_logs(
         .read(true)
         .write(true)
         .open(&stdin_path)?;
-    let child = command
-        .stdin(Stdio::from(stdin_file))
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()?;
+    let child = if tty {
+        let pair = PtyPair::new(24, 80).map_err(RuntimeError::Io)?;
+        let (master, slave) = pair.into_parts();
+        let mut master_reader = std::fs::File::from(master);
+        let mut master_writer = master_reader.try_clone()?;
+        let slave = std::fs::File::from(slave);
+        let mut log = stdout_file;
+        thread::spawn(move || {
+            let _ = io::copy(&mut master_reader, &mut log);
+        });
+        drop(stdin_file);
+        let mut input = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(&stdin_path)?;
+        let child = command
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave))
+            .spawn()?;
+        let child_pid = child.id();
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            while fs::metadata(format!("/proc/{child_pid}")).is_ok() {
+                match input.read(&mut buffer) {
+                    Ok(0) => thread::sleep(Duration::from_millis(5)),
+                    Ok(count) => {
+                        if master_writer.write_all(&buffer[..count]).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        child
+    } else {
+        command
+            .stdin(Stdio::from(stdin_file))
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()?
+    };
     let child_id = child.id();
     let raw_pidfd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, child_id, 0) } as i32;
     if raw_pidfd < 0 {
@@ -6336,6 +6388,7 @@ fn supervise_child(
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     append: bool,
+    tty: bool,
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
     restart_policy: RestartPolicy,
@@ -6510,7 +6563,7 @@ fn supervise_child(
             }
         };
         let (pid, new_child, new_pidfd) =
-            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append) {
+            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty) {
                 Ok(tuple) => tuple,
                 Err(_) => {
                     if ai_enabled {
@@ -15442,7 +15495,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         )
         .unwrap();
         let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false).unwrap();
+            super::spawn_child_with_logs(command, &stdout, &stderr, false, false).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(
             !marker.exists(),
@@ -15451,6 +15504,47 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         super::release_prepared_child(pid).unwrap();
         assert!(child.wait().unwrap().success());
         assert!(marker.exists());
+    }
+
+    #[test]
+    fn tty_spawn_uses_kernel_pty_and_merges_output_into_logs() {
+        let root = tempfile::tempdir().expect("runtime");
+        let stdout = root.path().join("stdout");
+        let stderr = root.path().join("stderr");
+        let command = super::build_command(
+            &["/bin/sh".into(), "-c".into(), "printf tty-ready".into()],
+            &[],
+            None,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            None,
+            &[],
+            &[],
+            false,
+        )
+        .expect("build command");
+        let (pid, mut child, _pidfd) =
+            super::spawn_child_with_logs(command, &stdout, &stderr, false, true)
+                .expect("spawn PTY child");
+        super::release_prepared_child(pid).expect("release PTY child");
+        assert!(child.wait().expect("wait PTY child").success());
+        for _ in 0..50 {
+            if std::fs::read_to_string(&stdout)
+                .map(|value| value.contains("tty-ready"))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!(
+            "PTY output was not persisted: {:?}",
+            std::fs::read_to_string(&stdout)
+        );
     }
 
     fn assert_sigkill_before_release_leaves_no_workload(action: &str) {
@@ -15609,6 +15703,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             command,
             &root.path().join("stdout"),
             &root.path().join("stderr"),
+            false,
             false,
         )
         .unwrap();

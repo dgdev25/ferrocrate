@@ -10824,6 +10824,8 @@ struct DockerCreateSpec {
     name: Option<String>,
     network_mode: String,
     #[serde(default)]
+    tty: bool,
+    #[serde(default)]
     auto_remove: bool,
     health: Option<DockerHealthSpec>,
     #[serde(default)]
@@ -12820,6 +12822,10 @@ fn handle_docker_compat_connection(
                 let network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
                     .unwrap_or_else(|_| "ebpf".to_string());
                 validate_network_backend(&network_backend)?;
+                let _tty_guard = ScopedEnv::set(
+                    "FERROCRATE_RUN_TTY",
+                    spec.tty.then_some("1"),
+                );
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -14681,12 +14687,6 @@ fn normalize_docker_api_path(path: &str) -> String {
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
     let request: DockerCreateRequest =
         serde_json::from_slice(body).map_err(|err| err.to_string())?;
-    if request.tty {
-        return Err(
-            "docker: Tty=true is unsupported; Ferrocrate currently supports non-TTY containers only"
-                .to_string(),
-        );
-    }
     let name = name
         .map(|name| validate_docker_container_name(&name).map(|_| name))
         .transpose()?;
@@ -14741,6 +14741,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user,
         name,
         network_mode,
+        tty: request.tty,
         auto_remove: host_config.auto_remove,
         health,
         memory_max,
@@ -15120,7 +15121,7 @@ fn docker_pending_inspect_payload(
             "Image": spec.image,
             "Env": spec.env,
             "Cmd": spec.cmd,
-            "Tty": false,
+            "Tty": spec.tty,
             "AttachStdin": false,
             "AttachStdout": true,
             "AttachStderr": true,
@@ -19097,11 +19098,11 @@ volumes:
     }
 
     #[test]
-    fn docker_create_spec_rejects_tty_instead_of_silently_downgrading() {
-        let error =
+    fn docker_create_spec_preserves_tty_for_start() {
+        let spec =
             parse_docker_create_spec(br#"{"Image":"busybox","Cmd":["sh"],"Tty":true}"#, None)
-                .expect_err("TTY creation must not be silently downgraded to pipes");
-        assert!(error.contains("Tty=true is unsupported"));
+                .expect("TTY preference should be retained until start");
+        assert!(spec.tty);
     }
 
     #[test]
@@ -19187,6 +19188,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            tty: false,
             auto_remove: false,
             health: Some(DockerHealthSpec {
                 cmd: "test -f /ready".to_string(),
@@ -19323,6 +19325,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                tty: false,
                 auto_remove: false,
                 health: None,
                 memory_max: None,
@@ -19366,6 +19369,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            tty: false,
             auto_remove: false,
             health: None,
             memory_max: None,
@@ -19501,6 +19505,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            tty: false,
             auto_remove: false,
             health: None,
             memory_max: None,

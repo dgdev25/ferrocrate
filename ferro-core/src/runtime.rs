@@ -6265,6 +6265,11 @@ fn spawn_child_with_logs(
         .open(&stdin_path)?;
     let child = if tty {
         let pair = PtyPair::new(24, 80).map_err(RuntimeError::Io)?;
+        let tty_device = pair.slave_name().map_err(RuntimeError::Io)?;
+        fs::write(
+            tty_device_path(stdout_path),
+            tty_device.to_string_lossy().as_bytes(),
+        )?;
         let (master, slave) = pair.into_parts();
         let mut master_reader = std::fs::File::from(master);
         let mut master_writer = master_reader.try_clone()?;
@@ -6326,6 +6331,14 @@ fn stdin_fifo_path(stdout_path: &Path) -> PathBuf {
         .and_then(Path::parent)
         .map(|container_dir| container_dir.join("stdin"))
         .unwrap_or_else(|| stdout_path.with_file_name("stdin"))
+}
+
+fn tty_device_path(stdout_path: &Path) -> PathBuf {
+    stdout_path
+        .parent()
+        .and_then(Path::parent)
+        .map(|container_dir| container_dir.join("tty-device"))
+        .unwrap_or_else(|| stdout_path.with_file_name("tty-device"))
 }
 
 fn ensure_stdin_fifo(path: &Path) -> Result<(), RuntimeError> {

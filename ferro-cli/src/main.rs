@@ -12379,19 +12379,44 @@ fn handle_docker_compat_connection(
                     }
                     Ok(parsed)
                 };
-                let _width = parse_dimension("w")?;
-                let _height = parse_dimension("h")?;
+                let width = parse_dimension("w")?;
+                let height = parse_dimension("h")?;
                 let pending = state
                     .pending
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                 let id = docker_resolve_id(&runtime, &pending, requested_id)?;
                 drop(pending);
-                // The current runtime has no PTY-backed terminal to resize;
-                // retain Docker's successful empty response after validating
-                // the container and dimensions so clients can use the same
-                // lifecycle against non-TTY workloads.
-                let _ = id;
+                let record = match runtime.inspect(&id) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        // A pending (not-yet-started) container has no PTY
+                        // device to resize; preserve Docker's validated no-op.
+                        return Ok(http_response(200, &[], "text/plain"));
+                    }
+                };
+                if !record.tty {
+                    // Docker accepts a validated resize request for a
+                    // non-terminal container as a no-op. Keep that wire
+                    // compatibility while applying the size for TTY records.
+                    return Ok(http_response(200, &[], "text/plain"));
+                }
+                let device_file = runtime_dir
+                    .join("containers")
+                    .join(&id)
+                    .join("tty-device");
+                let device = std::fs::read_to_string(&device_file).map_err(|error| {
+                    format!(
+                        "docker: TTY device is unavailable for {}: {error}",
+                        id
+                    )
+                })?;
+                ferro_core::pty::PtyPair::set_size_path(
+                    std::path::Path::new(device.trim()),
+                    height as u16,
+                    width as u16,
+                )
+                .map_err(|error| format!("docker: resize failed: {error}"))?;
                 http_response(200, &[], "text/plain")
             }
             ("POST", "/commit") => {

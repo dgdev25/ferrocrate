@@ -7,6 +7,8 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
+use std::{ffi::CStr, os::raw::c_char};
 
 use nix::pty::{openpty, Winsize};
 
@@ -52,6 +54,19 @@ impl PtyPair {
         (self.master, self.slave)
     }
 
+    /// Return the kernel device path for the slave side while it is live.
+    /// Callers may persist this path for a later Docker resize request.
+    pub fn slave_name(&self) -> io::Result<PathBuf> {
+        // SAFETY: the master descriptor is owned by this live PTY pair and
+        // libc writes a NUL-terminated path into its static buffer.
+        let name = unsafe { nix::libc::ttyname(self.master.as_raw_fd()) };
+        if name.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let name = unsafe { CStr::from_ptr(name as *const c_char) };
+        Ok(PathBuf::from(name.to_string_lossy().into_owned()))
+    }
+
     /// Update the live terminal size through the PTY master.
     pub fn set_size(&self, rows: u16, cols: u16) -> io::Result<()> {
         validate_dimension(rows, "rows")?;
@@ -62,15 +77,30 @@ impl PtyPair {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        // SAFETY: `self.master` is a live PTY fd and `size` points to a
-        // properly initialized winsize structure for the ioctl duration.
-        let result = unsafe {
-            nix::libc::ioctl(
-                self.master.as_raw_fd(),
-                nix::libc::TIOCSWINSZ,
-                &size as *const Winsize,
-            )
+        Self::set_size_fd(self.master.as_raw_fd(), &size)
+    }
+
+    /// Resize a PTY from a persisted slave device path.
+    pub fn set_size_path(path: &Path, rows: u16, cols: u16) -> io::Result<()> {
+        validate_dimension(rows, "rows")?;
+        validate_dimension(cols, "cols")?;
+        let size = Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
         };
+        let fd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        Self::set_size_fd(fd.as_raw_fd(), &size)
+    }
+
+    fn set_size_fd(fd: std::os::fd::RawFd, size: &Winsize) -> io::Result<()> {
+        // SAFETY: `fd` is a live PTY descriptor and `size` points to a
+        // properly initialized winsize structure for the ioctl duration.
+        let result = unsafe { nix::libc::ioctl(fd, nix::libc::TIOCSWINSZ, size as *const Winsize) };
         if result == -1 {
             Err(io::Error::last_os_error())
         } else {
@@ -105,6 +135,8 @@ mod tests {
     fn allocates_and_resizes_a_kernel_pty() {
         let pair = PtyPair::new(24, 80).expect("allocate PTY");
         pair.set_size(40, 120).expect("resize PTY");
+        let path = pair.slave_name().expect("slave device path");
+        PtyPair::set_size_path(&path, 50, 140).expect("resize slave device");
         assert!(pair.master().as_raw_fd() >= 0);
     }
 

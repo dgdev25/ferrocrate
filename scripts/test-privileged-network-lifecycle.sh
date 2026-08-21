@@ -21,7 +21,15 @@ cap_eff="$(awk '/^CapEff:/{print $2}' /proc/self/status)"
 [[ -n "$cap_eff" ]] || skip "effective capabilities are unreadable"
 (( (16#${cap_eff} & 0x1000) != 0 )) || skip "effective cap_net_admin is required"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="${BASH_SOURCE[0]:-}"
+if [[ -n "$script_path" && "$script_path" != bash ]]; then
+  repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+else
+  # The fixture is also streamed over SSH to a guest. In that mode there is
+  # no source-file path; callers must provide FERROCRATE_NETWORK_CLI or have
+  # ferro-cli on PATH.
+  repo_root="${FERROCRATE_REPO_ROOT:-$PWD}"
+fi
 ferro_cli=""
 if [[ -n "${FERROCRATE_NETWORK_CLI:-}" ]]; then
   [[ -x "$FERROCRATE_NETWORK_CLI" ]] || fail "configured FERROCRATE_NETWORK_CLI is not executable"
@@ -80,7 +88,7 @@ cleanup() {
     ip link delete "$bridge_name" || true
   fi
   if [[ -d "$runtime_dir" ]]; then
-    rm -rf -- "$runtime_dir"
+    find "$runtime_dir" -depth -delete 2>/dev/null || true
   fi
 }
 trap cleanup EXIT

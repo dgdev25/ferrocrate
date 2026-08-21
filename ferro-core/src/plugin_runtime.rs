@@ -173,10 +173,14 @@ impl PluginLifecycleJournal {
 pub enum PluginExecutionError {
     #[error("plugin signature verification failed: {0}")]
     Signature(String),
+    #[error("plugin permission denied: {0}")]
+    Permission(String),
     #[error("plugin entrypoint is not a regular executable file")]
     Entrypoint,
     #[error("plugin execution io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("plugin spawn failed: {0}")]
+    SpawnIo(std::io::Error),
     #[error("plugin resource limits are unavailable: {0}")]
     ResourceLimits(String),
     #[error("plugin cgroup isolation failed: {0}")]
@@ -187,6 +191,33 @@ pub enum PluginExecutionError {
     Journal(String),
     #[error("plugin output exceeded the declared limit")]
     OutputLimit,
+}
+
+/// Fail-closed permission gate for one plugin call.
+///
+/// The required permission must be a known contract permission and must be
+/// declared by the admitted manifest. Anything else — including unknown
+/// permission strings — is rejected before any child process is started.
+pub fn authorize_plugin_call(
+    manifest: &PluginManifest,
+    required_permission: &str,
+) -> Result<(), PluginExecutionError> {
+    if !crate::plugin_contract::ALLOWED_PERMISSIONS.contains(&required_permission) {
+        return Err(PluginExecutionError::Permission(format!(
+            "unknown plugin permission: {required_permission}"
+        )));
+    }
+    if !manifest
+        .permissions
+        .iter()
+        .any(|permission| permission == required_permission)
+    {
+        return Err(PluginExecutionError::Permission(format!(
+            "plugin '{}' does not declare permission '{required_permission}'",
+            manifest.name
+        )));
+    }
+    Ok(())
 }
 
 fn read_bounded<R: Read>(reader: R, limit: u64) -> std::io::Result<Vec<u8>> {
@@ -239,31 +270,44 @@ fn plugin_command(
 
 /// Verify and execute a plugin entrypoint with bounded timeout and output.
 ///
-/// The manifest signature is checked over the exact canonical manifest before
-/// any process is started. Arguments are passed directly to `execve` semantics
-/// and are never interpreted by a shell.
+/// The call must declare a known permission that the admitted manifest also
+/// declares. The manifest signature is checked over the exact canonical
+/// manifest before any process is started. Arguments are passed directly to
+/// `execve` semantics and are never interpreted by a shell.
 pub fn execute_plugin(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
-    execute_plugin_inner(manifest, trust_root, args, stdin, None)
+    execute_plugin_inner(manifest, trust_root, required_permission, args, stdin, None)
 }
 
-/// Execute a plugin with a bounded retry budget for transient execution I/O.
+/// Execute a plugin with a bounded retry budget for transient spawn failures.
 ///
-/// Admission, signature, timeout, output-limit, and resource-policy errors are
-/// never retried. The explicit cap prevents callers from turning a plugin
-/// mutation into an unbounded loop.
+/// Permission, admission, signature, timeout, output-limit, and
+/// resource-policy errors are never retried. Post-spawn I/O failures are never
+/// retried either: the child may already have produced effects, so a retry
+/// could replay a plugin mutation. The explicit cap prevents callers from
+/// turning a plugin call into an unbounded loop.
 pub fn execute_plugin_with_retries(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
     max_retries: u8,
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
-    execute_plugin_with_retries_inner(manifest, trust_root, args, stdin, None, max_retries)
+    execute_plugin_with_retries_inner(
+        manifest,
+        trust_root,
+        required_permission,
+        args,
+        stdin,
+        None,
+        max_retries,
+    )
 }
 
 /// Verify and execute a plugin inside a dedicated cgroup-v2 subtree.
@@ -276,18 +320,27 @@ pub fn execute_plugin_with_retries(
 pub fn execute_plugin_with_cgroup(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
     cgroup_root: &Path,
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
-    execute_plugin_inner(manifest, trust_root, args, stdin, Some(cgroup_root))
+    execute_plugin_inner(
+        manifest,
+        trust_root,
+        required_permission,
+        args,
+        stdin,
+        Some(cgroup_root),
+    )
 }
 
-/// Cgroup-isolated plugin execution with the same bounded transient-I/O retry
-/// policy as [`execute_plugin_with_retries`].
+/// Cgroup-isolated plugin execution with the same bounded transient-spawn
+/// retry policy as [`execute_plugin_with_retries`].
 pub fn execute_plugin_with_cgroup_retries(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
     cgroup_root: &Path,
@@ -296,6 +349,7 @@ pub fn execute_plugin_with_cgroup_retries(
     execute_plugin_with_retries_inner(
         manifest,
         trust_root,
+        required_permission,
         args,
         stdin,
         Some(cgroup_root),
@@ -311,6 +365,7 @@ pub fn execute_plugin_delegated(
     trust_root: &VerifyingKey,
     delegation: &PluginDelegation,
     journal: &PluginLifecycleJournal,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
 ) -> Result<PluginExecutionResult, PluginExecutionError> {
@@ -332,7 +387,7 @@ pub fn execute_plugin_delegated(
     };
     journal.append(&intent)?;
 
-    let result = execute_plugin_inner(manifest, trust_root, args, stdin, None);
+    let result = execute_plugin_inner(manifest, trust_root, required_permission, args, stdin, None);
     let (result_digest, succeeded, error) = match &result {
         Ok(value) => (
             Some(digest_bytes(&[&value.stdout, &value.stderr])?),
@@ -377,14 +432,16 @@ pub fn execute_plugin_delegated(
     result
 }
 
-/// Delegated plugin execution with bounded transient-I/O retries. Lifecycle
+/// Delegated plugin execution with bounded transient-spawn retries. Lifecycle
 /// intent/effect/cleanup records are written once for the logical operation;
 /// individual retry attempts never create duplicate authorization receipts.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_plugin_delegated_with_retries(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
     delegation: &PluginDelegation,
     journal: &PluginLifecycleJournal,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
     max_retries: u8,
@@ -407,8 +464,15 @@ pub fn execute_plugin_delegated_with_retries(
     };
     journal.append(&intent)?;
 
-    let result =
-        execute_plugin_with_retries_inner(manifest, trust_root, args, stdin, None, max_retries);
+    let result = execute_plugin_with_retries_inner(
+        manifest,
+        trust_root,
+        required_permission,
+        args,
+        stdin,
+        None,
+        max_retries,
+    );
     let (result_digest, succeeded, error) = match &result {
         Ok(value) => (
             Some(digest_bytes(&[&value.stdout, &value.stderr])?),
@@ -478,6 +542,7 @@ fn digest_bytes(parts: &[&[u8]]) -> Result<String, PluginExecutionError> {
 fn execute_plugin_inner(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
     cgroup_root: Option<&Path>,
@@ -488,9 +553,13 @@ fn execute_plugin_inner(
     #[cfg(test)]
     let _test_env_guard = crate::test_support::acquire_env_lock();
 
+    authorize_plugin_call(manifest, required_permission)?;
     verify_plugin_signature(manifest, trust_root)
         .map_err(|error| PluginExecutionError::Signature(error.to_string()))?;
-    let metadata = std::fs::symlink_metadata(&manifest.entrypoint)?;
+    // A missing or unreadable entrypoint is a deterministic admission
+    // failure, not transient spawn I/O; it must not consume retry budget.
+    let metadata = std::fs::symlink_metadata(&manifest.entrypoint)
+        .map_err(|_| PluginExecutionError::Entrypoint)?;
     if !metadata.file_type().is_file() {
         return Err(PluginExecutionError::Entrypoint);
     }
@@ -525,7 +594,9 @@ fn execute_plugin_inner(
             if let Some(path) = cgroup.as_ref() {
                 cleanup_plugin_cgroup(path);
             }
-            return Err(PluginExecutionError::Io(error));
+            // Only spawn-phase failures are retryable: no child process has
+            // started, so a retry cannot replay plugin side effects.
+            return Err(PluginExecutionError::SpawnIo(error));
         }
     };
     if let Some(path) = cgroup.as_ref() {
@@ -629,6 +700,7 @@ fn execute_plugin_inner(
 fn execute_plugin_with_retries_inner(
     manifest: &PluginManifest,
     trust_root: &VerifyingKey,
+    required_permission: &str,
     args: &[String],
     stdin: &[u8],
     cgroup_root: Option<&Path>,
@@ -641,11 +713,17 @@ fn execute_plugin_with_retries_inner(
     }
     let mut retries = 0u8;
     loop {
-        match execute_plugin_inner(manifest, trust_root, args, stdin, cgroup_root) {
-            Err(PluginExecutionError::Io(error)) if retries < max_retries => {
+        match execute_plugin_inner(
+            manifest,
+            trust_root,
+            required_permission,
+            args,
+            stdin,
+            cgroup_root,
+        ) {
+            Err(PluginExecutionError::SpawnIo(_)) if retries < max_retries => {
                 retries += 1;
                 thread::sleep(Duration::from_millis(10 * u64::from(retries)));
-                let _ = error;
             }
             result => return result,
         }
@@ -738,25 +816,81 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let key = SigningKey::from_bytes(&[3u8; 32]);
         let manifest = signed_manifest(&script(&temp, "cat"), PluginLimits::default(), &key);
-        let result = execute_plugin(&manifest, &key.verifying_key(), &["--arg".into()], b"ok")
-            .expect("plugin");
+        let result = execute_plugin(
+            &manifest,
+            &key.verifying_key(),
+            "read_logs",
+            &["--arg".into()],
+            b"ok",
+        )
+        .expect("plugin");
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, b"ok");
         assert!(!result.timed_out);
     }
 
     #[test]
-    fn retry_budget_is_capped_and_success_is_not_replayed() {
+    fn permission_gate_fails_closed_before_launch() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let key = SigningKey::from_bytes(&[12u8; 32]);
-        let manifest = signed_manifest(&script(&temp, "printf ok"), PluginLimits::default(), &key);
-        let result = execute_plugin_with_retries(&manifest, &key.verifying_key(), &[], b"", 3)
-            .expect("plugin");
-        assert_eq!(result.stdout, b"ok");
+        let key = SigningKey::from_bytes(&[13u8; 32]);
+        let marker = temp.path().join("launched");
+        let script_path = script(&temp, &format!("printf launched > {}", marker.display()));
+        let manifest = signed_manifest(&script_path, PluginLimits::default(), &key);
 
-        let error = execute_plugin_with_retries(&manifest, &key.verifying_key(), &[], b"", 4)
-            .expect_err("retry cap");
-        assert!(matches!(error, PluginExecutionError::ResourceLimits(_)));
+        // Unknown permission strings never match, even if the manifest
+        // happens to carry the same unknown token.
+        let error = execute_plugin(&manifest, &key.verifying_key(), "mount_host", &[], b"")
+            .expect_err("unknown permission");
+        assert!(matches!(error, PluginExecutionError::Permission(_)));
+
+        // A known permission the manifest does not declare is denied before
+        // the entrypoint is ever started.
+        let error = execute_plugin(&manifest, &key.verifying_key(), "write_logs", &[], b"")
+            .expect_err("undeclared permission");
+        assert!(matches!(error, PluginExecutionError::Permission(_)));
+        assert!(!marker.exists(), "denied plugin must not launch");
+
+        let result =
+            execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], b"").expect("gate");
+        assert_eq!(result.exit_code, 0);
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn failing_plugin_runs_exactly_once_within_retry_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[14u8; 32]);
+        let marker = temp.path().join("attempts");
+        let script_path = script(&temp, &format!("echo 1 >> {}; exit 7", marker.display()));
+        let manifest = signed_manifest(&script_path, PluginLimits::default(), &key);
+        let result =
+            execute_plugin_with_retries(&manifest, &key.verifying_key(), "read_logs", &[], b"", 3)
+                .expect("failing plugin still returns a result");
+        assert_eq!(result.exit_code, 7);
+        let attempts = std::fs::read_to_string(&marker).expect("marker");
+        assert_eq!(
+            attempts.lines().count(),
+            1,
+            "a plugin that ran and failed must not be retried"
+        );
+    }
+
+    #[test]
+    fn missing_entrypoint_is_not_retried() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = SigningKey::from_bytes(&[15u8; 32]);
+        let manifest = signed_manifest(
+            &temp.path().join("does-not-exist").display().to_string(),
+            PluginLimits::default(),
+            &key,
+        );
+        let error =
+            execute_plugin_with_retries(&manifest, &key.verifying_key(), "read_logs", &[], b"", 3)
+                .expect_err("missing entrypoint");
+        assert!(
+            matches!(error, PluginExecutionError::Entrypoint),
+            "missing entrypoint is a deterministic admission failure: {error:?}"
+        );
     }
 
     #[test]
@@ -768,7 +902,8 @@ mod tests {
             ..Default::default()
         };
         let manifest = signed_manifest(&script(&temp, "sleep 2"), limits, &key);
-        let result = execute_plugin(&manifest, &key.verifying_key(), &[], b"").expect("timeout");
+        let result = execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], b"")
+            .expect("timeout");
         assert!(result.timed_out);
 
         let limits = PluginLimits {
@@ -777,7 +912,7 @@ mod tests {
         };
         let manifest = signed_manifest(&script(&temp, "printf 12345"), limits, &key);
         assert!(matches!(
-            execute_plugin(&manifest, &key.verifying_key(), &[], b""),
+            execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], b""),
             Err(PluginExecutionError::OutputLimit)
         ));
     }
@@ -792,8 +927,8 @@ mod tests {
             ..Default::default()
         };
         let manifest = signed_manifest(&script(&temp, "ulimit -v"), limits, &key);
-        let result =
-            execute_plugin(&manifest, &key.verifying_key(), &[], b"").expect("limited plugin");
+        let result = execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], b"")
+            .expect("limited plugin");
         let virtual_memory_kib: u64 = String::from_utf8_lossy(&result.stdout)
             .trim()
             .parse()
@@ -811,7 +946,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let manifest = signed_manifest(&link.display().to_string(), PluginLimits::default(), &key);
         assert!(matches!(
-            execute_plugin(&manifest, &key.verifying_key(), &[], b""),
+            execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], b""),
             Err(PluginExecutionError::Entrypoint)
         ));
 
@@ -825,7 +960,7 @@ mod tests {
             &key,
         );
         assert!(matches!(
-            execute_plugin(&manifest, &key.verifying_key(), &[], b""),
+            execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], b""),
             Err(PluginExecutionError::Entrypoint)
         ));
     }
@@ -837,8 +972,14 @@ mod tests {
         let manifest = signed_manifest(&script(&temp, "printf ok"), PluginLimits::default(), &key);
         let cgroup_root = temp.path().join("cgroup");
         std::fs::create_dir(&cgroup_root).expect("cgroup root");
-        let result =
-            execute_plugin_with_cgroup(&manifest, &key.verifying_key(), &[], b"", &cgroup_root);
+        let result = execute_plugin_with_cgroup(
+            &manifest,
+            &key.verifying_key(),
+            "read_logs",
+            &[],
+            b"",
+            &cgroup_root,
+        );
         assert!(
             matches!(result, Err(PluginExecutionError::Cgroup(_))),
             "unexpected cgroup result: {result:?}"
@@ -876,9 +1017,15 @@ mod tests {
             },
             &key,
         );
-        let output =
-            execute_plugin_with_cgroup(&manifest, &key.verifying_key(), &[], b"", &cgroup_root)
-                .expect("plugin should execute in delegated cgroup");
+        let output = execute_plugin_with_cgroup(
+            &manifest,
+            &key.verifying_key(),
+            "read_logs",
+            &[],
+            b"",
+            &cgroup_root,
+        )
+        .expect("plugin should execute in delegated cgroup");
         assert_eq!(output.stdout, b"cgroup-qualified");
     }
 
@@ -907,6 +1054,7 @@ mod tests {
             &key.verifying_key(),
             &delegation,
             &journal,
+            "read_logs",
             &[],
             b"",
         )
@@ -947,6 +1095,7 @@ mod tests {
             &key.verifying_key(),
             &delegation,
             &journal,
+            "read_logs",
             &[],
             b"",
         )

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-const ALLOWED_PERMISSIONS: &[&str] = &[
+pub const ALLOWED_PERMISSIONS: &[&str] = &[
     "read_logs",
     "write_logs",
     "read_volumes",

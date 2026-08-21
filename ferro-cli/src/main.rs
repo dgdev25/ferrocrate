@@ -13754,6 +13754,18 @@ fn handle_docker_compat_connection(
                 404,
                 "docker: plugin pull is unsupported; install a signed local plugin manifest",
             ),
+            ("GET", "/plugins") => docker_error_response(
+                404,
+                "docker: plugin listing is unsupported; plugins are installed from signed local manifests",
+            ),
+            ("GET", path) | ("POST", path) | ("PUT", path) | ("DELETE", path)
+                if path.starts_with("/plugins/") =>
+            {
+                docker_error_response(
+                    404,
+                    "docker: remote plugin management is unsupported; install a signed local plugin manifest",
+                )
+            }
             ("POST", path)
                 if path.starts_with("/networks/") && path.ends_with("/connect") =>
             {

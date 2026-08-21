@@ -950,6 +950,35 @@ fn unsupported_plugin_pull_reports_an_explicit_boundary() {
 }
 
 #[test]
+fn plugin_management_family_reports_explicit_boundaries() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request("GET", "/plugins", "");
+    assert_eq!(status, 404, "list status: {body}");
+    assert!(
+        body.contains("plugin listing is unsupported") && body.contains("signed local manifests"),
+        "list body={body}"
+    );
+
+    let cases = [
+        ("GET", "/plugins/audit-log", "{}"),
+        ("POST", "/plugins/audit-log/enable", "{}"),
+        ("POST", "/plugins/audit-log/disable", "{}"),
+        ("POST", "/plugins/audit-log/upgrade", "{}"),
+        ("POST", "/plugins/audit-log/set", "{}"),
+        ("DELETE", "/plugins/audit-log", ""),
+    ];
+    for (method, path, body) in cases {
+        let (status, response) = harness.request(method, path, body);
+        assert_eq!(status, 404, "{method} {path}: {response}");
+        assert!(
+            response.contains("remote plugin management is unsupported")
+                && response.contains("signed local plugin manifest"),
+            "{method} {path} body={response}"
+        );
+    }
+}
+
+#[test]
 fn unsupported_network_attachment_mutations_report_an_explicit_boundary() {
     let harness = DaemonHarness::spawn();
     for operation in ["connect", "disconnect"] {

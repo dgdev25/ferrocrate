@@ -66,6 +66,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/verify-indie-release-plan.sh \
   scripts/test-docker-cli-compat.sh \
   scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh \
+  scripts/test-rootless-published-port.sh scripts/test-rootless-tty-container.sh \
   scripts/test-ebpf-networking.sh scripts/test-ebpf-networking-backend.sh \
   scripts/test-build-release-target-dir.sh scripts/test-cross-platform-release-targets.sh scripts/test-reproducible-release-artifacts.sh scripts/test-fixtures/cargo
 bash scripts/verify-indie-release-plan.sh

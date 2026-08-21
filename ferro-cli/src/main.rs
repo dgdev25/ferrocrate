@@ -1797,11 +1797,14 @@ fn handle_doctor(
             let rootless = ferro_core::rootless::RootlessConfig::from_system();
             let user_namespace = ferro_core::rootless::user_namespace_diagnostic();
             let user_namespace_ok = user_namespace.is_ok();
-            let runtime_socket = discover_rootless_socket();
-            let socket_message = runtime_socket.as_ref().map_or_else(
-                || "rootless Docker socket not discovered (set XDG_RUNTIME_DIR or use the configured daemon socket)".to_string(),
-                |path| format!("rootless Docker socket discovered at {}", path.display()),
-            );
+            let runtime_socket = select_rootless_socket(&rootless_socket_candidates());
+            let socket_message = match &runtime_socket {
+                Ok(path) => format!("rootless Docker socket discovered at {}", path.display()),
+                Err(diagnostic) => {
+                    tracing::warn!("{diagnostic}");
+                    diagnostic.clone()
+                }
+            };
             checks.push(DoctorCheck {
                 id: "rootless_context".to_string(),
                 ok: rootless.is_ok() && user_namespace_ok,
@@ -1837,6 +1840,38 @@ fn handle_doctor(
                 hint: Some(
                     "rootless contexts currently support the local runtime; CRI, Compose, and advanced network features remain explicitly qualification-gated".to_string(),
                 ),
+                remediated: false,
+                action: None,
+            });
+
+            let subid = ferro_core::rootless::subid_diagnostic();
+            checks.push(DoctorCheck {
+                id: "rootless_subid".to_string(),
+                ok: subid.is_ok(),
+                message: subid.as_ref().map_or_else(Clone::clone, |_| {
+                    "subordinate UID and GID ranges are configured for rootless mappings"
+                        .to_string()
+                }),
+                hint: subid.as_ref().err().map(|_| {
+                    "run the usermod --add-subuids/--add-subgids commands in the message, then start a new login session so the ranges apply".to_string()
+                }),
+                remediated: false,
+                action: None,
+            });
+
+            let cgroup_delegation = ferro_core::rootless::cgroup_delegation_diagnostic();
+            if let Err(diagnostic) = &cgroup_delegation {
+                tracing::warn!("{diagnostic}");
+            }
+            checks.push(DoctorCheck {
+                id: "rootless_cgroup_delegation".to_string(),
+                ok: cgroup_delegation.is_ok(),
+                message: cgroup_delegation.as_ref().map_or_else(Clone::clone, |_| {
+                    "cgroup v2 controllers are delegated to this user".to_string()
+                }),
+                hint: cgroup_delegation.as_ref().err().map(|_| {
+                    "rootless resource limits need delegated controllers; run the enable-linger/set-property commands in the message or set FERROCRATE_CGROUP_ROOT".to_string()
+                }),
                 remediated: false,
                 action: None,
             });
@@ -2016,9 +2051,7 @@ fn handle_doctor(
 }
 
 #[cfg(target_os = "linux")]
-fn discover_rootless_socket() -> Option<PathBuf> {
-    use std::os::unix::fs::FileTypeExt;
-
+fn rootless_socket_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(explicit) = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET") {
         candidates.push(PathBuf::from(explicit));
@@ -2031,11 +2064,28 @@ fn discover_rootless_socket() -> Option<PathBuf> {
     let runtime = runtime_dir();
     candidates.push(runtime.join("ferrocrate.sock"));
     candidates.push(runtime.join("docker.sock"));
-    candidates.into_iter().find(|path| {
-        std::fs::symlink_metadata(path)
-            .map(|metadata| metadata.file_type().is_socket())
-            .unwrap_or(false)
-    })
+    candidates
+}
+
+/// Select the first candidate that is an actual unix socket. When no
+/// candidate qualifies, report every probed path with its rejection reason
+/// and the exact remediation instead of a generic "not discovered" message.
+#[cfg(target_os = "linux")]
+fn select_rootless_socket(candidates: &[PathBuf]) -> Result<PathBuf, String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let mut probed = Vec::new();
+    for path in candidates {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => return Ok(path.clone()),
+            Ok(_) => probed.push(format!("{} (not a unix socket)", path.display())),
+            Err(_) => probed.push(format!("{} (missing)", path.display())),
+        }
+    }
+    Err(format!(
+        "rootless daemon socket not found; probed {}; set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running",
+        probed.join(", ")
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -11860,6 +11910,8 @@ ferrocrate_uptime_seconds {}\\n",
 #[cfg(target_os = "linux")]
 type DockerEventRequest = (String, String, HashMap<String, String>, Vec<u8>);
 
+/// Hijacked attach session: container id, the five request flags (logs,
+/// stream, stdin, stdout, stderr), and the initial stdin payload.
 #[cfg(target_os = "linux")]
 type DockerAttachHijack = (String, bool, bool, bool, bool, bool, Vec<u8>);
 
@@ -16082,7 +16134,8 @@ mod tests {
     use super::{
         append_export_rootfs, bind_run_network, build_error_is_retryable, build_health_config,
         build_limits, context_endpoint_available, context_endpoint_is_local,
-        decode_docker_raw_stream, desktop_forward_enabled, discover_rootless_socket, dispatch,
+        decode_docker_raw_stream, desktop_forward_enabled, dispatch,
+        rootless_socket_candidates, select_rootless_socket,
         dispatch_remote_context, docker_attach_output, docker_build_cache_entries,
         docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_container_prune_matches_filters,
@@ -16347,6 +16400,58 @@ configs:
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn rootless_socket_selection_failure_lists_every_probed_path_and_remediation() {
+        let temp = tempfile::tempdir().expect("socket fixture");
+        let decoy = temp.path().join("ferrocrate.sock");
+        std::fs::write(&decoy, b"not a socket").expect("write decoy");
+        let missing = temp.path().join("docker.sock");
+        let error = select_rootless_socket(&[decoy.clone(), missing.clone()])
+            .expect_err("no candidate qualifies");
+        let message = error.to_string();
+        assert!(message.contains("rootless daemon socket not found"));
+        assert!(message.contains(&format!("{} (not a unix socket)", decoy.display())));
+        assert!(message.contains(&format!("{} (missing)", missing.display())));
+        assert!(message.contains("FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock"));
+        assert!(message.contains("XDG_RUNTIME_DIR=/run/user/$(id -u)"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_socket_selection_accepts_first_real_socket() {
+        let temp = tempfile::tempdir().expect("socket fixture");
+        let missing = temp.path().join("ferrocrate.sock");
+        let socket = temp.path().join("docker.sock");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert_eq!(
+            select_rootless_socket(&[missing, socket.clone()]).expect("socket selected"),
+            socket
+        );
+        drop(listener);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_socket_candidates_lead_with_explicit_socket() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let temp = tempfile::tempdir().expect("candidate fixture");
+        let previous_socket = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET");
+        unsafe {
+            std::env::set_var(
+                "FERROCRATE_ROOTLESS_SOCKET",
+                temp.path().join("explicit.sock"),
+            )
+        };
+        let candidates = rootless_socket_candidates();
+        assert_eq!(candidates.first(), Some(&temp.path().join("explicit.sock")));
+        match previous_socket {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_ROOTLESS_SOCKET", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_ROOTLESS_SOCKET") },
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn rootless_socket_discovery_requires_an_actual_unix_socket() {
         let _guard = ENV_MUTEX.lock().expect("environment lock");
         let temp = tempfile::tempdir().expect("socket fixture");
@@ -16354,11 +16459,17 @@ configs:
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", temp.path()) };
         let socket = temp.path().join("docker.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
-        assert_eq!(discover_rootless_socket(), Some(socket.clone()));
+        assert_eq!(
+            select_rootless_socket(&rootless_socket_candidates()).ok(),
+            Some(socket.clone())
+        );
         drop(listener);
         std::fs::remove_file(&socket).expect("remove socket");
         std::fs::write(&socket, b"not a socket").expect("write decoy");
-        assert_ne!(discover_rootless_socket(), Some(socket));
+        assert_ne!(
+            select_rootless_socket(&rootless_socket_candidates()).ok(),
+            Some(socket)
+        );
         match previous {
             Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
@@ -16381,7 +16492,10 @@ configs:
         }
         let socket = temp.path().join("ferrocrate.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
-        assert_eq!(discover_rootless_socket(), Some(socket));
+        assert_eq!(
+            select_rootless_socket(&rootless_socket_candidates()).ok(),
+            Some(socket)
+        );
         drop(listener);
         match previous_runtime {
             Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },

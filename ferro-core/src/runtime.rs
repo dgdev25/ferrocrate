@@ -4648,7 +4648,7 @@ fn validate_rootless_mount_capability(
         && (!command_available("bwrap") || !rootless_mount_namespace_available())
     {
         return Err(RuntimeError::InvalidCommand(
-            "rootless workload mounts and read-only rootfs require bubblewrap plus a mount-capable user namespace; this host path cannot apply them safely".to_string(),
+            "unsupported in rootless mode on this host: workload mounts and read-only rootfs require bubblewrap (bwrap) plus a mount-capable user namespace; install a trusted bwrap package or run rootful".to_string(),
         ));
     }
     Ok(())

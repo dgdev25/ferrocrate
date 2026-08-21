@@ -207,7 +207,13 @@ fn validate_descriptor(descriptor: &Descriptor) -> Result<(), ImageManifestParse
             descriptor.digest.clone(),
         ));
     };
-    if value.len() != 64 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+    // OCI digests are lowercase hexadecimal; uppercase encodings are not
+    // canonical and must be rejected instead of silently accepted.
+    if value.len() != 64
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+    {
         return Err(ImageManifestParseError::InvalidDescriptorDigest(
             descriptor.digest.clone(),
         ));

@@ -4,6 +4,7 @@
 mod cli_fixture;
 
 use base64::Engine;
+use sha2::Digest;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -1671,4 +1672,322 @@ fn docker_compat_volume_mutation_preserves_disabled_shadow_and_enforce_contracts
         response.contains("PolicyDenied"),
         "stable enforce response: {response}"
     );
+}
+
+// ── OCI archive (docker save/load) conformance ────────────────────────────────
+
+fn build_tar_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        for (path, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).expect("archive entry path");
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, &bytes[..]).expect("append entry");
+        }
+        builder.finish().expect("finish archive");
+    }
+    archive
+}
+
+fn parse_tar_archive(archive: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut entries = std::collections::BTreeMap::new();
+    let mut tar = tar::Archive::new(archive);
+    for entry in tar.entries().expect("archive entries") {
+        let mut entry = entry.expect("archive entry");
+        let path = entry.path().expect("entry path").to_path_buf();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("entry bytes");
+        entries.insert(path.to_string_lossy().to_string(), bytes);
+    }
+    entries
+}
+
+fn http_body(archive_response: &[u8]) -> &[u8] {
+    let header_end = archive_response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("response headers");
+    &archive_response[header_end + 4..]
+}
+
+fn export_image_archive(harness: &DaemonHarness, encoded_tag: &str) -> Vec<u8> {
+    let raw = harness.request_bytes_raw(
+        "GET",
+        &format!("/v1.45/images/{encoded_tag}/get"),
+        "application/json",
+        &[],
+    );
+    let headers_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("export response headers");
+    let headers = String::from_utf8_lossy(&raw[..headers_end]).to_string();
+    assert!(headers.starts_with("HTTP/1.1 200 OK"), "export: {headers}");
+    raw[headers_end + 4..].to_vec()
+}
+
+fn octal_field(value: u64, width: usize) -> Vec<u8> {
+    let digits = format!("{:0width$o}", value, width = width - 2);
+    let mut field = digits.into_bytes();
+    field.push(0);
+    field.push(b' ');
+    field
+}
+
+/// Append a tar entry whose raw name may contain `..`. The high-level builder
+/// refuses such names, so the header is written byte-for-byte to prove the
+/// loader rejects the archive instead of the test tooling.
+fn append_raw_tar_entry(out: &mut Vec<u8>, name: &str, data: &[u8]) {
+    let mut header = [0u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    header[100..108].copy_from_slice(&octal_field(0o644, 8));
+    header[108..116].copy_from_slice(&octal_field(0, 8));
+    header[116..124].copy_from_slice(&octal_field(0, 8));
+    header[124..136].copy_from_slice(&octal_field(data.len() as u64, 12));
+    header[136..148].copy_from_slice(&octal_field(0, 12));
+    for byte in &mut header[148..156] {
+        *byte = b' ';
+    }
+    header[156] = b'0';
+    header[257..262].copy_from_slice(b"ustar");
+    header[262..264].copy_from_slice(b"00");
+    let checksum: u32 = header.iter().map(|byte| *byte as u32).sum();
+    let mut cksum = format!("{:06o}", checksum).into_bytes();
+    cksum.push(0);
+    cksum.push(b' ');
+    header[148..156].copy_from_slice(&cksum);
+    out.extend_from_slice(&header);
+    out.extend_from_slice(data);
+    let padding = (512 - data.len() % 512) % 512;
+    out.extend(std::iter::repeat(0u8).take(padding));
+}
+
+fn finish_raw_tar(out: &mut Vec<u8>) {
+    out.extend(std::iter::repeat(0u8).take(1024));
+}
+
+#[test]
+fn docker_compat_image_archive_round_trip_preserves_layers_and_config() {
+    let source = DaemonHarness::spawn();
+    build_local_busybox_image(&source, "round/trip:latest");
+    let archive_a = export_image_archive(&source, "round%2Ftrip%3Alatest");
+    let entries_a = parse_tar_archive(&archive_a);
+
+    let manifest_a: Vec<serde_json::Value> =
+        serde_json::from_slice(&entries_a["manifest.json"]).expect("source manifest.json");
+    assert_eq!(manifest_a.len(), 1, "one image per archive");
+    let config_name_a = manifest_a[0]["Config"]
+        .as_str()
+        .expect("config name")
+        .to_string();
+    let config_a: serde_json::Value =
+        serde_json::from_slice(&entries_a[&config_name_a]).expect("source config JSON");
+    let layers_a = manifest_a[0]["Layers"]
+        .as_array()
+        .expect("layer list")
+        .clone();
+    assert!(
+        !layers_a.is_empty(),
+        "built image must have at least one layer"
+    );
+
+    let target = DaemonHarness::spawn();
+    let (status, body) = target.request_bytes(
+        "POST",
+        "/v1.45/images/load",
+        "application/x-tar",
+        &archive_a,
+    );
+    assert_eq!(status, 200, "load response={body}");
+    assert!(body.contains("Loaded image"), "load stream={body}");
+
+    let archive_b = export_image_archive(&target, "round%2Ftrip%3Alatest");
+    let entries_b = parse_tar_archive(&archive_b);
+    let manifest_b: Vec<serde_json::Value> =
+        serde_json::from_slice(&entries_b["manifest.json"]).expect("loaded manifest.json");
+    assert_eq!(manifest_b.len(), 1);
+    assert_eq!(
+        manifest_b[0]["RepoTags"], manifest_a[0]["RepoTags"],
+        "RepoTags must survive the round trip"
+    );
+
+    let layers_b = manifest_b[0]["Layers"]
+        .as_array()
+        .expect("loaded layer list");
+    assert_eq!(layers_b.len(), layers_a.len(), "layer count must survive");
+    for (layer_a, layer_b) in layers_a.iter().zip(layers_b.iter()) {
+        let name_a = layer_a.as_str().expect("layer name");
+        let name_b = layer_b.as_str().expect("loaded layer name");
+        assert_eq!(
+            entries_a[name_a], entries_b[name_b],
+            "layer bytes must be identical after export/load/export"
+        );
+    }
+
+    let config_name_b = manifest_b[0]["Config"]
+        .as_str()
+        .expect("loaded config name");
+    let config_b: serde_json::Value =
+        serde_json::from_slice(&entries_b[config_name_b]).expect("loaded config JSON");
+    assert_eq!(
+        config_a["architecture"], config_b["architecture"],
+        "architecture label must survive the round trip"
+    );
+    assert_eq!(
+        config_a["os"], config_b["os"],
+        "os label must survive the round trip"
+    );
+    let diff_ids = config_b["rootfs"]["diff_ids"]
+        .as_array()
+        .expect("loaded diff_ids");
+    assert_eq!(
+        diff_ids.len(),
+        layers_b.len(),
+        "loaded config diff_ids must match the layer count"
+    );
+}
+
+#[test]
+fn docker_compat_image_load_rejects_malformed_archives() {
+    let harness = DaemonHarness::spawn();
+
+    let config_bytes = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_name = format!(
+        "{}.json",
+        format!("{:x}", sha2::Sha256::digest(config_bytes))
+    );
+    let missing_layer_manifest = format!(
+        r#"[{{"Config":"{config_name}","RepoTags":["malformed/layer:latest"],"Layers":["layer-0/layer.tar"]}}]"#
+    );
+    let digest_mismatch_manifest =
+        r#"[{"Config":"deadbeef.json","RepoTags":["malformed/cfg:latest"],"Layers":[]}]"#;
+
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("not a tar at all", b"definitely not a tar archive".to_vec()),
+        (
+            "missing manifest.json",
+            build_tar_archive(&[("README", b"no manifest here")]),
+        ),
+        (
+            "two images in one archive",
+            build_tar_archive(&[
+                (
+                    "manifest.json",
+                    br#"[{"Config":"a.json","RepoTags":["x/a:1"],"Layers":[]},{"Config":"b.json","RepoTags":["x/b:1"],"Layers":[]}]"#,
+                ),
+                ("a.json", b"{}"),
+                ("b.json", b"{}"),
+            ]),
+        ),
+        (
+            "unsafe entry path",
+            {
+                let mut archive = Vec::new();
+                append_raw_tar_entry(&mut archive, "../escape", b"payload");
+                append_raw_tar_entry(&mut archive, "manifest.json", b"[]");
+                finish_raw_tar(&mut archive);
+                archive
+            },
+        ),
+        (
+            "repeated entry name",
+            build_tar_archive(&[("manifest.json", b"[]"), ("manifest.json", b"[]")]),
+        ),
+        (
+            "config digest does not match filename",
+            build_tar_archive(&[
+                ("manifest.json", digest_mismatch_manifest.as_bytes()),
+                ("deadbeef.json", config_bytes),
+            ]),
+        ),
+        (
+            "manifest references missing layer",
+            build_tar_archive(&[
+                ("manifest.json", missing_layer_manifest.as_bytes()),
+                (&config_name, config_bytes),
+            ]),
+        ),
+    ];
+
+    for (name, archive) in cases {
+        let (status, body) =
+            harness.request_bytes("POST", "/v1.45/images/load", "application/x-tar", &archive);
+        assert!(
+            status >= 400,
+            "malformed archive ({name}) must fail closed: status={status} body={body}"
+        );
+    }
+
+    for tag in ["malformed%2Flayer%3Alatest", "malformed%2Fcfg%3Alatest"] {
+        let (status, body) = harness.request("GET", &format!("/v1.45/images/{tag}/json"));
+        assert_eq!(
+            status, 404,
+            "no image may be published from a malformed archive: {body}"
+        );
+    }
+}
+
+#[test]
+fn docker_compat_foreign_architecture_archive_keeps_label_without_execution_claim() {
+    let harness = DaemonHarness::spawn();
+
+    let mut layer_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut layer_tar);
+        let payload = b"#!/bin/sh\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/true").expect("layer entry path");
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append(&header, &payload[..])
+            .expect("append layer entry");
+        builder.finish().expect("finish layer tar");
+    }
+    let config_json = format!(
+        r#"{{"architecture":"arm64","os":"linux","config":{{}},"rootfs":{{"type":"layers","diff_ids":["{}"]}}}}"#,
+        format!(
+            "sha256:{}",
+            format!("{:x}", sha2::Sha256::digest(&layer_tar))
+        )
+    );
+    let config_bytes = config_json.as_bytes();
+    let config_name = format!(
+        "{}.json",
+        format!("{:x}", sha2::Sha256::digest(config_bytes))
+    );
+    let manifest = format!(
+        r#"[{{"Config":"{config_name}","RepoTags":["foreign/arch:latest"],"Layers":["layer-0/layer.tar"]}}]"#
+    );
+    let archive = build_tar_archive(&[
+        (&config_name, config_bytes),
+        ("manifest.json", manifest.as_bytes()),
+        ("layer-0/layer.tar", &layer_tar),
+    ]);
+
+    let (status, body) =
+        harness.request_bytes("POST", "/v1.45/images/load", "application/x-tar", &archive);
+    assert_eq!(status, 200, "foreign-arch load response={body}");
+
+    // The artifact stays inspectable and correctly labeled.
+    let (status, body) = harness.request("GET", "/v1.45/images/foreign%2Farch%3Alatest/json");
+    assert_eq!(status, 200, "foreign-arch inspect={body}");
+    assert!(body.contains("foreign/arch:latest"), "inspect={body}");
+
+    // Re-exporting must preserve the foreign platform label verbatim: the
+    // export is a data artifact and must not relabel it as host-runnable.
+    let exported = export_image_archive(&harness, "foreign%2Farch%3Alatest");
+    let entries = parse_tar_archive(&exported);
+    let manifest: Vec<serde_json::Value> =
+        serde_json::from_slice(&entries["manifest.json"]).expect("exported manifest.json");
+    let exported_config = manifest[0]["Config"].as_str().expect("config name");
+    let config: serde_json::Value =
+        serde_json::from_slice(&entries[exported_config]).expect("exported config JSON");
+    assert_eq!(config["architecture"], "arm64", "exported config={config}");
+    assert_eq!(config["os"], "linux", "exported config={config}");
 }

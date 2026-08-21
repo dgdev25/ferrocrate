@@ -55,6 +55,13 @@ status=0
 run_case image bash scripts/perf/oci-compat.sh || status=1
 run_case fixtures "$cargo_bin" test -p ferro-core --test image_operations fixture_manifest_and_index_match_oci_media_types -- --exact || status=1
 run_case malformed "$cargo_bin" test -p ferro-core --test image_operations malformed_oci -- --nocapture || status=1
+run_case corpus "$cargo_bin" test -p ferro-core --test image_operations || status=1
+run_case fetch "$cargo_bin" test -p ferro-core --lib image_fetch:: || status=1
+# The archive case builds real images through daemon fixtures; keep its
+# temporary directories inside the gate output so a full host /tmp cannot
+# fail the case for environmental reasons.
+mkdir -p "$OUT_DIR/tmp"
+run_case archive env TMPDIR="$OUT_DIR/tmp" "$cargo_bin" test -p ferro-cli --test docker_compat_integration -- docker_compat_image docker_compat_foreign_architecture || status=1
 set +e
 run_case runtime bash scripts/perf/oci-runtime-compat.sh
 runtime_status=$?

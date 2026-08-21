@@ -197,19 +197,15 @@ pub(crate) fn pull_image_with_store(
         )?;
     }
     verify_digest(&config_path, &manifest.config.digest)?;
+    verify_size(&config_path, manifest.config.size)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
-    let layer_digests = manifest
-        .layers
-        .iter()
-        .map(|layer| layer.digest.clone())
-        .collect::<Vec<_>>();
     let layer_paths = pull_layers_concurrently(
         &client,
         &canonical,
         auth.as_ref(),
         runtime_dir,
-        &layer_digests,
+        &manifest.layers,
     )?;
 
     Ok(ImageFetchResult {
@@ -268,11 +264,12 @@ fn pull_planned_image_with_store_mode(
         )?;
     }
     verify_digest(&config_path, plan.config_digest())?;
+    verify_size(&config_path, manifest.config.size)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
     fs::File::open(&config_path)?.sync_all()?;
 
-    let layer_digests = plan
-        .layer_digests()
+    let selected_layers: Vec<crate::image_manifest::Descriptor> = manifest
+        .layers
         .iter()
         .filter(|_| include_layers)
         .cloned()
@@ -282,7 +279,7 @@ fn pull_planned_image_with_store_mode(
         plan.immutable_reference(),
         auth.as_ref(),
         runtime_dir,
-        &layer_digests,
+        &selected_layers,
     )?;
     for layer_path in &layer_paths {
         fs::File::open(layer_path)?.sync_all()?;
@@ -310,21 +307,24 @@ fn pull_layers_concurrently(
     reference: &str,
     auth: Option<&RegistryAuth>,
     runtime_dir: &Path,
-    digests: &[String],
+    layers: &[crate::image_manifest::Descriptor],
 ) -> Result<Vec<PathBuf>, ImageFetchError> {
-    if digests.is_empty() {
+    if layers.is_empty() {
         return Ok(Vec::new());
     }
     let blob_root = runtime_dir.join("images").join("blobs");
     fs::create_dir_all(&blob_root)?;
     let results = std::thread::scope(|scope| {
-        let workers = digests.iter().enumerate().map(|(index, digest)| {
+        let workers = layers.iter().enumerate().map(|(index, layer)| {
+            let digest = layer.digest.clone();
+            let expected_size = layer.size;
             let blob_path = blob_root.join(digest.replace(':', "_"));
             scope.spawn(move || -> Result<(usize, PathBuf), ImageFetchError> {
                 if !blob_path.exists() {
-                    client.pull_blob_to_file(reference, digest, auth, &blob_path)?;
+                    client.pull_blob_to_file(reference, &digest, auth, &blob_path)?;
                 }
-                verify_digest(&blob_path, digest)?;
+                verify_digest(&blob_path, &digest)?;
+                verify_size(&blob_path, expected_size)?;
                 let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
                 Ok((index, blob_path))
             })
@@ -467,6 +467,7 @@ fn pull_manifest_only_with_store(
         )?;
     }
     verify_digest(&config_path, &manifest.config.digest)?;
+    verify_size(&config_path, manifest.config.size)?;
     let _ = ensure_cas_blob(runtime_dir, &config_path)?;
 
     Ok(canonical)
@@ -478,19 +479,26 @@ fn resolve_manifest_json(
     auth: Option<&crate::registry::RegistryAuth>,
 ) -> Result<String, ImageFetchError> {
     let manifest_json = client.pull_manifest_raw(image, auth)?;
-    if parse_image_manifest(&manifest_json).is_ok() {
-        return Ok(manifest_json);
-    }
+    let manifest_error = match parse_image_manifest(&manifest_json) {
+        Ok(_) => return Ok(manifest_json),
+        Err(error) => error,
+    };
 
-    if let Ok(index) = parse_image_index(&manifest_json) {
-        if let Some(digest) = select_platform_manifest(&index.manifests) {
-            let parsed = parse_image_reference(image)?;
-            let reference = format!("{}/{}@{}", parsed.registry, parsed.repository, digest);
-            return Ok(client.pull_manifest_raw(&reference, auth)?);
+    // The document may be an image index: select the platform manifest and
+    // address it through its digest. When index parsing or validation fails,
+    // surface that explicit error instead of forwarding an unparseable body.
+    match parse_image_index(&manifest_json) {
+        Ok(index) => {
+            if let Some(digest) = select_platform_manifest(&index.manifests) {
+                let parsed = parse_image_reference(image)?;
+                let reference = format!("{}/{}@{}", parsed.registry, parsed.repository, digest);
+                return Ok(client.pull_manifest_raw(&reference, auth)?);
+            }
         }
+        Err(index_error) => return Err(index_error.into()),
     }
 
-    Ok(manifest_json)
+    Err(manifest_error.into())
 }
 
 fn select_platform_manifest(manifests: &[crate::image_manifest::Descriptor]) -> Option<String> {
@@ -667,6 +675,20 @@ fn hash_file_shake256(path: &Path) -> Result<String, ImageFetchError> {
     Ok(hex::encode(rvf_crypto::shake256_256(&buf)))
 }
 
+/// Fail closed when a fetched blob's length differs from the descriptor size
+/// the manifest advertised. A matching digest with a wrong size is still an
+/// inconsistent descriptor and must not be published.
+fn verify_size(path: &Path, expected: i64) -> Result<(), ImageFetchError> {
+    let actual = fs::metadata(path)?.len();
+    if actual != expected as u64 {
+        return Err(ImageFetchError::Integrity(format!(
+            "descriptor size mismatch: expected {expected} bytes got {actual} for {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn verify_digest(path: &Path, digest: &str) -> Result<(), ImageFetchError> {
     let Some(expected) = digest.strip_prefix("sha256:") else {
         return Ok(());
@@ -823,7 +845,7 @@ mod tests {
         let layer_payload = b"real layer bytes";
         let layer_digest = format!("sha256:{:x}", Sha256::digest(layer_payload));
         let manifest = format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":13}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
             layer_payload.len()
         );
         let image = format!("{}/library/layer-swap:latest", server.addr());
@@ -831,7 +853,10 @@ mod tests {
         server.expect(
             Expectation::matching(request::method_path(
                 "GET",
-                format!("/v2/library/layer-swap/manifests/{}", plan.manifest_digest()),
+                format!(
+                    "/v2/library/layer-swap/manifests/{}",
+                    plan.manifest_digest()
+                ),
             ))
             .respond_with(status_code(200).body(manifest)),
         );
@@ -873,7 +898,7 @@ mod tests {
     #[test]
     fn pulls_manifest_and_layers() {
         let server = Server::run();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2","size":4}]}"#;
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":13},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2","size":4}]}"#;
 
         server.expect(
             Expectation::matching(request::method_path(
@@ -916,7 +941,7 @@ mod tests {
     #[test]
     fn inspects_immutable_binding_without_mutating_the_store() {
         let server = Server::run();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[]}"#;
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":13},"layers":[]}"#;
         server.expect(
             Expectation::matching(request::method_path(
                 "GET",
@@ -935,9 +960,126 @@ mod tests {
     }
 
     #[test]
+    fn planned_pull_rejects_config_size_mismatch() {
+        let server = Server::run();
+        let config_bytes = b"{\"config\":{}}";
+        let config_digest = format!("sha256:{:x}", Sha256::digest(config_bytes));
+        // The descriptor advertises a size that does not match the blob the
+        // registry serves. The digest is correct, so only an explicit size
+        // check can catch this inconsistency.
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[]}}"#,
+            config_bytes.len() + 1
+        );
+        let image = format!("{}/library/size-mismatch:latest", server.addr());
+        let plan = ImageFetchPlan::from_resolved_manifest(&image, &manifest).unwrap();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!(
+                    "/v2/library/size-mismatch/manifests/{}",
+                    plan.manifest_digest()
+                ),
+            ))
+            .respond_with(status_code(200).body(manifest)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/size-mismatch/blobs/{config_digest}"),
+            ))
+            .respond_with(status_code(200).body(config_bytes.to_vec())),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path().join("images")).unwrap();
+
+        let error = pull_planned_image_with_store(
+            temp.path(),
+            &plan,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect_err("config size mismatch must fail closed");
+
+        assert!(
+            error.to_string().contains("size mismatch"),
+            "expected size mismatch failure, got {error}"
+        );
+        assert!(store.list_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn planned_pull_rejects_layer_size_mismatch() {
+        let server = Server::run();
+        let config_bytes = b"{\"config\":{}}";
+        let config_digest = format!("sha256:{:x}", Sha256::digest(config_bytes));
+        let layer_bytes = b"layer payload";
+        let layer_digest = format!("sha256:{:x}", Sha256::digest(layer_bytes));
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
+            config_bytes.len(),
+            layer_bytes.len() - 1
+        );
+        let image = format!("{}/library/layer-size:latest", server.addr());
+        let plan = ImageFetchPlan::from_resolved_manifest(&image, &manifest).unwrap();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!(
+                    "/v2/library/layer-size/manifests/{}",
+                    plan.manifest_digest()
+                ),
+            ))
+            .respond_with(status_code(200).body(manifest)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/layer-size/blobs/{config_digest}"),
+            ))
+            .respond_with(status_code(200).body(config_bytes.to_vec())),
+        );
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/layer-size/blobs/{layer_digest}"),
+            ))
+            .respond_with(status_code(200).body(layer_bytes.to_vec())),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path().join("images")).unwrap();
+
+        let error = pull_planned_image_with_store(
+            temp.path(),
+            &plan,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect_err("layer size mismatch must fail closed");
+
+        assert!(
+            error.to_string().contains("size mismatch"),
+            "expected size mismatch failure, got {error}"
+        );
+        assert!(store.list_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fetch_plan_rejects_unknown_digest_algorithm() {
+        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;
+        let error =
+            ImageFetchPlan::from_resolved_manifest("example.test/library/alpine:latest", manifest)
+                .expect_err("unknown digest algorithm must fail closed");
+        assert!(
+            error.to_string().contains("invalid descriptor digest"),
+            "expected explicit digest rejection, got {error}"
+        );
+    }
+
+    #[test]
     fn pulls_manifest_only_without_layers() {
         let server = Server::run();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4}]}"#;
+        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":13},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4}]}"#;
 
         server.expect(
             Expectation::matching(request::method_path(

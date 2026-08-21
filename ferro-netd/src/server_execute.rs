@@ -481,9 +481,17 @@ impl NetdServer {
                 }
                 NetdResponse::Attached
             }
-            NetdRequest::DetachEndpoint { endpoint_id, .. } => {
-                self.execute_detach(request_id, operation_id, nonce, effect_receipt, endpoint_id)
-            }
+            NetdRequest::DetachEndpoint {
+                overlay_id,
+                endpoint_id,
+            } => self.execute_detach(
+                request_id,
+                operation_id,
+                nonce,
+                effect_receipt,
+                overlay_id,
+                endpoint_id,
+            ),
             NetdRequest::Inspect { overlay_id } => {
                 self.finish_inspect(&request_id, nonce, overlay_id, envelope.revision)
             }

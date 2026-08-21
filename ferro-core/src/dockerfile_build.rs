@@ -581,7 +581,13 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     for (stage, base_info) in stages.iter_mut().zip(&base_infos) {
         apply_onbuild_triggers(stage, &base_info.onbuild)?;
     }
-    let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
+    let cache_key = build_cache_key(
+        &dockerfile,
+        compression,
+        &context_hash,
+        &base_infos,
+        BUILD_CACHE_PLATFORM,
+    );
     let base_digests = base_infos
         .iter()
         .map(|info| info.digest.clone().unwrap_or_else(|| "scratch".to_string()))
@@ -1213,6 +1219,28 @@ fn validate_imported_cache_entry(
             "imported build cache entry failed provenance validation".to_string(),
         ));
     }
+    // The embedded config bytes and manifest must match the digests the
+    // entry claims. Without this check an imported entry could publish a
+    // reference whose manifest disagrees with its recorded layer identity.
+    if sha256_digest_bytes(entry.config_json.as_bytes()) != entry.config_digest {
+        return Err(DockerfileBuildError::Invalid(
+            "imported build cache config bytes do not match the recorded config digest".to_string(),
+        ));
+    }
+    let manifest = parse_image_manifest(&entry.manifest_json).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("imported build cache manifest is invalid: {error}"))
+    })?;
+    if manifest.config.digest != entry.config_digest
+        || manifest
+            .layers
+            .last()
+            .is_none_or(|layer| layer.digest != entry.layer_digest)
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "imported build cache manifest does not bind the recorded config and layer digests"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1640,17 +1668,24 @@ pub fn prune_build_cache(
     Ok(remove_count)
 }
 
+/// The cache key binds the target platform so a future multi-platform cache
+/// misses instead of serving a layer built for a different platform. Builds
+/// are single-platform today; the constant matches `build_config_json`.
+const BUILD_CACHE_PLATFORM: &str = "linux/amd64";
+
 fn build_cache_key(
     dockerfile: &str,
     compression: CompressionFormat,
     context_hash: &str,
     base_infos: &[BaseImageInfo],
+    platform: &str,
 ) -> String {
     let mut buf = Vec::new();
-    buf.extend_from_slice(b"ferrocrate/build-cache/v2\0");
+    buf.extend_from_slice(b"ferrocrate/build-cache/v3\0");
     append_cache_key_field(&mut buf, dockerfile.as_bytes());
     append_cache_key_field(&mut buf, context_hash.as_bytes());
     append_cache_key_field(&mut buf, format!("{compression:?}").as_bytes());
+    append_cache_key_field(&mut buf, platform.as_bytes());
     for info in base_infos {
         append_cache_key_field(
             &mut buf,
@@ -1984,9 +2019,7 @@ fn preprocess_dockerfile(contents: &str) -> Result<String, DockerfileBuildError>
 fn parse_escape_directive(raw: &str) -> Result<char, DockerfileBuildError> {
     let mut chars = raw.chars();
     let escape = chars.next().ok_or_else(|| {
-        DockerfileBuildError::Invalid(
-            "invalid escape directive: must be ` or \\".to_string(),
-        )
+        DockerfileBuildError::Invalid("invalid escape directive: must be ` or \\".to_string())
     })?;
     if chars.next().is_some() || !matches!(escape, '`' | '\\') {
         return Err(DockerfileBuildError::Invalid(
@@ -1999,15 +2032,12 @@ fn parse_escape_directive(raw: &str) -> Result<char, DockerfileBuildError> {
 /// Join lines ending with an odd run of the escape character, matching
 /// Docker's rule that a doubled escape is a literal character and a single
 /// trailing escape continues onto the next line.
-fn join_continuation_lines(
-    lines: &[String],
-    escape: char,
-) -> Result<String, DockerfileBuildError> {
+fn join_continuation_lines(lines: &[String], escape: char) -> Result<String, DockerfileBuildError> {
     let mut joined: Vec<String> = Vec::new();
     let mut pending: Option<String> = None;
     for line in lines {
-        let standalone = pending.is_none()
-            && (line.trim().is_empty() || line.trim_start().starts_with('#'));
+        let standalone =
+            pending.is_none() && (line.trim().is_empty() || line.trim_start().starts_with('#'));
         if standalone {
             joined.push(line.to_string());
             continue;
@@ -5001,14 +5031,16 @@ mod tests {
         apply_onbuild_triggers, build_cache_key, build_cache_path,
         build_from_dockerfile_with_store_and_compression, build_stage_dependency_graph,
         build_stage_execution_batches, create_build_dir, dockerignore_matches, export_build_cache,
-        file_matches_digest, import_build_cache, layer_blob_path, load_build_cache,
+        export_build_cache_to_registry, file_matches_digest, import_build_cache,
+        import_build_cache_from_registry, layer_blob_path, load_build_cache,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
         parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
         prune_build_cache, registry_cache_descriptor, registry_cache_reference,
-        reject_cache_path_symlinks, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
-        validate_mount_target, BaseImageInfo, BuildCacheEntry, CacheSharing, CopyOwner,
-        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
+        reject_cache_path_symlinks, resolve_copy_owner, save_build_cache, sha256_digest_bytes,
+        stage_checkpoint_path, validate_mount_target, BaseImageInfo, BuildCacheEntry, CacheSharing,
+        CopyOwner, BUILD_CACHE_PLATFORM, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use std::collections::HashMap;
 
@@ -5394,12 +5426,14 @@ mod tests {
             CompressionFormat::Gzip,
             "context",
             &[scratch],
+            BUILD_CACHE_PLATFORM,
         );
         let keyed_key = build_cache_key(
             "FROM scratch\n",
             CompressionFormat::Gzip,
             "context",
             &[keyed],
+            BUILD_CACHE_PLATFORM,
         );
         assert_ne!(scratch_key, keyed_key);
         assert_ne!(
@@ -5408,7 +5442,36 @@ mod tests {
                 "FROM scratch\nRUN true\n",
                 CompressionFormat::Gzip,
                 "context",
-                &[]
+                &[],
+                BUILD_CACHE_PLATFORM
+            )
+        );
+        // The key is a pure function of its inputs: identical arguments
+        // derive an identical key, and a different platform derives a
+        // different key so cross-platform caches miss instead of reusing.
+        assert_eq!(
+            scratch_key,
+            build_cache_key(
+                "FROM scratch\n",
+                CompressionFormat::Gzip,
+                "context",
+                &[BaseImageInfo {
+                    layers: Vec::new(),
+                    descriptors: Vec::new(),
+                    digest: None,
+                    onbuild: Vec::new(),
+                }],
+                BUILD_CACHE_PLATFORM
+            )
+        );
+        assert_ne!(
+            scratch_key,
+            build_cache_key(
+                "FROM scratch\n",
+                CompressionFormat::Gzip,
+                "context",
+                &[],
+                "linux/arm64"
             )
         );
     }
@@ -5513,10 +5576,16 @@ mod tests {
             );
         }
         save_build_cache(&runtime, &cache).unwrap();
+        // Pruning removes metadata records only. Content-addressed blobs
+        // stay, so a later rebuild of a pruned key still finds its layers.
+        let retained_blob = layer_blob_path(&runtime, "sha256:new");
+        fs::create_dir_all(retained_blob.parent().unwrap()).unwrap();
+        fs::write(&retained_blob, b"blob").unwrap();
         assert_eq!(prune_build_cache(&runtime, 1).unwrap(), 2);
         let retained = load_build_cache(&runtime).unwrap();
         assert!(retained.contains_key("new"));
         assert_eq!(retained.len(), 1);
+        assert!(retained_blob.exists());
     }
 
     #[test]
@@ -5550,12 +5619,34 @@ mod tests {
         assert!(!retained.contains_key("alpha"));
     }
 
+    /// Build a manifest JSON whose config and final layer bind the recorded
+    /// entry digests, matching what a real build records.
+    fn bound_manifest_json(config_digest: &str, layer_digest: &str) -> String {
+        serde_json::json!({
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": 2
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": layer_digest,
+                "size": 1
+            }]
+        })
+        .to_string()
+    }
+
     #[test]
     fn exports_and_imports_build_cache_metadata_atomically() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         let mut cache = HashMap::new();
         let cache_key = "a".repeat(64);
+        let config_json = "{}";
+        let config_digest = sha256_digest_bytes(config_json.as_bytes());
+        let layer_digest = format!("sha256:{}", "1".repeat(64));
         cache.insert(
             cache_key.clone(),
             BuildCacheEntry {
@@ -5565,12 +5656,12 @@ mod tests {
                 dockerfile_digest: String::new(),
                 base_digests: Vec::new(),
                 stage_layer_digests: vec![format!("sha256:{}", "3".repeat(64))],
-                layer_digest: format!("sha256:{}", "1".repeat(64)),
+                layer_digest: layer_digest.clone(),
                 layer_size: 1,
                 layer_media_type: "application/octet-stream".to_string(),
-                config_digest: format!("sha256:{}", "2".repeat(64)),
-                config_json: "{}".to_string(),
-                manifest_json: "{}".to_string(),
+                config_digest: config_digest.clone(),
+                config_json: config_json.to_string(),
+                manifest_json: bound_manifest_json(&config_digest, &layer_digest),
             },
         );
         save_build_cache(source.path(), &cache).unwrap();
@@ -5625,6 +5716,14 @@ mod tests {
         .unwrap();
         assert_eq!(first.layer_digest, second.layer_digest);
         assert_eq!(first.config_digest, second.config_digest);
+        // The hit must come from the imported cache, not a deterministic
+        // rebuild: the fast path never creates stage build directories and
+        // reads the imported layer blob directly.
+        assert!(
+            !target_runtime.join("build").exists(),
+            "imported cache hit must not rebuild stages"
+        );
+        assert!(layer_blob_path(&target_runtime, &second.layer_digest).exists());
     }
 
     #[test]
@@ -5701,6 +5800,329 @@ mod tests {
         fs::write(&source, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
         let error = import_build_cache(runtime.path(), &source).expect_err("oversized source");
         assert!(error.to_string().contains("16 MiB"));
+    }
+
+    /// A fully valid entry fixture that passes provenance validation.
+    fn provenance_bound_entry() -> BuildCacheEntry {
+        let config_json = r#"{"architecture":"amd64","os":"linux"}"#;
+        let config_digest = sha256_digest_bytes(config_json.as_bytes());
+        let layer_digest = format!("sha256:{}", "7".repeat(64));
+        BuildCacheEntry {
+            cache_key: "d".repeat(64),
+            created_at_unix: 5,
+            context_digest: "context".to_string(),
+            dockerfile_digest: "dockerfile".to_string(),
+            base_digests: vec!["scratch".to_string()],
+            stage_layer_digests: vec![layer_digest.clone()],
+            layer_digest: layer_digest.clone(),
+            layer_size: 3,
+            layer_media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
+            config_digest: config_digest.clone(),
+            config_json: config_json.to_string(),
+            manifest_json: bound_manifest_json(&config_digest, &layer_digest),
+        }
+    }
+
+    fn write_import_source(
+        runtime: &std::path::Path,
+        entry: &BuildCacheEntry,
+    ) -> std::path::PathBuf {
+        let source = runtime.join("cache-import.json");
+        let payload =
+            serde_json::json!({ entry.cache_key.clone(): serde_json::to_value(entry).unwrap() });
+        fs::write(&source, serde_json::to_vec(&payload).unwrap()).unwrap();
+        source
+    }
+
+    #[test]
+    fn import_build_cache_accepts_provenance_bound_entry() {
+        let runtime = tempfile::tempdir().unwrap();
+        let source = write_import_source(runtime.path(), &provenance_bound_entry());
+        assert_eq!(import_build_cache(runtime.path(), &source).unwrap(), 1);
+    }
+
+    #[test]
+    fn import_build_cache_rejects_config_bytes_digest_mismatch() {
+        let runtime = tempfile::tempdir().unwrap();
+        let mut entry = provenance_bound_entry();
+        // Same claimed config digest, different embedded bytes.
+        entry.config_json = entry.config_json.replace("amd64", "arm64");
+        let source = write_import_source(runtime.path(), &entry);
+        let error = import_build_cache(runtime.path(), &source)
+            .expect_err("config bytes must bind the recorded digest");
+        assert!(error.to_string().contains("config digest"));
+        assert!(!build_cache_path(runtime.path()).exists());
+    }
+
+    #[test]
+    fn import_build_cache_rejects_manifest_layer_binding_mismatch() {
+        let runtime = tempfile::tempdir().unwrap();
+        let mut entry = provenance_bound_entry();
+        // The manifest's final layer disagrees with the recorded layer.
+        let wrong_layer = format!("sha256:{}", "e".repeat(64));
+        entry.manifest_json = bound_manifest_json(&entry.config_digest, &wrong_layer);
+        let source = write_import_source(runtime.path(), &entry);
+        let error = import_build_cache(runtime.path(), &source)
+            .expect_err("manifest must bind the recorded layer digest");
+        assert!(error.to_string().contains("does not bind"));
+        assert!(!build_cache_path(runtime.path()).exists());
+    }
+
+    /// A single-threaded local OCI registry served over plain HTTP on
+    /// 127.0.0.1. It stores pushed blobs and manifests in memory so a
+    /// cache export can be imported back without external network access.
+    struct LocalTestRegistry {
+        addr: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl LocalTestRegistry {
+        fn run() -> Self {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            listener.set_nonblocking(true).unwrap();
+            std::thread::spawn(move || {
+                let blobs =
+                    std::sync::Arc::new(std::sync::Mutex::new(HashMap::<String, Vec<u8>>::new()));
+                let manifests =
+                    std::sync::Arc::new(std::sync::Mutex::new(HashMap::<String, Vec<u8>>::new()));
+                while !flag.load(Ordering::Relaxed) {
+                    let (stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(_) => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        }
+                    };
+                    let blobs = blobs.clone();
+                    let manifests = manifests.clone();
+                    std::thread::spawn(move || {
+                        let _ = serve_registry_request(stream, &blobs, &manifests);
+                    });
+                }
+            });
+            Self { addr, stop }
+        }
+
+        fn reference(&self, repository: &str, tag: &str) -> String {
+            format!("registry://{}/{repository}:{tag}", self.addr)
+        }
+    }
+
+    impl Drop for LocalTestRegistry {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn serve_registry_request(
+        mut stream: std::net::TcpStream,
+        blobs: &std::sync::Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
+        manifests: &std::sync::Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
+    ) -> std::io::Result<()> {
+        use std::io::{Read, Write};
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // Read headers.
+        let header_end = loop {
+            if let Some(position) = find_double_crlf(&buffer) {
+                break position;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return Ok(()),
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Err(_) => return Ok(()),
+            }
+        };
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let mut lines = headers.lines();
+        let request_line = lines.next().unwrap_or_default().to_string();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let raw_path = parts.next().unwrap_or_default().to_string();
+        let content_length = lines
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        // Read body.
+        let mut body = buffer[header_end + 4..].to_vec();
+        while body.len() < content_length {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => body.extend_from_slice(&chunk[..read]),
+                Err(_) => break,
+            }
+        }
+        body.truncate(content_length);
+
+        let (path, query) = raw_path.split_once('?').unwrap_or((raw_path.as_str(), ""));
+        let response = if path == "/v2/" {
+            http_response(200, b"")
+        } else if let Some(rest) = path.strip_suffix("/blobs/uploads/") {
+            let _ = rest;
+            let location = format!("{path}transfer");
+            format!(
+                "HTTP/1.1 202 Accepted\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes()
+        } else if path.contains("/blobs/uploads/") {
+            let digest = query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("digest="))
+                .unwrap_or_default()
+                .to_string();
+            if digest.is_empty() {
+                http_response(400, b"missing digest")
+            } else {
+                blobs.lock().unwrap().insert(digest, body);
+                http_response(201, b"")
+            }
+        } else if let Some(digest) = path.strip_prefix("/v2/") {
+            let digest = digest
+                .split_once("/blobs/")
+                .map(|(_, blob)| blob.to_string());
+            if let Some(digest) = digest {
+                match blobs.lock().unwrap().get(&digest) {
+                    Some(payload) => http_response(200, payload),
+                    None => http_response(404, b"blob not found"),
+                }
+            } else {
+                let reference = path
+                    .rsplit_once("/manifests/")
+                    .map(|(_, reference)| reference.to_string());
+                match (method.as_str(), reference) {
+                    ("PUT", Some(reference)) => {
+                        manifests.lock().unwrap().insert(reference, body);
+                        http_response(201, b"")
+                    }
+                    ("GET", Some(reference)) => match manifests.lock().unwrap().get(&reference) {
+                        Some(payload) => http_response(200, payload),
+                        None => http_response(404, b"manifest not found"),
+                    },
+                    _ => http_response(405, b"unsupported"),
+                }
+            }
+        } else {
+            http_response(404, b"not found")
+        };
+        stream.write_all(&response)?;
+        stream.flush()?;
+        Ok(())
+    }
+
+    fn find_double_crlf(buffer: &[u8]) -> Option<usize> {
+        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn http_response(status: u16, body: &[u8]) -> Vec<u8> {
+        let reason = match status {
+            200 => "OK",
+            201 => "Created",
+            202 => "Accepted",
+            400 => "Bad Request",
+            404 => "Not Found",
+            _ => "Error",
+        };
+        let head = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut response = head.into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    #[test]
+    fn registry_cache_export_import_round_trip_proves_cache_hit() {
+        let registry = LocalTestRegistry::run();
+        let source = tempfile::tempdir().unwrap();
+        let context = source.path().join("context");
+        fs::create_dir_all(&context).unwrap();
+        fs::write(context.join("Dockerfile"), "FROM scratch\nCOPY . /\n").unwrap();
+        fs::write(context.join("payload"), "registry exchange").unwrap();
+        let source_runtime = source.path().join("runtime");
+        let source_store = LocalImageStore::open(source_runtime.join("images")).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &context.join("Dockerfile"),
+            Some("local/registry-cache:latest"),
+            &source_runtime,
+            CompressionFormat::Gzip,
+            &source_store,
+            &authority,
+        )
+        .unwrap();
+
+        let reference = registry.reference("team/cache", "latest");
+        let pushed = export_build_cache_to_registry(&source_runtime, &reference, None)
+            .expect("export cache to registry");
+        // Metadata plus at least the final layer and config blobs.
+        assert!(pushed >= 3, "expected metadata, layer, and config pushes");
+
+        let target = tempfile::tempdir().unwrap();
+        let target_runtime = target.path().join("runtime");
+        let imported = import_build_cache_from_registry(&target_runtime, &reference, None)
+            .expect("import cache from registry");
+        assert_eq!(imported, 1);
+
+        let target_store = LocalImageStore::open(target_runtime.join("images")).unwrap();
+        let second = build_from_dockerfile_with_store_and_compression(
+            &context.join("Dockerfile"),
+            Some("local/registry-cache:latest"),
+            &target_runtime,
+            CompressionFormat::Gzip,
+            &target_store,
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(first.layer_digest, second.layer_digest);
+        assert_eq!(first.config_digest, second.config_digest);
+        // The registry import itself uses build/ as its transfer directory;
+        // a cache hit must not add any stage directories to it.
+        assert!(
+            !target_runtime.join("build/stage-0").exists(),
+            "imported registry cache hit must not rebuild stages"
+        );
+        assert!(layer_blob_path(&target_runtime, &second.layer_digest).exists());
+    }
+
+    #[test]
+    fn registry_cache_import_fails_closed_without_metadata_layer() {
+        let registry = LocalTestRegistry::run();
+        let target = tempfile::tempdir().unwrap();
+        let runtime = target.path().join("runtime");
+        // A manifest without the cache metadata layer annotation must be
+        // rejected instead of partially imported.
+        let manifest = bound_manifest_json(
+            &format!("sha256:{}", "5".repeat(64)),
+            &format!("sha256:{}", "6".repeat(64)),
+        );
+        push_raw_manifest(&registry.reference("team/empty", "latest"), &manifest);
+        let error = import_build_cache_from_registry(
+            &runtime,
+            &registry.reference("team/empty", "latest"),
+            None,
+        )
+        .expect_err("manifest without metadata layer must fail closed");
+        assert!(error.to_string().contains("no metadata layer"));
+    }
+
+    /// Push a manifest directly into the local test registry, bypassing the
+    /// export path, to seed invalid fixture states.
+    fn push_raw_manifest(reference: &str, manifest: &str) {
+        use crate::registry::RegistryClient;
+        let client = RegistryClient::new().unwrap();
+        let plain = reference
+            .strip_prefix("registry://")
+            .expect("registry cache reference prefix");
+        client
+            .push_manifest_raw(plain, manifest, None)
+            .expect("push fixture manifest");
     }
 
     #[test]

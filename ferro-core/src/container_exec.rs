@@ -75,15 +75,15 @@ pub fn exec_in_rootless_rootfs_tty(
         tmpfs_mounts,
         readonly_rootfs,
     )?;
-    let pty = nix::pty::openpty(None, None)
-        .map_err(|error| ContainerExecError::Io(std::io::Error::other(error)))?;
-    let slave = File::from(pty.slave);
+    let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
+    let (master, slave) = pty.into_parts();
+    let slave = File::from(slave);
     let mut child = command
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave))
         .spawn()?;
-    let master = File::from(pty.master);
+    let master = File::from(master);
     let mut output = Vec::new();
     if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
         if error.raw_os_error() != Some(nix::libc::EIO) {
@@ -242,16 +242,16 @@ pub fn exec_in_container_tty(
             "nsenter is unavailable or not a trusted root-owned executable",
         ))
     })?;
-    let pty = nix::pty::openpty(None, None)
-        .map_err(|error| ContainerExecError::Io(std::io::Error::other(error)))?;
-    let slave = File::from(pty.slave);
+    let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
+    let (master, slave) = pty.into_parts();
+    let slave = File::from(slave);
     let mut child = Command::new(nsenter)
         .args(args)
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave))
         .spawn()?;
-    let master = File::from(pty.master);
+    let master = File::from(master);
     let mut output = Vec::new();
     if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
         // Linux reports EIO when the last PTY slave closes; for a PTY this is

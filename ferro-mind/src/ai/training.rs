@@ -3081,18 +3081,36 @@ pub mod quantize {
         pub encoded_bytes: usize,
         /// Maximum absolute reconstruction error across the training set.
         pub max_abs_error: f32,
+        /// Fraction of sampled vectors whose nearest neighbor (cosine
+        /// distance, self excluded) computed from decoded vectors matches
+        /// the neighbor computed from the original f32 vectors. 1.0 means
+        /// quantization preserved every neighbor prediction.
+        pub top1_neighbor_parity: f32,
     }
 
-    /// Operator-selected size and reconstruction-error bounds for a
-    /// quantized artifact. Bounds are checked after training, before an
-    /// artifact is published or used for future inserts.
+    /// Operator-selected size, reconstruction-error, and prediction-parity
+    /// bounds for a quantized artifact. Bounds are checked after training,
+    /// before an artifact is published or used for future inserts.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct QuantizationPolicy {
         pub min_compression_ratio: f32,
         pub max_abs_error: f32,
+        pub min_neighbor_parity: f32,
     }
 
     impl QuantizationPolicy {
+        /// Canonical regression-gate thresholds, derived from measured
+        /// behavior of Scalar8bit on representative vector-memory workloads
+        /// (see docs/evidence/ai/2026-08-21-quantization-regression-gates.md):
+        /// int8 encoding must compress at least 3x (theoretical 4x), keep
+        /// the worst per-component reconstruction error at or below 0.05,
+        /// and preserve at least 90% of top-1 nearest-neighbor predictions.
+        pub const REGRESSION_GATE: QuantizationPolicy = QuantizationPolicy {
+            min_compression_ratio: 3.0,
+            max_abs_error: 0.05,
+            min_neighbor_parity: 0.9,
+        };
+
         pub fn validate(self) -> Result<(), String> {
             if !self.min_compression_ratio.is_finite() || self.min_compression_ratio < 1.0 {
                 return Err("minimum compression ratio must be finite and at least 1".to_string());
@@ -3100,6 +3118,14 @@ pub mod quantize {
             if !self.max_abs_error.is_finite() || self.max_abs_error < 0.0 {
                 return Err(
                     "maximum reconstruction error must be finite and non-negative".to_string(),
+                );
+            }
+            if !self.min_neighbor_parity.is_finite()
+                || self.min_neighbor_parity < 0.0
+                || self.min_neighbor_parity > 1.0
+            {
+                return Err(
+                    "minimum neighbor parity must be finite and within [0, 1]".to_string(),
                 );
             }
             Ok(())
@@ -3131,8 +3157,67 @@ pub mod quantize {
                     self.max_abs_error, policy.max_abs_error
                 ));
             }
+            if self.top1_neighbor_parity < policy.min_neighbor_parity {
+                return Err(format!(
+                    "neighbor parity {:.4} is below required {:.4}",
+                    self.top1_neighbor_parity, policy.min_neighbor_parity
+                ));
+            }
             Ok(())
         }
+    }
+
+    /// Cosine distance in [0, 2]. Degenerate (zero-norm) inputs return 1.0.
+    pub(crate) fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+        let mut dot = 0.0_f32;
+        let mut norm_a = 0.0_f32;
+        let mut norm_b = 0.0_f32;
+        for (x, y) in a.iter().zip(b.iter()) {
+            dot += x * y;
+            norm_a += x * x;
+            norm_b += y * y;
+        }
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 1.0;
+        }
+        1.0 - dot / (norm_a.sqrt() * norm_b.sqrt())
+    }
+
+    /// Upper bound on vectors used for the neighbor-parity measurement.
+    /// Keeps the O(n^2) comparison bounded on large training sets.
+    const PARITY_SAMPLE_MAX: usize = 2048;
+
+    /// Fraction of vectors whose nearest neighbor (cosine distance, self
+    /// excluded) is identical when computed from `original` versus
+    /// `reconstructed`. Uses a deterministic stride sample of at most
+    /// `PARITY_SAMPLE_MAX` vectors when the set is larger.
+    fn top1_neighbor_parity(original: &[Vec<f32>], reconstructed: &[Vec<f32>]) -> f32 {
+        let count = original.len();
+        if count < 2 {
+            return 1.0;
+        }
+        let stride = count.div_ceil(PARITY_SAMPLE_MAX);
+        let indices: Vec<usize> = (0..count).step_by(stride).collect();
+        let nearest = |set: &[Vec<f32>], i: usize| -> usize {
+            let mut best = usize::MAX;
+            let mut best_distance = f32::INFINITY;
+            for j in 0..count {
+                if j == i {
+                    continue;
+                }
+                let distance = cosine_distance(&set[i], &set[j]);
+                if distance < best_distance {
+                    best_distance = distance;
+                    best = j;
+                }
+            }
+            best
+        };
+        let matched = indices
+            .iter()
+            .filter(|&&i| nearest(original, i) == nearest(reconstructed, i))
+            .count();
+        matched as f32 / indices.len() as f32
     }
 
     /// Train a scalar quantizer over a slice of f32 vectors.
@@ -3167,6 +3252,7 @@ pub mod quantize {
             .ok_or_else(|| "quantizer input size overflows usize".to_string())?;
         let mut encoded_bytes = 0usize;
         let mut max_abs_error = 0.0f32;
+        let mut decoded_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
         for vector in vectors {
             let encoded = quantizer.encode_vec(vector);
             encoded_bytes = encoded_bytes
@@ -3176,7 +3262,9 @@ pub mod quantize {
             for (original, reconstructed) in vector.iter().zip(decoded.iter()) {
                 max_abs_error = max_abs_error.max((original - reconstructed).abs());
             }
+            decoded_vectors.push(decoded);
         }
+        let top1_neighbor_parity = top1_neighbor_parity(vectors, &decoded_vectors);
 
         Ok(QuantSummary {
             training_vectors: vectors.len(),
@@ -3185,6 +3273,7 @@ pub mod quantize {
             original_bytes,
             encoded_bytes,
             max_abs_error,
+            top1_neighbor_parity,
         })
     }
 
@@ -3219,6 +3308,7 @@ pub mod quantize {
                 .enforce_policy(QuantizationPolicy {
                     min_compression_ratio: 3.0,
                     max_abs_error: 0.05,
+                    min_neighbor_parity: 0.9,
                 })
                 .expect("quality policy");
 
@@ -3253,6 +3343,7 @@ pub mod quantize {
                 .enforce_policy(QuantizationPolicy {
                     min_compression_ratio: 100.0,
                     max_abs_error: 1.0,
+                    min_neighbor_parity: 0.0,
                 })
                 .expect_err("size gate");
             assert!(error.contains("compression ratio"));
@@ -3260,6 +3351,7 @@ pub mod quantize {
                 .enforce_policy(QuantizationPolicy {
                     min_compression_ratio: 1.0,
                     max_abs_error: 0.0,
+                    min_neighbor_parity: 0.0,
                 })
                 .expect_err("error gate");
             assert!(error.contains("reconstruction error"));
@@ -3270,10 +3362,108 @@ pub mod quantize {
                 QuantizationPolicy {
                     min_compression_ratio: 100.0,
                     max_abs_error: 1.0,
+                    min_neighbor_parity: 0.0,
                 },
             )
             .expect_err("training entry point must enforce policy");
             assert!(error.contains("compression ratio"));
+        }
+
+        #[test]
+        fn quantization_policy_rejects_invalid_parity_bounds() {
+            let error = QuantizationPolicy {
+                min_compression_ratio: 1.0,
+                max_abs_error: 1.0,
+                min_neighbor_parity: 1.5,
+            }
+            .validate()
+            .expect_err("parity above 1 must be rejected");
+            assert!(error.contains("neighbor parity"));
+            let error = QuantizationPolicy {
+                min_compression_ratio: 1.0,
+                max_abs_error: 1.0,
+                min_neighbor_parity: -0.1,
+            }
+            .validate()
+            .expect_err("negative parity must be rejected");
+            assert!(error.contains("neighbor parity"));
+        }
+
+        /// Regression gate: the canonical policy must hold on a
+        /// representative vector-memory workload (clustered unit-scale
+        /// vectors, the shape `RvfStore` embeddings take).
+        #[test]
+        fn regression_gate_holds_on_representative_workload() {
+            let dim = 16;
+            let mut vectors = Vec::new();
+            for cluster in 0..8u32 {
+                for member in 0..8u32 {
+                    let mut vector = vec![0.0_f32; dim];
+                    vector[(cluster as usize) % dim] = 0.8;
+                    vector[((cluster + 3) as usize) % dim] = 0.4;
+                    vector[((cluster + 7) as usize) % dim] = 0.1 * (member % 3) as f32;
+                    vectors.push(vector);
+                }
+            }
+
+            let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
+            summary
+                .enforce_policy(QuantizationPolicy::REGRESSION_GATE)
+                .expect("canonical regression gate must hold");
+            assert!(summary.compression_ratio() >= 3.0);
+            assert!(summary.max_abs_error <= 0.05);
+            assert!(summary.top1_neighbor_parity >= 0.9);
+        }
+
+        /// Compatibility gate: on a well-separated workload, decoded
+        /// (dequantized) vectors must produce the same top-1 neighbor
+        /// predictions as the original f32 vectors.
+        #[test]
+        fn quantized_predictions_match_unquantized_neighbors() {
+            let dim = 12;
+            let mut vectors = Vec::new();
+            for cluster in 0..6u32 {
+                for member in 0..5u32 {
+                    let mut vector = vec![0.05_f32; dim];
+                    vector[(cluster as usize) % dim] = 0.9;
+                    vector[((cluster * 5 + 1) as usize) % dim] = 0.2;
+                    vector[((cluster + 2) as usize) % dim] += 0.05 * member as f32;
+                    vectors.push(vector);
+                }
+            }
+
+            let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
+            assert!(
+                summary.top1_neighbor_parity >= 0.99,
+                "neighbor parity too low: {}",
+                summary.top1_neighbor_parity
+            );
+        }
+
+        /// Parity gate rejection: a coarse grid collapses vectors that are
+        /// closer than the quantization step, which must flip at least one
+        /// neighbor prediction and fail a parity-1.0 policy.
+        #[test]
+        fn policy_rejects_neighbor_parity_regression() {
+            let vectors = vec![
+                vec![0.0, 1.0],
+                vec![0.001, 1.0],
+                vec![100.0, 1.0],
+            ];
+            let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
+            assert!(
+                summary.top1_neighbor_parity < 1.0,
+                "collapsed grid must flip at least one neighbor: {}",
+                summary.top1_neighbor_parity
+            );
+            let error = summary
+                .enforce_policy(QuantizationPolicy {
+                    min_compression_ratio: 1.0,
+                    max_abs_error: 100.0,
+                    min_neighbor_parity: 1.0,
+                })
+                .expect_err("parity gate");
+            assert!(error.contains("neighbor parity"));
         }
     }
 }

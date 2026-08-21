@@ -362,4 +362,69 @@ mod tests {
             .expect("query compressed store");
         assert_eq!(hits.len(), 10);
     }
+
+    /// Regression gate for the persistent compression profile: on an
+    /// identical workload, the Scalar profile must never produce a larger
+    /// on-disk artifact than the default None profile (size
+    /// non-regression), and it must return the same top-1 query results
+    /// (compatibility). Measured against rvf-runtime 0.2.0, where the
+    /// stored profile is accepted but not yet applied — see
+    /// docs/evidence/ai/2026-08-21-quantization-regression-gates.md.
+    #[test]
+    fn scalar_profile_size_and_query_parity_gate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dimensions = 8;
+        let workload: Vec<[f32; 8]> = (0..512u32)
+            .map(|index| {
+                let mut vector = [0.0_f32; 8];
+                vector[(index as usize) % dimensions] = 1.0;
+                vector[((index as usize) + 1) % dimensions] = (index % 97) as f32 / 97.0;
+                vector[((index as usize) + 3) % dimensions] = (index % 13) as f32 / 13.0;
+                vector
+            })
+            .collect();
+
+        let build = |path: std::path::PathBuf, compression: CompressionProfile| {
+            let store =
+                RvfStore::open_or_create_with_compression(&path, dimensions, compression)
+                    .expect("create store");
+            for (index, vector) in workload.iter().enumerate() {
+                store
+                    .insert(Some(&format!("v-{index}")), vector)
+                    .expect("insert vector");
+            }
+            let metrics = store.metrics().expect("metrics");
+            drop(store);
+            metrics
+        };
+
+        let plain = build(tmp.path().join("plain.rvf"), CompressionProfile::None);
+        let scalar = build(tmp.path().join("scalar.rvf"), CompressionProfile::Scalar);
+
+        assert_eq!(plain.vectors, 512);
+        assert_eq!(scalar.vectors, 512);
+        assert!(
+            scalar.file_size_bytes <= plain.file_size_bytes,
+            "scalar profile file {} bytes is larger than plain {} bytes",
+            scalar.file_size_bytes,
+            plain.file_size_bytes
+        );
+
+        // Compatibility: both profiles must answer probes identically.
+        let plain_store = RvfStore::open_or_create(tmp.path().join("plain.rvf"), dimensions)
+            .expect("open plain");
+        let scalar_store = RvfStore::open_or_create(tmp.path().join("scalar.rvf"), dimensions)
+            .expect("open scalar");
+        for probe in [0usize, 7, 100, 511] {
+            let query = workload[probe];
+            let plain_top = plain_store.search(&query, 1).expect("plain query");
+            let scalar_top = scalar_store.search(&query, 1).expect("scalar query");
+            assert_eq!(plain_top.len(), 1);
+            assert_eq!(scalar_top.len(), 1);
+            assert_eq!(
+                plain_top[0].id, scalar_top[0].id,
+                "top-1 result differs at probe {probe}"
+            );
+        }
+    }
 }

@@ -28,6 +28,9 @@ pub mod container_store;
 pub mod docker_auth;
 #[cfg(target_os = "linux")]
 pub mod dockerfile_build;
+#[cfg(not(target_os = "linux"))]
+#[path = "dockerfile_build_non_linux.rs"]
+pub mod dockerfile_build;
 pub mod entitlements;
 #[cfg(target_os = "linux")]
 pub mod ferrofile_build;

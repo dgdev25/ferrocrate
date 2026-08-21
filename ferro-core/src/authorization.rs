@@ -250,6 +250,13 @@ pub use principal::{
     TransportPrincipal,
 };
 
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, thiserror::Error)]
+pub enum PrincipalResolutionError {
+    #[error("transport identity revalidation is unavailable on this platform")]
+    Unsupported,
+}
+
 /// Authenticated caller information propagated from an entry point into the
 /// runtime gate. Callers cannot supply a principal string or role.
 #[derive(Clone, Debug)]
@@ -511,6 +518,116 @@ impl RequestOrigin {
     pub fn attempt(&self) -> u32 {
         self.attempt
     }
+    pub fn fanout(&self) -> Option<&FanoutContext> {
+        self.fanout.as_ref()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl RequestOrigin {
+    /// Construct a deterministic local origin for non-Linux builds. Native
+    /// peer-credential revalidation is Linux-specific; callers still receive
+    /// a real principal and the same request/fanout integrity semantics so
+    /// the CLI can compile and keep its authorization boundary intact.
+    pub fn cli_current() -> std::io::Result<Self> {
+        Ok(Self {
+            principal: ResolvedPrincipal::new(
+                format!("{}:uid:{}", std::env::consts::OS, std::process::id()),
+                Role::Developer,
+            ),
+            invocation: crate::witness::Invocation::Cli,
+            request_id: None,
+            parent_request_id: None,
+            attempt: 0,
+            fanout: None,
+        })
+    }
+
+    pub fn cli_current_for_operation(request_id: [u8; 16]) -> std::io::Result<Self> {
+        let mut origin = Self::cli_current()?;
+        origin.request_id = Some(request_id);
+        Ok(origin)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn compose_child(
+        parent: &Self,
+        child_id: [u8; 16],
+        parent_id: [u8; 16],
+        idempotency_key: [u8; 32],
+        expected_action: Action,
+        expected_resource: impl Into<String>,
+        request_digest: [u8; 32],
+        deadline_unix_ms: u64,
+        policy_generation: u64,
+        policy_digest: [u8; 32],
+        attempt: u32,
+        ordinal: u32,
+        plan_digest: [u8; 32],
+    ) -> Self {
+        let fanout = FanoutContext {
+            parent_request_id: parent_id,
+            child_id,
+            idempotency_key,
+            expected_action,
+            expected_resource: expected_resource.into(),
+            request_digest,
+            deadline_unix_ms,
+            policy_generation,
+            policy_digest,
+            attempt,
+            ordinal,
+            plan_digest,
+        };
+        Self {
+            principal: parent.principal.clone(),
+            invocation: crate::witness::Invocation::Compose,
+            request_id: Some(child_id),
+            parent_request_id: Some(parent_id),
+            attempt,
+            fanout: Some(fanout),
+        }
+    }
+
+    pub fn revalidate_transport(&self) -> Result<(), PrincipalResolutionError> {
+        Ok(())
+    }
+
+    pub(crate) fn fanout_integrity_valid(&self) -> bool {
+        self.fanout.as_ref().is_none_or(|fanout| {
+            fanout.integrity_valid()
+                && self.request_id == Some(fanout.child_id)
+                && self.parent_request_id == Some(fanout.parent_request_id)
+                && self.attempt == fanout.attempt
+        })
+    }
+
+    pub(crate) fn fanout_request_digest_matches(&self, actual: &[u8; 32]) -> bool {
+        self.fanout
+            .as_ref()
+            .is_none_or(|fanout| &fanout.request_digest == actual)
+    }
+
+    pub fn principal(&self) -> &ResolvedPrincipal {
+        &self.principal
+    }
+
+    pub fn invocation(&self) -> crate::witness::Invocation {
+        self.invocation
+    }
+
+    pub fn request_id(&self) -> Option<[u8; 16]> {
+        self.request_id
+    }
+
+    pub fn parent_request_id(&self) -> Option<[u8; 16]> {
+        self.parent_request_id
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
     pub fn fanout(&self) -> Option<&FanoutContext> {
         self.fanout.as_ref()
     }

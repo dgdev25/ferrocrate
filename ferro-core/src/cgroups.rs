@@ -4,6 +4,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[cfg(target_os = "linux")]
+fn effective_user_is_root() -> bool {
+    nix::unistd::Uid::effective().is_root()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn effective_user_is_root() -> bool {
+    false
+}
+
 const CGROUP_CONTROLLERS: &str = "cgroup.controllers";
 const CGROUP_SUBTREE_CONTROL: &str = "cgroup.subtree_control";
 
@@ -52,7 +62,7 @@ impl CgroupV2Manager {
 
     pub fn ensure_v2_available(&self) -> Result<(), CgroupError> {
         if self.root.join(CGROUP_CONTROLLERS).exists() {
-            if !nix::unistd::Uid::effective().is_root()
+            if !effective_user_is_root()
                 && self.root.starts_with("/sys/fs/cgroup")
                 && fs::OpenOptions::new()
                     .write(true)
@@ -324,7 +334,7 @@ fn write_cgroup_file(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::
     fs::write(path, contents).map_err(|error| {
         io::Error::new(
             error.kind(),
-            format_cgroup_io_error(path, error, !nix::unistd::Uid::effective().is_root()),
+            format_cgroup_io_error(path, error, !effective_user_is_root()),
         )
     })
 }

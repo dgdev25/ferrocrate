@@ -1,4 +1,8 @@
+#[cfg(target_os = "linux")]
 use crate::seccomp::{guest_seccomp_profile, SeccompProfile};
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, Clone)]
+pub struct SeccompProfile;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,6 +14,7 @@ pub enum AiRuntimeError {
     TokenBudgetExceeded { used: u64, budget: u64 },
     #[error("coherence gate failed: {gate}: {reason}")]
     CoherenceGateFailed { gate: String, reason: String },
+    #[cfg(target_os = "linux")]
     #[error("seccomp error: {0}")]
     Seccomp(#[from] crate::seccomp::SeccompError),
     #[error("model backend failed: {0}")]
@@ -216,10 +221,23 @@ pub fn ai_runtime_env(config: &AiRuntimeConfig) -> Vec<String> {
 pub fn seccomp_profile_for_authority(
     authority: &Authority,
 ) -> Result<Option<SeccompProfile>, AiRuntimeError> {
+    #[cfg(not(target_os = "linux"))]
+    if matches!(authority, Authority::Guest) {
+        return Err(AiRuntimeError::ModelBackend(
+            "guest seccomp profiles are unsupported on this platform".to_string(),
+        ));
+    }
     match authority {
         Authority::Guest => {
-            let profile = guest_seccomp_profile()?;
-            Ok(Some(profile))
+            #[cfg(target_os = "linux")]
+            {
+                let profile = guest_seccomp_profile()?;
+                Ok(Some(profile))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                unreachable!("non-Linux guest authority returned above")
+            }
         }
         Authority::User | Authority::Admin => Ok(None),
     }

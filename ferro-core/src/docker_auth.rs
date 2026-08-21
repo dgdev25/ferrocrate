@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+#[cfg(target_os = "linux")]
 use tracing::warn;
 
 // SEC-02: Scoped environment variable guard for safe test environment manipulation
@@ -298,7 +299,18 @@ fn resolve_helper_path(helper_bin: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    crate::rootless::trusted_executable_path(helper_bin)
+    #[cfg(target_os = "linux")]
+    {
+        crate::rootless::trusted_executable_path(helper_bin)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Rootless helper discovery is Linux-specific. Windows/macOS builds
+        // retain the explicit untrusted-helper failure until a native helper
+        // policy is implemented.
+        let _ = helper_bin;
+        None
+    }
 }
 
 fn trusted_helper_path(path: &Path) -> bool {

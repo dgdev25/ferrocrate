@@ -9,22 +9,22 @@ use crate::image_manifest::{
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::{canonicalize_reference, resolve_reference};
 use crate::layer_compression::{
-    CompressionFormat, LayerCompressionError, compress_bytes_gzip, compress_bytes_zstd,
+    compress_bytes_gzip, compress_bytes_zstd, CompressionFormat, LayerCompressionError,
 };
 use crate::registry::{RegistryAuth, RegistryClient};
 #[cfg(target_os = "linux")]
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
-use crate::seccomp::{SeccompProfile, apply_seccomp_profile, default_seccomp_profile};
+use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use lzma_rust2::XzReader;
 #[cfg(unix)]
-use nix::mount::{MsFlags, mount};
+use nix::mount::{mount, MsFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
@@ -41,8 +41,9 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
@@ -94,6 +95,7 @@ pub struct ImageBuildPlan {
     named_contexts: HashMap<String, PathBuf>,
     stage_dependencies: Vec<Vec<usize>>,
     stage_batches: Vec<Vec<usize>>,
+    stage_identities: Vec<String>,
     plan_digest: [u8; 32],
 }
 
@@ -119,6 +121,15 @@ impl ImageBuildPlan {
     /// only on earlier batches and are candidates for concurrent execution.
     pub fn stage_batches(&self) -> &[Vec<usize>] {
         &self.stage_batches
+    }
+
+    /// Return the content-addressed identity of every stage: a digest of the
+    /// stage instructions, the context it consumes, its base image, and the
+    /// identities of the stages it copies from. Two builds of the same stage
+    /// inputs produce the same identity; editing one stage changes only that
+    /// stage's identity and the identities of its descendants.
+    pub fn stage_identities(&self) -> &[String] {
+        &self.stage_identities
     }
 }
 
@@ -203,6 +214,22 @@ pub fn prepare_dockerfile_build_with_contexts(
             hash.update((*dependency as u64).to_be_bytes());
         }
     }
+    let stage_base_digests: Vec<String> = base_digests
+        .iter()
+        .map(|(_, digest)| digest.clone().unwrap_or_else(|| "scratch".to_string()))
+        .collect();
+    let stage_identities = stage_content_identities(
+        &stages,
+        &stage_base_digests,
+        &context_digest,
+        &stage_dependencies,
+        compression,
+    )?;
+    hash.update((stage_identities.len() as u64).to_be_bytes());
+    for identity in &stage_identities {
+        hash.update((identity.len() as u64).to_be_bytes());
+        hash.update(identity.as_bytes());
+    }
     Ok(ImageBuildPlan {
         dockerfile_path: dockerfile_path.to_path_buf(),
         runtime_dir: runtime_dir.to_path_buf(),
@@ -214,6 +241,7 @@ pub fn prepare_dockerfile_build_with_contexts(
         named_contexts: canonicalize_named_contexts(named_contexts)?,
         stage_dependencies,
         stage_batches,
+        stage_identities,
         plan_digest: hash.finalize().into(),
     })
 }
@@ -401,10 +429,6 @@ fn save_stage_checkpoints(
         File::open(parent)?.sync_all()?;
     }
     Ok(())
-}
-
-fn stage_checkpoint_key(cache_key: &str, index: usize) -> String {
-    sha256_digest_bytes(format!("ferrocrate-stage-checkpoint\0{cache_key}\0{index}").as_bytes())
 }
 
 fn build_journal_path(runtime_dir: &Path) -> PathBuf {
@@ -719,13 +743,20 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 &base_digests,
             ) =>
         {
+            // Same build identity: keep the completed-stage record so an
+            // interrupted build resumes from the stages the journal says
+            // finished. Stage checkpoints stay authoritative per stage: a
+            // checkpoint restores only when its content-addressed stage
+            // identity still matches.
             existing
         }
         _ => {
             // No journal, or the source/context/base identity changed since
-            // the journaled build: discard its stage checkpoints so a retry
-            // never resumes state produced under a different identity.
-            let _ = fs::remove_file(stage_checkpoint_path(runtime_dir));
+            // the journaled build: start a fresh progress record. Stage
+            // checkpoints are kept, not discarded — each is bound to the
+            // content-addressed identity of its stage, so an edited
+            // Dockerfile still reuses the checkpoints of the stages whose
+            // inputs did not change and overwrites only the rest.
             BuildJournal {
                 cache_key: cache_key.clone(),
                 context_digest: context_hash.clone(),
@@ -739,7 +770,6 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         }
     };
     journal.state = BuildJournalState::Running;
-    journal.completed_stages.clear();
     journal.authorization_plan_digest = authorization_plan_digest.map(str::to_string);
     journal.image_reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
     // Checked before the cache path so a cancelled build never re-publishes a
@@ -838,6 +868,83 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     }
 }
 
+/// Append one stage lifecycle event to the trace file named by
+/// FERROCRATE_BUILD_STAGE_TRACE. Events: `start <idx> <unix_ns>` before a
+/// stage executes, `end <idx> <unix_ns> ok|err` after, and
+/// `restore <idx> <unix_ns>` when a stage is restored from its checkpoint.
+/// The trace is build instrumentation: it never gates build behavior.
+fn stage_trace_event(kind: &str, idx: usize, detail: &str) {
+    let Some(path) = std::env::var_os("FERROCRATE_BUILD_STAGE_TRACE") else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let line = format!("{kind} {idx} {now} {detail}\n");
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Run every stage of one dependency batch over a bounded worker pool.
+/// At most `max_workers` stages execute concurrently; the rest queue. Each
+/// worker re-checks build control before starting a stage so cancellation and
+/// limits stop queued stages immediately. Results are delivered to
+/// `on_result` on the coordinating thread as they arrive, so callers can
+/// journal each stage atomically while the rest of the batch still runs.
+/// Returns the number of results delivered; a panicked worker delivers no
+/// result for its stage, so a count below `batch.len()` reports a panic.
+fn run_stage_worker_pool<F, T, R>(
+    batch: &[usize],
+    max_workers: usize,
+    control: &BuildControl,
+    execute: F,
+    mut on_result: R,
+) -> usize
+where
+    F: Fn(usize) -> Result<T, DockerfileBuildError> + Send + Sync,
+    R: FnMut(usize, Result<T, DockerfileBuildError>) + Send,
+    T: Send,
+{
+    let worker_count = batch.len().min(max_workers.max(1));
+    let queue = Mutex::new(VecDeque::from_iter(batch.iter().copied()));
+    let (sender, receiver) = mpsc::channel::<(usize, Result<T, DockerfileBuildError>)>();
+    let mut delivered = 0usize;
+    thread::scope(|scope| {
+        let delivered = &mut delivered;
+        let coordinator = scope.spawn(move || {
+            while *delivered < batch.len() {
+                match receiver.recv() {
+                    Ok((idx, result)) => {
+                        *delivered += 1;
+                        on_result(idx, result);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let queue = &queue;
+        let execute = &execute;
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            scope.spawn(move || loop {
+                let next = queue.lock().expect("stage queue").pop_front();
+                let Some(idx) = next else {
+                    break;
+                };
+                let result = control.check("stage start").and_then(|()| execute(idx));
+                if sender.send((idx, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+        let _ = coordinator.join();
+    });
+    delivered
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_stages_and_publish(
     stages: &[StageSpec],
@@ -869,9 +976,17 @@ fn execute_stages_and_publish(
         HashMap::new()
     };
 
-    let batches =
-        build_stage_execution_batches(&build_stage_dependency_graph(stages, named_contexts)?)?;
+    let dependency_graph = build_stage_dependency_graph(stages, named_contexts)?;
+    let batches = build_stage_execution_batches(&dependency_graph)?;
+    let stage_identities = stage_content_identities(
+        stages,
+        base_digests,
+        context_hash,
+        &dependency_graph,
+        compression,
+    )?;
     let mut built: Vec<Option<BuiltStage>> = (0..stages.len()).map(|_| None).collect();
+    let max_workers = resolve_max_parallel_stages(&control.limits);
     for batch in batches {
         control.check("stage batch start")?;
         let roots_snapshot = stage_roots
@@ -884,134 +999,137 @@ fn execute_stages_and_publish(
         let names_snapshot = stage_names.clone();
         // Each stage has an isolated rootfs and stage-scoped RUN cache. The
         // unique build-directory allocator and content-addressed blob writer
-        // make independent stages safe to execute concurrently.
-        let can_parallel = batch.len() > 1;
-        let outputs = if can_parallel {
-            std::thread::scope(|scope| {
-                let handles = batch
-                    .iter()
-                    .map(|idx| {
-                        let stage = &stages[*idx];
-                        let base_info = &base_infos[*idx];
-                        let checkpoint = checkpoints
-                            .get(idx)
-                            .filter(|checkpoint| {
-                                checkpoint.build_key == stage_checkpoint_key(cache_key, *idx)
-                            })
-                            .cloned();
-                        let worker_ignore_patterns = ignore_patterns.clone();
-                        let worker_named_contexts = named_contexts.clone();
-                        let worker_roots_snapshot = roots_snapshot.clone();
-                        let worker_names_snapshot = names_snapshot.clone();
-                        scope.spawn(move || {
-                            let restored = checkpoint.as_ref().map(|checkpoint| {
-                                restore_stage_from_checkpoint(
-                                    runtime_dir,
-                                    *idx,
-                                    base_info,
-                                    checkpoint,
-                                )
-                            });
-                            match restored {
-                                Some(Ok(Some(mut output))) => {
-                                    output.name = stage.name.clone();
-                                    Ok(output)
-                                }
-                                Some(Ok(None)) | None => build_one_stage(
-                                    *idx,
-                                    stage,
-                                    base_info,
-                                    runtime_dir,
-                                    context_dir,
-                                    dockerfile_path,
-                                    compression,
-                                    &worker_ignore_patterns,
-                                    &worker_named_contexts,
-                                    secrets,
-                                    &worker_roots_snapshot,
-                                    &worker_names_snapshot,
-                                    control,
-                                ),
-                                Some(Err(error)) => Err(error),
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().map_err(|_| {
-                            DockerfileBuildError::Invalid(
-                                "parallel stage worker panicked".to_string(),
-                            )
-                        })?
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })?
-        } else {
-            batch
-                .iter()
-                .map(|idx| {
-                    let checkpoint = checkpoints.get(idx).filter(|checkpoint| {
-                        checkpoint.build_key == stage_checkpoint_key(cache_key, *idx)
-                    });
-                    if let Some(checkpoint) = checkpoint {
-                        if let Some(mut output) = restore_stage_from_checkpoint(
+        // make independent stages safe to execute concurrently; the worker
+        // pool bounds how many do at once. A stage resumes from its
+        // checkpoint when the checkpoint was produced by the same
+        // content-addressed stage identity.
+        let worker_checkpoints = checkpoints.clone();
+        let execute_stage = |idx: usize| -> Result<BuiltStage, DockerfileBuildError> {
+            let checkpoint = worker_checkpoints
+                .get(&idx)
+                .filter(|checkpoint| checkpoint.build_key == stage_identities[idx])
+                .cloned();
+            let outcome = match checkpoint {
+                Some(checkpoint) => {
+                    match restore_stage_from_checkpoint(
+                        runtime_dir,
+                        idx,
+                        &base_infos[idx],
+                        &checkpoint,
+                    ) {
+                        Ok(Some(mut output)) => {
+                            stage_trace_event("restore", idx, "");
+                            output.name = stages[idx].name.clone();
+                            Ok(output)
+                        }
+                        Ok(None) => build_one_stage(
+                            idx,
+                            &stages[idx],
+                            &base_infos[idx],
                             runtime_dir,
-                            *idx,
-                            &base_infos[*idx],
-                            checkpoint,
-                        )? {
-                            output.name = stages[*idx].name.clone();
-                            return Ok(output);
+                            context_dir,
+                            dockerfile_path,
+                            compression,
+                            &ignore_patterns,
+                            named_contexts,
+                            secrets,
+                            &roots_snapshot,
+                            &names_snapshot,
+                            control,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                }
+                None => build_one_stage(
+                    idx,
+                    &stages[idx],
+                    &base_infos[idx],
+                    runtime_dir,
+                    context_dir,
+                    dockerfile_path,
+                    compression,
+                    &ignore_patterns,
+                    named_contexts,
+                    secrets,
+                    &roots_snapshot,
+                    &names_snapshot,
+                    control,
+                ),
+            };
+            match &outcome {
+                Ok(_) => stage_trace_event("end", idx, "ok"),
+                Err(_) => stage_trace_event("end", idx, "err"),
+            }
+            outcome
+        };
+        // The trace `start` event belongs inside the worker so recorded
+        // intervals reflect actual pool concurrency.
+        let traced_execute = |idx: usize| -> Result<BuiltStage, DockerfileBuildError> {
+            stage_trace_event("start", idx, "");
+            execute_stage(idx)
+        };
+        let mut completed_in_batch = 0usize;
+        let mut batch_error: Option<DockerfileBuildError> = None;
+        let mut journal_error: Option<DockerfileBuildError> = None;
+        let delivered = run_stage_worker_pool(
+            &batch,
+            max_workers,
+            control,
+            traced_execute,
+            |idx, result| match result {
+                Ok(output) => {
+                    if checkpointing {
+                        checkpoints.insert(
+                            idx,
+                            StageCheckpoint {
+                                build_key: stage_identities[idx].clone(),
+                                layer_digest: output.layer_digest.clone(),
+                                layer_media_type: output.layer_media_type.clone(),
+                                layer_size: output.layer_size,
+                            },
+                        );
+                    }
+                    stage_roots[idx] = Some(output.root.clone());
+                    if let Some(name) = output.name.as_ref() {
+                        stage_names.insert(name.clone(), output.root.clone());
+                    }
+                    journal.completed_stages.push(idx);
+                    journal.completed_stages.sort_unstable();
+                    journal.completed_stages.dedup();
+                    // Journal and checkpoints are written once per completed
+                    // stage while the rest of the batch still runs, so an
+                    // interrupted parallel batch keeps the stages that did
+                    // finish resumable.
+                    if checkpointing {
+                        if let Err(error) = save_stage_checkpoints(runtime_dir, &checkpoints) {
+                            journal_error.get_or_insert(error);
                         }
                     }
-                    build_one_stage(
-                        *idx,
-                        &stages[*idx],
-                        &base_infos[*idx],
-                        runtime_dir,
-                        context_dir,
-                        dockerfile_path,
-                        compression,
-                        &ignore_patterns,
-                        named_contexts,
-                        secrets,
-                        &roots_snapshot,
-                        &names_snapshot,
-                        control,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let batch_indexes = batch.clone();
-        for (idx, output) in batch.into_iter().zip(outputs) {
-            if checkpointing {
-                checkpoints.insert(
-                    idx,
-                    StageCheckpoint {
-                        build_key: stage_checkpoint_key(cache_key, idx),
-                        layer_digest: output.layer_digest.clone(),
-                        layer_media_type: output.layer_media_type.clone(),
-                        layer_size: output.layer_size,
-                    },
-                );
-            }
-            stage_roots[idx] = Some(output.root.clone());
-            if let Some(name) = output.name.as_ref() {
-                stage_names.insert(name.clone(), output.root.clone());
-            }
-            built[idx] = Some(output);
+                    if let Err(error) = save_build_journal(runtime_dir, journal) {
+                        journal_error.get_or_insert(error);
+                    }
+                    built[idx] = Some(output);
+                    completed_in_batch += 1;
+                }
+                Err(error) => {
+                    batch_error.get_or_insert(error);
+                }
+            },
+        );
+        if delivered != batch.len() {
+            return Err(DockerfileBuildError::Invalid(
+                "parallel stage worker panicked".to_string(),
+            ));
         }
-        if checkpointing {
-            save_stage_checkpoints(runtime_dir, &checkpoints)?;
+        if let Some(error) = journal_error {
+            return Err(error);
         }
-        journal
-            .completed_stages
-            .extend(batch_indexes.iter().copied());
-        journal.completed_stages.sort_unstable();
-        journal.completed_stages.dedup();
-        save_build_journal(runtime_dir, journal)?;
+        if let Some(error) = batch_error {
+            return Err(error);
+        }
+        // Every stage of the batch delivered an Ok result, so `built` and
+        // `stage_roots` now hold an entry for each index.
+        debug_assert_eq!(completed_in_batch, batch.len());
     }
 
     let final_idx = stages
@@ -2541,6 +2659,242 @@ fn build_stage_execution_batches(
     Ok(batches)
 }
 
+/// Append a length-prefixed identity field. The tag keeps fields
+/// domain-separated so adjacent values cannot be re-parsed ambiguously.
+fn append_stage_identity_str(buffer: &mut Vec<u8>, tag: &str, value: &str) {
+    buffer.extend_from_slice(tag.as_bytes());
+    buffer.push(0);
+    buffer.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(value.as_bytes());
+}
+
+fn append_stage_identity_opt_str(buffer: &mut Vec<u8>, tag: &str, value: &Option<String>) {
+    append_stage_identity_str(buffer, tag, value.as_deref().unwrap_or("\0absent"));
+}
+
+fn append_stage_identity_u64(buffer: &mut Vec<u8>, tag: &str, value: u64) {
+    append_stage_identity_str(buffer, tag, &value.to_string());
+}
+
+fn append_stage_identity_bool(buffer: &mut Vec<u8>, tag: &str, value: bool) {
+    append_stage_identity_str(buffer, tag, if value { "1" } else { "0" });
+}
+
+fn append_stage_identity_owner(buffer: &mut Vec<u8>, tag: &str, owner: &Option<CopyOwner>) {
+    match owner {
+        None => append_stage_identity_str(buffer, tag, "\0absent"),
+        Some(CopyOwner::Numeric(uid, gid)) => {
+            append_stage_identity_str(buffer, tag, &format!("n:{uid}:{gid}"));
+        }
+        Some(CopyOwner::Named { user, group }) => {
+            append_stage_identity_str(
+                buffer,
+                tag,
+                &format!("s:{user}:{}", group.clone().unwrap_or_default()),
+            );
+        }
+    }
+}
+
+/// Serialize every field of a stage that can change its built output. All
+/// fields are included conservatively: adding an instruction field later must
+/// extend this function, or stale checkpoints could be restored.
+fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
+    append_stage_identity_str(buffer, "base", &stage.base);
+    append_stage_identity_opt_str(buffer, "name", &stage.name);
+    for copy in &stage.copy_from {
+        append_stage_identity_str(buffer, "cf.from", &copy.from);
+        append_stage_identity_str(buffer, "cf.src", &copy.src);
+        append_stage_identity_str(buffer, "cf.dest", &copy.dest);
+        append_stage_identity_owner(buffer, "cf.owner", &copy.owner);
+    }
+    for copy in &stage.copy_paths {
+        for source in &copy.srcs {
+            append_stage_identity_str(buffer, "cp.src", source);
+        }
+        append_stage_identity_str(buffer, "cp.dest", &copy.dest);
+        if let Some(chmod) = copy.chmod {
+            append_stage_identity_u64(buffer, "cp.chmod", chmod as u64);
+        } else {
+            append_stage_identity_str(buffer, "cp.chmod", "\0absent");
+        }
+        append_stage_identity_owner(buffer, "cp.owner", &copy.owner);
+        append_stage_identity_str(
+            buffer,
+            "cp.checksum",
+            copy.checksum.as_deref().unwrap_or("\0absent"),
+        );
+        append_stage_identity_bool(buffer, "cp.parents", copy.parents);
+        for exclude in &copy.excludes {
+            append_stage_identity_str(buffer, "cp.exclude", exclude);
+        }
+        append_stage_identity_bool(buffer, "cp.extract", copy.extract_archives);
+    }
+    match &stage.healthcheck {
+        Some(health) => {
+            for probe in &health.test {
+                append_stage_identity_str(buffer, "hc.test", probe);
+            }
+            append_stage_identity_u64(buffer, "hc.interval", health.interval_nanos);
+            append_stage_identity_u64(buffer, "hc.timeout", health.timeout_nanos);
+            append_stage_identity_u64(buffer, "hc.retries", health.retries as u64);
+            append_stage_identity_u64(buffer, "hc.start_period", health.start_period_nanos);
+            append_stage_identity_u64(buffer, "hc.start_interval", health.start_interval_nanos);
+        }
+        None => append_stage_identity_str(buffer, "hc", "\0absent"),
+    }
+    for entry in &stage.env {
+        append_stage_identity_str(buffer, "env", entry);
+    }
+    let mut args = stage.args.iter().collect::<Vec<_>>();
+    args.sort_unstable();
+    for (key, value) in args {
+        append_stage_identity_str(buffer, "arg", &format!("{key}={value}"));
+    }
+    let mut labels = stage.labels.iter().collect::<Vec<_>>();
+    labels.sort_unstable();
+    for (key, value) in labels {
+        append_stage_identity_str(buffer, "label", &format!("{key}={value}"));
+    }
+    append_stage_identity_opt_str(buffer, "workdir", &stage.workdir);
+    append_stage_identity_opt_str(buffer, "user", &stage.user);
+    append_stage_identity_opt_str(buffer, "stop_signal", &stage.stop_signal);
+    append_stage_identity_opt_str(buffer, "author", &stage.author);
+    for trigger in &stage.onbuild {
+        append_stage_identity_str(buffer, "onbuild", trigger);
+    }
+    match &stage.entrypoint {
+        Some(entrypoint) => {
+            for part in entrypoint {
+                append_stage_identity_str(buffer, "entrypoint", part);
+            }
+        }
+        None => append_stage_identity_str(buffer, "entrypoint", "\0absent"),
+    }
+    match &stage.cmd {
+        Some(cmd) => {
+            for part in cmd {
+                append_stage_identity_str(buffer, "cmd", part);
+            }
+        }
+        None => append_stage_identity_str(buffer, "cmd", "\0absent"),
+    }
+    for part in &stage.shell {
+        append_stage_identity_str(buffer, "shell", part);
+    }
+    for run in &stage.run {
+        for arg in &run.args {
+            append_stage_identity_str(buffer, "run.arg", arg);
+        }
+        append_stage_identity_bool(buffer, "run.shell", run._shell);
+        for mount in &run.cache_mounts {
+            append_stage_identity_str(buffer, "cache.target", &mount.target);
+            append_stage_identity_str(buffer, "cache.id", &mount.id);
+            append_stage_identity_str(
+                buffer,
+                "cache.sharing",
+                match mount.sharing {
+                    CacheSharing::Shared => "shared",
+                    CacheSharing::Private => "private",
+                    CacheSharing::Locked => "locked",
+                },
+            );
+            append_stage_identity_u64(
+                buffer,
+                "cache.uid",
+                mount.uid.map(u64::from).unwrap_or(u64::MAX),
+            );
+            append_stage_identity_u64(
+                buffer,
+                "cache.gid",
+                mount.gid.map(u64::from).unwrap_or(u64::MAX),
+            );
+            append_stage_identity_u64(
+                buffer,
+                "cache.mode",
+                mount.mode.map(u64::from).unwrap_or(u64::MAX),
+            );
+        }
+        for mount in &run.secret_mounts {
+            append_stage_identity_str(buffer, "secret.target", &mount.target);
+            append_stage_identity_str(buffer, "secret.id", &mount.id);
+            append_stage_identity_bool(buffer, "secret.required", mount.required);
+        }
+        for mount in &run.ssh_mounts {
+            append_stage_identity_str(buffer, "ssh.target", &mount.target);
+            append_stage_identity_str(buffer, "ssh.id", &mount.id);
+        }
+        for mount in &run.tmpfs_mounts {
+            append_stage_identity_str(buffer, "tmpfs.target", &mount.target);
+            append_stage_identity_u64(buffer, "tmpfs.size", mount.size.unwrap_or(u64::MAX));
+            append_stage_identity_bool(buffer, "tmpfs.ro", mount.read_only);
+        }
+        for mount in &run.bind_mounts {
+            append_stage_identity_str(buffer, "bind.source", &mount.source);
+            append_stage_identity_str(buffer, "bind.target", &mount.target);
+            append_stage_identity_bool(buffer, "bind.ro", mount.read_only);
+        }
+    }
+    for port in &stage.exposed_ports {
+        append_stage_identity_str(buffer, "expose", port);
+    }
+    for volume in &stage.volumes {
+        append_stage_identity_str(buffer, "volume", volume);
+    }
+}
+
+/// A stage consumes the build context when it COPYs from it directly or from
+/// a named context; RUN-only stages never see context bytes.
+fn stage_consumes_context(stage: &StageSpec) -> bool {
+    !stage.copy_paths.is_empty() || !stage.copy_from.is_empty()
+}
+
+/// Compute the content-addressed identity of every stage in Dockerfile order.
+/// Identity = digest(stage instructions, context binding when the stage
+/// consumes context, base image digest, parent stage identities, compression).
+/// The context binding is whole-context (conservative): an unrelated context
+/// edit invalidates every context-consuming stage rather than one slice.
+/// Editing one stage's instructions changes only that identity and the
+/// identities of its descendants; independent branches are unaffected.
+fn stage_content_identities(
+    stages: &[StageSpec],
+    base_digests: &[String],
+    context_binding_digest: &str,
+    dependencies: &[Vec<usize>],
+    compression: CompressionFormat,
+) -> Result<Vec<String>, DockerfileBuildError> {
+    if stages.len() != base_digests.len() || stages.len() != dependencies.len() {
+        return Err(DockerfileBuildError::Invalid(
+            "stage identity inputs must match the stage count".to_string(),
+        ));
+    }
+    let mut identities: Vec<String> = Vec::with_capacity(stages.len());
+    for (index, stage) in stages.iter().enumerate() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"ferrocrate/stage-identity/v1\0");
+        buffer.push(match compression {
+            CompressionFormat::None => 0,
+            CompressionFormat::Gzip => 1,
+            CompressionFormat::Zstd => 2,
+        });
+        append_stage_identity_str(&mut buffer, "base", &base_digests[index]);
+        append_stage_spec_identity(&mut buffer, stage);
+        if stage_consumes_context(stage) {
+            append_stage_identity_str(&mut buffer, "context", context_binding_digest);
+        }
+        for dependency in &dependencies[index] {
+            let parent = identities.get(*dependency).ok_or_else(|| {
+                DockerfileBuildError::Invalid(
+                    "stage dependency graph references a later stage".to_string(),
+                )
+            })?;
+            append_stage_identity_str(&mut buffer, "parent", parent);
+        }
+        identities.push(hex::encode(rvf_crypto::shake256_256(&buffer)));
+    }
+    Ok(identities)
+}
+
 fn parse_from(value: &str) -> Result<(String, Option<String>), DockerfileBuildError> {
     let parts = value.split_whitespace().collect::<Vec<_>>();
     if parts.is_empty() {
@@ -2903,7 +3257,7 @@ fn apply_cache_mount_metadata(
     if uid.is_some() || gid.is_some() {
         #[cfg(unix)]
         {
-            use nix::unistd::{Gid, Uid, chown};
+            use nix::unistd::{chown, Gid, Uid};
             use std::os::unix::fs::MetadataExt;
             let current = fs::metadata(cache)?;
             let owner = Uid::from_raw(uid.unwrap_or(current.uid()));
@@ -4390,6 +4744,18 @@ struct BuildLimits {
     wall_clock: Option<Duration>,
     max_steps: Option<u64>,
     max_output_bytes: Option<u64>,
+    max_parallel_stages: Option<u64>,
+}
+
+/// Default bound on concurrently executing build stages. Independent stages
+/// run in parallel up to this many workers; stages beyond it queue.
+const DEFAULT_MAX_PARALLEL_STAGES: usize = 4;
+
+fn resolve_max_parallel_stages(limits: &BuildLimits) -> usize {
+    limits
+        .max_parallel_stages
+        .map(|value| (value as usize).clamp(1, 64))
+        .unwrap_or(DEFAULT_MAX_PARALLEL_STAGES)
 }
 
 fn load_build_limits() -> Result<BuildLimits, DockerfileBuildError> {
@@ -4399,6 +4765,7 @@ fn load_build_limits() -> Result<BuildLimits, DockerfileBuildError> {
     let wall_clock = parse_limit_env("FERROCRATE_BUILD_WALL_CLOCK_MS")?.map(Duration::from_millis);
     let max_steps = parse_limit_env("FERROCRATE_BUILD_MAX_STEPS")?;
     let max_output_bytes = parse_limit_env("FERROCRATE_BUILD_MAX_OUTPUT_BYTES")?;
+    let max_parallel_stages = parse_limit_env("FERROCRATE_BUILD_MAX_PARALLEL_STAGES")?;
     let cancel_file = std::env::var_os("FERROCRATE_BUILD_CANCEL_FILE").map(PathBuf::from);
     if let Some(path) = &cancel_file {
         if !path.is_absolute() {
@@ -4415,6 +4782,7 @@ fn load_build_limits() -> Result<BuildLimits, DockerfileBuildError> {
         wall_clock,
         max_steps,
         max_output_bytes,
+        max_parallel_stages,
     })
 }
 
@@ -4595,7 +4963,7 @@ fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuil
 }
 
 fn setup_build_namespace() -> io::Result<()> {
-    use nix::sched::{CloneFlags, unshare};
+    use nix::sched::{unshare, CloneFlags};
     unshare(
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
@@ -4607,7 +4975,7 @@ fn setup_build_namespace() -> io::Result<()> {
 }
 
 fn setup_build_namespace_root() -> io::Result<()> {
-    use nix::sched::{CloneFlags, unshare};
+    use nix::sched::{unshare, CloneFlags};
     unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET)
         .map_err(|err| io::Error::other(err.to_string()))?;
     make_mount_namespace_private()
@@ -5133,7 +5501,7 @@ fn resolve_copy_owner(
 fn apply_copy_owner_recursive(path: &Path, owner: &CopyOwner) -> Result<(), DockerfileBuildError> {
     #[cfg(unix)]
     {
-        use nix::unistd::{Gid, Uid, chown};
+        use nix::unistd::{chown, Gid, Uid};
         let CopyOwner::Numeric(uid, gid) = owner else {
             return Err(DockerfileBuildError::Invalid(
                 "COPY --chown owner was not resolved against the base image".to_string(),
@@ -5430,23 +5798,29 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits,
-        CacheSharing, CopyOwner, DockerfileBuildError, OCI_IMAGE_LAYER_MEDIA_TYPE,
-        REGISTRY_CACHE_KIND_ANNOTATION, apply_onbuild_triggers, build_cache_key, build_cache_path,
+        apply_onbuild_triggers, build_cache_key, build_cache_path,
         build_from_dockerfile_with_store_and_compression, build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
         dockerignore_matches, export_build_cache, export_build_cache_to_registry,
-        file_matches_digest, import_build_cache, import_build_cache_from_registry,
-        layer_blob_path, load_build_cache, load_build_journal, load_stage_checkpoints, parse_env,
+        file_matches_digest, import_build_cache, import_build_cache_from_registry, layer_blob_path,
+        load_build_cache, load_build_journal, load_stage_checkpoints, parse_env,
         parse_exposed_ports, parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer,
         parse_onbuild, parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner, save_build_cache,
-        save_build_journal, sha256_digest_bytes, stage_checkpoint_path, validate_mount_target,
-        BUILD_CACHE_PLATFORM,
+        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner,
+        run_stage_worker_pool, save_build_cache, save_build_journal, sha256_digest_bytes,
+        stage_checkpoint_path, stage_content_identities, validate_mount_target, BaseImageInfo,
+        BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits, CacheSharing, CopyOwner,
+        DockerfileBuildError, BUILD_CACHE_PLATFORM, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use sha2::Digest;
     use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn build_scratch_is_scoped_to_runtime_directory() {
@@ -5677,17 +6051,15 @@ mod tests {
         assert_ne!(plan.plan_digest(), changed.plan_digest());
 
         contexts.insert("bad/name".to_string(), assets.clone());
-        assert!(
-            prepare_dockerfile_build_with_contexts(
-                &dockerfile,
-                Some("local/app:test"),
-                &runtime,
-                CompressionFormat::Gzip,
-                &store,
-                &contexts,
-            )
-            .is_err()
-        );
+        assert!(prepare_dockerfile_build_with_contexts(
+            &dockerfile,
+            Some("local/app:test"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &contexts,
+        )
+        .is_err());
     }
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;
@@ -5956,12 +6328,10 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first.layer_digest, second.layer_digest);
-        assert!(
-            load_build_cache(&runtime)
-                .unwrap()
-                .values()
-                .any(|entry| entry.context_digest != first_entry.context_digest)
-        );
+        assert!(load_build_cache(&runtime)
+            .unwrap()
+            .values()
+            .any(|entry| entry.context_digest != first_entry.context_digest));
     }
 
     #[test]
@@ -6655,6 +7025,491 @@ mod tests {
         assert!(runtime.join("build/stage-2").exists());
     }
 
+    fn stage_identity_for(
+        dockerfile: &str,
+        base_digests: &[&str],
+        context_digest: &str,
+        compression: CompressionFormat,
+    ) -> Vec<String> {
+        let stages = parse_stages(dockerfile).expect("stages parse");
+        let graph = build_stage_dependency_graph(&stages, &HashMap::new()).expect("graph");
+        let bases = base_digests
+            .iter()
+            .map(|digest| digest.to_string())
+            .collect::<Vec<_>>();
+        stage_content_identities(&stages, &bases, context_digest, &graph, compression)
+            .expect("identities")
+    }
+
+    #[test]
+    fn stage_identities_are_content_addressed_per_branch() {
+        let base = r#"
+        FROM scratch AS base
+        RUN echo base
+        FROM scratch AS independent
+        COPY independent /independent
+        FROM scratch AS final
+        COPY --from=base /out /base
+        COPY --from=independent /out /independent
+        "#;
+        let edited_base = base.replace("RUN echo base", "RUN echo base-edited");
+        let edited_independent = base.replace(
+            "COPY independent /independent",
+            "COPY independent /independent2",
+        );
+        let context = "sha256:context";
+        let original = stage_identity_for(
+            base,
+            &["scratch", "scratch", "scratch"],
+            context,
+            CompressionFormat::Gzip,
+        );
+
+        // Editing stage 0 changes only stage 0 and its descendant stage 2;
+        // the independent stage 1 keeps its identity.
+        let after_base_edit = stage_identity_for(
+            &edited_base,
+            &["scratch", "scratch", "scratch"],
+            context,
+            CompressionFormat::Gzip,
+        );
+        assert_ne!(after_base_edit[0], original[0]);
+        assert_eq!(after_base_edit[1], original[1]);
+        assert_ne!(after_base_edit[2], original[2]);
+
+        // Editing stage 1 changes only stage 1 and its descendant stage 2;
+        // stage 0 keeps its identity.
+        let after_branch_edit = stage_identity_for(
+            &edited_independent,
+            &["scratch", "scratch", "scratch"],
+            context,
+            CompressionFormat::Gzip,
+        );
+        assert_eq!(after_branch_edit[0], original[0]);
+        assert_ne!(after_branch_edit[1], original[1]);
+        assert_ne!(after_branch_edit[2], original[2]);
+
+        // A context edit invalidates only stages that consume the context;
+        // the RUN-only stage 0 is immune. A compression change invalidates
+        // every stage.
+        let after_context_edit = stage_identity_for(
+            base,
+            &["scratch", "scratch", "scratch"],
+            "sha256:context-two",
+            CompressionFormat::Gzip,
+        );
+        assert_eq!(after_context_edit[0], original[0]);
+        assert_ne!(after_context_edit[1], original[1]);
+        assert_ne!(after_context_edit[2], original[2]);
+        let after_compression_change = stage_identity_for(
+            base,
+            &["scratch", "scratch", "scratch"],
+            context,
+            CompressionFormat::Zstd,
+        );
+        for (index, identity) in after_compression_change.iter().enumerate() {
+            assert_ne!(*identity, original[index]);
+        }
+
+        // A base image change invalidates the stage on that base.
+        let after_base_image_change = stage_identity_for(
+            base,
+            &["sha256:baseimage", "scratch", "scratch"],
+            context,
+            CompressionFormat::Gzip,
+        );
+        assert_ne!(after_base_image_change[0], original[0]);
+        assert_eq!(after_base_image_change[1], original[1]);
+    }
+
+    #[test]
+    fn worker_pool_runs_independent_stages_concurrently_within_bound() {
+        let control = BuildControl {
+            limits: BuildLimits::default(),
+            deadline: None,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        // Two stages must be executing at the same time: each waits, with a
+        // bounded deadline, until the other has started. Sequential execution
+        // cannot satisfy the rendezvous and fails the test instead of
+        // hanging.
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let arrived_probe = Arc::clone(&arrived);
+        let active_probe = Arc::clone(&active);
+        let max_probe = Arc::clone(&max_active);
+        let mut ok_results = 0usize;
+        let delivered = run_stage_worker_pool(
+            &[0usize, 1usize],
+            2,
+            &control,
+            move |idx: usize| -> Result<usize, DockerfileBuildError> {
+                let entered = active_probe.fetch_add(1, Ordering::SeqCst) + 1;
+                max_probe.fetch_max(entered, Ordering::SeqCst);
+                arrived_probe.fetch_add(1, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while arrived_probe.load(Ordering::SeqCst) < 2 {
+                    if Instant::now() >= deadline {
+                        return Err(DockerfileBuildError::Invalid(
+                            "stages did not run concurrently within 5s".to_string(),
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                active_probe.fetch_sub(1, Ordering::SeqCst);
+                Ok(idx)
+            },
+            |_, result| {
+                if result.is_ok() {
+                    ok_results += 1;
+                }
+            },
+        );
+        assert_eq!(delivered, 2);
+        assert_eq!(ok_results, 2);
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            2,
+            "two permitted workers must both make progress at once"
+        );
+
+        // Six stages over two permits must never exceed two concurrent
+        // executions.
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let active_probe = Arc::clone(&active);
+        let max_probe = Arc::clone(&max_active);
+        let mut ok_results = 0usize;
+        let delivered = run_stage_worker_pool(
+            &[0usize, 1, 2, 3, 4, 5],
+            2,
+            &control,
+            move |idx: usize| -> Result<usize, DockerfileBuildError> {
+                let entered = active_probe.fetch_add(1, Ordering::SeqCst) + 1;
+                max_probe.fetch_max(entered, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(25));
+                active_probe.fetch_sub(1, Ordering::SeqCst);
+                Ok(idx)
+            },
+            |_, result| {
+                if result.is_ok() {
+                    ok_results += 1;
+                }
+            },
+        );
+        assert_eq!(delivered, 6);
+        assert_eq!(ok_results, 6);
+        assert!(
+            max_active.load(Ordering::SeqCst) <= 2,
+            "worker pool must bound concurrency to the permit count"
+        );
+    }
+
+    #[test]
+    fn worker_pool_fails_closed_for_cancelled_build_control() {
+        let cancel_dir = tempfile::tempdir().unwrap();
+        let cancel_file = cancel_dir.path().join("cancel.flag");
+        fs::write(&cancel_file, b"cancel").unwrap();
+        let control = BuildControl {
+            limits: BuildLimits {
+                cancel_file: Some(cancel_file),
+                ..BuildLimits::default()
+            },
+            deadline: None,
+        };
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executed_probe = Arc::clone(&executed);
+        let mut cancelled_results = 0usize;
+        let delivered = run_stage_worker_pool(
+            &[0usize, 1, 2],
+            2,
+            &control,
+            move |idx: usize| -> Result<usize, DockerfileBuildError> {
+                executed_probe.fetch_add(1, Ordering::SeqCst);
+                Ok(idx)
+            },
+            |_, result| {
+                if matches!(result, Err(DockerfileBuildError::Cancelled(_))) {
+                    cancelled_results += 1;
+                }
+            },
+        );
+        assert_eq!(delivered, 3, "every queued stage must deliver a result");
+        assert_eq!(cancelled_results, 3);
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            0,
+            "no stage may execute after cancellation"
+        );
+    }
+
+    /// Parse a stage trace file into (kind, stage, unix_ns, detail) rows.
+    fn parse_stage_trace(path: &Path) -> Vec<(String, usize, u128, String)> {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let kind = parts.next()?.to_string();
+                let stage = parts.next()?.parse().ok()?;
+                let timestamp = parts.next()?.parse().ok()?;
+                let detail = parts.next().unwrap_or("").to_string();
+                Some((kind, stage, timestamp, detail))
+            })
+            .collect()
+    }
+
+    /// Highest number of stages whose [start, end] trace intervals overlap.
+    fn max_trace_concurrency(events: &[(String, usize, u128, String)]) -> usize {
+        let mut boundaries = Vec::new();
+        for (kind, _, timestamp, _) in events {
+            match kind.as_str() {
+                "start" => boundaries.push((*timestamp, 1i64)),
+                "end" => boundaries.push((*timestamp, -1i64)),
+                _ => {}
+            }
+        }
+        boundaries.sort_unstable();
+        let mut current = 0i64;
+        let mut max = 0usize;
+        for (_, delta) in boundaries {
+            current += delta;
+            max = max.max(current.unsigned_abs() as usize);
+        }
+        max
+    }
+
+    #[test]
+    fn parallel_build_graph_execution_is_bounded_and_dependency_ordered() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS a\nCOPY a /a\n\
+             FROM scratch AS b\nCOPY b /b\n\
+             FROM scratch AS c\nCOPY c /c\n\
+             FROM scratch AS d\nCOPY d /d\n\
+             FROM scratch AS final\nCOPY --from=a /a /a\nCOPY --from=b /b /b\nCOPY --from=c /c /c\nCOPY --from=d /d /d\n",
+        )
+        .unwrap();
+        for name in ["a", "b", "c", "d"] {
+            fs::write(temp.path().join(name), name).unwrap();
+        }
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let trace = temp.path().join("stage.trace");
+        std::env::set_var("FERROCRATE_BUILD_STAGE_TRACE", &trace);
+        std::env::set_var("FERROCRATE_BUILD_MAX_PARALLEL_STAGES", "2");
+        let outcome = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/bounded:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        );
+        std::env::remove_var("FERROCRATE_BUILD_STAGE_TRACE");
+        std::env::remove_var("FERROCRATE_BUILD_MAX_PARALLEL_STAGES");
+        let result = outcome.expect("bounded parallel build succeeds");
+        assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
+
+        let events = parse_stage_trace(&trace);
+        assert!(
+            events
+                .iter()
+                .any(|(kind, stage, _, _)| kind == "start" && *stage == 4),
+            "every stage including the final one must be traced"
+        );
+        assert!(
+            max_trace_concurrency(&events) <= 2,
+            "the worker pool must never exceed the configured stage bound"
+        );
+        // The dependent final stage (4) may only start after every stage it
+        // copies from has ended: dependency-ordered batches never overlap it.
+        let final_start = events
+            .iter()
+            .find(|(kind, stage, _, _)| kind == "start" && *stage == 4)
+            .expect("final stage start traced")
+            .2;
+        for stage in 0..4usize {
+            let end = events
+                .iter()
+                .find(|(kind, other, _, _)| kind == "end" && *other == stage)
+                .unwrap_or_else(|| panic!("stage {stage} end traced"))
+                .2;
+            assert!(
+                final_start >= end,
+                "dependent final stage must not run before stage {stage} completed"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_edit_invalidates_only_that_stage_and_its_descendants() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        let original_dockerfile = "FROM scratch AS base\nCOPY base /base\n\
+             FROM scratch AS branch\nCOPY branch /branch\n\
+             FROM scratch AS final\nCOPY --from=base /base /base\nCOPY --from=branch /branch /branch\n";
+        // Edit only stage 1: it copies to /branch2, and the final stage's
+        // COPY --from=branch source follows so the image stays consistent.
+        let edited_dockerfile = "FROM scratch AS base\nCOPY base /base\n\
+             FROM scratch AS branch\nCOPY branch /branch2\n\
+             FROM scratch AS final\nCOPY --from=base /base /base\nCOPY --from=branch /branch2 /branch\n";
+        fs::write(&dockerfile, original_dockerfile).unwrap();
+        fs::write(temp.path().join("base"), "base").unwrap();
+        fs::write(temp.path().join("branch"), "branch").unwrap();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/invalidate:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .expect("seed build");
+
+        // Plan-level identities: editing the branch stage leaves the base
+        // stage identity untouched.
+        let plan_before = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/invalidate:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .unwrap();
+        fs::write(&dockerfile, edited_dockerfile).unwrap();
+        let plan_after = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/invalidate:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            plan_after.stage_identities()[0],
+            plan_before.stage_identities()[0]
+        );
+        assert_ne!(
+            plan_after.stage_identities()[1],
+            plan_before.stage_identities()[1]
+        );
+
+        let trace = temp.path().join("stage.trace");
+        std::env::set_var("FERROCRATE_BUILD_STAGE_TRACE", &trace);
+        let second = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/invalidate:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        );
+        std::env::remove_var("FERROCRATE_BUILD_STAGE_TRACE");
+        let second = second.expect("rebuild after branch edit succeeds");
+        assert_ne!(first.layer_digest, second.layer_digest);
+
+        let events = parse_stage_trace(&trace);
+        let restored = events
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "restore")
+            .map(|(_, stage, _, _)| *stage)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            restored,
+            vec![0],
+            "only the unchanged base stage may restore from its checkpoint"
+        );
+        let rebuilt = events
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "start")
+            .map(|(_, stage, _, _)| *stage)
+            .filter(|stage| !restored.contains(stage))
+            .collect::<Vec<_>>();
+        assert_eq!(rebuilt, vec![1, 2], "edited stage and descendant rebuild");
+    }
+
+    #[test]
+    fn failed_parallel_batch_journals_partial_completion_and_resumes() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS left\nCOPY left /left\n\
+             FROM scratch AS broken\nCOPY does-not-exist /broken\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("left"), "left").unwrap();
+
+        // One stage of the independent batch fails while its sibling
+        // succeeds; the journal must record the sibling as completed.
+        let outcome = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/resume:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        );
+        assert!(outcome.is_err(), "build with a missing COPY source fails");
+        let journal = load_build_journal(&runtime)
+            .unwrap()
+            .expect("journal present");
+        assert_eq!(journal.state, BuildJournalState::Failed);
+        assert_eq!(
+            journal.completed_stages,
+            vec![0],
+            "the parallel sibling that completed must be journaled"
+        );
+
+        // Retry with the failure fixed: stage 0 resumes from its checkpoint
+        // instead of rebuilding.
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS left\nCOPY left /left\n\
+             FROM scratch AS fixed\nCOPY left /fixed\n",
+        )
+        .unwrap();
+        let trace = temp.path().join("stage.trace");
+        std::env::set_var("FERROCRATE_BUILD_STAGE_TRACE", &trace);
+        let result = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/resume:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        );
+        std::env::remove_var("FERROCRATE_BUILD_STAGE_TRACE");
+        let result = result.expect("retry build succeeds");
+        assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
+        let events = parse_stage_trace(&trace);
+        let restored = events
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "restore")
+            .map(|(_, stage, _, _)| *stage)
+            .collect::<Vec<_>>();
+        assert_eq!(restored, vec![0], "retry must resume from completed stages");
+        let journal = load_build_journal(&runtime)
+            .unwrap()
+            .expect("journal present");
+        assert_eq!(journal.state, BuildJournalState::Complete);
+        assert_eq!(journal.completed_stages, vec![0, 1]);
+    }
+
     #[test]
     fn run_mount_secret_and_ssh_are_parsed_with_safe_defaults() {
         let run = parse_run(
@@ -6678,13 +7533,11 @@ mod tests {
         .expect("ssh mount parses");
         assert_eq!(ssh.ssh_mounts[0].id, "default");
         assert_eq!(ssh.ssh_mounts[0].target, "/run/buildkit/ssh_agent.default");
-        assert!(
-            parse_run(
-                "--mount=type=secret,id=bad/slash echo value",
-                &["/bin/sh".into(), "-c".into()]
-            )
-            .is_err()
-        );
+        assert!(parse_run(
+            "--mount=type=secret,id=bad/slash echo value",
+            &["/bin/sh".into(), "-c".into()]
+        )
+        .is_err());
         for invalid in [
             "--mount=type=ssh,id=bad/slash echo value",
             "--mount=type=ssh,target=relative.sock echo value",
@@ -6866,18 +7719,19 @@ mod tests {
         let store = LocalImageStore::open(runtime.join("images")).expect("open store");
         let mut secrets = HashMap::new();
         secrets.insert("token".to_string(), secret_source);
-        let result = super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
-            &dockerfile,
-            Some("local/secret-e2e:latest"),
-            &runtime,
-            CompressionFormat::Gzip,
-            &store,
-            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
-            &HashMap::new(),
-            &secrets,
-            None,
-        )
-        .unwrap_or_else(|err| panic!("secret build succeeds: {err}"));
+        let result =
+            super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+                &dockerfile,
+                Some("local/secret-e2e:latest"),
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                &HashMap::new(),
+                &secrets,
+                None,
+            )
+            .unwrap_or_else(|err| panic!("secret build succeeds: {err}"));
         assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
         // Sensitive builds never write cache metadata or stage checkpoints.
         assert!(
@@ -6917,20 +7771,21 @@ mod tests {
         fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
         let runtime = temp.path().join("runtime");
         let store = LocalImageStore::open(runtime.join("images")).expect("open store");
-        let error = match super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
-            &dockerfile,
-            Some("local/secret-missing:latest"),
-            &runtime,
-            CompressionFormat::Gzip,
-            &store,
-            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("missing required secret must fail the build"),
-        };
+        let error =
+            match super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+                &dockerfile,
+                Some("local/secret-missing:latest"),
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("missing required secret must fail the build"),
+            };
         let message = error.to_string();
         assert!(message.contains("token"), "error names the id: {message}");
         assert!(
@@ -7034,7 +7889,11 @@ mod tests {
             "ssh-bearing builds must not write cache metadata"
         );
         // The host agent socket path must not leak into build artifacts.
-        assert_tree_free_of(&runtime, socket.as_os_str().as_encoded_bytes(), "socket path");
+        assert_tree_free_of(
+            &runtime,
+            socket.as_os_str().as_encoded_bytes(),
+            "socket path",
+        );
     }
 
     #[cfg(unix)]
@@ -7089,9 +7948,14 @@ mod tests {
             Arc::clone(&journal),
             [0x19; 16],
         );
-        let plan =
-            prepare_dockerfile_build(&dockerfile, Some("local/secret-witness:latest"), &runtime, CompressionFormat::Gzip, &store)
-                .expect("plan");
+        let plan = prepare_dockerfile_build(
+            &dockerfile,
+            Some("local/secret-witness:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+        )
+        .expect("plan");
         let permit = auth
             .authorize_image_build_plan(&RequestOrigin::cli_current().expect("origin"), &plan)
             .expect("permit");
@@ -7122,11 +7986,9 @@ mod tests {
         std::os::unix::fs::symlink("/tmp", root.path().join("private/link")).expect("symlink");
         let error = reject_cache_path_symlinks(&root.path().join("private/link/cache"))
             .expect_err("symlinked cache path must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("cache mount path contains a symlink")
-        );
+        assert!(error
+            .to_string()
+            .contains("cache mount path contains a symlink"));
     }
 
     #[test]
@@ -7222,13 +8084,11 @@ mod tests {
 
     #[test]
     fn bind_mounts_are_accepted_for_shell_runs() {
-        assert!(
-            parse_run(
-                "--mount=type=bind,source=assets,target=/mnt,ro echo value",
-                &["/bin/sh".into(), "-c".into()]
-            )
-            .is_ok()
-        );
+        assert!(parse_run(
+            "--mount=type=bind,source=assets,target=/mnt,ro echo value",
+            &["/bin/sh".into(), "-c".into()]
+        )
+        .is_ok());
     }
 
     #[test]
@@ -7294,16 +8154,14 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(stages[0].copy_paths[0].checksum, Some(digest.clone()));
-        assert!(
-            parse_stages("FROM scratch\nADD --checksum=sha1:abcd https://example.test/a /app\n")
-                .is_err()
-        );
-        assert!(
-            parse_stages(&format!(
-                "FROM scratch\nCOPY --checksum=sha256:{digest} app /app\n"
-            ))
-            .is_err()
-        );
+        assert!(parse_stages(
+            "FROM scratch\nADD --checksum=sha1:abcd https://example.test/a /app\n"
+        )
+        .is_err());
+        assert!(parse_stages(&format!(
+            "FROM scratch\nCOPY --checksum=sha256:{digest} app /app\n"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -7590,8 +8448,8 @@ mod tests {
 
     #[test]
     fn add_extracts_tar_gzip_bzip_and_xz_archives_without_path_escape() {
-        use bzip2::{Compression as BzCompression, write::BzEncoder};
-        use flate2::{Compression, write::GzEncoder};
+        use bzip2::{write::BzEncoder, Compression as BzCompression};
+        use flate2::{write::GzEncoder, Compression};
         use lzma_rust2::{XzOptions, XzWriter};
         use std::io::{Cursor, Write};
 

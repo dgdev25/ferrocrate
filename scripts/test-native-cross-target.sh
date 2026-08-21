@@ -26,6 +26,16 @@ if [[ "$target" == *-apple-darwin ]]; then
   fi
 fi
 
+min_free_kb="${FERROCRATE_CROSS_MIN_FREE_KB:-4194304}"
+[[ "$min_free_kb" =~ ^[1-9][0-9]*$ ]] || {
+  echo "FERROCRATE_CROSS_MIN_FREE_KB must be a positive integer" >&2
+  exit 2
+}
+available_kb="$(df -Pk /tmp | awk 'NR == 2 { print $4 }')"
+if [[ ! "$available_kb" =~ ^[0-9]+$ ]] || (( available_kb < min_free_kb )); then
+  echo "SKIP: cross-target build requires ${min_free_kb} KiB free; available=${available_kb:-unknown} KiB" >&2
+  exit 77
+fi
 target_dir="$(mktemp -d /tmp/ferrocrate-cross-target.XXXXXX)"
 cleanup() {
   if [[ -d "$target_dir" ]]; then
@@ -60,15 +70,15 @@ command -v setsid >/dev/null 2>&1 || {
 }
 
 run_bounded "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}" \
-  env CARGO_TARGET_DIR="$target_dir" \
+  env CARGO_BUILD_JOBS="${FERROCRATE_CROSS_BUILD_JOBS:-1}" CARGO_TARGET_DIR="$target_dir" \
 cargo "+$toolchain" check -p ferro-net --lib --target "$target"
 
 run_bounded "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}" \
-  env CARGO_TARGET_DIR="$target_dir" \
+  env CARGO_BUILD_JOBS="${FERROCRATE_CROSS_BUILD_JOBS:-1}" CARGO_TARGET_DIR="$target_dir" \
   cargo "+$toolchain" check -p ferro-core --lib --target "$target"
 
 run_bounded "${FERROCRATE_CROSS_TIMEOUT_SECONDS:-240}" \
-  env CARGO_TARGET_DIR="$target_dir" \
+  env CARGO_BUILD_JOBS="${FERROCRATE_CROSS_BUILD_JOBS:-1}" CARGO_TARGET_DIR="$target_dir" \
   cargo "+$toolchain" check -p ferro-cli --target "$target"
 
 echo "native cross-target ferro-net, ferro-core, and ferro-cli checks passed: $target"

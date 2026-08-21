@@ -34,6 +34,28 @@ PATH="$tmp/empty-bin" \
 /usr/bin/grep -q '^rootless.provision.packages=shadow slirp4netns bubblewrap$' "$tmp/arch-output"
 /usr/bin/grep -q '^rootless.provision.command=pacman --needed --noconfirm -S shadow slirp4netns bubblewrap ' "$tmp/arch-output"
 
+# `--apply` must reject an unprivileged caller before invoking a package
+# manager. The fake manager writes a marker if reached; the marker must remain
+# absent after the fail-closed check.
+fake_bin="$tmp/fake-bin"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+touch "${FERROCRATE_PROVISION_MARKER:?}"
+EOF
+chmod 0755 "$fake_bin/apt-get"
+if (( EUID == 0 )); then
+  echo "rootless provision: unprivileged --apply check skipped under root"
+else
+  if PATH="$fake_bin:$tmp/empty-bin" FERROCRATE_PROVISION_MARKER="$tmp/package-manager-ran" \
+    /bin/bash "$script" --os-release "$tmp/os-release" --apply >"$tmp/apply-output" 2>"$tmp/apply-stderr"; then
+    echo "unprivileged --apply unexpectedly succeeded" >&2
+    exit 1
+  fi
+  /usr/bin/grep -q -- '--apply requires root' "$tmp/apply-stderr"
+  test ! -e "$tmp/package-manager-ran"
+fi
+
 if PATH="$tmp/empty-bin" /bin/bash "$script" --os-release "$tmp/os-release" --package-manager unsupported >"$tmp/invalid" 2>&1; then
   echo "unsupported package manager unexpectedly succeeded" >&2
   exit 1

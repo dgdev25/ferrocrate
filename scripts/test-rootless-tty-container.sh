@@ -5,7 +5,15 @@ if [[ "$(id -u)" == 0 ]]; then
   echo "rootless TTY fixture must run as a non-root user" >&2
   exit 77
 fi
-repo_root="$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="${BASH_SOURCE[0]:-}"
+if [[ -n "$script_path" && "$script_path" != bash ]]; then
+  repo_root="$(cd "$(dirname -- "$script_path")/.." && pwd)"
+else
+  # The fixture is commonly streamed over SSH to a guest. In that mode there
+  # is no source-file path; callers must provide FERROCRATE_NETWORK_CLI or
+  # have the binary under the current working directory.
+  repo_root="${FERROCRATE_REPO_ROOT:-$PWD}"
+fi
 cli="${FERROCRATE_NETWORK_CLI:-${repo_root}/target/release/ferro-cli}"
 [[ -x "$cli" ]] || { echo "missing executable ferro-cli: $cli" >&2; exit 77; }
 command -v curl >/dev/null || { echo "rootless TTY fixture requires curl" >&2; exit 77; }

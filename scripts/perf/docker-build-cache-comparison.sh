@@ -12,9 +12,11 @@ ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_BUILD_COMPARISON_ROUNDS:-3}"
 parallelism="${FERROCRATE_BUILD_COMPARISON_PARALLELISM:-4}"
+fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-60}"
 
 [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || { echo "invalid rounds: $rounds" >&2; exit 2; }
 [[ "$parallelism" =~ ^[1-9][0-9]*$ ]] || { echo "invalid parallelism: $parallelism" >&2; exit 2; }
+[[ "$fixture_timeout" =~ ^[1-9][0-9]*$ && "$fixture_timeout" -le 600 ]] || { echo "FERROCRATE_COMPARISON_TIMEOUT_SECONDS must be 1..600" >&2; exit 2; }
 [[ "$image" =~ ^[A-Za-z0-9._/@:-]+$ ]] || { echo "invalid image: $image" >&2; exit 2; }
 command -v docker >/dev/null || { echo "docker is unavailable" >&2; exit 1; }
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || {
@@ -56,7 +58,8 @@ median_ms() {
   local command_string="$1" samples=() start end i
   for ((i = 0; i < rounds; i++)); do
     start="$(date +%s%N)"
-    if ! bash -c "$command_string" >/dev/null 2>&1; then
+    if ! timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+      bash -c "$command_string" >/dev/null 2>&1; then
       echo SKIP
       return 0
     fi
@@ -70,7 +73,8 @@ parallel_ms() {
   local command_prefix="$1" start end i pids=()
   start="$(date +%s%N)"
   for ((i = 1; i <= parallelism; i++)); do
-    bash -c "${command_prefix//__INDEX__/$i}" >/dev/null 2>&1 &
+    timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+      bash -c "${command_prefix//__INDEX__/$i}" >/dev/null 2>&1 &
     pids+=("$!")
   done
   for p in "${pids[@]}"; do
@@ -111,6 +115,7 @@ mkdir -p "$(dirname -- "$out")"
   echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unavailable)"
   echo "- Ferrocrate commit: $(git -C "$repo_root" rev-parse --short HEAD)"
   echo "- Image: \`$image\`; rounds per cached row: $rounds; parallelism: $parallelism."
+  echo "- Per-operation timeout: ${fixture_timeout}s (timed-out operations are reported as SKIP)."
   echo "- Reported values are median wall-clock milliseconds; the parallel row is one wall-clock batch."
   echo
   echo "This is a host-local performance comparison, not a compatibility or production-readiness claim."

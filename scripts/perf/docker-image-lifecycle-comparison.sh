@@ -9,6 +9,7 @@ out="${FERROCRATE_IMAGE_LIFECYCLE_OUTPUT:-$repo_root/docs/evidence/performance/$
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
+fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-30}"
 
 [[ "$image" =~ ^[A-Za-z0-9._/@:-]+$ ]] || {
   echo "invalid image reference: $image" >&2
@@ -16,6 +17,10 @@ rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
 }
 [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || {
   echo "rounds must be a positive integer" >&2
+  exit 2
+}
+[[ "$fixture_timeout" =~ ^[1-9][0-9]*$ && "$fixture_timeout" -le 300 ]] || {
+  echo "FERROCRATE_COMPARISON_TIMEOUT_SECONDS must be 1..300" >&2
   exit 2
 }
 [[ -x "$ferro_bin" ]] || {
@@ -47,7 +52,8 @@ median_ms() {
   local command_string="$1" samples=() start end i
   for ((i = 0; i < rounds; i++)); do
     start="$(date +%s%N)"
-    if ! bash -c "$command_string" >/dev/null 2>&1; then
+    if ! timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+      bash -c "$command_string" >/dev/null 2>&1; then
       echo SKIP
       return 0
     fi
@@ -88,6 +94,7 @@ mkdir -p "$(dirname -- "$out")"
   echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unavailable)"
   echo "- Ferrocrate commit: $(git -C "$repo_root" rev-parse --short HEAD)"
   echo "- Image: \`$image\`; rounds per operation: $rounds; reported value is median wall-clock milliseconds."
+  echo "- Per-operation timeout: ${fixture_timeout}s (timed-out operations are reported as SKIP)."
   echo
   echo "This supplements the fixed ten-feature comparison and does not claim universal Docker parity."
   echo

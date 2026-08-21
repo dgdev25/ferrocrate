@@ -213,6 +213,39 @@ kill_status="$(docker -H "$host" wait "$kill_name")"
 }
 docker -H "$host" rm "$kill_name" >/dev/null
 docker -H "$host" rm --force "$attach_name" >/dev/null
+
+# Exercise the Docker-compatible API's PTY-backed create/start/attach/resize
+# path against the isolated daemon. The payload must remain raw (not Docker's
+# non-TTY multiplex framing), and resize must be accepted while the terminal
+# is live.
+tty_name="docker-cli-tty-$$"
+docker -H "$host" create --network none --name "$tty_name" --tty "$image" \
+  /bin/busybox sh -c '/bin/busybox sleep 2; printf ferrocrate-tty-smoke; /bin/busybox sleep 30' >/dev/null
+docker -H "$host" inspect --format '{{.Config.Tty}}' "$tty_name" | grep -qx 'true'
+docker -H "$host" start "$tty_name" >/dev/null
+tty_id="$(docker -H "$host" inspect --format '{{.Id}}' "$tty_name")"
+curl --fail --silent --show-error --unix-socket "$socket" -X POST \
+  "http://localhost/v1.45/containers/$tty_id/resize?h=40&w=100" >/dev/null
+tty_attach_status=0
+timeout -k 2 12 curl --no-buffer --silent --show-error \
+  --unix-socket "$socket" -X POST \
+  -H 'Connection: Upgrade' -H 'Upgrade: tcp' -H 'Content-Length: 0' \
+  "http://localhost/v1.45/containers/$tty_id/attach?logs=0&stream=1&stdin=0&stdout=1&stderr=1" \
+  >"$runtime_dir/tty-attach.stdout" || tty_attach_status=$?
+grep -a -q 'ferrocrate-tty-smoke' "$runtime_dir/tty-attach.stdout"
+docker -H "$host" logs "$tty_name" >"$runtime_dir/tty-logs.stdout"
+grep -a -q 'ferrocrate-tty-smoke' "$runtime_dir/tty-logs.stdout"
+if [[ "$tty_attach_status" != "0" && "$tty_attach_status" != "124" && "$tty_attach_status" != "137" ]]; then
+  echo "Docker TTY attach returned unexpected status: $tty_attach_status" >&2
+  exit 1
+fi
+first_tty_byte="$(od -An -N1 -t x1 "$runtime_dir/tty-attach.stdout" | tr -d '[:space:]')"
+if [[ "$first_tty_byte" == "00" ]]; then
+  echo "Docker TTY attach unexpectedly emitted multiplex framing" >&2
+  exit 1
+fi
+docker -H "$host" wait "$tty_name" >/dev/null
+docker -H "$host" rm "$tty_name" >/dev/null
 wait "$events_pid" 2>/dev/null || true
 grep -q 'container create' "$events_file" || {
   echo "Docker CLI did not receive a container create event" >&2
@@ -221,4 +254,4 @@ grep -q 'container create' "$events_file" || {
   exit 1
 }
 
-echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/copy-exclude/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/logs-follow/diff/exec/export/cp/commit/attach/stop/kill/rm/events"
+echo "Docker CLI compatibility smoke passed: version/info/ps/images/build/copy-exclude/history/save/load/tag/inspect/rmi/image-prune/create/start/rename/stats/top/pause/unpause/restart/wait/logs/logs-follow/diff/exec/export/cp/commit/attach/tty/resize/stop/kill/rm/events"

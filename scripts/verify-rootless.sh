@@ -33,6 +33,44 @@ if [[ -f "$userns_path" ]]; then
   fi
 fi
 
+# Docker-compatible rootless authentication requires the kernel's
+# SO_PEERPIDFD socket option.  Probe it directly on a local Unix socket pair
+# before starting a daemon so an older kernel reports a capability boundary
+# instead of a generic readiness timeout.  Keep the probe side-effect free:
+# the returned pidfd is closed immediately and no process is created.
+if command -v python3 >/dev/null 2>&1; then
+  peer_pidfd_probe=""
+  if peer_pidfd_probe=$(python3 - 2>&1 <<'PY'
+import os
+import socket
+
+SO_PEERPIDFD = 77
+left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    pidfd = left.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD)
+    if pidfd < 0:
+        raise OSError("kernel returned an invalid peer pidfd")
+    os.close(pidfd)
+finally:
+    left.close()
+    right.close()
+PY
+  ); then
+    echo "rootless.peer_pidfd=pass"
+  else
+    peer_pidfd_reason="$(printf '%s' "$peer_pidfd_probe" | tr '\n' ' ' | tr -s ' ' | cut -c1-240)"
+    echo "rootless.peer_pidfd=missing"
+    echo "rootless.peer_pidfd_reason=${peer_pidfd_reason:-SO_PEERPIDFD is unavailable}"
+    echo "warning: Docker-compatible rootless/CRI authentication requires a kernel with SO_PEERPIDFD" >&2
+    missing=1
+  fi
+else
+  echo "rootless.peer_pidfd=missing"
+  echo "rootless.peer_pidfd_reason=python3 is unavailable for the socket capability probe"
+  echo "warning: install python3 or provide an equivalent SO_PEERPIDFD probe before rootless qualification" >&2
+  missing=1
+fi
+
 # The sysctl only expresses policy. Probe the namespace operation that the
 # rootless workload launcher actually needs so a host cannot pass diagnostics
 # while its user+mount namespace creation is denied by a container/LSM

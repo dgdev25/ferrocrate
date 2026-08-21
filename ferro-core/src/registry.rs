@@ -427,35 +427,70 @@ impl RegistryClient {
         auth: Option<&RegistryAuth>,
     ) -> Result<reqwest::blocking::Response, RegistryError> {
         let origin = request_origin(url)?;
-        let cached_token = self.cached_bearer_token(&origin)?;
-        let mut response = self
-            .build_request(
-                &method,
-                url,
-                &headers,
-                body.as_ref(),
-                if cached_token.is_some() { None } else { auth },
-                cached_token.as_deref(),
-            )
-            .send()
-            .map_err(RegistryError::Request)?;
+        let mut last_error: Option<RegistryError> = None;
 
-        if response.status().as_u16() == 401 {
-            let challenge = response
-                .headers()
-                .get(WWW_AUTHENTICATE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(parse_bearer_challenge);
-            if let Some(challenge) = challenge {
-                self.invalidate_bearer_token(&origin)?;
-                let token = self.fetch_bearer_token(&challenge, auth, &origin)?;
-                response = self
-                    .build_request(&method, url, &headers, body.as_ref(), None, Some(&token))
-                    .send()
-                    .map_err(RegistryError::Request)?;
+        for attempt in 0..=self.config.max_retries {
+            if attempt > 0 {
+                let backoff = std::cmp::min(
+                    self.config.initial_backoff_ms * (1 << (attempt - 1)),
+                    self.config.max_backoff_ms,
+                );
+                if backoff > 0 {
+                    let jitter = (backoff as f64 * 0.1 * rand::random::<f64>()) as u64;
+                    std::thread::sleep(Duration::from_millis(backoff + jitter));
+                }
             }
+
+            let cached_token = self.cached_bearer_token(&origin)?;
+            let send = |bearer: Option<&str>, basic_auth: Option<&RegistryAuth>| {
+                self.build_request(&method, url, &headers, body.as_ref(), basic_auth, bearer)
+                    .send()
+            };
+            let mut response = match send(
+                cached_token.as_deref(),
+                if cached_token.is_some() { None } else { auth },
+            ) {
+                Ok(response) => response,
+                Err(error) if error.is_timeout() || error.is_connect() => {
+                    last_error = Some(RegistryError::Request(error));
+                    continue;
+                }
+                Err(error) => return Err(RegistryError::Request(error)),
+            };
+
+            if response.status().as_u16() == 401 {
+                let challenge = response
+                    .headers()
+                    .get(WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_bearer_challenge);
+                if let Some(challenge) = challenge {
+                    self.invalidate_bearer_token(&origin)?;
+                    let token = self.fetch_bearer_token(&challenge, auth, &origin)?;
+                    response = match send(Some(&token), None) {
+                        Ok(response) => response,
+                        Err(error) if error.is_timeout() || error.is_connect() => {
+                            last_error = Some(RegistryError::Request(error));
+                            continue;
+                        }
+                        Err(error) => return Err(RegistryError::Request(error)),
+                    };
+                }
+            }
+
+            let status = response.status();
+            if status.as_u16() == 429 || status.as_u16() >= 500 {
+                last_error = Some(RegistryError::HttpStatus {
+                    status: status.as_u16(),
+                    body: response.text().unwrap_or_default(),
+                });
+                continue;
+            }
+            return Ok(response);
         }
-        Ok(response)
+
+        Err(last_error
+            .unwrap_or_else(|| RegistryError::InvalidReference("max retries exceeded".to_string())))
     }
 
     fn build_request(
@@ -841,12 +876,12 @@ mod tests {
     use super::{
         append_digest_query, normalize_location, parse_image_reference,
         registry_scheme_with_override, request_origin, ReferenceSeparator, RegistryAuth,
-        RegistryClient,
+        RegistryClient, RegistryClientConfig,
     };
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use httptest::matchers::{all_of, contains, request};
-    use httptest::responders::status_code;
+    use httptest::responders::{cycle, status_code};
     use httptest::{Expectation, Server};
 
     #[test]
@@ -962,6 +997,38 @@ mod tests {
             .pull_manifest(&image, Some(&auth))
             .expect("manifest should be pulled");
         assert_eq!(manifest.schema_version, 2);
+    }
+
+    #[test]
+    fn retries_transient_manifest_responses_with_bounded_backoff() {
+        let server = Server::run();
+        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/test/image/manifests/latest",
+            ))
+            .times(3)
+            .respond_with(cycle![
+                status_code(503).body("temporary"),
+                status_code(503).body("temporary"),
+                status_code(200).body(manifest),
+            ]),
+        );
+
+        let client = RegistryClient::with_config(RegistryClientConfig {
+            timeout_secs: 5,
+            max_retries: 2,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 0,
+        })
+        .expect("client");
+        let image = format!("{}/test/image", server.addr());
+
+        let parsed = client
+            .pull_manifest(&image, None)
+            .expect("transient responses should be retried");
+        assert_eq!(parsed.schema_version, 2);
     }
 
     #[test]

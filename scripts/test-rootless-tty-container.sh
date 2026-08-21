@@ -61,6 +61,8 @@ for _ in $(seq 1 "$wait_seconds"); do
 done
 if [[ "$daemon_ready" != 1 ]]; then
   echo "rootless Docker-compatible daemon did not become ready" >&2
+  curl --silent --show-error --max-time 2 --unix-socket "$socket" \
+    http://localhost/_ping >&2 || true
   sed -n '1,80p' "$daemon_log" >&2 || true
   exit 77
 fi

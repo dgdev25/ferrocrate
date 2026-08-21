@@ -717,4 +717,159 @@ mod tests {
             Err(RvfError::LayerSizeMismatch { .. }) | Err(RvfError::LayerDigestMismatch { .. })
         ));
     }
+
+    #[test]
+    fn read_rvf_fails_on_truncated_stream() {
+        let segments = vec![
+            RvfSegment {
+                seg_type: SEG_MANIFEST,
+                payload: b"manifest".to_vec(),
+            },
+            RvfSegment {
+                seg_type: SEG_LAYER,
+                payload: vec![0u8; 64],
+            },
+        ];
+        let mut buf = Vec::new();
+        write_rvf(&mut buf, &segments).unwrap();
+        // Truncate inside the layer payload.
+        let truncated = &buf[..buf.len() - 16];
+        assert!(read_rvf(&mut Cursor::new(truncated)).is_err());
+        // Truncate inside the header.
+        assert!(read_rvf(&mut Cursor::new(&buf[..6])).is_err());
+    }
+
+    #[test]
+    fn read_rvf_fails_on_declared_length_overrun() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(RVF_MAGIC);
+        buf.push(RVF_FORMAT_VERSION);
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.push(SEG_LAYER);
+        // Declare a 512 MiB + 1 payload that is not present.
+        buf.extend_from_slice(&((MAX_SEGMENT_PAYLOAD as u64) + 1).to_le_bytes());
+        assert!(matches!(
+            read_rvf(&mut Cursor::new(&buf)),
+            Err(RvfError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn read_rvf_image_rejects_garbage_manifest_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image_path = tmp.path().join("garbage.rvf");
+        let mut bytes = Vec::new();
+        write_rvf(
+            &mut bytes,
+            &[
+                RvfSegment {
+                    seg_type: SEG_MANIFEST,
+                    payload: b"{definitely not json".to_vec(),
+                },
+                RvfSegment {
+                    seg_type: SEG_LAYER,
+                    payload: b"layer".to_vec(),
+                },
+            ],
+        )
+        .unwrap();
+        std::fs::write(&image_path, bytes).unwrap();
+        assert!(matches!(
+            read_rvf_image(&image_path),
+            Err(RvfError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn read_rvf_image_rejects_missing_layer_segment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = sample_manifest();
+        let image_path = tmp.path().join("nolayer.rvf");
+        let mut bytes = Vec::new();
+        write_rvf(
+            &mut bytes,
+            &[RvfSegment {
+                seg_type: SEG_MANIFEST,
+                payload: serde_json::to_vec(&manifest).unwrap(),
+            }],
+        )
+        .unwrap();
+        std::fs::write(&image_path, bytes).unwrap();
+        assert!(matches!(
+            read_rvf_image(&image_path),
+            Err(RvfError::LayerMissing)
+        ));
+    }
+
+    #[test]
+    fn read_rvf_image_rejects_duplicate_layer_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = sample_manifest();
+        let image_path = tmp.path().join("dup.rvf");
+        // write_rvf refuses duplicate types, so craft the file by hand:
+        // header + manifest + two layer segments.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(RVF_MAGIC);
+        bytes.push(RVF_FORMAT_VERSION);
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        for (seg_type, payload) in [
+            (SEG_MANIFEST, serde_json::to_vec(&manifest).unwrap()),
+            (SEG_LAYER, b"a".to_vec()),
+            (SEG_LAYER, b"b".to_vec()),
+        ] {
+            bytes.push(seg_type);
+            bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&payload);
+        }
+        std::fs::write(&image_path, bytes).unwrap();
+        assert!(matches!(
+            read_rvf_image(&image_path),
+            Err(RvfError::DuplicateSegment(SEG_LAYER))
+        ));
+    }
+
+    #[test]
+    fn read_rvf_image_round_trips_kernel_segment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = b"kernel-bytes".to_vec();
+        let layer = b"layer".to_vec();
+        let digest = {
+            let mut hasher = Sha256::new();
+            hasher.update(&layer);
+            format!("sha256:{:x}", hasher.finalize())
+        };
+        let manifest = FerroImageManifest {
+            layer_digest: digest,
+            layer_size: layer.len() as u64,
+            ..sample_manifest()
+        };
+        let image_path = tmp.path().join("with-kernel.rvf");
+        let mut bytes = Vec::new();
+        write_rvf(
+            &mut bytes,
+            &[
+                RvfSegment {
+                    seg_type: SEG_MANIFEST,
+                    payload: serde_json::to_vec(&manifest).unwrap(),
+                },
+                RvfSegment {
+                    seg_type: SEG_LAYER,
+                    payload: layer,
+                },
+                RvfSegment {
+                    seg_type: SEG_KERNEL,
+                    payload: kernel.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        std::fs::write(&image_path, bytes).unwrap();
+        let image = read_rvf_image(&image_path).unwrap();
+        let kernel_back = image
+            .segments
+            .iter()
+            .find(|segment| segment.seg_type == SEG_KERNEL)
+            .unwrap();
+        assert_eq!(kernel_back.payload, kernel);
+    }
 }

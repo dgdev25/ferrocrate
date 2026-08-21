@@ -185,7 +185,7 @@ download_linux_release() {
   curl -fsSL -o "$artifact_dir/$checksum_file" "${GITHUB_RELEASE_BASE}/${version}/${checksum_file}"
   curl -fsSL -o "$artifact_dir/$provenance_file" "${GITHUB_RELEASE_BASE}/${version}/${provenance_file}"
 
-  verify_checksum "$artifact_dir/$archive" "$artifact_dir/$checksum_file" || {
+  verify_checksum "$artifact_dir/$archive" "$artifact_dir/$checksum_file" >&2 || {
     log_error "Release checksum verification failed"
     exit 1
   }
@@ -306,6 +306,98 @@ download_binary() {
   echo "$file"
 }
 
+platform_archive_name() {
+  local os="$1" arch="$2" version="$3"
+  [[ "$arch" == "arm64" ]] && arch="aarch64"
+  case "$os" in
+    macos) printf 'ferrocrate-%s-macos-%s.tar.gz\n' "$version" "$arch" ;;
+    windows) printf 'ferrocrate-%s-windows-%s.zip\n' "$version" "$arch" ;;
+    *) log_error "Unsupported archive platform: $os"; exit 1 ;;
+  esac
+}
+
+download_platform_release() {
+  local os="$1" arch="$2" version="$3" artifact_dir="$4"
+  local archive checksum_file provenance_file
+  archive="$(platform_archive_name "$os" "$arch" "$version")"
+  checksum_file="ferrocrate-${version}-checksums.txt"
+  provenance_file="${archive}.provenance.json"
+  mkdir -p "$artifact_dir"
+  log_info "Downloading ${archive}..." >&2
+  curl -fsSL -o "$artifact_dir/$archive" "${GITHUB_RELEASE_BASE}/${version}/${archive}"
+  curl -fsSL -o "$artifact_dir/$checksum_file" "${GITHUB_RELEASE_BASE}/${version}/${checksum_file}"
+  curl -fsSL -o "$artifact_dir/$provenance_file" "${GITHUB_RELEASE_BASE}/${version}/${provenance_file}"
+  verify_checksum "$artifact_dir/$archive" "$artifact_dir/$checksum_file" >&2 || {
+    log_error "Release checksum verification failed"
+    exit 1
+  }
+  python3 - "$artifact_dir/$provenance_file" "$artifact_dir/$archive" "$version" "$os" "$arch" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+archive_path = Path(sys.argv[2])
+version, target_os, target_arch = sys.argv[3:6]
+if target_arch == "arm64":
+    target_arch = "aarch64"
+data = json.loads(manifest_path.read_text(encoding="utf-8"))
+if data.get("schema") != "ferrocrate-release-provenance-v1":
+    raise SystemExit("unsupported release provenance schema")
+if data.get("version") != version or data.get("archive") != archive_path.name:
+    raise SystemExit("release provenance identity mismatch")
+if data.get("target_os") != target_os or data.get("target_arch") != target_arch:
+    raise SystemExit("release provenance target mismatch")
+if data.get("target_libc") != "gnu":
+    raise SystemExit("release provenance libc mismatch")
+if data.get("sha256") != hashlib.sha256(archive_path.read_bytes()).hexdigest():
+    raise SystemExit("release provenance digest mismatch")
+PY
+  printf '%s\n' "$artifact_dir/$archive"
+}
+
+install_platform_archive() {
+  local os="$1" archive="$2" install_dir="$3"
+  local stage binary_name="" backup=""
+  stage="$(mktemp -d)"
+  cleanup_platform_archive() {
+    find "$stage" -depth -delete 2>/dev/null || true
+    if [[ -n "$backup" && -n "$binary_name" && ! -e "$install_dir/$binary_name" ]]; then
+      mv "$backup" "$install_dir/$binary_name" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_platform_archive RETURN
+  if [[ "$archive" == *.tar.gz ]]; then
+    tar -xzf "$archive" -C "$stage"
+    binary_name="ferrocrate"
+  elif [[ "$archive" == *.zip ]]; then
+    command -v unzip >/dev/null 2>&1 || { log_error "unzip is required for Windows release archives"; return 1; }
+    unzip -q "$archive" -d "$stage"
+    binary_name="ferrocrate.exe"
+  else
+    log_error "unsupported platform archive: $archive"
+    return 1
+  fi
+  [[ -f "$stage/ferrocrate/$binary_name" ]] || {
+    log_error "Release archive does not contain $binary_name"
+    return 1
+  }
+  mkdir -p "$install_dir"
+  if [[ -e "$install_dir/$binary_name" ]]; then
+    backup="$install_dir/.${binary_name}.previous.$$"
+    mv "$install_dir/$binary_name" "$backup"
+  fi
+  if ! mv "$stage/ferrocrate/$binary_name" "$install_dir/$binary_name"; then
+    log_error "Unable to install $binary_name; restoring previous binary"
+    return 1
+  fi
+  chmod 0755 "$install_dir/$binary_name" 2>/dev/null || true
+  [[ -z "$backup" ]] || rm -f "$backup"
+  backup=""
+  log_info "Installed to $install_dir/$binary_name"
+}
+
 install_binary() {
   local os file install_path
 
@@ -367,8 +459,10 @@ main() {
     file=$(download_linux_release "$arch" "$version" "$download_dir" "$libc")
     install_linux_release "$file" "$INSTALL_DIR"
   else
-    file=$(download_binary "$os" "$arch" "$version")
-    install_binary "$os" "$file"
+    download_dir=$(mktemp -d)
+    trap 'rm -rf "$download_dir"' EXIT
+    file=$(download_platform_release "$os" "$arch" "$version" "$download_dir")
+    install_platform_archive "$os" "$file" "$INSTALL_DIR"
   fi
 
   log_info "FerroCrate installation complete!"

@@ -97,6 +97,10 @@ pub struct ContainerRecord {
     pub pid: u32,
     pub image: String,
     pub command: Vec<String>,
+    /// Whether the workload was created with a Docker-compatible terminal.
+    /// Defaults to false for records written before durable TTY support.
+    #[serde(default)]
+    pub tty: bool,
     #[serde(default)]
     pub workdir: Option<String>,
     #[serde(default)]
@@ -229,6 +233,7 @@ impl ContainerRecord {
             pid: 0,
             image,
             command: Vec::new(),
+            tty: false,
             workdir: None,
             user: None,
             env: Vec::new(),
@@ -1214,6 +1219,7 @@ mod tests {
             pid: 1234,
             image: "alpine:latest".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
+            tty: false,
             workdir: Some("/app".to_string()),
             user: Some("1000:1000".to_string()),
             env: vec!["HELLO=world".to_string()],
@@ -1353,6 +1359,7 @@ mod tests {
             pid: 1234,
             image: "alpine:latest".to_string(),
             command: vec!["echo".to_string(), "hi".to_string()],
+            tty: false,
             workdir: None,
             user: None,
             env: Vec::new(),

@@ -14901,7 +14901,7 @@ fn docker_inspect_payload(
             "Image": record.image,
             "Env": record.env,
             "Cmd": record.command,
-            "Tty": false,
+            "Tty": record.tty,
             "AttachStdin": false,
             "AttachStdout": true,
             "AttachStderr": true,
@@ -19216,6 +19216,26 @@ volumes:
         assert_eq!(payload["HostConfig"]["CpuQuota"], 50_000u64);
         assert_eq!(payload["HostConfig"]["CpuPeriod"], 100_000u64);
         assert_eq!(payload["HostConfig"]["PidsLimit"], 32u64);
+    }
+
+    #[test]
+    fn docker_inspect_projects_persisted_tty_mode() {
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "tty-inspect",
+                "pid": 4242,
+                "image": "alpine:3.20",
+                "command": ["sh"],
+                "tty": true,
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running"
+            }))
+            .expect("TTY record");
+
+        let payload = docker_inspect_payload(&record, false);
+        assert_eq!(payload["Config"]["Tty"], true);
     }
 
     #[test]

@@ -193,6 +193,7 @@ mod tests {
         // same temporary image store first so the test exercises the complete
         // pull -> build -> run -> cleanup lifecycle rather than relying on a
         // developer's global image cache.
+        eprintln!("eBPF fixture phase=pull-start");
         let pull_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args(["pull", "alpine:3.19"])
@@ -241,6 +242,7 @@ CMD ["cat", "/hello.txt"]
         assert!(images.contains("test/cycle"), "Image should be listed");
 
         // Step 3: Run container
+        eprintln!("eBPF fixture phase=run-start");
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
@@ -570,6 +572,7 @@ CMD ["cat", "/hello.txt"]
             .args(["pull", "docker.io/library/nginx:alpine"])
             .output()
             .expect("pull nginx image");
+        eprintln!("eBPF fixture phase=pull status={}", pull_output.status);
         assert!(
             pull_output.status.success(),
             "eBPF nginx image pull should succeed: {}",
@@ -624,6 +627,11 @@ CMD ["cat", "/hello.txt"]
             .args(&run_args)
             .output()
             .expect("run nginx with eBPF");
+        eprintln!(
+            "eBPF fixture phase=run status={} stderr={}",
+            run_output.status,
+            String::from_utf8_lossy(&run_output.stderr)
+        );
         assert!(
             run_output.status.success(),
             "eBPF nginx container should start: {}",
@@ -631,6 +639,7 @@ CMD ["cat", "/hello.txt"]
         );
 
         std::thread::sleep(Duration::from_secs(2));
+        eprintln!("eBPF fixture phase=local-health-start");
         let local_health = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
@@ -642,6 +651,11 @@ CMD ["cat", "/hello.txt"]
             ])
             .output()
             .expect("in-namespace service probe");
+        eprintln!(
+            "eBPF fixture phase=local-health status={} stderr={}",
+            local_health.status,
+            String::from_utf8_lossy(&local_health.stderr)
+        );
         if !local_health.status.success() {
             let inspect = ferro_cli()
                 .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
@@ -689,6 +703,7 @@ CMD ["cat", "/hello.txt"]
                 String::from_utf8_lossy(&logs.stderr)
             );
         }
+        eprintln!("eBPF fixture phase=published-curl-start port={host_port}");
         let start = std::time::Instant::now();
         let mut last_curl = None;
         while start.elapsed() < Duration::from_secs(12) {
@@ -705,6 +720,11 @@ CMD ["cat", "/hello.txt"]
             std::thread::sleep(Duration::from_millis(400));
         }
         let curl = last_curl.expect("at least one curl attempt");
+        eprintln!(
+            "eBPF fixture phase=published-curl status={} stderr={}",
+            curl.status,
+            String::from_utf8_lossy(&curl.stderr)
+        );
         assert!(
             curl.status.success(),
             "eBPF published TCP port must be reachable: {}",

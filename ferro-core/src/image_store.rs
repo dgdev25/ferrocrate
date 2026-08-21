@@ -6,10 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-#[cfg(feature = "legacy-sled-importers")]
-const IMAGE_INDEX_TREE: &str = "image_index";
-#[cfg(feature = "legacy-sled-importers")]
-const IMAGE_DIGEST_TREE: &str = "image_digest_index";
 const IMAGE_SQLITE_SUFFIX: &str = "sqlite";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,10 +44,7 @@ pub enum ImageStoreError {
     Open(#[from] rusqlite::Error),
     #[error("failed to lock image store: {0}")]
     Lock(String),
-    #[cfg(feature = "legacy-sled-importers")]
-    #[error("failed to read legacy image store: {0}")]
-    Legacy(#[from] sled::Error),
-    #[error("legacy image store detected; reopen with the `legacy-sled-importers` feature")]
+    #[error("legacy Sled image store detected; the Sled importer was removed. See docs/architecture/legacy-sled-importers.md")]
     LegacyMigrationRequired,
     #[error("image store io error: {0}")]
     Io(#[from] std::io::Error),
@@ -78,77 +71,12 @@ fn image_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecor
     })
 }
 
-#[cfg(feature = "legacy-sled-importers")]
-fn migrate_legacy_sled(path: &Path, db: &Connection) -> Result<(), ImageStoreError> {
-    let marker = PathBuf::from(format!(
-        "{}.{}.migrated",
-        path.display(),
-        IMAGE_SQLITE_SUFFIX
-    ));
-    if marker.exists() || !path.join("conf").exists() {
-        return Ok(());
-    }
-    let legacy = sled::open(path)?;
-    let references = legacy.open_tree(IMAGE_INDEX_TREE)?;
-    for entry in &references {
-        let (_, value) = entry?;
-        let record =
-            serde_json::from_slice::<ImageRecord>(&value).map_err(ImageStoreError::Decode)?;
-        insert_image_record(db, &record)?;
-    }
-    let digests = legacy.open_tree(IMAGE_DIGEST_TREE)?;
-    for entry in &digests {
-        let (_, value) = entry?;
-        let record =
-            serde_json::from_slice::<ImageRecord>(&value).map_err(ImageStoreError::Decode)?;
-        insert_image_digest(db, &record)?;
-    }
-    db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
-    std::fs::write(marker, b"image-store-migration-v1\n")?;
-    Ok(())
-}
-
-#[cfg(feature = "legacy-sled-importers")]
-fn insert_image_record(db: &Connection, record: &ImageRecord) -> Result<(), ImageStoreError> {
-    db.execute(
-        "INSERT OR IGNORE INTO image_references
-         (reference, digest, manifest_media_type, manifest_json, created_at_unix)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            record.reference,
-            record.digest,
-            record.manifest_media_type,
-            record.manifest_json,
-            record.created_at_unix as i64
-        ],
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "legacy-sled-importers")]
-fn insert_image_digest(db: &Connection, record: &ImageRecord) -> Result<(), ImageStoreError> {
-    db.execute(
-        "INSERT OR IGNORE INTO image_digests
-         (digest, reference, manifest_media_type, manifest_json, created_at_unix)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            record.digest,
-            record.reference,
-            record.manifest_media_type,
-            record.manifest_json,
-            record.created_at_unix as i64
-        ],
-    )?;
-    Ok(())
-}
-
 impl LocalImageStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ImageStoreError> {
         let legacy_path = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&legacy_path)?;
         let db_path = PathBuf::from(format!("{}.{}", legacy_path.display(), IMAGE_SQLITE_SUFFIX));
         if !db_path.exists() && legacy_path.join("conf").exists() {
-            #[cfg(not(feature = "legacy-sled-importers"))]
             return Err(ImageStoreError::LegacyMigrationRequired);
         }
         let db = Connection::open(db_path)?;
@@ -168,8 +96,6 @@ impl LocalImageStore {
                 created_at_unix INTEGER NOT NULL
             );",
         )?;
-        #[cfg(feature = "legacy-sled-importers")]
-        migrate_legacy_sled(&legacy_path, &db)?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
         })
@@ -734,54 +660,6 @@ mod tests {
         assert_eq!(remaining[0].digest, retained_digest);
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
-    #[test]
-    fn migrates_legacy_sled_image_indexes_and_keeps_rollback_copy() {
-        let temp = tempfile::tempdir().unwrap();
-        let legacy = sled::open(temp.path()).unwrap();
-        let record = super::ImageRecord {
-            reference: "repo/app:legacy".to_string(),
-            digest: format!("sha256:{}", "d".repeat(64)),
-            manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            manifest_json: "{}".to_string(),
-            created_at_unix: 7,
-        };
-        legacy
-            .open_tree(super::IMAGE_INDEX_TREE)
-            .unwrap()
-            .insert(
-                record.reference.as_bytes(),
-                serde_json::to_vec(&record).unwrap(),
-            )
-            .unwrap();
-        legacy
-            .open_tree(super::IMAGE_DIGEST_TREE)
-            .unwrap()
-            .insert(
-                record.digest.as_bytes(),
-                serde_json::to_vec(&record).unwrap(),
-            )
-            .unwrap();
-        legacy.flush().unwrap();
-        drop(legacy);
-
-        let store = LocalImageStore::open(temp.path()).unwrap();
-        assert_eq!(
-            store.resolve_reference(&record.reference).unwrap(),
-            Some(record.clone())
-        );
-        assert_eq!(
-            store
-                .resolve_reference(&format!("repo/app@{}", record.digest))
-                .unwrap(),
-            Some(record)
-        );
-        assert!(temp.path().with_extension("sqlite").is_file());
-        assert!(temp.path().with_extension("sqlite.migrated").is_file());
-        assert!(temp.path().join("conf").is_file());
-    }
-
-    #[cfg(not(feature = "legacy-sled-importers"))]
     #[test]
     fn default_open_rejects_legacy_image_directory() {
         let temp = tempfile::tempdir().unwrap();

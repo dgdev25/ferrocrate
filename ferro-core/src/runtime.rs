@@ -12072,8 +12072,6 @@ mod tests {
         Action, RequestOrigin,
     };
     use crate::cgroups::{CpuMax, ResourceLimits};
-    #[cfg(feature = "legacy-sled-importers")]
-    use crate::container_store::LocalContainerStore;
     use crate::container_store::{
         now_unix, ContainerRecord, MutationReservation, PortMappingRecord, RestartPolicy,
     };
@@ -15652,7 +15650,6 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(!std::path::Path::new(&format!("/proc/{workload_pid}")).exists());
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
     fn assert_sigkill_after_identity_persist_is_recoverable(action: &str) {
         let root = tempfile::tempdir().unwrap();
         let pid_file = root.path().join("pid");
@@ -15691,7 +15688,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let store = LocalContainerStore::open(&store_path).unwrap();
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(&store_path).unwrap();
         let operation = store.lifecycle_operation([71; 16]).unwrap().unwrap();
         assert_eq!(operation.pid_after, Some(workload_pid));
         assert!(operation.process_start_time_after.is_some());
@@ -15699,13 +15696,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(!std::path::Path::new(&format!("/proc/{workload_pid}")).exists());
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn run_sigkill_before_durable_launch_release_has_no_orphan() {
         assert_sigkill_before_release_leaves_no_workload("run");
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn restart_sigkill_before_durable_launch_release_has_no_replacement_orphan() {
         assert_sigkill_before_release_leaves_no_workload("restart");
@@ -15719,13 +15714,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert_sigkill_before_release_leaves_no_workload("run-user");
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn run_sigkill_after_identity_persist_retains_recovery_identity() {
         assert_sigkill_after_identity_persist_is_recoverable("run");
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
     #[test]
     fn restart_sigkill_after_identity_persist_retains_replacement_identity() {
         assert_sigkill_after_identity_persist_is_recoverable("restart");
@@ -15763,9 +15756,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        #[cfg(feature = "legacy-sled-importers")]
         if let Ok(store_path) = std::env::var("FERRO_LAUNCH_HELPER_STORE") {
-            let store = LocalContainerStore::open(store_path).unwrap();
+            let store = crate::sqlite_container_store::SqliteContainerStore::open(store_path).unwrap();
             let mut record =
                 ContainerRecord::authorization_candidate("launch-helper".into(), "image".into());
             record.pending_mutation = Some(MutationReservation {

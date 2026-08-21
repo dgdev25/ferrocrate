@@ -55,25 +55,7 @@ fn config(path: &std::path::Path) -> JournalConfig {
 }
 
 #[test]
-#[cfg(feature = "legacy-sled-importers")]
-fn rejects_v1_storage_instead_of_silently_opening_an_unreadable_journal() {
-    let dir = tempdir().unwrap();
-    let db = sled::open(dir.path().join("witness.sled")).unwrap();
-    db.open_tree("witness-meta-v1")
-        .unwrap()
-        .insert(b"schema", b"v1")
-        .unwrap();
-    db.flush().unwrap();
-    drop(db);
-    assert!(matches!(
-        WitnessJournal::open(config(dir.path())),
-        Err(JournalError::UnsupportedVersion)
-    ));
-}
-
-#[test]
-#[cfg(not(feature = "legacy-sled-importers"))]
-fn rejects_legacy_storage_before_optional_importer_is_enabled() {
+fn rejects_legacy_storage_directory_at_open() {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("witness.sled")).unwrap();
     assert!(matches!(

@@ -2,8 +2,6 @@
 
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
-#[cfg(feature = "legacy-sled")]
-use std::path::Path;
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,11 +135,8 @@ impl FanoutReplayStore {
         )
         .map_err(|error| FanoutError::Storage(error.to_string()))?;
         if legacy.join("conf").exists() {
-            #[cfg(feature = "legacy-sled")]
-            migrate_legacy_replay(root, &legacy, &db)?;
-            #[cfg(not(feature = "legacy-sled"))]
             return Err(FanoutError::Storage(
-                "legacy Compose replay requires the `legacy-sled` migration feature".into(),
+                "legacy Sled Compose replay detected; the Sled importer was removed. See docs/architecture/legacy-sled-importers.md".into(),
             ));
         }
         Ok(Self { db: Mutex::new(db) })
@@ -169,34 +164,6 @@ impl FanoutReplayStore {
             Ok(())
         }
     }
-}
-
-#[cfg(feature = "legacy-sled")]
-fn migrate_legacy_replay(
-    root: &Path,
-    legacy: &Path,
-    sqlite: &Connection,
-) -> Result<(), FanoutError> {
-    let marker = root.join("compose-replay.sqlite.migrated");
-    if marker.exists() || !legacy.join("conf").exists() {
-        return Ok(());
-    }
-    let legacy_db = sled::open(legacy).map_err(|error| FanoutError::Storage(error.to_string()))?;
-    for item in legacy_db.iter() {
-        let (key, value) = item.map_err(|error| FanoutError::Storage(error.to_string()))?;
-        sqlite
-            .execute(
-                "INSERT OR IGNORE INTO compose_replay (child_id, value) VALUES (?1, ?2)",
-                params![key.as_ref(), value.as_ref()],
-            )
-            .map_err(|error| FanoutError::Storage(error.to_string()))?;
-    }
-    sqlite
-        .execute_batch("PRAGMA wal_checkpoint(FULL);")
-        .map_err(|error| FanoutError::Storage(error.to_string()))?;
-    std::fs::write(marker, b"compose-replay-migration-v1\n")
-        .map_err(|error| FanoutError::Storage(error.to_string()))?;
-    Ok(())
 }
 
 impl FanoutPlan {
@@ -468,47 +435,7 @@ where
     FanoutResult::new(statuses)
 }
 
-#[cfg(all(test, feature = "legacy-sled"))]
-mod storage_tests {
-    use super::{FanoutAction, FanoutChild, FanoutReplayStore};
-
-    #[test]
-    fn legacy_compose_replay_claims_migrate_idempotently() {
-        let temp = tempfile::tempdir().expect("compose replay directory");
-        let legacy = sled::open(temp.path().join("compose-replay.db")).expect("legacy store");
-        let child_id = [7_u8; 16];
-        legacy
-            .insert(child_id, vec![1_u8; 96])
-            .expect("legacy claim");
-        legacy.flush().expect("legacy flush");
-        drop(legacy);
-
-        let store = FanoutReplayStore::open(temp.path()).expect("migrate replay store");
-        let child = FanoutChild {
-            parent_request_id: [1; 16],
-            child_id,
-            idempotency_key: [2; 32],
-            service: "api".to_string(),
-            action: FanoutAction::ContainerRun,
-            request_digest: [3; 32],
-            deadline_unix_ms: u64::MAX,
-            policy_generation: 1,
-            policy_digest: [4; 32],
-            attempt: 0,
-            ordinal: 0,
-            plan_digest: [5; 32],
-        };
-        assert!(matches!(
-            store.claim(&child),
-            Err(super::FanoutError::Replay)
-        ));
-        assert!(temp.path().join("compose-replay.sqlite").is_file());
-        assert!(temp.path().join("compose-replay.sqlite.migrated").is_file());
-        assert!(temp.path().join("compose-replay.db").is_dir());
-    }
-}
-
-#[cfg(all(test, not(feature = "legacy-sled")))]
+#[cfg(test)]
 mod storage_boundary_tests {
     use super::FanoutReplayStore;
 

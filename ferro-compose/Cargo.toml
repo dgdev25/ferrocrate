@@ -5,7 +5,6 @@ edition = "2021"
 
 [features]
 default = []
-legacy-sled = ["dep:sled"]
 
 [dependencies]
 serde = { workspace = true }
@@ -13,5 +12,4 @@ serde_yaml = "0.9"
 thiserror = { workspace = true }
 tempfile = { workspace = true }
 sha2 = "0.10"
-sled = { version = "0.34", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"] }

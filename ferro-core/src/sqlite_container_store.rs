@@ -60,14 +60,7 @@ impl SqliteContainerStore {
         if let Some(legacy_path) = legacy_path.as_ref() {
             let marker = legacy_path.join("containers.sqlite3.imported");
             if !sqlite_path.exists() && !marker.exists() && legacy_path.join("conf").exists() {
-                #[cfg(not(feature = "legacy-sled-importers"))]
                 return Err(ContainerStoreError::LegacyMigrationRequired);
-                #[cfg(feature = "legacy-sled-importers")]
-                {
-                    let legacy = super::container_store::LocalContainerStore::open(legacy_path)?;
-                    legacy.export_sqlite_snapshot(&sqlite_path)?;
-                    std::fs::write(marker, b"sqlite-v1\n")?;
-                }
             }
         }
         let connection = Connection::open(&sqlite_path)?;
@@ -708,8 +701,6 @@ fn lifecycle_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "legacy-sled-importers")]
-    use crate::container_store::LocalContainerStore;
 
     fn record(id: &str) -> ContainerRecord {
         ContainerRecord::authorization_candidate(id.to_string(), "alpine:latest".to_string())
@@ -801,19 +792,6 @@ mod tests {
         assert_eq!(store.list().expect("list").len(), 8);
     }
 
-    #[cfg(feature = "legacy-sled-importers")]
-    #[test]
-    fn sqlite_store_imports_existing_legacy_sled_directory() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let legacy = LocalContainerStore::open(temp.path()).expect("legacy");
-        legacy.put(&record("legacy-1")).expect("legacy put");
-        drop(legacy);
-        let sqlite = SqliteContainerStore::open(temp.path()).expect("sqlite");
-        assert!(sqlite.get("legacy-1").expect("get").is_some());
-        assert!(temp.path().join("containers.sqlite3.imported").exists());
-    }
-
-    #[cfg(not(feature = "legacy-sled-importers"))]
     #[test]
     fn sqlite_store_rejects_legacy_directory_by_default() {
         let temp = tempfile::tempdir().expect("legacy store");

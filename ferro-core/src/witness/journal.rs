@@ -19,8 +19,6 @@ use std::{
         Mutex,
     },
 };
-#[cfg(feature = "legacy-sled-importers")]
-use storage::SqliteJournalStore;
 use storage::{lock_journal, path_entry_exists, JournalDb, JournalTree};
 pub use types::{
     DurableIntent, FaultPoint, FlushBoundary, JournalConfig, JournalError, JournalFaults,
@@ -215,16 +213,6 @@ impl WitnessJournal {
         let legacy_path = config.root.join("witness.sled");
         let sqlite_path = config.root.join("witness.sqlite3");
         let ready_marker = config.root.join("witness.sqlite3.ready");
-        #[cfg(feature = "legacy-sled-importers")]
-        const V1_TREES: [&[u8]; 7] = [
-            b"witness-records-v1",
-            b"witness-operations-v1",
-            b"witness-events-v1",
-            b"witness-pending-v1",
-            b"witness-meta-v1",
-            b"witness-segments-v1",
-            b"witness-sealed-segments-v1",
-        ];
         if ready_marker.exists() && !sqlite_path.exists() {
             return Err(JournalError::Corrupt);
         }
@@ -234,34 +222,7 @@ impl WitnessJournal {
             return Err(JournalError::Corrupt);
         }
         if legacy_path.exists() && (!sqlite_path.exists() || !ready_marker.exists()) {
-            #[cfg(not(feature = "legacy-sled-importers"))]
             return Err(JournalError::LegacyMigrationRequired);
-            #[cfg(feature = "legacy-sled-importers")]
-            {
-                let legacy = sled::open(&legacy_path)?;
-                if legacy
-                    .tree_names()
-                    .iter()
-                    .any(|name| V1_TREES.contains(&name.as_ref()))
-                {
-                    return Err(JournalError::UnsupportedVersion);
-                }
-                drop(legacy);
-                SqliteJournalStore::migrate_from_sled(
-                    &legacy_path,
-                    &sqlite_path,
-                    &ready_marker,
-                    &[
-                        "witness-records-v2",
-                        "witness-operations-v2",
-                        "witness-events-v2",
-                        "witness-pending-v2",
-                        "witness-meta-v2",
-                        "witness-segments-v2",
-                        "witness-sealed-segments-v2",
-                    ],
-                )?;
-            }
         }
         let db = JournalDb::open(&sqlite_path)?;
         let journal = Self {

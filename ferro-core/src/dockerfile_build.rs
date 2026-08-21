@@ -3010,6 +3010,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                         "RUN secret mount does not accept sharing".to_string(),
                     ));
                 }
+                if source.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN secret mount does not accept source/src; provide the secret to the build request".to_string(),
+                    ));
+                }
                 let required = match required {
                     None | Some("true") => true,
                     Some("false") => false,
@@ -3036,6 +3041,11 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 if sharing.is_some() || required.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
                         "RUN ssh mount sharing/required options are not supported".to_string(),
+                    ));
+                }
+                if source.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN ssh mount does not accept source/src; the agent socket is selected by the host environment".to_string(),
                     ));
                 }
                 let id = validate_secret_id(id.unwrap_or("default"))?;
@@ -3555,6 +3565,13 @@ fn run_stage_commands(
                 )));
             }
             ssh_specs.push((source, target));
+        }
+        if let Some((_, ssh_auth_sock_target)) = ssh_specs.first() {
+            // BuildKit semantics: inside the RUN the agent socket lives at its
+            // mount point, so SSH_AUTH_SOCK must point at the in-namespace
+            // target. The host selector variable never crosses the boundary.
+            cmd.env("SSH_AUTH_SOCK", ssh_auth_sock_target);
+            cmd.env_remove("FERROCRATE_BUILD_SSH_AUTH_SOCK");
         }
         let mut ssh_mounted = Vec::new();
         for (index, (source, target)) in ssh_specs.iter().enumerate() {
@@ -5838,6 +5855,406 @@ mod tests {
             &["/bin/sh".into(), "-c".into()]
         )
         .is_err());
+        // Secret and SSH mounts resolve only against caller-provided sources;
+        // an inline src= would silently imply a different provenance.
+        for rejected in [
+            "--mount=type=secret,id=token,src=/etc/shadow echo value",
+            "--mount=type=secret,id=token,source=/etc/shadow echo value",
+            "--mount=type=ssh,src=/run/host-agent.sock echo value",
+        ] {
+            assert!(parse_run(rejected, &["/bin/sh".into(), "-c".into()]).is_err());
+        }
+    }
+
+    /// Return the host busybox path when it is a static ELF usable inside a
+    /// chroot build rootfs, otherwise `None` (the caller skips the test).
+    #[cfg(unix)]
+    fn static_busybox() -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::path::PathBuf::from("/usr/bin/busybox");
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+        let bytes = fs::read(&path).ok()?;
+        // 64-bit little-endian ELF with no PT_INTERP header => self-contained.
+        if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
+            return None;
+        }
+        let phoff = u64::from_le_bytes(bytes[32..40].try_into().ok()?) as usize;
+        let phentsize = u16::from_le_bytes(bytes[54..56].try_into().ok()?) as usize;
+        let phnum = u16::from_le_bytes(bytes[56..58].try_into().ok()?) as usize;
+        for index in 0..phnum {
+            let offset = phoff.checked_add(index.checked_mul(phentsize)?)?;
+            let ptype = u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+            if ptype == 3 {
+                return None; // PT_INTERP: dynamically linked, unusable in chroot
+            }
+        }
+        Some(path)
+    }
+
+    #[cfg(unix)]
+    fn contains_needle(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len().max(1)).any(|w| w == needle)
+    }
+
+    /// Fail when any file under `root` contains `needle` verbatim.
+    #[cfg(unix)]
+    fn assert_tree_free_of(root: &std::path::Path, needle: &[u8], label: &str) {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(err) => panic!("cannot scan {}: {err}", dir.display()),
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(bytes) = fs::read(&path) {
+                    assert!(
+                        !contains_needle(&bytes, needle),
+                        "{label} bytes leaked into {}",
+                        path.display()
+                    );
+                    // Compressed layer blobs are decompressed before the
+                    // check so the proof stays literal.
+                    if bytes.starts_with(b"\x1f\x8b") {
+                        let mut decoded = Vec::new();
+                        let mut reader = flate2::read::GzDecoder::new(&bytes[..]);
+                        if std::io::Read::read_to_end(&mut reader, &mut decoded).is_ok() {
+                            assert!(
+                                !contains_needle(&decoded, needle),
+                                "{label} bytes leaked into decompressed {}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restores one process environment variable on drop.
+    #[cfg(unix)]
+    struct ScopedEnvVar {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(old) => std::env::set_var(self.key, old),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// True when the host refuses unprivileged user-namespace uid mapping
+    /// (for example via AppArmor policy). Such hosts cannot start the RUN
+    /// build sandbox at all, which is a documented host-policy limitation,
+    /// not a mount defect; callers skip execution-level checks.
+    #[cfg(unix)]
+    fn host_blocks_rootless_build_sandbox() -> bool {
+        // The sandbox uses the rootful unshare set when euid is 0 and the
+        // user-namespace set otherwise; probe the one that would run.
+        let args: [&str; 3] = if nix::unistd::Uid::effective().is_root() {
+            ["-m", "--propagation", "unchanged"]
+        } else {
+            ["-Ur", "--propagation", "unchanged"]
+        };
+        match std::process::Command::new("unshare")
+            .args(args)
+            .arg("/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) => !status.success(),
+            Err(_) => true,
+        }
+    }
+
+    const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_mount_run_sees_secret_then_all_artifacts_stay_clean() {
+        use crate::image_store::LocalImageStore;
+        use crate::layer_compression::CompressionFormat;
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        if host_blocks_rootless_build_sandbox() {
+            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = temp.path().join("ctx");
+        fs::create_dir_all(&ctx).expect("ctx dir");
+        let dockerfile = ctx.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\n\
+             COPY busybox /busybox\n\
+             SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
+             RUN --mount=type=secret,id=token grep -q TEST-SECRET-DO-NOT-USE /run/secrets/token\n\
+             RUN test ! -e /run/secrets/token\n",
+        )
+        .expect("write dockerfile");
+        fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
+        // The secret source lives outside the build context on purpose.
+        let secret_source = temp.path().join("token.secret");
+        fs::write(&secret_source, "TEST-SECRET-DO-NOT-USE\n").expect("write secret");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        let mut secrets = HashMap::new();
+        secrets.insert("token".to_string(), secret_source);
+        let result = super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/secret-e2e:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &secrets,
+        )
+        .unwrap_or_else(|err| panic!("secret build succeeds: {err}"));
+        assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
+        // Sensitive builds never write cache metadata or stage checkpoints.
+        assert!(
+            !build_cache_path(&runtime).exists(),
+            "sensitive build must not write cache metadata"
+        );
+        assert!(
+            !stage_checkpoint_path(&runtime).is_file(),
+            "sensitive build must not write stage checkpoints"
+        );
+        // No layer, config, manifest, cache metadata, or stage rootfs file
+        // carries the secret bytes.
+        assert_tree_free_of(&runtime, SECRET_NEEDLE, "secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_required_secret_fails_closed_without_disclosure() {
+        use crate::image_store::LocalImageStore;
+        use crate::layer_compression::CompressionFormat;
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = temp.path().join("ctx");
+        fs::create_dir_all(&ctx).expect("ctx dir");
+        let dockerfile = ctx.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\n\
+             COPY busybox /busybox\n\
+             SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
+             RUN --mount=type=secret,id=token true\n",
+        )
+        .expect("write dockerfile");
+        fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        let error = match super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/secret-missing:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing required secret must fail the build"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("token"), "error names the id: {message}");
+        assert!(
+            !message.contains("TEST-SECRET-DO-NOT-USE"),
+            "error must not disclose secret material: {message}"
+        );
+        assert!(!build_cache_path(&runtime).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_secret_skips_silently_when_not_provided() {
+        use crate::image_store::LocalImageStore;
+        use crate::layer_compression::CompressionFormat;
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        if host_blocks_rootless_build_sandbox() {
+            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = temp.path().join("ctx");
+        fs::create_dir_all(&ctx).expect("ctx dir");
+        let dockerfile = ctx.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\n\
+             COPY busybox /busybox\n\
+             SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
+             RUN --mount=type=secret,id=absent,required=false test ! -e /run/secrets/absent\n",
+        )
+        .expect("write dockerfile");
+        fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/secret-optional:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_or_else(|err| panic!("optional absent secret builds normally: {err}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_mount_binds_socket_and_sets_auth_sock_inside_run() {
+        use crate::image_store::LocalImageStore;
+        use crate::layer_compression::CompressionFormat;
+        use std::os::unix::net::UnixListener;
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        if host_blocks_rootless_build_sandbox() {
+            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = temp.path().join("agent");
+        fs::create_dir_all(&agent_dir).expect("agent dir");
+        let socket = agent_dir.join("agent.sock");
+        let _listener = UnixListener::bind(&socket).expect("bind agent socket");
+        let ctx = temp.path().join("ctx");
+        fs::create_dir_all(&ctx).expect("ctx dir");
+        let dockerfile = ctx.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\n\
+             COPY busybox /busybox\n\
+             SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
+             RUN --mount=type=ssh test -S \"$SSH_AUTH_SOCK\" && test \"$SSH_AUTH_SOCK\" = /run/buildkit/ssh_agent.default\n\
+             RUN test ! -e /run/buildkit/ssh_agent.default\n",
+        )
+        .expect("write dockerfile");
+        fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        let _guard = ScopedEnvVar::set("FERROCRATE_BUILD_SSH_AUTH_SOCK", &socket);
+        super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/ssh-e2e:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_or_else(|err| panic!("ssh mount build succeeds: {err}"));
+        assert!(
+            !build_cache_path(&runtime).exists(),
+            "ssh-bearing builds must not write cache metadata"
+        );
+        // The host agent socket path must not leak into build artifacts.
+        assert_tree_free_of(&runtime, socket.as_os_str().as_encoded_bytes(), "socket path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_secret_build_witness_journal_stays_free_of_secret_bytes() {
+        use crate::authorization::gate::AuthorizationGate;
+        use crate::authorization::policy::PolicyStore;
+        use crate::authorization::surface::SurfaceAuthorization;
+        use crate::authorization::RequestOrigin;
+        use crate::image_store::LocalImageStore;
+        use crate::layer_compression::CompressionFormat;
+        use crate::witness::{JournalConfig, JournalMode, WitnessJournal};
+        use std::sync::Arc;
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        if host_blocks_rootless_build_sandbox() {
+            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = temp.path().join("ctx");
+        fs::create_dir_all(&ctx).expect("ctx dir");
+        let dockerfile = ctx.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\n\
+             COPY busybox /busybox\n\
+             SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
+             RUN --mount=type=secret,id=token grep -q TEST-SECRET-DO-NOT-USE /run/secrets/token\n",
+        )
+        .expect("write dockerfile");
+        fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
+        let secret_source = temp.path().join("token.secret");
+        fs::write(&secret_source, "TEST-SECRET-DO-NOT-USE\n").expect("write secret");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        let journal_dir = temp.path().join("journal");
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                &journal_dir,
+                [0x18; 16],
+                JournalMode::Required,
+            ))
+            .expect("open journal"),
+        );
+        let auth = SurfaceAuthorization::local_administrative(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            Arc::clone(&journal),
+            [0x19; 16],
+        );
+        let plan =
+            prepare_dockerfile_build(&dockerfile, Some("local/secret-witness:latest"), &runtime, CompressionFormat::Gzip, &store)
+                .expect("plan");
+        let permit = auth
+            .authorize_image_build_plan(&RequestOrigin::cli_current().expect("origin"), &plan)
+            .expect("permit");
+        let mut secrets = HashMap::new();
+        secrets.insert("token".to_string(), secret_source);
+        super::execute_dockerfile_build_authorized_with_secrets(plan, &store, permit, &secrets)
+            .unwrap_or_else(|err| panic!("authorized secret build: {err}"));
+        assert!(journal.records().expect("records").len() >= 1);
+        assert_tree_free_of(&journal_dir, SECRET_NEEDLE, "secret");
     }
 
     #[cfg(unix)]

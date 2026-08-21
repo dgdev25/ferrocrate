@@ -818,6 +818,59 @@ mod tests {
     }
 
     #[test]
+    fn planned_pull_rejects_substituted_layer_blob() {
+        let server = Server::run();
+        let layer_payload = b"real layer bytes";
+        let layer_digest = format!("sha256:{:x}", Sha256::digest(layer_payload));
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
+            layer_payload.len()
+        );
+        let image = format!("{}/library/layer-swap:latest", server.addr());
+        let plan = ImageFetchPlan::from_resolved_manifest(&image, &manifest).unwrap();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/layer-swap/manifests/{}", plan.manifest_digest()),
+            ))
+            .respond_with(status_code(200).body(manifest)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/library/layer-swap/blobs/sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be",
+            ))
+            .respond_with(status_code(200).body("{\"config\":{}}")),
+        );
+        // The registry serves different bytes than the descriptor digest
+        // promises: a substituted blob must fail verification and prevent
+        // any store publication.
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/library/layer-swap/blobs/{layer_digest}"),
+            ))
+            .respond_with(status_code(200).body("substituted payload")),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path().join("images")).unwrap();
+
+        let error = pull_planned_image_with_store(
+            temp.path(),
+            &plan,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect_err("substituted layer blob must fail closed");
+
+        assert!(
+            error.to_string().contains("digest verification failed"),
+            "expected digest verification failure, got {error}"
+        );
+        assert!(store.list_references().unwrap().is_empty());
+    }
+
+    #[test]
     fn pulls_manifest_and_layers() {
         let server = Server::run();
         let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2","size":4}]}"#;

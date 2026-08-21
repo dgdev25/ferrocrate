@@ -194,6 +194,16 @@ fn rootless_compose_services_share_the_project_network_namespace() {
         .args(["compose", "--file", "compose.yml", "up", "--detach"])
         .output()
         .expect("compose up");
+    if !up.status.success()
+        && String::from_utf8_lossy(&up.stderr)
+            .contains("rootless bridge networking is unavailable on this host")
+    {
+        eprintln!(
+            "SKIP: rootless shared-network Compose requires user-namespace mapping: {}",
+            String::from_utf8_lossy(&up.stderr).trim()
+        );
+        return;
+    }
     assert!(
         up.status.success(),
         "rootless shared-network compose up failed: {}",

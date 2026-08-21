@@ -2194,6 +2194,16 @@ async fn cri_remove_container_runtime_crash_rebinds_cleared_binding() {
         })
         .await
         .expect("start container");
+    // The runtime refuses to remove a running container, so stop first; the
+    // crash point sits after the runtime removal effect, before the CRI
+    // record cleanup.
+    client
+        .stop_container(StopContainerRequest {
+            container_id: container.clone(),
+            timeout: 5,
+        })
+        .await
+        .expect("stop container before removal");
     let _ = client
         .remove_container(RemoveContainerRequest {
             container_id: container.clone(),
@@ -2529,6 +2539,191 @@ async fn cri_journal_sandbox_with_missing_netns_reports_notready_and_retains_rec
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cri_journal_seeded_container_remove_hits_injected_crash_point() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let cri_container = "cri-container-remove-crash";
+    let runtime_id = "ferro-seeded-runtime";
+    let sandbox_id = "cri-sandbox-seeded";
+
+    // Seed an exited runtime container directly in the runtime store so
+    // remove_container reaches the runtime removal effect without privileged
+    // OCI execution. Both CRI labels are required, otherwise startup
+    // reconciliation would treat the binding as stale and clear it.
+    let store =
+        ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            runtime.path().join("containers.db"),
+        )
+        .expect("open runtime container store");
+    store
+        .put(&ferro_core::container_store::ContainerRecord {
+            id: runtime_id.to_string(),
+            name: Some("remove-crash-container".into()),
+            pid: 0,
+            image: "fixture:latest".into(),
+            command: Vec::new(),
+            tty: false,
+            workdir: None,
+            user: None,
+            env: Vec::new(),
+            labels: [
+                (
+                    "io.ferrocrate.cri-container-id".to_string(),
+                    cri_container.to_string(),
+                ),
+                (
+                    "io.ferrocrate.parent-resource".to_string(),
+                    sandbox_id.to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            annotations: Default::default(),
+            capabilities: Vec::new(),
+            health: None,
+            health_status: "none".into(),
+            health_failures: 0,
+            health_checked_at_unix: None,
+            restart_policy: Default::default(),
+            last_exit_code: Some(0),
+            created_at_unix: 1,
+            stdout_path: String::new(),
+            stderr_path: String::new(),
+            status: "exited".into(),
+            netns: None,
+            namespace_owned: false,
+            namespace_identity: None,
+            network_name: None,
+            ip_address: None,
+            ipv6_address: None,
+            ports: Vec::new(),
+            mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+            readonly_rootfs: false,
+            no_new_privileges: false,
+            resource_limits: None,
+            network_backend: None,
+            network_ownership: None,
+            managed_overlay: None,
+            managed_cleanup_provenance: None,
+            managed_host_veth: None,
+            ai_runtime: None,
+            creation_provenance: Default::default(),
+            mutation_generation: 1,
+            pending_mutation: None,
+        })
+        .expect("seed runtime container record");
+    drop(store);
+
+    // Seed the CRI mapping exactly as a completed start_container leaves it.
+    let containers = serde_json::json!({
+        cri_container: {
+            "id": cri_container,
+            "sandbox_id": sandbox_id,
+            "name": "remove-crash-container",
+            "image": "fixture:latest",
+            "command": ["true"],
+            "env": [],
+            "runtime_id": runtime_id,
+            "created_at_unix": 1
+        }
+    });
+    let connection = rusqlite::Connection::open(runtime.path().join("cri-state.sqlite"))
+        .expect("open seeded CRI state");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS cri_state (
+                kind TEXT PRIMARY KEY NOT NULL,
+                payload BLOB NOT NULL
+            )",
+        )
+        .expect("seed CRI state schema");
+    connection
+        .execute(
+            "INSERT INTO cri_state(kind, payload) VALUES (?1, ?2)",
+            rusqlite::params![
+                "containers",
+                serde_json::to_vec(&containers).expect("encode container journal state")
+            ],
+        )
+        .expect("seed container journal state");
+    drop(connection);
+
+    let socket = runtime.path().join("cri-seeded-remove-crash.sock");
+    set_crash_point("after-container-runtime-remove-effect");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let remove = client
+        .remove_container(RemoveContainerRequest {
+            container_id: cri_container.to_string(),
+        })
+        .await;
+    assert!(
+        remove.is_err(),
+        "crash injection must terminate the daemon after runtime removal"
+    );
+    wait_for_cri_crash(&mut daemon).await;
+    clear_crash_point();
+
+    // The runtime effect landed (record deleted) while the CRI mapping was
+    // retained with its now-stale binding.
+    let store =
+        ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            runtime.path().join("containers.db"),
+        )
+        .expect("reopen runtime container store");
+    assert!(
+        store.get(runtime_id).expect("query removed record").is_none(),
+        "runtime removal effect must land before the crash point"
+    );
+    drop(store);
+    let containers_after = read_cri_state(runtime.path(), "containers");
+    assert_eq!(
+        containers_after[cri_container]["runtime_id"].as_str(),
+        Some(runtime_id),
+        "CRI record must be retained with its stale binding at the crash point"
+    );
+
+    // Restart without the crash point: reconciliation must clear the stale
+    // binding and the removal retry must complete.
+    let mut restarted = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+    let mut recovered = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
+    let status = recovered
+        .container_status(ContainerStatusRequest {
+            container_id: cri_container.to_string(),
+            verbose: false,
+        })
+        .await
+        .expect("recovered status")
+        .into_inner()
+        .status
+        .expect("recovered container");
+    assert_eq!(status.id, cri_container);
+    assert_eq!(
+        status.state,
+        ferro_cri::runtime::ContainerState::Created as i32
+    );
+    recovered
+        .remove_container(RemoveContainerRequest {
+            container_id: cri_container.to_string(),
+        })
+        .await
+        .expect("remove retry after recovery");
+    assert!(
+        !read_cri_state(runtime.path(), "containers").contains_key(cri_container),
+        "remove retry must delete the CRI record"
+    );
+    restarted.kill().expect("stop restarted CRI daemon");
+    let _ = restarted.wait();
+    clear_crash_fixture();
 }
 
 fn seed_runnable_fixture_image(runtime_dir: &Path) {

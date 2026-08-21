@@ -5752,8 +5752,12 @@ fn build_command(
         direct_cmd.args(&cmd[1..]);
         direct_cmd
     } else if rootless_shared_netns {
-        // Join the leader's namespace in the pre-exec hook below. Keeping the
-        // workload command direct avoids requiring privileged `ip netns exec`.
+        // Join both the leader's user and network namespaces before invoking
+        // bubblewrap. Entering the network namespace outside bubblewrap is
+        // important: a rootless bubblewrap mount namespace cannot reliably
+        // open another process's namespace path after it has installed its
+        // own user namespace. `nsenter` performs the ordered user→network
+        // handoff while the caller still has the leader's /proc view.
         if let Some(rootfs) = rootfs_dir {
             let pid = netns_name
                 .and_then(|value| value.strip_prefix("pid:"))
@@ -5761,28 +5765,22 @@ fn build_command(
             let pid = pid
                 .parse::<u32>()
                 .map_err(|_| RuntimeError::InvalidState("shared network PID invalid".into()))?;
-            let mut shared_cmd = vec![
-                "/bin/busybox".to_string(),
-                "nsenter".to_string(),
-                "-t".to_string(),
-                pid.to_string(),
-                "-n".to_string(),
-                "--".to_string(),
-                "/bin/busybox".to_string(),
-                "setpriv".to_string(),
-                "--inh-caps=-sys_admin".to_string(),
-                "--ambient-caps=-sys_admin".to_string(),
-                "--".to_string(),
-            ];
-            shared_cmd.extend(cmd.iter().cloned());
-            build_bwrap_command(
-                rootfs,
-                &shared_cmd,
-                mounts,
-                tmpfs_mounts,
-                readonly_rootfs,
-                true,
-            )?
+            let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+                RuntimeError::InvalidCommand(
+                    "shared rootless networking requires a trusted nsenter executable".into(),
+                )
+            })?;
+            let bwrap =
+                build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?;
+            let mut shared_cmd = Command::new(nsenter);
+            shared_cmd.arg("-t").arg(pid.to_string()).args([
+                "-U",
+                "--preserve-credentials",
+                "-n",
+                "--",
+            ]);
+            shared_cmd.arg(bwrap.get_program()).args(bwrap.get_args());
+            shared_cmd
         } else {
             let mut direct_cmd = Command::new(&cmd[0]);
             direct_cmd.args(&cmd[1..]);
@@ -5949,13 +5947,6 @@ fn build_command(
     } else {
         None
     };
-    let shared_netns_pid = rootless_shared_netns
-        .then(|| {
-            netns_name
-                .and_then(|value| value.strip_prefix("pid:"))
-                .and_then(|value| value.parse::<u32>().ok())
-        })
-        .flatten();
     let setup_user = if direct_container_setup {
         user.map(str::to_string)
     } else {
@@ -5979,12 +5970,6 @@ fn build_command(
                 enter_runtime_netns(netns).map_err(|err| {
                     io::Error::new(err.kind(), format!("pre_exec enter netns {netns}: {err}"))
                 })?;
-            }
-            if let Some(pid) = shared_netns_pid {
-                let user_ns = fs::File::open(format!("/proc/{pid}/ns/user"))?;
-                if nix::libc::dup2(user_ns.as_raw_fd(), 3) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
             }
             if let Some(user_spec) = setup_user.as_deref() {
                 apply_runtime_identity(user_spec).map_err(|err| {
@@ -14615,19 +14600,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let handoff = [
-            "/bin/busybox",
-            "nsenter",
-            "-t",
-            "123",
-            "-n",
-            "--",
-            "/bin/busybox",
-            "setpriv",
-            "--inh-caps=-sys_admin",
-            "--ambient-caps=-sys_admin",
-            "--",
-        ];
+        let handoff = ["-t", "123", "-U", "--preserve-credentials", "-n", "--"];
         assert!(args.windows(handoff.len()).any(|window| window == handoff));
         assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
     }

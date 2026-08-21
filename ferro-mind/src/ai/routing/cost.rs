@@ -563,6 +563,13 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
     )
 }
 
+/// Result of [`execute_routed_prompt_metered_failover_recorded`]: the routed
+/// prompt outcome together with the deterministic provider attempt journal.
+pub type RecordedFailoverOutcome = (
+    Result<(String, String, u64), ExecutionError>,
+    Vec<ProviderAttemptRecord>,
+);
+
 /// Recorded variant of [`execute_routed_prompt_with_adapters_metered_failover`]:
 /// returns the deterministic attempt order together with the result, so
 /// callers can meter and audit which providers were tried and in what order.
@@ -574,10 +581,7 @@ pub fn execute_routed_prompt_metered_failover_recorded(
     timeout: std::time::Duration,
     budget: &TokenBudget,
     max_attempts: usize,
-) -> (
-    Result<(String, String, u64), ExecutionError>,
-    Vec<ProviderAttemptRecord>,
-) {
+) -> RecordedFailoverOutcome {
     let mut attempts = Vec::new();
     let result = run_metered_failover(
         adapters,
@@ -1070,7 +1074,7 @@ mod tests {
             "prompt",
             std::time::Duration::from_secs(1),
         )
-        .err().expect("empty adapters must fail");
+        .expect_err("empty adapters must fail");
         assert!(matches!(error, ExecutionError::NoProvider));
 
         // An eligible-but-unsatisfiable policy also fails closed with the
@@ -1084,7 +1088,7 @@ mod tests {
             "prompt",
             std::time::Duration::from_secs(1),
         )
-        .err().expect("unsatisfiable policy must fail");
+        .expect_err("unsatisfiable policy must fail");
         assert!(matches!(error, ExecutionError::NoProvider));
     }
 

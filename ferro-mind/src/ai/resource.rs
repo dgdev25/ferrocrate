@@ -921,7 +921,7 @@ mod tests {
         for i in 0..5 {
             predictor.push(ResourceSample {
                 cpu_percent: 10.0,
-                memory_bytes: 10_000 + i as u64 * 10_000,
+                memory_bytes: 10_000 + i * 10_000,
                 pids_count: 1,
                 timestamp: base + Duration::from_millis(i * 250),
             });
@@ -993,7 +993,7 @@ mod tests {
                     cpu_percent: 10.0,
                     memory_bytes: 1_000 + i * 100,
                     pids_count: 1,
-                    timestamp: base + Duration::from_secs(i as u64),
+                    timestamp: base + Duration::from_secs(i),
                 });
             }
             assert!(predictor.predict().is_some());
@@ -1014,7 +1014,7 @@ mod tests {
                 cpu_percent: 12.0,
                 memory_bytes: 2_000 + i * 100,
                 pids_count: 1,
-                timestamp: base + Duration::from_secs(i as u64),
+                timestamp: base + Duration::from_secs(i),
             });
         }
         assert!(reopened.predict().is_some());
@@ -1027,9 +1027,9 @@ mod tests {
         for i in 0..24 {
             p.push(ResourceSample {
                 cpu_percent: 20.0 + (i as f32 * 0.2),
-                memory_bytes: 100_000 + i as u64 * 2_000,
-                pids_count: 4 + (i as u64 % 2),
-                timestamp: base + Duration::from_secs(i as u64),
+                memory_bytes: 100_000 + i * 2_000,
+                pids_count: 4 + (i % 2),
+                timestamp: base + Duration::from_secs(i),
             });
         }
         assert!(p.has_neural_model());

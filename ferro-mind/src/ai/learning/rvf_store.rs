@@ -267,7 +267,10 @@ mod tests {
         let garbage = b"not an rvf store: trailing junk bytes".to_vec();
         std::fs::write(&path, &garbage).expect("write garbage");
 
-        let error = RvfStore::open_or_create(&path, 3).err().expect("corrupt store must fail");
+        // let-else avoids the Debug bound `expect_err` would require.
+        let Err(error) = RvfStore::open_or_create(&path, 3) else {
+            panic!("corrupt store must fail");
+        };
         assert!(
             matches!(error, super::RvfStoreError::Runtime(_)),
             "unexpected error: {error:?}"
@@ -285,7 +288,9 @@ mod tests {
             store.insert(Some("v"), &[1.0, 0.0, 0.0]).expect("insert");
         }
 
-        let error = RvfStore::open_or_create(&path, 4).err().expect("dimension mismatch");
+        let Err(error) = RvfStore::open_or_create(&path, 4) else {
+            panic!("dimension mismatch must fail");
+        };
         assert!(
             matches!(error, super::RvfStoreError::InvalidDimensions(3)),
             "unexpected error: {error:?}"
@@ -296,10 +301,11 @@ mod tests {
     fn insert_rejects_wrong_dimension_vector() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = RvfStore::open_or_create(tmp.path().join("dim-check.rvf"), 3).expect("create");
-        let error = store
-            .insert(Some("bad"), &[1.0, 0.0])
-            .err()
-            .expect("wrong dimension must fail");
+        // let-else avoids the Debug bound `expect_err` would require on the
+        // success type.
+        let Err(error) = store.insert(Some("bad"), &[1.0, 0.0]) else {
+            panic!("wrong dimension must fail");
+        };
         assert!(
             matches!(error, super::RvfStoreError::InvalidDimensions(2)),
             "unexpected error: {error:?}"

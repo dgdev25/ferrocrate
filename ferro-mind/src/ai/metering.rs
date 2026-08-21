@@ -234,7 +234,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("metering.jsonl");
         let mut expected_total = 0u64;
-        for session in 0..3 {
+        for _session in 0..3 {
             // A new ledger per "process" must append, not truncate, so
             // consumption history stays durable across restarts.
             let ledger = MeteringLedger::new(&path);

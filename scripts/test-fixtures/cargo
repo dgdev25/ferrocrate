@@ -12,12 +12,21 @@ while [[ $# -gt 0 ]]; do
   fi
 done
 release_dir="$target_dir/release"
+target_os="linux"
 if [[ -n "$target_triple" ]]; then
   release_dir="$target_dir/$target_triple/release"
+  case "$target_triple" in
+    *-pc-windows-*) target_os="windows" ;;
+    *-apple-darwin) target_os="macos" ;;
+  esac
 fi
 mkdir -p "$release_dir"
-printf '#!/bin/sh\nexit 0\n' > "$release_dir/ferro-cli"
-chmod +x "$release_dir/ferro-cli"
+if [[ "$target_os" == "windows" ]]; then
+  printf 'fixture-windows-cli\n' > "$release_dir/ferro-cli.exe"
+else
+  printf '#!/bin/sh\nexit 0\n' > "$release_dir/ferro-cli"
+  chmod +x "$release_dir/ferro-cli"
+fi
 # The release packager embeds the security-monitor eBPF object produced by the
 # real ferro-net build script. Keep the hermetic Cargo fixture representative
 # of that contract without invoking a compiler or toolchain.

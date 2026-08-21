@@ -317,9 +317,15 @@ pub fn execute_routed_prompt(
         .stdin
         .take()
         .ok_or_else(|| ExecutionError::Spawn("provider stdin unavailable".to_string()))?;
-    stdin
-        .write_all(prompt.as_bytes())
-        .map_err(|error| ExecutionError::Spawn(error.to_string()))?;
+    if let Err(error) = stdin.write_all(prompt.as_bytes()) {
+        // A provider that exits before reading its prompt (for example a
+        // failing stub) closes stdin, so a broken pipe is expected and the
+        // child's exit status below is the meaningful error. Any other write
+        // error is surfaced.
+        if error.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(ExecutionError::Spawn(error.to_string()));
+        }
+    }
     drop(stdin);
 
     let started = std::time::Instant::now();
@@ -517,6 +523,22 @@ pub fn execute_routed_prompt_with_adapters_metered(
     Ok((provider, response, budget.used_tokens()))
 }
 
+/// Outcome of one provider attempt inside a failover sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttemptOutcome {
+    /// The backend failed; the value is the error description.
+    Failed(String),
+    /// The backend produced a response charged to the budget.
+    Succeeded { response_tokens: u64 },
+}
+
+/// One recorded failover attempt: the provider tried and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAttemptRecord {
+    pub provider: String,
+    pub outcome: AttemptOutcome,
+}
+
 /// Metered variant of [`execute_routed_prompt_with_adapters_failover`]. The
 /// prompt is reserved once for the whole attempt sequence; response usage is
 /// reserved only for a response that can be returned. A failed or over-budget
@@ -528,6 +550,55 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
     timeout: std::time::Duration,
     budget: &TokenBudget,
     max_attempts: usize,
+) -> Result<(String, String, u64), ExecutionError> {
+    let mut attempts = Vec::new();
+    run_metered_failover(
+        adapters,
+        policy,
+        prompt,
+        timeout,
+        budget,
+        max_attempts,
+        &mut attempts,
+    )
+}
+
+/// Recorded variant of [`execute_routed_prompt_with_adapters_metered_failover`]:
+/// returns the deterministic attempt order together with the result, so
+/// callers can meter and audit which providers were tried and in what order.
+/// The attempt journal is filled even when every provider fails.
+pub fn execute_routed_prompt_metered_failover_recorded(
+    adapters: &[ProviderAdapter],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+    budget: &TokenBudget,
+    max_attempts: usize,
+) -> (
+    Result<(String, String, u64), ExecutionError>,
+    Vec<ProviderAttemptRecord>,
+) {
+    let mut attempts = Vec::new();
+    let result = run_metered_failover(
+        adapters,
+        policy,
+        prompt,
+        timeout,
+        budget,
+        max_attempts,
+        &mut attempts,
+    );
+    (result, attempts)
+}
+
+fn run_metered_failover(
+    adapters: &[ProviderAdapter],
+    policy: &RoutingPolicy,
+    prompt: &str,
+    timeout: std::time::Duration,
+    budget: &TokenBudget,
+    max_attempts: usize,
+    attempts: &mut Vec<ProviderAttemptRecord>,
 ) -> Result<(String, String, u64), ExecutionError> {
     if max_attempts == 0 {
         return Err(ExecutionError::NoProvider);
@@ -566,6 +637,10 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
                     .map(|(provider, response)| (provider, response, None))
             }
         };
+        let provider_name = match &result {
+            Ok((provider, _, _)) => provider.clone(),
+            Err(_) => adapter.provider().name.clone(),
+        };
         match result {
             Ok((provider, response, usage)) => {
                 let response_tokens = if let Some(usage) = usage {
@@ -576,11 +651,29 @@ pub fn execute_routed_prompt_with_adapters_metered_failover(
                     estimate_tokens(&response)
                 };
                 match budget.reserve(response_tokens) {
-                    Ok(()) => return Ok((provider, response, budget.used_tokens())),
-                    Err(error) => last_error = Some(error),
+                    Ok(()) => {
+                        attempts.push(ProviderAttemptRecord {
+                            provider: provider_name,
+                            outcome: AttemptOutcome::Succeeded { response_tokens },
+                        });
+                        return Ok((provider, response, budget.used_tokens()));
+                    }
+                    Err(error) => {
+                        attempts.push(ProviderAttemptRecord {
+                            provider: provider_name,
+                            outcome: AttemptOutcome::Failed(error.to_string()),
+                        });
+                        last_error = Some(error);
+                    }
                 }
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => {
+                attempts.push(ProviderAttemptRecord {
+                    provider: provider_name,
+                    outcome: AttemptOutcome::Failed(error.to_string()),
+                });
+                last_error = Some(error);
+            }
         }
     }
     Err(last_error.unwrap_or(ExecutionError::NoProvider))
@@ -1219,6 +1312,139 @@ mod tests {
             budget.used_tokens(),
             estimate_tokens("hello") + estimate_tokens("ok")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_metered_failover_attempts_are_deterministic_and_budget_correct() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let failing = temp.path().join("failing.sh");
+        let healthy = temp.path().join("healthy.sh");
+        std::fs::write(&failing, "#!/bin/sh\nexit 9\n").expect("failing script");
+        std::fs::write(&healthy, "#!/bin/sh\nread prompt\nprintf 'ok'\n").expect("healthy script");
+        for path in [&failing, &healthy] {
+            let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("permissions");
+        }
+        let make = |name: &str, quality: f32, command| {
+            ProviderAdapter::Command(ProviderEndpoint {
+                provider: Provider {
+                    name: name.into(),
+                    cost_per_1k_tokens: 0.0,
+                    quality,
+                    avg_latency_ms: 1,
+                    local: true,
+                },
+                command,
+                args: Vec::new(),
+            })
+        };
+
+        let expected_attempts = vec![
+            ProviderAttemptRecord {
+                provider: "preferred".to_string(),
+                outcome: AttemptOutcome::Failed(
+                    "provider command exited with status 9: ".to_string(),
+                ),
+            },
+            ProviderAttemptRecord {
+                provider: "fallback".to_string(),
+                outcome: AttemptOutcome::Succeeded {
+                    response_tokens: estimate_tokens("ok"),
+                },
+            },
+        ];
+        // Repeated runs and permuted candidate order must record the same
+        // deterministic attempt sequence with exact budget accounting: the
+        // prompt is charged once for the whole sequence, not per attempt.
+        let orders = [
+            vec![
+                make("preferred", 0.99, failing.clone()),
+                make("fallback", 0.80, healthy.clone()),
+            ],
+            vec![
+                make("fallback", 0.80, healthy.clone()),
+                make("preferred", 0.99, failing.clone()),
+            ],
+        ];
+        for adapters in &orders {
+            for _ in 0..5 {
+                let budget = TokenBudget::new(4);
+                let (result, attempts) = execute_routed_prompt_metered_failover_recorded(
+                    adapters,
+                    &RoutingPolicy::default(),
+                    "hello",
+                    std::time::Duration::from_secs(5),
+                    &budget,
+                    2,
+                );
+                let (provider, response, used) = result.expect("fallback response");
+                assert_eq!(provider, "fallback");
+                assert_eq!(response, "ok");
+                assert_eq!(attempts, expected_attempts);
+                assert_eq!(used, estimate_tokens("hello") + estimate_tokens("ok"));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_metered_failover_records_attempts_even_when_all_providers_fail() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("first.sh");
+        let second = temp.path().join("second.sh");
+        std::fs::write(&first, "#!/bin/sh\nexit 7\n").expect("first script");
+        std::fs::write(&second, "#!/bin/sh\nexit 8\n").expect("second script");
+        for path in [&first, &second] {
+            let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("permissions");
+        }
+        let make = |name: &str, quality: f32, command| {
+            ProviderAdapter::Command(ProviderEndpoint {
+                provider: Provider {
+                    name: name.into(),
+                    cost_per_1k_tokens: 0.0,
+                    quality,
+                    avg_latency_ms: 1,
+                    local: true,
+                },
+                command,
+                args: Vec::new(),
+            })
+        };
+        let budget = TokenBudget::new(20);
+        let (result, attempts) = execute_routed_prompt_metered_failover_recorded(
+            &[
+                make("higher-score", 0.99, first),
+                make("lower-score", 0.80, second),
+            ],
+            &RoutingPolicy::default(),
+            "hello",
+            std::time::Duration::from_secs(5),
+            &budget,
+            2,
+        );
+        assert!(matches!(
+            result,
+            Err(ExecutionError::NonZeroExit { status: 8, .. })
+        ));
+        // The full deterministic order is recorded despite total failure,
+        // and the prompt charge stays accounted.
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["higher-score", "lower-score"]
+        );
+        assert!(attempts
+            .iter()
+            .all(|attempt| matches!(attempt.outcome, AttemptOutcome::Failed(_))));
+        assert_eq!(budget.used_tokens(), estimate_tokens("hello"));
     }
 
     #[cfg(unix)]

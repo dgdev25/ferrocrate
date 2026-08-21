@@ -4361,7 +4361,12 @@ impl ContainerRuntime {
         status: &str,
         _intent: Option<&crate::witness::DurableIntent>,
     ) -> Result<(), RuntimeError> {
-        for attempt in 0..64 {
+        // A restarted TTY workload can publish its exit while Docker's
+        // force-remove path is finalizing the same lifecycle mutation. Keep
+        // this retry bounded, but allow enough time for the supervisor's
+        // SQLite publication to settle under a real PTY/process handoff.
+        const MAX_STATUS_RETRIES: usize = 256;
+        for attempt in 0..MAX_STATUS_RETRIES {
             let record = self
                 .store
                 .get(id)?
@@ -4385,7 +4390,7 @@ impl ContainerRuntime {
             };
             match self.store.set_status_for_mutation(id, operation_id, status) {
                 Ok(()) => return Ok(()),
-                Err(ContainerStoreError::MutationConflict) if attempt < 63 => {
+                Err(ContainerStoreError::MutationConflict) if attempt + 1 < MAX_STATUS_RETRIES => {
                     thread::sleep(Duration::from_millis(5));
                 }
                 Err(error) => return Err(error.into()),
@@ -4425,9 +4430,21 @@ impl ContainerRuntime {
                 .store
                 .get(id)?
                 .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-            if let Err(error) = self.authorization.revalidate(&permit, &current) {
-                self.authorization.complete(permit, false)?;
-                return Err(error.into());
+            match self.authorization.revalidate(&permit, &current) {
+                Ok(()) => {}
+                // A supervisor may publish an exit between the authorization
+                // snapshot and reservation. Re-authorize against that fresh
+                // generation instead of surfacing a transient stale-binding
+                // error to Docker restart/remove callers.
+                Err(MediationError::Stale) if attempt + 1 < MAX_RESERVATION_RETRIES => {
+                    self.authorization.complete(permit, false)?;
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => {
+                    self.authorization.complete(permit, false)?;
+                    return Err(error.into());
+                }
             }
             match self.store.reserve_mutation(
                 id,

@@ -1027,6 +1027,26 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
     }
     assert!(logs.contains("tty-container"), "TTY logs={logs:?}");
 
+    let (status, response) = harness.request("POST", "/v1.45/containers/tty-container/restart");
+    assert_eq!(status, 204, "TTY container restart response={response}");
+    let (status, response) = harness.request("GET", "/v1.45/containers/tty-container/json");
+    assert_eq!(status, 200, "TTY inspect after restart response={response}");
+    let restarted: serde_json::Value =
+        serde_json::from_str(&response).expect("TTY inspect after restart JSON");
+    assert_eq!(restarted["Config"]["Tty"], true, "inspect={restarted}");
+    let mut stopped = false;
+    for _ in 0..80 {
+        let (status, response) = harness.request("GET", "/v1.45/containers/tty-container/json");
+        assert_eq!(status, 200, "TTY inspect while waiting response={response}");
+        let state: serde_json::Value = serde_json::from_str(&response).expect("TTY state JSON");
+        if state["State"]["Status"] != serde_json::Value::String("running".to_string()) {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(stopped, "TTY container did not finish after restart");
+
     let (status, response) =
         harness.request("DELETE", "/v1.45/containers/tty-container?force=true");
     assert_eq!(status, 204, "TTY container cleanup response={response}");

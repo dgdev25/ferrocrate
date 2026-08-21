@@ -1,7 +1,27 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(missing_docs)]
 
-use crate::network_lifecycle::{
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("ferro-cli requires a Linux runtime; this target is compile-only");
+    std::process::exit(78);
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    linux_cli::main();
+}
+
+#[cfg(target_os = "linux")]
+#[path = "network_lifecycle.rs"]
+mod network_lifecycle;
+
+#[cfg(target_os = "linux")]
+#[rustfmt::skip]
+mod linux_cli {
+use super::network_lifecycle;
+
+use self::network_lifecycle::{
     canonical_bridge_name, last_committed_bridge_identity, NetworkCreateRecord, NetworkRecord,
 };
 #[cfg(target_os = "linux")]
@@ -1021,7 +1041,7 @@ pub enum EntitlementCommands {
     },
 }
 
-fn main() {
+pub fn main() {
     // Initialize tracing subscriber for structured logging (CQ-03)
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -8181,16 +8201,16 @@ fn is_builtin_network_mode(value: &str) -> bool {
 
 #[allow(dead_code)]
 fn network_store_path(runtime_dir: &Path) -> PathBuf {
-    crate::network_lifecycle::network_store_path(runtime_dir)
+    self::network_lifecycle::network_store_path(runtime_dir)
 }
 
 fn load_networks(runtime_dir: &Path) -> Result<Vec<NetworkRecord>, String> {
-    crate::network_lifecycle::load_networks(runtime_dir)
+    self::network_lifecycle::load_networks(runtime_dir)
 }
 
 #[allow(dead_code)]
 fn save_networks(runtime_dir: &Path, records: &[NetworkRecord]) -> Result<(), String> {
-    crate::network_lifecycle::save_networks(runtime_dir, records)
+    self::network_lifecycle::save_networks(runtime_dir, records)
 }
 
 fn validate_network_name(name: &str) -> Result<(), String> {
@@ -8286,12 +8306,12 @@ fn bridge_name_for_network(name: &str) -> String {
 
 #[cfg(test)]
 fn reset_network_kernel_effect_count() {
-    crate::network_lifecycle::reset_network_kernel_effect_count();
+    self::network_lifecycle::reset_network_kernel_effect_count();
 }
 
 #[cfg(test)]
 fn network_kernel_effect_count() -> u32 {
-    crate::network_lifecycle::network_kernel_effect_count()
+    self::network_lifecycle::network_kernel_effect_count()
 }
 
 fn create_network_record(
@@ -8437,7 +8457,7 @@ fn handle_network_authorized(
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
-    let recovery = crate::network_lifecycle::recover_network_lifecycles(
+    let recovery = self::network_lifecycle::recover_network_lifecycles(
         runtime_dir,
         cli_network_kernel().as_ref(),
     )
@@ -8445,7 +8465,7 @@ fn handle_network_authorized(
     if let Some(entry) = recovery.entries.iter().find(|entry| {
         matches!(
             entry.verdict,
-            crate::network_lifecycle::NetworkRecoveryVerdict::Quarantined
+            self::network_lifecycle::NetworkRecoveryVerdict::Quarantined
         )
     }) {
         return Err(format!(
@@ -8630,10 +8650,10 @@ fn handle_network_authorized(
     Ok(())
 }
 
-fn cli_network_kernel() -> Box<dyn crate::network_lifecycle::NetworkKernel> {
+fn cli_network_kernel() -> Box<dyn self::network_lifecycle::NetworkKernel> {
     // Explicit opt-in for the file-backed emulator (Docker/CLI harnesses).
     // Default production path remains SystemBridgeKernel.
-    if let Some(kernel) = crate::network_lifecycle::FileBackedNetworkKernel::from_env() {
+    if let Some(kernel) = self::network_lifecycle::FileBackedNetworkKernel::from_env() {
         return Box::new(kernel);
     }
     #[cfg(test)]
@@ -8642,7 +8662,7 @@ fn cli_network_kernel() -> Box<dyn crate::network_lifecycle::NetworkKernel> {
     }
     #[cfg(not(test))]
     {
-        Box::new(crate::network_lifecycle::SystemBridgeKernel)
+        Box::new(self::network_lifecycle::SystemBridgeKernel)
     }
 }
 
@@ -8650,19 +8670,19 @@ fn cli_network_kernel() -> Box<dyn crate::network_lifecycle::NetworkKernel> {
 struct CliKernelProxy;
 
 #[cfg(test)]
-impl crate::network_lifecycle::NetworkKernel for CliKernelProxy {
+impl self::network_lifecycle::NetworkKernel for CliKernelProxy {
     fn create_bridge(
         &self,
         config: &ferro_net::BridgeConfig,
-    ) -> Result<(), crate::network_lifecycle::NetworkKernelError> {
-        crate::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.create_bridge(config))
+    ) -> Result<(), self::network_lifecycle::NetworkKernelError> {
+        self::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.create_bridge(config))
     }
 
     fn destroy_bridge(
         &self,
-        identity: &crate::network_lifecycle::BridgeIdentity,
-    ) -> Result<(), crate::network_lifecycle::NetworkKernelError> {
-        crate::network_lifecycle::CliTestKernel::with_current(|kernel| {
+        identity: &self::network_lifecycle::BridgeIdentity,
+    ) -> Result<(), self::network_lifecycle::NetworkKernelError> {
+        self::network_lifecycle::CliTestKernel::with_current(|kernel| {
             kernel.destroy_bridge(identity)
         })
     }
@@ -8671,10 +8691,10 @@ impl crate::network_lifecycle::NetworkKernel for CliKernelProxy {
         &self,
         name: &str,
     ) -> Result<
-        Option<crate::network_lifecycle::BridgeIdentity>,
-        crate::network_lifecycle::NetworkKernelError,
+        Option<self::network_lifecycle::BridgeIdentity>,
+        self::network_lifecycle::NetworkKernelError,
     > {
-        crate::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.observe_bridge(name))
+        self::network_lifecycle::CliTestKernel::with_current(|kernel| kernel.observe_bridge(name))
     }
 }
 
@@ -8685,7 +8705,7 @@ fn execute_network_create(
 ) -> Result<(), String> {
     let create =
         NetworkCreateRecord::from_record(record.clone()).map_err(|error| error.to_string())?;
-    crate::network_lifecycle::create_authorized(
+    self::network_lifecycle::create_authorized(
         runtime_dir,
         &create,
         permit,
@@ -8717,7 +8737,7 @@ fn execute_network_remove(
             ));
         }
     };
-    crate::network_lifecycle::delete_authorized(
+    self::network_lifecycle::delete_authorized(
         runtime_dir,
         &record.name,
         &expected,
@@ -15898,8 +15918,6 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
     Ok(env)
 }
 
-mod network_lifecycle;
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{parse_docker_update_request, DockerResourceUpdate};
@@ -21124,4 +21142,6 @@ fn runtime_dir() -> PathBuf {
         return PathBuf::from(home).join(".ferrocrate");
     }
     PathBuf::from(".ferrocrate")
+}
+
 }

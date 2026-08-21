@@ -42,6 +42,7 @@ pub mod image_security;
 pub mod image_store;
 pub mod image_tagging;
 pub mod installer;
+pub mod layer_cache;
 pub mod layer_compression;
 #[cfg(target_os = "linux")]
 pub mod layer_mount;

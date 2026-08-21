@@ -54,6 +54,10 @@ name = "authorization_compatibility"
 path = "../tests/authorization_compatibility.rs"
 
 [[test]]
+name = "ai_multi_container_qualification"
+path = "../tests/ai_multi_container_qualification.rs"
+
+[[test]]
 name = "emergency_unix_e2e"
 path = "tests/emergency_unix_e2e.rs"
 required-features = ["test-console"]

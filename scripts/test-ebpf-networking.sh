@@ -10,13 +10,12 @@ step_timeout="${FERROCRATE_EBPF_STEP_TIMEOUT:-45}"
 [[ "$step_timeout" =~ ^[1-9][0-9]*$ ]] || fail "FERROCRATE_EBPF_STEP_TIMEOUT must be a positive integer"
 (( step_timeout <= 600 )) || fail "FERROCRATE_EBPF_STEP_TIMEOUT must be <= 600 seconds"
 run_bounded() {
-  timeout --foreground "${step_timeout}s" "$@" || {
-    local status=$?
-    if (( status == 124 )); then
-      fail "timed out after ${step_timeout}s: $*"
-    fi
-    return "$status"
-  }
+  timeout --foreground "${step_timeout}s" "$@"
+  local status=$?
+  if (( status == 124 )); then
+    printf 'eBPF qualification step timed out after %ss: %s\n' "$step_timeout" "$*" >&2
+  fi
+  return "$status"
 }
 
 # sudo's secure_path commonly hides the operator's Rustup shim. Resolve the
@@ -59,7 +58,7 @@ export FERROCRATE_E2E_NETWORK_BACKEND=ebpf
 # datapath and the privileged probe gives a false negative.
 export FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1
 export FERROCRATE_EBPF_SNAT_PORT_RANGE="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
-pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)"
+pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true)"
 before_iptables="$(mktemp)"
 before_nft="$(mktemp)"
 after_iptables="$(mktemp)"
@@ -73,6 +72,7 @@ packet_capture_pid=""
 loopback_ingress_capture_pid=""
 loopback_egress_capture_pid=""
 checksum_errors_before="$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')"
+diagnostics_output_dir="${FERROCRATE_EBPF_DIAGNOSTICS_DIR:-}"
 reserved_ports_path="/proc/sys/net/ipv4/ip_local_reserved_ports"
 reserved_ports_before="$(cat "$reserved_ports_path" 2>/dev/null || true)"
 reserved_ports_changed=0
@@ -166,6 +166,17 @@ dump_redirect_diagnostics() {
   if [[ -s "$loopback_egress_capture" ]]; then
     printf '%s\n' '--- loopback egress capture ---' >&2
     tail -n 120 "$loopback_egress_capture" >&2 || true
+  fi
+  if [[ -n "$diagnostics_output_dir" ]]; then
+    mkdir -p "$diagnostics_output_dir"
+    cp "$redirect_diagnostics" "$diagnostics_output_dir/redirect-samples.log"
+    cp "$packet_capture" "$diagnostics_output_dir/any-capture.log"
+    cp "$loopback_ingress_capture" "$diagnostics_output_dir/loopback-ingress.log"
+    cp "$loopback_egress_capture" "$diagnostics_output_dir/loopback-egress.log"
+    printf 'before=%s\nafter=%s\n' "$checksum_errors_before" \
+      "$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')" \
+      >"$diagnostics_output_dir/checksum-errors.txt"
+    printf 'saved eBPF diagnostics to %s\n' "$diagnostics_output_dir" >&2
   fi
 }
 

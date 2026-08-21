@@ -11,5 +11,7 @@ grep -Fqx 'export FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1' "$script"
 grep -Fq 'FERROCRATE_EBPF_STEP_TIMEOUT' "$script"
 grep -Fq 'run_bounded' "$script"
 grep -Fq 'timeout --foreground' "$script"
+grep -Fq '|| true)' "$script"
+grep -Fq 'FERROCRATE_EBPF_DIAGNOSTICS_DIR' "$script"
 
 printf '%s\n' 'ebpf-networking-backend=pass'

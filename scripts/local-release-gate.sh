@@ -54,6 +54,8 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/test-reliability-matrix-preflight.sh \
   scripts/perf/check-docker-comparison.sh scripts/perf/test-check-docker-comparison.sh \
   scripts/perf/docker-image-lifecycle-comparison.sh \
+  scripts/perf/docker-network-run-comparison.sh scripts/perf/docker-ipv6-comparison.sh \
+  scripts/perf/docker-outbound-http-comparison.sh \
   scripts/perf/docker-volume-io-comparison.sh \
   scripts/test-state-migrations.sh \
   scripts/test-default-dependency-graph.sh \

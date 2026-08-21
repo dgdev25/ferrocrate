@@ -11,9 +11,11 @@ out="${FERROCRATE_OUTBOUND_HTTP_OUTPUT:-$repo_root/docs/evidence/performance/$(d
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-5}"
+fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-30}"
 
 [[ "$image" =~ ^[A-Za-z0-9._/@:-]+$ ]] || { echo "invalid image" >&2; exit 2; }
 [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || { echo "rounds must be positive" >&2; exit 2; }
+[[ "$fixture_timeout" =~ ^[1-9][0-9]*$ && "$fixture_timeout" -le 300 ]] || { echo "FERROCRATE_COMPARISON_TIMEOUT_SECONDS must be 1..300" >&2; exit 2; }
 [[ -x "$ferro_bin" ]] || { echo "Ferrocrate binary is unavailable: $ferro_bin" >&2; exit 1; }
 command -v docker >/dev/null || { echo "docker is unavailable" >&2; exit 1; }
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -63,7 +65,8 @@ median_ms() {
   local -a samples=()
   for ((i = 0; i < rounds; i++)); do
     start="$(date +%s%N)"
-    bash -c "$command_string" >/dev/null
+    timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+      bash -c "$command_string" >/dev/null
     end="$(date +%s%N)"
     samples+=("$(( (end - start) / 1000000 ))")
   done
@@ -87,6 +90,7 @@ cat >"$out" <<EOF
 - Ferrocrate commit: $(git -C "$repo_root" rev-parse --short HEAD)
 - Image: \`$image\`; rounds: $rounds; reported value is the median wall-clock milliseconds.
 - Network mode: host (same local HTTP fixture for both runtimes)
+- Per-operation timeout: ${fixture_timeout}s.
 
 | Feature | Docker median (ms) | Ferrocrate median (ms) | Difference | Relative vs Docker |
 |---|---:|---:|---:|---:|

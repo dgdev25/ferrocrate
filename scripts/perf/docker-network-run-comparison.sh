@@ -6,9 +6,11 @@ out="${FERROCRATE_NETWORK_RUN_OUTPUT:-$repo_root/docs/evidence/performance/$(dat
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
+fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-30}"
 
 [[ "$image" =~ ^[A-Za-z0-9._/@:-]+$ ]] || { echo "invalid image reference" >&2; exit 2; }
 [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || { echo "rounds must be positive" >&2; exit 2; }
+[[ "$fixture_timeout" =~ ^[1-9][0-9]*$ && "$fixture_timeout" -le 300 ]] || { echo "FERROCRATE_COMPARISON_TIMEOUT_SECONDS must be 1..300" >&2; exit 2; }
 [[ -x "$ferro_bin" ]] || { echo "missing Ferrocrate binary: $ferro_bin" >&2; exit 1; }
 command -v docker >/dev/null || { echo "docker is unavailable" >&2; exit 1; }
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo "rootful comparison requires root" >&2; exit 77; }
@@ -26,7 +28,8 @@ median_ms() {
   local -a samples=()
   for ((i = 0; i < rounds; i++)); do
     start="$(date +%s%N)"
-    if ! bash -c "$command_string" >/dev/null 2>&1; then
+    if ! timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+      bash -c "$command_string" >/dev/null 2>&1; then
       echo SKIP
       return
     fi
@@ -48,6 +51,7 @@ mkdir -p "$(dirname -- "$out")"
   echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unavailable)"
   echo "- Ferrocrate commit: $(git -C "$repo_root" rev-parse --short HEAD)"
   echo "- Image: \`$image\`; rounds: $rounds; median wall-clock milliseconds."
+  echo "- Per-operation timeout: ${fixture_timeout}s (timed-out operations are reported as SKIP)."
   echo
   echo "| Feature | Docker median (ms) | Ferrocrate median (ms) | Difference | Relative vs Docker |"
   echo "|---|---:|---:|---:|---:|"

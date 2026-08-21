@@ -10,6 +10,7 @@ out="${FERROCRATE_IPV6_COMPARISON_OUTPUT:-$repo_root/docs/evidence/performance/$
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 runtime="$(mktemp -d /tmp/ferrocrate-ipv6-benchmark.XXXXXX)"
 rounds="${FERROCRATE_IPV6_COMPARISON_ROUNDS:-3}"
+fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-30}"
 subnet="fd00:fe:0:1::/64"
 gateway="fd00:fe:0:1::1"
 
@@ -20,6 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || { echo "invalid rounds: $rounds" >&2; exit 2; }
+[[ "$fixture_timeout" =~ ^[1-9][0-9]*$ && "$fixture_timeout" -le 300 ]] || { echo "FERROCRATE_COMPARISON_TIMEOUT_SECONDS must be 1..300" >&2; exit 2; }
 command -v docker >/dev/null || { echo "docker is unavailable" >&2; exit 1; }
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || {
   echo "rootful Docker/Ferrocrate comparison requires uid 0; rerun with sudo" >&2
@@ -33,14 +35,18 @@ median_ms() {
     name="ferro-ipv6-bench-$kind-$i"
     start="$(date +%s%N)"
     if [[ "$kind" == docker ]]; then
-      docker network create --ipv6 --subnet "$subnet" --gateway "$gateway" "$name" >/dev/null
-      json="$(docker network inspect "$name")"
-      docker network rm "$name" >/dev/null
+      timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+        docker network create --ipv6 --subnet "$subnet" --gateway "$gateway" "$name" >/dev/null
+      json="$(timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" docker network inspect "$name")"
+      timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" docker network rm "$name" >/dev/null
     else
-      env FERROCRATE_RUNTIME_DIR="$runtime/$i" "$ferro_bin" network create \
-        --ipv6-subnet "$subnet" --ipv6-gateway "$gateway" "$name" >/dev/null
-      json="$(env FERROCRATE_RUNTIME_DIR="$runtime/$i" "$ferro_bin" network inspect --format json "$name")"
-      env FERROCRATE_RUNTIME_DIR="$runtime/$i" "$ferro_bin" network rm "$name" >/dev/null
+      timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+        env FERROCRATE_RUNTIME_DIR="$runtime/$i" "$ferro_bin" network create \
+          --ipv6-subnet "$subnet" --ipv6-gateway "$gateway" "$name" >/dev/null
+      json="$(timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+        env FERROCRATE_RUNTIME_DIR="$runtime/$i" "$ferro_bin" network inspect --format json "$name")"
+      timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+        env FERROCRATE_RUNTIME_DIR="$runtime/$i" "$ferro_bin" network rm "$name" >/dev/null
     fi
     grep -Fq '"EnableIPv6": true' <<<"$json"
     grep -Fq "$subnet" <<<"$json"
@@ -66,6 +72,7 @@ mkdir -p "$(dirname -- "$out")"
   echo "- Ferrocrate commit: $(git -C "$repo_root" rev-parse --short HEAD)"
   echo "- Fixture: create, inspect, and remove a bridge network with IPv6 subnet \`$subnet\` and gateway \`$gateway\`."
   echo "- Rounds: $rounds; reported value is the median wall-clock milliseconds."
+  echo "- Per-operation timeout: ${fixture_timeout}s."
   echo
   echo "Both implementations had to expose \`EnableIPv6=true\` and the requested IPv6 IPAM values in inspection output."
   echo

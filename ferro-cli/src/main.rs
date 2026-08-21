@@ -5637,10 +5637,25 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             format!("/volumes/{}", percent_encode_path_component(name)),
         )
         .map(|_| ()),
-        Commands::BuildCachePrune { .. } => Err(
-            "remote build-cache prune: Docker transport has no cache-only prune endpoint; run it on the selected Ferrocrate host"
-                .to_string(),
-        ),
+        Commands::BuildCachePrune {
+            max_entries,
+            format,
+        } => (|| -> Result<(), String> {
+            let body = request("POST", format!("/build/prune?max_entries={max_entries}"))?;
+            if format == "json" {
+                print_json(body, "json")
+            } else {
+                let value: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+                    format!("remote build-cache prune returned invalid JSON: {error}")
+                })?;
+                let removed = value
+                    .get("Removed")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default();
+                println!("build-cache prune: removed={removed} retained_max={max_entries}");
+                Ok(())
+            }
+        })(),
         _ => {
             Err("selected remote context has no transport mapping for this command yet".to_string())
         }
@@ -13104,6 +13119,27 @@ fn handle_docker_compat_connection(
                     .map_err(|error| format!("docker: image search response failed: {error}"))?;
                 http_response(200, json.as_bytes(), "application/json")
             }
+            ("POST", "/build/prune") => {
+                let max_entries = query
+                    .get("max_entries")
+                    .map(String::as_str)
+                    .unwrap_or("64")
+                    .parse::<usize>()
+                    .map_err(|_| "docker build prune: max_entries must be a non-negative integer".to_string())?;
+                let removed = ferro_core::dockerfile_build::prune_build_cache(
+                    runtime_dir.as_ref(),
+                    max_entries,
+                )
+                .map_err(|error| format!("docker build prune: {error}"))?;
+                let body = serde_json::json!({
+                    "Removed": removed,
+                    "CachesDeleted": removed,
+                    "SpaceReclaimed": 0,
+                    "MaxEntries": max_entries,
+                });
+                let body = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
+                http_response(200, &body, "application/json")
+            }
             ("POST", "/build") => {
                 let dockerfile = query
                     .get("dockerfile")
@@ -20337,7 +20373,7 @@ volumes:
     }
 
     #[test]
-    fn remote_run_rejects_unrepresentable_options_before_connecting() {
+    fn remote_run_rejects_unrepresentable_options_and_routes_cache_prune() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
         let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
         let temp = tempfile::tempdir().expect("remote run config");
@@ -20418,13 +20454,38 @@ volumes:
             Cli::try_parse_from(["ferrocrate", "build-cache-prune", "--max-entries", "2"])
                 .expect("parse remote cache prune")
                 .command;
-        let result = dispatch_remote_context(&cache_prune)
+        let temp = tempfile::tempdir().expect("remote cache prune config");
+        let socket = temp.path().join("remote-cache-prune.sock");
+        let listener = UnixListener::bind(&socket).expect("bind remote cache prune socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept remote cache prune request");
+            let mut request = Vec::new();
+            stream
+                .read_to_end(&mut request)
+                .expect("read remote cache prune request");
+            assert!(String::from_utf8_lossy(&request).contains("POST /build/prune?max_entries=2"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 65\r\nConnection: close\r\n\r\n{\"Removed\":1,\"CachesDeleted\":1,\"SpaceReclaimed\":0,\"MaxEntries\":2}",
+                )
+                .expect("respond to remote cache prune");
+        });
+        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()) };
+        handle_context(ContextCommands::Create {
+            name: "remote-cache".to_string(),
+            endpoint: format!("unix://{}", socket.display()),
+        })
+        .expect("create remote cache context");
+        handle_context(ContextCommands::Use {
+            name: "remote-cache".to_string(),
+        })
+        .expect("use remote cache context");
+        dispatch_remote_context(&cache_prune)
             .expect("remote context should claim cache prune")
-            .expect_err("cache prune must be explicit unsupported remotely");
-        assert!(
-            result.contains("cache-only prune endpoint"),
-            "error={result}"
-        );
+            .expect("remote cache prune should succeed");
+        worker.join().expect("remote cache prune worker");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },

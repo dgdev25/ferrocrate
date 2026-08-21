@@ -613,17 +613,29 @@ impl Drop for DaemonHarness {
 
 impl DaemonHarness {
     fn spawn() -> Self {
+        Self::spawn_env(&[])
+    }
+
+    /// Spawn with extra daemon environment variables. Network creation needs
+    /// the emulated kernel-adapter state file to run without root, matching
+    /// the Docker compat integration harness.
+    fn spawn_env(extra_env: &[(&str, std::path::PathBuf)]) -> Self {
         let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
         let socket_path = runtime_dir.path().join("docker.sock");
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ferro-cli"));
+        command
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "daemon",
                 "--docker-compat",
                 "--socket",
                 socket_path.to_str().expect("socket path utf8"),
-            ])
+            ]);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -966,6 +978,157 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
     assert!(body.contains("\"Name\":\"events-volume\""), "{body}");
     assert!(body.contains("\"Actor\":"), "{body}");
     assert!(body.contains("\"timeNano\":"), "{body}");
+}
+
+/// Docker clients read `/events` as newline-delimited JSON where each frame
+/// carries the documented scalar fields with fixed JSON types, and the actor
+/// attributes use Docker's canonical lowercase keys (`name`, `image`,
+/// `driver`, `type`). Consume the response the way the Docker CLI does:
+/// frame-by-frame, validating types rather than substrings.
+#[test]
+fn docker_events_frames_carry_docker_canonical_attribute_types() {
+    let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
+    let kernel_state = runtime_dir.path().join("network-kernel-state.json");
+    let harness = DaemonHarness::spawn_env(&[(
+        "FERROCRATE_NETWORK_KERNEL_STATE",
+        kernel_state,
+    )]);
+    let (status, _) = harness.request(
+        "POST",
+        "/containers/create?name=attr-container",
+        r#"{"Image":"busybox","Cmd":["true"]}"#,
+    );
+    assert_eq!(status, 201);
+    let create_body = r#"{"Name":"attr-network","Driver":"bridge","IPAM":{"Config":[]}}"#;
+    let create_request = format!(
+        "POST /networks/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, body) = harness.request_raw(&create_request);
+    assert_eq!(status, 201, "network create: {body}");
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"attr-volume"}"#);
+    assert_eq!(status, 201);
+
+    let (status, body) = harness.request("GET", "/events", "");
+    assert_eq!(status, 200, "events response: {body}");
+    let frames: Vec<serde_json::Value> = body
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("event frame must be one JSON object: {error}: {line}"))
+        })
+        .collect();
+    assert!(frames.len() >= 3, "expected three create events: {body}");
+
+    for frame in &frames {
+        assert!(frame["status"].is_string(), "status: {frame}");
+        assert!(frame["id"].is_string(), "id: {frame}");
+        assert!(frame["from"].is_string(), "from: {frame}");
+        assert!(frame["Type"].is_string(), "Type: {frame}");
+        assert!(frame["Action"].is_string(), "Action: {frame}");
+        assert!(frame["scope"].is_string(), "scope: {frame}");
+        assert!(frame["time"].is_u64(), "time: {frame}");
+        assert!(frame["timeNano"].is_u64(), "timeNano: {frame}");
+        assert!(frame["timeNano"].as_u64().unwrap() >= frame["time"].as_u64().unwrap() * 1_000_000_000);
+        let actor = &frame["Actor"];
+        assert!(actor.is_object(), "Actor: {frame}");
+        assert!(actor["ID"].is_string(), "Actor.ID: {frame}");
+        let attributes = &actor["Attributes"];
+        assert!(attributes.is_object(), "Actor.Attributes: {frame}");
+        for (key, value) in attributes.as_object().expect("attributes object") {
+            assert!(
+                key.len() <= 256 && value.as_str().is_some_and(|text| text.len() <= 256),
+                "attribute {key} must stay bounded and scalar: {frame}"
+            );
+        }
+    }
+
+    let container = frames
+        .iter()
+        .find(|frame| frame["Type"] == "container" && frame["Action"] == "create")
+        .expect("container create event");
+    assert_eq!(container["Actor"]["Attributes"]["name"], "attr-container");
+    assert_eq!(container["Actor"]["Attributes"]["image"], "busybox");
+    assert_eq!(container["from"], "busybox");
+
+    let network = frames
+        .iter()
+        .find(|frame| frame["Type"] == "network" && frame["Action"] == "create")
+        .expect("network create event");
+    assert_eq!(network["Actor"]["Attributes"]["name"], "attr-network");
+    assert_eq!(network["Actor"]["Attributes"]["type"], "bridge");
+
+    let volume = frames
+        .iter()
+        .find(|frame| frame["Type"] == "volume" && frame["Action"] == "create")
+        .expect("volume create event");
+    assert_eq!(volume["Actor"]["Attributes"]["name"], "attr-volume");
+    assert_eq!(volume["Actor"]["Attributes"]["driver"], "local");
+}
+
+/// The Docker CLI subscribes with `Accept: application/x-ndjson` and reads
+/// chunked-transfer frames. Read one chunk like a streaming client, verify
+/// the hex-size framing and the JSON payload, then drop the connection.
+#[test]
+fn docker_events_follow_stream_uses_chunked_jsonl_framing() {
+    let harness = DaemonHarness::spawn();
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"stream-volume"}"#);
+    assert_eq!(status, 201);
+
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let request = "GET /events?follow=1 HTTP/1.1\r\nHost: docker\r\nAccept: application/x-ndjson\r\n\r\n";
+    stream
+        .write_all(request.as_bytes())
+        .expect("write events request");
+
+    let mut buffered = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // Accumulate until the first chunked frame is complete: a hex length
+    // line, the JSON body it announces, and the trailing CRLF.
+    let frame = loop {
+        if Instant::now() > deadline {
+            panic!("no event chunk arrived before timeout");
+        }
+        if let Some(text) = parse_first_chunk(&buffered) {
+            break text;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => panic!("stream closed before a chunk arrived: {buffered:?}"),
+            Ok(read) => buffered.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                panic!("read timed out before a chunk arrived: {error}")
+            }
+            Err(error) => panic!("stream read failed: {error}"),
+        }
+    };
+    let payload: serde_json::Value = serde_json::from_str(&frame)
+        .unwrap_or_else(|error| panic!("chunk payload must be one JSON object: {error}: {frame}"));
+    assert_eq!(payload["Type"], "volume");
+    assert_eq!(payload["Action"], "create");
+    assert_eq!(payload["Actor"]["ID"], "stream-volume");
+    assert_eq!(payload["Actor"]["Attributes"]["name"], "stream-volume");
+}
+
+/// Extract the payload of the first complete chunked-transfer frame from a
+/// buffered HTTP response, or `None` while the frame is still partial.
+fn parse_first_chunk(buffered: &[u8]) -> Option<String> {
+    let header_end = buffered
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    let body = &buffered[header_end + 4..];
+    let line_end = body.windows(2).position(|window| window == b"\r\n")?;
+    let size_text = std::str::from_utf8(&body[..line_end]).ok()?;
+    let size = usize::from_str_radix(size_text, 16).ok()?;
+    let frame_end = line_end + 2 + size;
+    if body.len() < frame_end + 2 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&body[line_end + 2..frame_end]).into_owned())
 }
 
 #[test]

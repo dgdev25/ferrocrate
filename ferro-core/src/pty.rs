@@ -142,7 +142,9 @@ pub fn configure_command(command: &mut Command) -> io::Result<()> {
 }
 
 fn validate_dimension(value: u16, field: &str) -> io::Result<()> {
-    if value == 0 || value > MAX_DIMENSION {
+    // `MAX_DIMENSION` is `u16::MAX`, so a `u16` can never exceed it; only
+    // zero is rejectable.
+    if value == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{field} must be between 1 and {MAX_DIMENSION}"),

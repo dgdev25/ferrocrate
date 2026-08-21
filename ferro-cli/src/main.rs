@@ -11124,7 +11124,7 @@ impl DockerEventStore {
 
     #[allow(dead_code)]
     fn append(&mut self, method: &str, path: &str, status: u16) -> Result<(), String> {
-        self.append_with_context(method, path, status, &[], &[])
+        self.append_with_context(method, path, status, &HashMap::new(), &[], &[])
     }
 
     fn append_with_context(
@@ -11132,6 +11132,7 @@ impl DockerEventStore {
         method: &str,
         path: &str,
         status: u16,
+        query: &HashMap<String, String>,
         request_body: &[u8],
         response_bytes: &[u8],
     ) -> Result<(), String> {
@@ -11164,8 +11165,16 @@ impl DockerEventStore {
         attributes.insert("path".to_string(), path.to_string());
         attributes.insert("httpStatus".to_string(), status.to_string());
         attributes.insert("scope".to_string(), "local".to_string());
+        let actor_attributes = docker_event_actor_attributes(
+            event_type,
+            resource.as_deref(),
+            query,
+            &request_attributes,
+            &response_attributes,
+        );
         attributes.extend(request_attributes);
         attributes.extend(response_attributes);
+        attributes.extend(actor_attributes);
         let event = DockerEvent {
             id: self.next_id,
             time: timestamp.as_secs(),
@@ -11473,6 +11482,69 @@ fn docker_event_response_attributes(response: &[u8]) -> BTreeMap<String, String>
                 }
             }
         }
+    }
+    attributes
+}
+
+#[cfg(target_os = "linux")]
+fn docker_event_actor_attributes(
+    event_type: &str,
+    resource: Option<&str>,
+    query: &HashMap<String, String>,
+    request_attributes: &BTreeMap<String, String>,
+    response_attributes: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    // Docker engine event actors carry canonical lowercase attribute keys
+    // (`name`, `image`, `driver`, `type`) that differ from the create/update
+    // request and response field names. Project the already-captured bounded
+    // scalars onto those keys so clients that read Actor.Attributes or filter
+    // on attribute values see the documented names. No value is invented:
+    // every alias is derived from an existing captured scalar or the event
+    // resource itself, with the same 256-character bound.
+    const MAX_TEXT: usize = 256;
+    let lookup = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|key| {
+            query
+                .get(*key)
+                .cloned()
+                .or_else(|| request_attributes.get(*key).cloned())
+                .or_else(|| response_attributes.get(*key).cloned())
+                .filter(|value| !value.is_empty() && value.len() <= MAX_TEXT)
+        })
+    };
+    let mut attributes = BTreeMap::new();
+    match event_type {
+        "container" => {
+            if let Some(name) = lookup(&["name", "Name"]) {
+                attributes.insert("name".to_string(), name);
+            }
+            if let Some(image) = lookup(&["image", "Image"]) {
+                attributes.insert("image".to_string(), image);
+            }
+        }
+        "network" => {
+            if let Some(name) = lookup(&["name", "Name"]) {
+                attributes.insert("name".to_string(), name);
+            }
+            if let Some(driver) = lookup(&["driver", "Driver"]) {
+                attributes.insert("type".to_string(), driver);
+            }
+        }
+        "volume" => {
+            if let Some(name) = lookup(&["name", "Name"]) {
+                attributes.insert("name".to_string(), name);
+            }
+            if let Some(driver) = lookup(&["driver", "Driver"]) {
+                attributes.insert("driver".to_string(), driver);
+            }
+        }
+        "image" => {
+            if let Some(name) = resource.filter(|name| !name.is_empty() && name.len() <= MAX_TEXT)
+            {
+                attributes.insert("name".to_string(), name.to_string());
+            }
+        }
+        _ => {}
     }
     attributes
 }
@@ -11786,6 +11858,12 @@ ferrocrate_uptime_seconds {}\\n",
 }
 
 #[cfg(target_os = "linux")]
+type DockerEventRequest = (String, String, HashMap<String, String>, Vec<u8>);
+
+#[cfg(target_os = "linux")]
+type DockerAttachHijack = (String, bool, bool, bool, bool, bool, Vec<u8>);
+
+#[cfg(target_os = "linux")]
 fn handle_docker_compat_connection(
     mut stream: UnixStream,
     runtime_dir: Arc<PathBuf>,
@@ -11794,11 +11872,11 @@ fn handle_docker_compat_connection(
     state: Arc<DockerCompatState>,
 ) -> Result<(), String> {
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
-    let mut event_request: Option<(String, String, Vec<u8>)> = None;
+    let mut event_request: Option<DockerEventRequest> = None;
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut attach_hijack: Option<(String, bool, bool, bool, bool, bool, Vec<u8>)> = None;
+    let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_output: Option<Vec<u8>> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
@@ -11832,7 +11910,12 @@ fn handle_docker_compat_connection(
             query.insert("names".to_string(), name);
             path = "/images/get".to_string();
         }
-        event_request = Some((request.method.clone(), path.clone(), request.body.clone()));
+        event_request = Some((
+            request.method.clone(),
+            path.clone(),
+            query.clone(),
+            request.body.clone(),
+        ));
         let response = match (request.method.as_str(), path.as_str()) {
             ("GET", "/events") => {
                 let follow = query
@@ -13872,7 +13955,7 @@ fn handle_docker_compat_connection(
         )?;
         return Ok(());
     }
-    if let Some((method, path, request_body)) = event_request {
+    if let Some((method, path, request_query, request_body)) = event_request {
         let status = response
             .get(..)
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
@@ -13881,7 +13964,14 @@ fn handle_docker_compat_connection(
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(500);
         if let Ok(mut events) = state.events.lock() {
-            let _ = events.append_with_context(&method, &path, status, &request_body, &response);
+            let _ = events.append_with_context(
+                &method,
+                &path,
+                status,
+                &request_query,
+                &request_body,
+                &response,
+            );
         }
     }
     let fixture = ferro_core::observability::qualification_fixture("docker");
@@ -19084,6 +19174,7 @@ volumes:
                 "POST",
                 "/plugins/example/enable",
                 204,
+                &HashMap::new(),
                 br#"{"Name":"example","PluginID":"plugin-1"}"#,
                 br#"{"Id":"plugin-1","Name":"example"}"#,
             )
@@ -19117,6 +19208,7 @@ volumes:
                 "POST",
                 "/containers/create",
                 201,
+                &HashMap::new(),
                 br#"{"Image":"busybox","Labels":{"tier":"frontend"},"Env":["TOKEN=secret"]}"#,
                 br#"{"Id":"container-1","Warnings":[]}"#,
             )
@@ -19142,6 +19234,101 @@ volumes:
             .any(|value| value.contains("secret")));
         let payload = docker_event_payload(&events[0]);
         assert_eq!(payload["Actor"]["ID"], "container-1");
+    }
+
+    #[test]
+    fn docker_event_actor_attributes_use_docker_canonical_keys() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        let mut query = HashMap::new();
+        query.insert("name".to_string(), "named-container".to_string());
+        store
+            .append_with_context(
+                "POST",
+                "/containers/create",
+                201,
+                &query,
+                br#"{"Image":"busybox"}"#,
+                br#"{"Id":"container-9","Warnings":null}"#,
+            )
+            .unwrap();
+        let events = store.query(&HashMap::new()).unwrap();
+        assert_eq!(events.len(), 1);
+        let container = &events[0];
+        assert_eq!(container.attributes.get("name"), Some(&"named-container".to_string()));
+        assert_eq!(container.attributes.get("image"), Some(&"busybox".to_string()));
+
+        store
+            .append_with_context(
+                "POST",
+                "/networks/create",
+                201,
+                &HashMap::new(),
+                br#"{"Name":"net-1","Driver":"bridge"}"#,
+                br#"{"Id":"net-1","Warning":""}"#,
+            )
+            .unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/volumes/create",
+                201,
+                &HashMap::new(),
+                br#"{"Name":"vol-1"}"#,
+                br#"{"Name":"vol-1","Driver":"local","Mountpoint":"/volumes/vol-1"}"#,
+            )
+            .unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/images/app-img/tag",
+                201,
+                &HashMap::new(),
+                br#"{}"#,
+                br#"{}"#,
+            )
+            .unwrap();
+        let events = store.query(&HashMap::new()).unwrap();
+        let network = events
+            .iter()
+            .find(|event| event.event_type == "network")
+            .expect("network event");
+        assert_eq!(network.attributes.get("name"), Some(&"net-1".to_string()));
+        assert_eq!(network.attributes.get("type"), Some(&"bridge".to_string()));
+        let volume = events
+            .iter()
+            .find(|event| event.event_type == "volume")
+            .expect("volume event");
+        assert_eq!(volume.attributes.get("name"), Some(&"vol-1".to_string()));
+        assert_eq!(volume.attributes.get("driver"), Some(&"local".to_string()));
+        let image = events
+            .iter()
+            .find(|event| event.event_type == "image")
+            .expect("image event");
+        assert_eq!(image.attributes.get("name"), Some(&"app-img".to_string()));
+    }
+
+    #[test]
+    fn docker_event_actor_attributes_stay_bounded() {
+        let long_name = "x".repeat(257);
+        let mut query = HashMap::new();
+        query.insert("name".to_string(), long_name.clone());
+        let attributes = super::docker_event_actor_attributes(
+            "container",
+            None,
+            &query,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(!attributes.contains_key("name"), "over-long query name must be dropped");
+        assert!(super::docker_event_actor_attributes(
+            "container",
+            None,
+            &HashMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .is_empty());
     }
 
     #[test]

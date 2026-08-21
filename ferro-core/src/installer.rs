@@ -1115,6 +1115,55 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_does_not_follow_symlinks_inside_the_state_dir() {
+        // A symlink with an owned name appears inside the state dir after
+        // planning. `remove_dir_all` must unlink the symlink itself and never
+        // delete through it, so the victim directory survives.
+        let root = tempdir();
+        let install = root.path().join("bin");
+        let state = root.path().join("state");
+        let victim = root.path().join("victim");
+        fs::create_dir_all(&install).expect("install dir");
+        fs::create_dir_all(state.join("containers")).expect("containers");
+        fs::create_dir_all(&victim).expect("victim dir");
+        fs::write(victim.join("data"), b"precious").expect("victim data");
+        fs::write(install.join("ferrocrate"), b"bin").expect("binary");
+
+        let plan = plan_uninstall(&install, &state, None).expect("plan");
+        // Owned-named entry swapped for a symlink between plan and execute.
+        std::os::unix::fs::symlink(&victim, state.join("containers/symlinked"))
+            .expect("plant symlink");
+
+        execute_uninstall(&plan).expect("uninstall");
+        assert!(!state.exists(), "state dir removed");
+        assert!(victim.join("data").exists(), "victim must survive");
+    }
+
+    #[test]
+    fn uninstall_refuses_symlinked_state_dir_without_deleting_the_target() {
+        // The state dir path itself is replaced by a symlink. Removal must
+        // fail or remove only the link; the target must survive either way.
+        let root = tempdir();
+        let install = root.path().join("bin");
+        let real_state = root.path().join("real-state");
+        let link = root.path().join("state-link");
+        fs::create_dir_all(&install).expect("install dir");
+        fs::create_dir_all(real_state.join("containers")).expect("containers");
+        fs::write(real_state.join("desktop-vm.json"), b"{}").expect("owned file");
+        fs::write(install.join("ferrocrate"), b"bin").expect("binary");
+        std::os::unix::fs::symlink(&real_state, &link).expect("state symlink");
+
+        let plan = plan_uninstall(&install, &link, None).expect("plan");
+        let _ = execute_uninstall(&plan);
+        // Whether removal refused the symlink or unlinked only the link, the
+        // real state tree and its owned entries must still exist.
+        assert!(
+            real_state.join("containers").exists(),
+            "symlinked state-dir target must never be deleted"
+        );
+    }
+
+    #[test]
     fn uninstall_refuses_relative_paths() {
         let error = plan_uninstall(Path::new("bin"), Path::new("/state"), None)
             .expect_err("relative install");

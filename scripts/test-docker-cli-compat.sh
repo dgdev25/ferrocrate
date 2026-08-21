@@ -6,6 +6,11 @@ bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 strict="${FERROCRATE_DOCKER_CLI_REQUIRED:-0}"
 rebuild_stale="${FERROCRATE_DOCKER_CLI_REBUILD_STALE:-0}"
 
+command -v setsid >/dev/null 2>&1 || {
+  echo "Docker CLI compatibility smoke requires setsid for daemon cleanup" >&2
+  exit 77
+}
+
 if ! command -v docker >/dev/null 2>&1; then
   if [[ "$strict" == "1" || "$strict" == "true" ]]; then
     echo "Docker CLI is required but not installed" >&2
@@ -59,7 +64,9 @@ socket="$runtime_dir/docker.sock"
 daemon_pid=""
 cleanup() {
   if [[ -n "$daemon_pid" ]]; then
-    kill "$daemon_pid" 2>/dev/null || true
+    kill -TERM -- "-$daemon_pid" 2>/dev/null || kill "$daemon_pid" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL -- "-$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
   fi
   if [[ -d "$runtime_dir" ]]; then
@@ -73,11 +80,11 @@ cleanup() {
       kill -KILL $fixture_pids 2>/dev/null || true
     fi
   fi
-  rm -rf "$runtime_dir"
+  find "$runtime_dir" -depth -delete 2>/dev/null || true
 }
 trap cleanup EXIT
 
-FERROCRATE_RUNTIME_DIR="$runtime_dir" "$bin" daemon --docker-compat --socket "$socket" \
+setsid env FERROCRATE_RUNTIME_DIR="$runtime_dir" "$bin" daemon --docker-compat --socket "$socket" \
   >"$runtime_dir/daemon.stdout" 2>"$runtime_dir/daemon.stderr" &
 daemon_pid=$!
 for _ in $(seq 1 100); do

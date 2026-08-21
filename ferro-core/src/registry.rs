@@ -118,65 +118,6 @@ impl RegistryClient {
         })
     }
 
-    /// Execute a request with retry logic and exponential backoff
-    #[allow(dead_code)]
-    fn send_with_retry(
-        &self,
-        request_builder: reqwest::blocking::RequestBuilder,
-    ) -> Result<reqwest::blocking::Response, RegistryError> {
-        let mut last_error: Option<RegistryError> = None;
-
-        for attempt in 0..=self.config.max_retries {
-            if attempt > 0 {
-                // Calculate exponential backoff with jitter
-                let backoff = std::cmp::min(
-                    self.config.initial_backoff_ms * (1 << (attempt - 1)),
-                    self.config.max_backoff_ms,
-                );
-                // Add 10% jitter
-                let jitter = (backoff as f64 * 0.1 * rand::random::<f64>()) as u64;
-                std::thread::sleep(Duration::from_millis(backoff + jitter));
-            }
-
-            // Clone the request for retry attempts
-            let response = match request_builder.try_clone() {
-                Some(req) => req.send(),
-                None => {
-                    return Err(RegistryError::InvalidReference(
-                        "request body cannot be retried - streaming bodies not supported"
-                            .to_string(),
-                    ));
-                }
-            };
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    // Retry on 429 (rate limited) and 5xx errors
-                    if status.as_u16() == 429 || status.as_u16() >= 500 {
-                        last_error = Some(RegistryError::HttpStatus {
-                            status: status.as_u16(),
-                            body: resp.text().unwrap_or_default(),
-                        });
-                        continue;
-                    }
-                    return Ok(resp);
-                }
-                Err(e) => {
-                    // Retry on network errors
-                    if e.is_timeout() || e.is_connect() {
-                        last_error = Some(RegistryError::Request(e));
-                        continue;
-                    }
-                    return Err(RegistryError::Request(e));
-                }
-            }
-        }
-
-        Err(last_error
-            .unwrap_or_else(|| RegistryError::InvalidReference("max retries exceeded".to_string())))
-    }
-
     /// Pull and parse OCI image manifest from registry using optional basic auth.
     pub fn pull_manifest(
         &self,

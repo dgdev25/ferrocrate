@@ -23,7 +23,10 @@ cap_eff="$(awk '/^CapEff:/{print $2}' /proc/self/status)"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ferro_cli=""
-if command -v ferro-cli >/dev/null; then
+if [[ -n "${FERROCRATE_NETWORK_CLI:-}" ]]; then
+  [[ -x "$FERROCRATE_NETWORK_CLI" ]] || fail "configured FERROCRATE_NETWORK_CLI is not executable"
+  ferro_cli="$FERROCRATE_NETWORK_CLI"
+elif command -v ferro-cli >/dev/null; then
   ferro_cli="$(command -v ferro-cli)"
 elif [[ -x "$repo_root/target/debug/ferro-cli" ]]; then
   ferro_cli="$repo_root/target/debug/ferro-cli"

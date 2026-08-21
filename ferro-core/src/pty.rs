@@ -48,6 +48,10 @@ impl PtyPair {
         self.slave
     }
 
+    pub fn into_parts(self) -> (OwnedFd, OwnedFd) {
+        (self.master, self.slave)
+    }
+
     /// Update the live terminal size through the PTY master.
     pub fn set_size(&self, rows: u16, cols: u16) -> io::Result<()> {
         validate_dimension(rows, "rows")?;
@@ -102,5 +106,39 @@ mod tests {
         let pair = PtyPair::new(24, 80).expect("allocate PTY");
         pair.set_size(40, 120).expect("resize PTY");
         assert!(pair.master().as_raw_fd() >= 0);
+    }
+
+    #[test]
+    fn child_output_crosses_the_slave_to_master_boundary() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+
+        let pair = PtyPair::new(24, 80).expect("allocate PTY");
+        let (master, slave) = pair.into_parts();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf ready"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(slave))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn PTY child");
+        let mut output = Vec::new();
+        let mut master = std::fs::File::from(master);
+        let mut buffer = [0_u8; 64];
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                // Linux reports EIO when the PTY slave closes. That is the
+                // terminal EOF condition, not a failed child write.
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+                Err(error) => panic!("read PTY master: {error}"),
+            }
+        }
+        assert!(child.wait().expect("wait PTY child").success());
+        assert!(
+            String::from_utf8_lossy(&output).contains("ready"),
+            "PTY output={output:?}"
+        );
     }
 }

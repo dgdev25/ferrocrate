@@ -7,7 +7,9 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::{ffi::CStr, os::raw::c_char};
 
 use nix::pty::{openpty, Winsize};
@@ -109,6 +111,36 @@ impl PtyPair {
     }
 }
 
+/// Make a spawned process a session leader with the PTY slave as its
+/// controlling terminal. Merely wiring stdin/stdout/stderr to a PTY is not
+/// sufficient for interactive programs: job-control signals, `tcgetpgrp`,
+/// and terminal-generated interrupts require a controlling session.
+///
+/// The caller must install the slave descriptor as the command's stdin before
+/// spawning. `pre_exec` runs after Rust has forked and duplicated those
+/// descriptors, so descriptor 0 is valid in the child.
+pub fn configure_command(command: &mut Command) -> io::Result<()> {
+    // SAFETY: the closure only invokes async-signal-safe libc operations in
+    // the post-fork child, and `slave_fd` is owned by the command's stdio.
+    unsafe {
+        command.pre_exec(move || {
+            if nix::libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if nix::libc::ioctl(
+                nix::libc::STDIN_FILENO,
+                nix::libc::TIOCSCTTY,
+                0 as nix::libc::c_int,
+            ) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
 fn validate_dimension(value: u16, field: &str) -> io::Result<()> {
     if value == 0 || value > MAX_DIMENSION {
         return Err(io::Error::new(
@@ -170,6 +202,65 @@ mod tests {
         assert!(child.wait().expect("wait PTY child").success());
         assert!(
             String::from_utf8_lossy(&output).contains("ready"),
+            "PTY output={output:?}"
+        );
+    }
+
+    #[test]
+    fn child_can_use_pty_as_controlling_terminal() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+
+        let pair = PtyPair::new(24, 80).expect("allocate PTY");
+        let (master, slave) = pair.into_parts();
+        let slave_for_stdin = slave.try_clone().expect("clone PTY slave");
+        let mut command = Command::new("/usr/bin/timeout");
+        command
+            .args(["2", "/bin/sh", "-c", "test -t 0 && test -t 1 && stty size"])
+            .stdin(Stdio::from(slave_for_stdin))
+            .stdout(Stdio::from(slave.try_clone().expect("clone PTY slave")))
+            .stderr(Stdio::from(slave));
+        super::configure_command(&mut command).expect("configure controlling terminal");
+        let mut child = command.spawn().expect("spawn PTY child");
+        let mut output = Vec::new();
+        let mut master = std::fs::File::from(master);
+        let flags = unsafe { nix::libc::fcntl(master.as_raw_fd(), nix::libc::F_GETFL) };
+        assert!(flags >= 0, "get PTY flags failed");
+        assert_eq!(
+            unsafe {
+                nix::libc::fcntl(
+                    master.as_raw_fd(),
+                    nix::libc::F_SETFL,
+                    flags | nix::libc::O_NONBLOCK,
+                )
+            },
+            0,
+            "set PTY nonblocking failed"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let status = loop {
+            let mut buffer = [0_u8; 128];
+            match master.read(&mut buffer) {
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => {}
+                Err(error) => panic!("read PTY master: {error}"),
+            }
+            if let Some(status) = child.try_wait().expect("poll PTY child") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY child did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(
+            status.success(),
+            "PTY child status={status:?} output={output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output).contains("24 80"),
             "PTY output={output:?}"
         );
     }

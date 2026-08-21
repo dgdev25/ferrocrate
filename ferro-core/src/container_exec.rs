@@ -78,11 +78,11 @@ pub fn exec_in_rootless_rootfs_tty(
     let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
     let (master, slave) = pty.into_parts();
     let slave = File::from(slave);
-    let mut child = command
-        .stdin(Stdio::from(slave.try_clone()?))
-        .stdout(Stdio::from(slave.try_clone()?))
-        .stderr(Stdio::from(slave))
-        .spawn()?;
+    command.stdin(Stdio::from(slave.try_clone()?));
+    command.stdout(Stdio::from(slave.try_clone()?));
+    command.stderr(Stdio::from(slave));
+    crate::pty::configure_command(&mut command)?;
+    let mut child = command.spawn()?;
     let master = File::from(master);
     let mut output = Vec::new();
     if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
@@ -245,12 +245,14 @@ pub fn exec_in_container_tty(
     let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
     let (master, slave) = pty.into_parts();
     let slave = File::from(slave);
-    let mut child = Command::new(nsenter)
+    let mut child = Command::new(nsenter);
+    child
         .args(args)
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
-        .stderr(Stdio::from(slave))
-        .spawn()?;
+        .stderr(Stdio::from(slave));
+    crate::pty::configure_command(&mut child)?;
+    let mut child = child.spawn()?;
     let master = File::from(master);
     let mut output = Vec::new();
     if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {

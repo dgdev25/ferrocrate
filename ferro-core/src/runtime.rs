@@ -6297,11 +6297,11 @@ fn spawn_child_with_logs(
             .write(true)
             .custom_flags(nix::libc::O_NONBLOCK)
             .open(&stdin_path)?;
-        let child = command
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave))
-            .spawn()?;
+        command.stdin(Stdio::from(slave.try_clone()?));
+        command.stdout(Stdio::from(slave.try_clone()?));
+        command.stderr(Stdio::from(slave));
+        crate::pty::configure_command(&mut command).map_err(RuntimeError::Io)?;
+        let child = command.spawn()?;
         let child_pid = child.id();
         thread::spawn(move || {
             let mut buffer = [0_u8; 4096];

@@ -72,6 +72,33 @@ GITHUB_RELEASE_BASE="file://$release_root" \
   >"$tmp_dir/downloaded-path.txt"
 test -f "$(tail -n 1 "$tmp_dir/downloaded-path.txt")"
 
+# The installer must reject a checksum manifest that is ambiguous or points
+# outside the downloaded artifact name.
+printf '%s  %s\n%s  ../outside.tar.gz\n' "$archive_digest" "$(basename "$release_archive")" \
+  "$archive_digest" >"$release_dir/ferrocrate-${version}-checksums.txt"
+if bash -c '
+  source "$1"
+  GITHUB_RELEASE_BASE="$2" download_linux_release x86_64 "$3" "$4"
+' _ "$repo_root/scripts/install.sh" "file://$release_root" "$version" \
+  "$tmp_dir/ambiguous-download" >/dev/null 2>&1; then
+  echo "ambiguous checksum manifest unexpectedly verified" >&2
+  exit 1
+fi
+printf '%s  %s\n' "$archive_digest" "$(basename "$release_archive")" \
+  >"$release_dir/ferrocrate-${version}-checksums.txt"
+
+# Missing checksums are not an acceptable release fallback.
+mv "$release_dir/ferrocrate-${version}-checksums.txt" "$release_dir/checksums.saved"
+if bash -c '
+  source "$1"
+  GITHUB_RELEASE_BASE="$2" download_linux_release x86_64 "$3" "$4"
+' _ "$repo_root/scripts/install.sh" "file://$release_root" "$version" \
+  "$tmp_dir/missing-checksum-download" >/dev/null 2>&1; then
+  echo "missing checksum manifest unexpectedly verified" >&2
+  exit 1
+fi
+mv "$release_dir/checksums.saved" "$release_dir/ferrocrate-${version}-checksums.txt"
+
 # A changed archive must fail closed even when the release has a provenance
 # document, preventing an attacker from swapping bytes after publication.
 printf 'tampered\n' >>"$release_archive"

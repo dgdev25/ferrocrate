@@ -94,34 +94,50 @@ validate_version() {
 }
 
 verify_checksum() {
-  local file checksum_file expected_checksum actual_checksum
+  local file checksum_file expected_checksum actual_checksum entries listed_file
 
   file="$1"
-  checksum_file="${file}.sha256"
+  checksum_file="${2:-${file}.sha256}"
 
   if [ ! -f "$checksum_file" ]; then
-    log_warn "Checksum file not found, skipping verification"
-    return 0
+    log_error "Checksum file not found: $checksum_file"
+    return 1
   fi
 
   log_info "Verifying checksum..."
-  expected_checksum=$(cat "$checksum_file" | cut -d' ' -f1)
-
-  if command -v sha256sum &> /dev/null; then
-    actual_checksum=$(sha256sum "$file" | cut -d' ' -f1)
-  elif command -v shasum &> /dev/null; then
-    actual_checksum=$(shasum -a 256 "$file" | cut -d' ' -f1)
-  else
-    log_warn "No checksum tool available, skipping verification"
-    return 0
+  entries=$(awk 'NF && $1 !~ /^#/ {count += 1} END {print count + 0}' "$checksum_file")
+  if [ "$entries" != "1" ]; then
+    log_error "Checksum manifest must contain exactly one artifact entry"
+    return 1
+  fi
+  expected_checksum=$(awk 'NF && $1 !~ /^#/ {print $1; exit}' "$checksum_file")
+  listed_file=$(awk 'NF && $1 !~ /^#/ {name=$2; sub(/^\*/, "", name); print name; exit}' "$checksum_file")
+  if [[ ! "$expected_checksum" =~ ^[[:xdigit:]]{64}$ ]]; then
+    log_error "Checksum manifest contains an invalid SHA-256 digest"
+    return 1
+  fi
+  if [ "$listed_file" != "$(basename "$file")" ] ||
+    [[ "$listed_file" == */* || "$listed_file" == -* || "$listed_file" == .* ]]; then
+    log_error "Checksum manifest is not bound to the downloaded artifact"
+    return 1
   fi
 
-  if [ "$expected_checksum" != "$actual_checksum" ]; then
-    log_error "Checksum mismatch!"
-    log_error "Expected: $expected_checksum"
-    log_error "Got:      $actual_checksum"
-    rm -f "$file"
-    exit 1
+  if command -v sha256sum &> /dev/null; then
+    (cd "$(dirname "$file")" && sha256sum --strict -c "$(basename "$checksum_file")") || {
+      log_error "Checksum mismatch!"
+      rm -f "$file"
+      return 1
+    }
+  elif command -v shasum &> /dev/null; then
+    actual_checksum=$(shasum -a 256 "$file" | cut -d' ' -f1)
+    if [ "$expected_checksum" != "$actual_checksum" ]; then
+      log_error "Checksum mismatch!"
+      rm -f "$file"
+      return 1
+    fi
+  else
+    log_error "No checksum tool available; refusing unverified release"
+    return 1
   fi
 
   log_info "Checksum verified"
@@ -142,7 +158,7 @@ download_linux_release() {
   curl -fsSL -o "$artifact_dir/$checksum_file" "${GITHUB_RELEASE_BASE}/${version}/${checksum_file}"
   curl -fsSL -o "$artifact_dir/$provenance_file" "${GITHUB_RELEASE_BASE}/${version}/${provenance_file}"
 
-  (cd "$artifact_dir" && sha256sum --ignore-missing -c "$checksum_file" >/dev/null) || {
+  verify_checksum "$artifact_dir/$archive" "$artifact_dir/$checksum_file" || {
     log_error "Release checksum verification failed"
     exit 1
   }
@@ -252,7 +268,9 @@ download_binary() {
   if curl -fsSL -o "${file}.sha256" "${download_url}.sha256" 2>/dev/null; then
     verify_checksum "$file"
   else
-    log_warn "Checksum not available"
+    log_error "Checksum not available; refusing unverified release"
+    rm -f "$file" "${file}.sha256"
+    exit 1
   fi
 
   echo "$file"

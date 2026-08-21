@@ -6746,6 +6746,7 @@ fn build_error_is_retryable(error: &str) -> bool {
         "unsupported",
         "cancelled",
         "timed out",
+        "limit exceeded",
         "secret",
         "traversal",
         "symlink",
@@ -16863,6 +16864,18 @@ volumes:
             "image build authorization failed"
         ));
         assert!(!build_error_is_retryable("RUN cancelled by build control"));
+        assert!(!build_error_is_retryable(
+            "build cancelled: cancel file /tmp/cancel exists at build start"
+        ));
+        assert!(!build_error_is_retryable(
+            "build limit exceeded: RUN timed out by build control"
+        ));
+        assert!(!build_error_is_retryable(
+            "build limit exceeded: Dockerfile declares 12 RUN steps; limit is 10"
+        ));
+        assert!(!build_error_is_retryable(
+            "build limit exceeded: RUN output exceeded 1024 bytes"
+        ));
         assert!(!build_error_is_retryable(
             "unsupported Dockerfile directive"
         ));

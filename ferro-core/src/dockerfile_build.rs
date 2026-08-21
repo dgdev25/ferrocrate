@@ -9,18 +9,18 @@ use crate::image_manifest::{
 use crate::image_store::LocalImageStore;
 use crate::image_tagging::{canonicalize_reference, resolve_reference};
 use crate::layer_compression::{
-    compress_bytes_gzip, compress_bytes_zstd, CompressionFormat, LayerCompressionError,
+    CompressionFormat, LayerCompressionError, compress_bytes_gzip, compress_bytes_zstd,
 };
 use crate::registry::{RegistryAuth, RegistryClient};
 #[cfg(target_os = "linux")]
 use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
-use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
+use crate::seccomp::{SeccompProfile, apply_seccomp_profile, default_seccomp_profile};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use lzma_rust2::XzReader;
 #[cfg(unix)]
-use nix::mount::{mount, MsFlags};
+use nix::mount::{MsFlags, mount};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -41,6 +41,8 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
@@ -74,6 +76,10 @@ pub enum DockerfileBuildError {
     Registry(#[from] crate::registry::RegistryError),
     #[error("ADD remote fetch error: {0}")]
     RemoteFetch(#[from] reqwest::Error),
+    #[error("build cancelled: {0}")]
+    Cancelled(String),
+    #[error("build limit exceeded: {0}")]
+    LimitExceeded(String),
 }
 
 #[derive(Clone, Debug)]
@@ -340,6 +346,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts(
         authority,
         named_contexts,
         &HashMap::new(),
+        None,
     )
 }
 
@@ -400,6 +407,105 @@ fn stage_checkpoint_key(cache_key: &str, index: usize) -> String {
     sha256_digest_bytes(format!("ferrocrate-stage-checkpoint\0{cache_key}\0{index}").as_bytes())
 }
 
+fn build_journal_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("build").join("journal.json")
+}
+
+/// Lifecycle state recorded for one build attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BuildJournalState {
+    Running,
+    Cancelled,
+    Failed,
+    Complete,
+}
+
+/// Build record binding source, context, and image identities so an
+/// interrupted or retried build can be verified before it resumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BuildJournal {
+    cache_key: String,
+    context_digest: String,
+    dockerfile_digest: String,
+    base_digests: Vec<String>,
+    image_reference: String,
+    #[serde(default)]
+    authorization_plan_digest: Option<String>,
+    state: BuildJournalState,
+    #[serde(default)]
+    completed_stages: Vec<usize>,
+}
+
+impl BuildJournal {
+    /// The resume identity: everything that determines the stage checkpoints.
+    /// A changed context, Dockerfile, or base image invalidates the journal
+    /// and its checkpoints so a retry never resumes stale state.
+    fn identity_matches(
+        &self,
+        cache_key: &str,
+        context_digest: &str,
+        dockerfile_digest: &str,
+        base_digests: &[String],
+    ) -> bool {
+        self.cache_key == cache_key
+            && self.context_digest == context_digest
+            && self.dockerfile_digest == dockerfile_digest
+            && self.base_digests == base_digests
+    }
+}
+
+fn load_build_journal(runtime_dir: &Path) -> Result<Option<BuildJournal>, DockerfileBuildError> {
+    let path = build_journal_path(runtime_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+        return Err(DockerfileBuildError::Invalid(
+            "build journal must be a bounded regular file".to_string(),
+        ));
+    }
+    serde_json::from_slice(&fs::read(&path)?)
+        .map(Some)
+        .map_err(|error| {
+            DockerfileBuildError::Invalid(format!(
+                "build journal is malformed: {error}; remove {} to start a fresh build",
+                path.display()
+            ))
+        })
+}
+
+fn save_build_journal(
+    runtime_dir: &Path,
+    journal: &BuildJournal,
+) -> Result<(), DockerfileBuildError> {
+    let path = build_journal_path(runtime_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec(journal).map_err(|error| io::Error::other(error.to_string()))?;
+    let temporary = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn restore_stage_from_checkpoint(
     runtime_dir: &Path,
     idx: usize,
@@ -456,6 +562,7 @@ fn build_one_stage(
     secrets: &HashMap<String, PathBuf>,
     stage_roots: &[PathBuf],
     stage_names: &HashMap<String, PathBuf>,
+    control: &BuildControl,
 ) -> Result<BuiltStage, DockerfileBuildError> {
     let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
     if stage_root.exists() {
@@ -526,6 +633,7 @@ fn build_one_stage(
                 .join(format!("stage-{idx}")),
             secrets,
             context_dir,
+            control,
         )?;
         let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
         layer_bytes = rebuilt;
@@ -554,12 +662,14 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
     named_contexts: &HashMap<String, PathBuf>,
     secrets: &HashMap<String, PathBuf>,
+    authorization_plan_digest: Option<&str>,
 ) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
         ));
     }
+    let control = BuildControl::load()?;
 
     let dockerfile = fs::read_to_string(dockerfile_path)?;
     let stages = parse_stages(&dockerfile)?;
@@ -581,56 +691,163 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     for (stage, base_info) in stages.iter_mut().zip(&base_infos) {
         apply_onbuild_triggers(stage, &base_info.onbuild)?;
     }
+    if let Some(max_steps) = control.limits.max_steps {
+        let total_steps: usize = stages.iter().map(|stage| stage.run.len()).sum();
+        if total_steps as u64 > max_steps {
+            return Err(DockerfileBuildError::LimitExceeded(format!(
+                "Dockerfile declares {total_steps} RUN steps; limit is {max_steps}"
+            )));
+        }
+    }
     let cache_key = build_cache_key(&dockerfile, compression, &context_hash, &base_infos);
     let base_digests = base_infos
         .iter()
         .map(|info| info.digest.clone().unwrap_or_else(|| "scratch".to_string()))
         .collect::<Vec<_>>();
-    let mut cache = load_build_cache(runtime_dir)?;
-    if !has_sensitive_mounts(&stages) {
-        if let Some(entry) = cache.get(&cache_key).cloned() {
-            if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
-                return Err(DockerfileBuildError::Invalid(
-                    "build cache provenance key mismatch".to_string(),
-                ));
-            }
-            if (!entry.context_digest.is_empty() && entry.context_digest != context_hash)
-                || (!entry.dockerfile_digest.is_empty()
-                    && entry.dockerfile_digest != dockerfile_digest)
-                || (!entry.base_digests.is_empty() && entry.base_digests != base_digests)
-            {
-                return Err(DockerfileBuildError::Invalid(
-                    "build cache source provenance mismatch".to_string(),
-                ));
-            }
-            let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
-            let config_path = config_path(runtime_dir, &entry.config_digest);
-            let layer_valid = entry.layer_size >= 0
-                && fs::metadata(&layer_path)
-                    .is_ok_and(|metadata| metadata.len() == entry.layer_size as u64)
-                && file_matches_digest(&layer_path, &entry.layer_digest);
-            let config_valid = file_matches_digest(&config_path, &entry.config_digest);
-            if layer_valid && config_valid {
-                let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
-                store.put_reference(
-                    authority,
-                    &reference,
-                    &entry.config_digest,
-                    OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-                    &entry.manifest_json,
-                )?;
-                return Ok(BuildResult {
-                    reference,
-                    layer_digest: entry.layer_digest,
-                    config_digest: entry.config_digest,
-                });
+    let mut journal = match load_build_journal(runtime_dir)? {
+        Some(existing)
+            if existing.identity_matches(
+                &cache_key,
+                &context_hash,
+                &dockerfile_digest,
+                &base_digests,
+            ) =>
+        {
+            existing
+        }
+        _ => {
+            // No journal, or the source/context/base identity changed since
+            // the journaled build: discard its stage checkpoints so a retry
+            // never resumes state produced under a different identity.
+            let _ = fs::remove_file(stage_checkpoint_path(runtime_dir));
+            BuildJournal {
+                cache_key: cache_key.clone(),
+                context_digest: context_hash.clone(),
+                dockerfile_digest: dockerfile_digest.clone(),
+                base_digests: base_digests.clone(),
+                image_reference: String::new(),
+                authorization_plan_digest: None,
+                state: BuildJournalState::Running,
+                completed_stages: Vec::new(),
             }
         }
+    };
+    journal.state = BuildJournalState::Running;
+    journal.completed_stages.clear();
+    journal.authorization_plan_digest = authorization_plan_digest.map(str::to_string);
+    journal.image_reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+    save_build_journal(runtime_dir, &journal)?;
+    // Checked after the journal records the attempt so a cancelled build is
+    // always journaled, and before the cache path so a cancelled build never
+    // re-publishes a cached reference either.
+    let outcome = control.check("build start").and_then(|()| {
+        let mut cache = load_build_cache(runtime_dir)?;
+        if !has_sensitive_mounts(&stages) {
+            if let Some(entry) = cache.get(&cache_key).cloned() {
+                if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
+                    return Err(DockerfileBuildError::Invalid(
+                        "build cache provenance key mismatch".to_string(),
+                    ));
+                }
+                if (!entry.context_digest.is_empty() && entry.context_digest != context_hash)
+                    || (!entry.dockerfile_digest.is_empty()
+                        && entry.dockerfile_digest != dockerfile_digest)
+                    || (!entry.base_digests.is_empty() && entry.base_digests != base_digests)
+                {
+                    return Err(DockerfileBuildError::Invalid(
+                        "build cache source provenance mismatch".to_string(),
+                    ));
+                }
+                let layer_path = layer_blob_path(runtime_dir, &entry.layer_digest);
+                let config_path = config_path(runtime_dir, &entry.config_digest);
+                let layer_valid = entry.layer_size >= 0
+                    && fs::metadata(&layer_path)
+                        .is_ok_and(|metadata| metadata.len() == entry.layer_size as u64)
+                    && file_matches_digest(&layer_path, &entry.layer_digest);
+                let config_valid = file_matches_digest(&config_path, &entry.config_digest);
+                if layer_valid && config_valid {
+                    let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+                    store.put_reference(
+                        authority,
+                        &reference,
+                        &entry.config_digest,
+                        OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                        &entry.manifest_json,
+                    )?;
+                    return Ok(BuildResult {
+                        reference,
+                        layer_digest: entry.layer_digest,
+                        config_digest: entry.config_digest,
+                    });
+                }
+            }
+        }
+        execute_stages_and_publish(
+            &stages,
+            &base_infos,
+            runtime_dir,
+            context_dir,
+            dockerfile_path,
+            compression,
+            store,
+            authority,
+            tag,
+            &named_contexts,
+            secrets,
+            &mut cache,
+            &cache_key,
+            &context_hash,
+            &dockerfile_digest,
+            &base_digests,
+            &control,
+            &mut journal,
+        )
+    });
+    match outcome {
+        Ok(result) => {
+            journal.state = BuildJournalState::Complete;
+            save_build_journal(runtime_dir, &journal)?;
+            Ok(result)
+        }
+        Err(error) => {
+            journal.state = if matches!(error, DockerfileBuildError::Cancelled(_)) {
+                BuildJournalState::Cancelled
+            } else {
+                BuildJournalState::Failed
+            };
+            // The journal is best-effort on the failure path; the build error
+            // is the authoritative outcome and must not be masked.
+            let _ = save_build_journal(runtime_dir, &journal);
+            Err(error)
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_stages_and_publish(
+    stages: &[StageSpec],
+    base_infos: &[BaseImageInfo],
+    runtime_dir: &Path,
+    context_dir: &Path,
+    dockerfile_path: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    tag: Option<&str>,
+    named_contexts: &HashMap<String, PathBuf>,
+    secrets: &HashMap<String, PathBuf>,
+    cache: &mut HashMap<String, BuildCacheEntry>,
+    cache_key: &str,
+    context_hash: &str,
+    dockerfile_digest: &str,
+    base_digests: &[String],
+    control: &BuildControl,
+    journal: &mut BuildJournal,
+) -> Result<BuildResult, DockerfileBuildError> {
     let mut stage_roots = vec![None; stages.len()];
     let mut stage_names: HashMap<String, PathBuf> = HashMap::new();
     let ignore_patterns = load_dockerignore_patterns(context_dir)?;
-    let checkpointing = !has_sensitive_mounts(&stages);
+    let checkpointing = !has_sensitive_mounts(stages);
     let mut checkpoints = if checkpointing {
         load_stage_checkpoints(runtime_dir)?
     } else {
@@ -638,9 +855,10 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     };
 
     let batches =
-        build_stage_execution_batches(&build_stage_dependency_graph(&stages, &named_contexts)?)?;
+        build_stage_execution_batches(&build_stage_dependency_graph(stages, named_contexts)?)?;
     let mut built: Vec<Option<BuiltStage>> = (0..stages.len()).map(|_| None).collect();
     for batch in batches {
+        control.check("stage batch start")?;
         let roots_snapshot = stage_roots
             .iter()
             .map(|root| {
@@ -663,7 +881,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                         let checkpoint = checkpoints
                             .get(idx)
                             .filter(|checkpoint| {
-                                checkpoint.build_key == stage_checkpoint_key(&cache_key, *idx)
+                                checkpoint.build_key == stage_checkpoint_key(cache_key, *idx)
                             })
                             .cloned();
                         let worker_ignore_patterns = ignore_patterns.clone();
@@ -697,6 +915,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                                     secrets,
                                     &worker_roots_snapshot,
                                     &worker_names_snapshot,
+                                    control,
                                 ),
                                 Some(Err(error)) => Err(error),
                             }
@@ -719,7 +938,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 .iter()
                 .map(|idx| {
                     let checkpoint = checkpoints.get(idx).filter(|checkpoint| {
-                        checkpoint.build_key == stage_checkpoint_key(&cache_key, *idx)
+                        checkpoint.build_key == stage_checkpoint_key(cache_key, *idx)
                     });
                     if let Some(checkpoint) = checkpoint {
                         if let Some(mut output) = restore_stage_from_checkpoint(
@@ -741,20 +960,22 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                         dockerfile_path,
                         compression,
                         &ignore_patterns,
-                        &named_contexts,
+                        named_contexts,
                         secrets,
                         &roots_snapshot,
                         &names_snapshot,
+                        control,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
+        let batch_indexes = batch.clone();
         for (idx, output) in batch.into_iter().zip(outputs) {
             if checkpointing {
                 checkpoints.insert(
                     idx,
                     StageCheckpoint {
-                        build_key: stage_checkpoint_key(&cache_key, idx),
+                        build_key: stage_checkpoint_key(cache_key, idx),
                         layer_digest: output.layer_digest.clone(),
                         layer_media_type: output.layer_media_type.clone(),
                         layer_size: output.layer_size,
@@ -770,6 +991,12 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         if checkpointing {
             save_stage_checkpoints(runtime_dir, &checkpoints)?;
         }
+        journal
+            .completed_stages
+            .extend(batch_indexes.iter().copied());
+        journal.completed_stages.sort_unstable();
+        journal.completed_stages.dedup();
+        save_build_journal(runtime_dir, journal)?;
     }
 
     let final_idx = stages
@@ -837,6 +1064,9 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     let manifest_json =
         serde_json::to_string(&manifest).map_err(|err| io::Error::other(err.to_string()))?;
     let reference = canonicalize_reference(tag.unwrap_or("local/build:latest"))?;
+    // A build cancelled while its layers were being assembled must never
+    // publish the resulting image reference.
+    control.check("image publish")?;
     store.put_reference(
         authority,
         &reference,
@@ -845,18 +1075,18 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         &manifest_json,
     )?;
     write_config(runtime_dir, &config_digest, config_bytes)?;
-    if !has_sensitive_mounts(&stages) {
+    if !has_sensitive_mounts(stages) {
         cache.insert(
-            cache_key.clone(),
+            cache_key.to_string(),
             BuildCacheEntry {
-                cache_key: cache_key.clone(),
+                cache_key: cache_key.to_string(),
                 created_at_unix: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                context_digest: context_hash.clone(),
-                dockerfile_digest: dockerfile_digest.clone(),
-                base_digests: base_digests.clone(),
+                context_digest: context_hash.to_string(),
+                dockerfile_digest: dockerfile_digest.to_string(),
+                base_digests: base_digests.to_vec(),
                 stage_layer_digests,
                 layer_digest: final_output.layer_digest.clone(),
                 layer_size: final_output.layer_size,
@@ -866,7 +1096,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 manifest_json: manifest_json.clone(),
             },
         );
-        save_build_cache(runtime_dir, &cache)?;
+        save_build_cache(runtime_dir, cache)?;
     }
     Ok(BuildResult {
         reference,
@@ -926,6 +1156,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
         ));
     }
     let authority = permit.mutation_authority();
+    let authorization_plan_digest = hex::encode(plan.plan_digest());
     match build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
@@ -935,6 +1166,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
         &authority,
         &plan.named_contexts,
         secrets,
+        Some(&authorization_plan_digest),
     ) {
         Ok(result) => {
             permit
@@ -1984,9 +2216,7 @@ fn preprocess_dockerfile(contents: &str) -> Result<String, DockerfileBuildError>
 fn parse_escape_directive(raw: &str) -> Result<char, DockerfileBuildError> {
     let mut chars = raw.chars();
     let escape = chars.next().ok_or_else(|| {
-        DockerfileBuildError::Invalid(
-            "invalid escape directive: must be ` or \\".to_string(),
-        )
+        DockerfileBuildError::Invalid("invalid escape directive: must be ` or \\".to_string())
     })?;
     if chars.next().is_some() || !matches!(escape, '`' | '\\') {
         return Err(DockerfileBuildError::Invalid(
@@ -1999,15 +2229,12 @@ fn parse_escape_directive(raw: &str) -> Result<char, DockerfileBuildError> {
 /// Join lines ending with an odd run of the escape character, matching
 /// Docker's rule that a doubled escape is a literal character and a single
 /// trailing escape continues onto the next line.
-fn join_continuation_lines(
-    lines: &[String],
-    escape: char,
-) -> Result<String, DockerfileBuildError> {
+fn join_continuation_lines(lines: &[String], escape: char) -> Result<String, DockerfileBuildError> {
     let mut joined: Vec<String> = Vec::new();
     let mut pending: Option<String> = None;
     for line in lines {
-        let standalone = pending.is_none()
-            && (line.trim().is_empty() || line.trim_start().starts_with('#'));
+        let standalone =
+            pending.is_none() && (line.trim().is_empty() || line.trim_start().starts_with('#'));
         if standalone {
             joined.push(line.to_string());
             continue;
@@ -2561,7 +2788,7 @@ fn parse_copy_owner(raw: &str) -> Result<CopyOwner, DockerfileBuildError> {
         Some(_) => {
             return Err(DockerfileBuildError::Invalid(
                 "COPY --chown gid must not be empty".to_string(),
-            ))
+            ));
         }
         None => None,
     };
@@ -2632,7 +2859,7 @@ fn apply_cache_mount_metadata(
     if uid.is_some() || gid.is_some() {
         #[cfg(unix)]
         {
-            use nix::unistd::{chown, Gid, Uid};
+            use nix::unistd::{Gid, Uid, chown};
             use std::os::unix::fs::MetadataExt;
             let current = fs::metadata(cache)?;
             let owner = Uid::from_raw(uid.unwrap_or(current.uid()));
@@ -2846,7 +3073,7 @@ fn parse_healthcheck(raw: &str) -> Result<Option<HealthcheckSpec>, DockerfileBui
             _ => {
                 return Err(DockerfileBuildError::Invalid(format!(
                     "unsupported HEALTHCHECK flag: --{key}"
-                )))
+                )));
             }
         }
     }
@@ -2950,7 +3177,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 _ => {
                     return Err(DockerfileBuildError::Unsupported(format!(
                         "RUN --mount option is not supported: {key}"
-                    )))
+                    )));
                 }
             }
         }
@@ -2963,8 +3190,8 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     Some(value) if value.eq_ignore_ascii_case("locked") => CacheSharing::Locked,
                     Some(value) => {
                         return Err(DockerfileBuildError::Unsupported(format!(
-                        "RUN cache mount sharing={value} is not supported; use shared, private, or locked"
-                    )))
+                            "RUN cache mount sharing={value} is not supported; use shared, private, or locked"
+                        )));
                     }
                 };
                 if required.is_some() {
@@ -3016,7 +3243,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                     Some(value) => {
                         return Err(DockerfileBuildError::Invalid(format!(
                             "RUN secret mount required must be true or false, got {value}"
-                        )))
+                        )));
                     }
                 };
                 let id = id.ok_or_else(|| {
@@ -3110,12 +3337,12 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
             Some(other) => {
                 return Err(DockerfileBuildError::Unsupported(format!(
                     "RUN --mount=type={other} is not supported"
-                )))
+                )));
             }
             None => {
                 return Err(DockerfileBuildError::Invalid(
                     "RUN mount requires type".to_string(),
-                ))
+                ));
             }
         }
     }
@@ -3474,9 +3701,10 @@ fn run_stage_commands(
     cache_root: &Path,
     secrets: &HashMap<String, PathBuf>,
     context_dir: &Path,
+    control: &BuildControl,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
-    let build_limits = load_build_limits()?;
+    let limits = &control.limits;
     let running_as_root = nix::unistd::Uid::effective().is_root();
     fs::create_dir_all(cache_root)?;
     for run in runs {
@@ -3488,6 +3716,13 @@ fn run_stage_commands(
         let mut cmd = Command::new(&run.args[0]);
         cmd.args(&run.args[1..]);
         cmd.stdin(Stdio::null());
+        // When an output cap is configured, capture the child's streams so
+        // runaway output fails the build instead of exhausting host memory.
+        let output_cap = limits.max_output_bytes;
+        if output_cap.is_some() {
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+        }
 
         // Set environment variables
         for entry in env {
@@ -3504,7 +3739,7 @@ fn run_stage_commands(
         let workdir = workdir.map(|v| v.to_string());
         let run_user = user.map(|v| v.to_string());
         let seccomp = seccomp_profile.clone();
-        let limits = build_limits.clone();
+        let limits = control.limits.clone();
         let child_limits = limits.clone();
         let ssh_socket = std::env::var_os("FERROCRATE_BUILD_SSH_AUTH_SOCK")
             .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
@@ -3900,27 +4135,82 @@ fn run_stage_commands(
             }
         };
         let started = Instant::now();
+        let output_total = Arc::new(AtomicU64::new(0));
+        let output_exceeded = Arc::new(AtomicBool::new(false));
+        let mut output_drains = Vec::new();
+        let cap = output_cap.unwrap_or(u64::MAX);
+        if output_cap.is_some() {
+            let mut child_streams: Vec<Box<dyn Read + Send>> = Vec::new();
+            if let Some(stream) = child.stdout.take() {
+                child_streams.push(Box::new(stream));
+            }
+            if let Some(stream) = child.stderr.take() {
+                child_streams.push(Box::new(stream));
+            }
+            for stream in child_streams {
+                let total = Arc::clone(&output_total);
+                let exceeded = Arc::clone(&output_exceeded);
+                output_drains.push(thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buffer = [0u8; 8192];
+                    loop {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => {
+                                let summed =
+                                    total.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
+                                if summed > cap {
+                                    exceeded.store(true, Ordering::Release);
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+        }
         let status_result = loop {
             if let Some(status) = child.try_wait()? {
                 break Ok(status);
             }
-            let cancelled = limits
-                .cancel_file
-                .as_ref()
-                .is_some_and(|path| path.exists());
-            let timed_out = limits
+            if let Some(path) = limits.cancel_file.as_ref() {
+                if path.exists() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(DockerfileBuildError::Cancelled(format!(
+                        "RUN cancelled by build control: {}",
+                        path.display()
+                    )));
+                }
+            }
+            if limits
                 .timeout
-                .is_some_and(|timeout| started.elapsed() >= timeout);
-            if cancelled || timed_out {
+                .is_some_and(|timeout| started.elapsed() >= timeout)
+            {
                 let _ = child.kill();
                 let _ = child.wait();
-                let reason = if cancelled { "cancelled" } else { "timed out" };
-                break Err(DockerfileBuildError::Invalid(format!(
-                    "RUN {reason} by build control"
+                break Err(DockerfileBuildError::LimitExceeded(
+                    "RUN timed out by build control".to_string(),
+                ));
+            }
+            if control.deadline_exceeded() {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(DockerfileBuildError::LimitExceeded(
+                    "RUN aborted: build wall clock exceeded".to_string(),
+                ));
+            }
+            if output_exceeded.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(DockerfileBuildError::LimitExceeded(format!(
+                    "RUN output exceeded {cap} bytes"
                 )));
             }
             thread::sleep(Duration::from_millis(20));
         };
+        for drain in output_drains {
+            let _ = drain.join();
+        }
         let mut cleanup_error = None;
         for (target, backup, existed) in secret_mounted.into_iter().rev() {
             if target.exists() {
@@ -4023,12 +4313,18 @@ struct BuildLimits {
     cpu_seconds: Option<u64>,
     timeout: Option<Duration>,
     cancel_file: Option<PathBuf>,
+    wall_clock: Option<Duration>,
+    max_steps: Option<u64>,
+    max_output_bytes: Option<u64>,
 }
 
 fn load_build_limits() -> Result<BuildLimits, DockerfileBuildError> {
     let memory_bytes = parse_limit_env("FERROCRATE_BUILD_MEMORY_MAX")?;
     let cpu_seconds = parse_limit_env("FERROCRATE_BUILD_CPU_SECONDS")?;
     let timeout = parse_limit_env("FERROCRATE_BUILD_TIMEOUT_MS")?.map(Duration::from_millis);
+    let wall_clock = parse_limit_env("FERROCRATE_BUILD_WALL_CLOCK_MS")?.map(Duration::from_millis);
+    let max_steps = parse_limit_env("FERROCRATE_BUILD_MAX_STEPS")?;
+    let max_output_bytes = parse_limit_env("FERROCRATE_BUILD_MAX_OUTPUT_BYTES")?;
     let cancel_file = std::env::var_os("FERROCRATE_BUILD_CANCEL_FILE").map(PathBuf::from);
     if let Some(path) = &cancel_file {
         if !path.is_absolute() {
@@ -4042,7 +4338,51 @@ fn load_build_limits() -> Result<BuildLimits, DockerfileBuildError> {
         cpu_seconds,
         timeout,
         cancel_file,
+        wall_clock,
+        max_steps,
+        max_output_bytes,
     })
+}
+
+/// Whole-build control state: the per-step limits plus a wall-clock deadline
+/// computed once when the build starts. Shared immutably across stage workers.
+#[derive(Clone, Debug)]
+struct BuildControl {
+    limits: BuildLimits,
+    deadline: Option<Instant>,
+}
+
+impl BuildControl {
+    fn load() -> Result<Self, DockerfileBuildError> {
+        let limits = load_build_limits()?;
+        let deadline = limits.wall_clock.map(|clock| Instant::now() + clock);
+        Ok(BuildControl { limits, deadline })
+    }
+
+    /// Fail closed when the build was cancelled or exceeded its wall clock.
+    /// Checked at build start, before every stage batch, and immediately
+    /// before publishing the image, so a cancelled build never publishes.
+    fn check(&self, phase: &str) -> Result<(), DockerfileBuildError> {
+        if let Some(path) = &self.limits.cancel_file {
+            if path.exists() {
+                return Err(DockerfileBuildError::Cancelled(format!(
+                    "cancel file {} exists at {phase}",
+                    path.display()
+                )));
+            }
+        }
+        if self.deadline_exceeded() {
+            return Err(DockerfileBuildError::LimitExceeded(format!(
+                "wall clock exceeded at {phase}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn deadline_exceeded(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
 }
 
 fn parse_limit_env(name: &str) -> Result<Option<u64>, DockerfileBuildError> {
@@ -4181,7 +4521,7 @@ fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuil
 }
 
 fn setup_build_namespace() -> io::Result<()> {
-    use nix::sched::{unshare, CloneFlags};
+    use nix::sched::{CloneFlags, unshare};
     unshare(
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
@@ -4192,7 +4532,7 @@ fn setup_build_namespace() -> io::Result<()> {
 }
 
 fn setup_build_namespace_root() -> io::Result<()> {
-    use nix::sched::{unshare, CloneFlags};
+    use nix::sched::{CloneFlags, unshare};
     unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET)
         .map_err(|err| io::Error::other(err.to_string()))
 }
@@ -4701,7 +5041,7 @@ fn resolve_copy_owner(
 fn apply_copy_owner_recursive(path: &Path, owner: &CopyOwner) -> Result<(), DockerfileBuildError> {
     #[cfg(unix)]
     {
-        use nix::unistd::{chown, Gid, Uid};
+        use nix::unistd::{Gid, Uid, chown};
         let CopyOwner::Numeric(uid, gid) = owner else {
             return Err(DockerfileBuildError::Invalid(
                 "COPY --chown owner was not resolved against the base image".to_string(),
@@ -4998,18 +5338,20 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_onbuild_triggers, build_cache_key, build_cache_path,
-        build_from_dockerfile_with_store_and_compression, build_stage_dependency_graph,
-        build_stage_execution_batches, create_build_dir, dockerignore_matches, export_build_cache,
-        file_matches_digest, import_build_cache, layer_blob_path, load_build_cache,
-        load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
-        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
-        parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
-        prune_build_cache, registry_cache_descriptor, registry_cache_reference,
-        reject_cache_path_symlinks, resolve_copy_owner, save_build_cache, stage_checkpoint_path,
-        validate_mount_target, BaseImageInfo, BuildCacheEntry, CacheSharing, CopyOwner,
-        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
+        BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournal, BuildJournalState, BuildLimits,
+        CacheSharing, CopyOwner, DockerfileBuildError, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION, apply_onbuild_triggers, build_cache_key, build_cache_path,
+        build_from_dockerfile_with_store_and_compression, build_journal_path,
+        build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
+        dockerignore_matches, export_build_cache, file_matches_digest, import_build_cache,
+        layer_blob_path, load_build_cache, load_build_journal, load_stage_checkpoints, parse_env,
+        parse_exposed_ports, parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer,
+        parse_onbuild, parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
+        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner, save_build_cache,
+        save_build_journal, stage_checkpoint_path, validate_mount_target,
     };
+    use sha2::Digest;
     use std::collections::HashMap;
 
     #[test]
@@ -5241,15 +5583,17 @@ mod tests {
         assert_ne!(plan.plan_digest(), changed.plan_digest());
 
         contexts.insert("bad/name".to_string(), assets.clone());
-        assert!(prepare_dockerfile_build_with_contexts(
-            &dockerfile,
-            Some("local/app:test"),
-            &runtime,
-            CompressionFormat::Gzip,
-            &store,
-            &contexts,
-        )
-        .is_err());
+        assert!(
+            prepare_dockerfile_build_with_contexts(
+                &dockerfile,
+                Some("local/app:test"),
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &contexts,
+            )
+            .is_err()
+        );
     }
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;
@@ -5258,6 +5602,7 @@ mod tests {
 
     #[test]
     fn builds_minimal_dockerfile() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(&dockerfile, "FROM scratch\nCOPY --link . /\n").expect("write");
@@ -5282,6 +5627,7 @@ mod tests {
 
     #[test]
     fn repeated_build_ignores_runtime_scratch_nested_in_context() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").expect("write");
@@ -5347,6 +5693,7 @@ mod tests {
 
     #[test]
     fn stores_build_cache_entry() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").expect("write");
@@ -5415,6 +5762,7 @@ mod tests {
 
     #[test]
     fn interrupted_build_resumes_from_digest_bound_stage_checkpoint() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").unwrap();
@@ -5453,6 +5801,7 @@ mod tests {
 
     #[test]
     fn cache_entry_records_source_provenance_when_context_changes() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").unwrap();
@@ -5482,10 +5831,12 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first.layer_digest, second.layer_digest);
-        assert!(load_build_cache(&runtime)
-            .unwrap()
-            .values()
-            .any(|entry| entry.context_digest != first_entry.context_digest));
+        assert!(
+            load_build_cache(&runtime)
+                .unwrap()
+                .values()
+                .any(|entry| entry.context_digest != first_entry.context_digest)
+        );
     }
 
     #[test]
@@ -5590,6 +5941,7 @@ mod tests {
 
     #[test]
     fn exports_and_imports_cache_artifacts_for_portable_hits() {
+        let _env = crate::test_support::acquire_env_lock();
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         let context = source.path().join("context");
@@ -5772,6 +6124,7 @@ mod tests {
 
     #[test]
     fn independent_stage_batch_executes_before_dependent_final_stage() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(
@@ -5821,11 +6174,13 @@ mod tests {
         .expect("ssh mount parses");
         assert_eq!(ssh.ssh_mounts[0].id, "default");
         assert_eq!(ssh.ssh_mounts[0].target, "/run/buildkit/ssh_agent.default");
-        assert!(parse_run(
-            "--mount=type=secret,id=bad/slash echo value",
-            &["/bin/sh".into(), "-c".into()]
-        )
-        .is_err());
+        assert!(
+            parse_run(
+                "--mount=type=secret,id=bad/slash echo value",
+                &["/bin/sh".into(), "-c".into()]
+            )
+            .is_err()
+        );
         for invalid in [
             "--mount=type=ssh,id=bad/slash echo value",
             "--mount=type=ssh,target=relative.sock echo value",
@@ -5833,11 +6188,13 @@ mod tests {
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }
-        assert!(parse_run(
-            "--mount=type=ssh [\"/bin/sh\",\"-c\",\"echo value\"]",
-            &["/bin/sh".into(), "-c".into()]
-        )
-        .is_err());
+        assert!(
+            parse_run(
+                "--mount=type=ssh [\"/bin/sh\",\"-c\",\"echo value\"]",
+                &["/bin/sh".into(), "-c".into()]
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -5859,9 +6216,11 @@ mod tests {
         std::os::unix::fs::symlink("/tmp", root.path().join("private/link")).expect("symlink");
         let error = reject_cache_path_symlinks(&root.path().join("private/link/cache"))
             .expect_err("symlinked cache path must fail closed");
-        assert!(error
-            .to_string()
-            .contains("cache mount path contains a symlink"));
+        assert!(
+            error
+                .to_string()
+                .contains("cache mount path contains a symlink")
+        );
     }
 
     #[test]
@@ -5957,11 +6316,13 @@ mod tests {
 
     #[test]
     fn bind_mounts_are_accepted_for_shell_runs() {
-        assert!(parse_run(
-            "--mount=type=bind,source=assets,target=/mnt,ro echo value",
-            &["/bin/sh".into(), "-c".into()]
-        )
-        .is_ok());
+        assert!(
+            parse_run(
+                "--mount=type=bind,source=assets,target=/mnt,ro echo value",
+                &["/bin/sh".into(), "-c".into()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -6027,14 +6388,16 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(stages[0].copy_paths[0].checksum, Some(digest.clone()));
-        assert!(parse_stages(
-            "FROM scratch\nADD --checksum=sha1:abcd https://example.test/a /app\n"
-        )
-        .is_err());
-        assert!(parse_stages(&format!(
-            "FROM scratch\nCOPY --checksum=sha256:{digest} app /app\n"
-        ))
-        .is_err());
+        assert!(
+            parse_stages("FROM scratch\nADD --checksum=sha1:abcd https://example.test/a /app\n")
+                .is_err()
+        );
+        assert!(
+            parse_stages(&format!(
+                "FROM scratch\nCOPY --checksum=sha256:{digest} app /app\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -6321,8 +6684,8 @@ mod tests {
 
     #[test]
     fn add_extracts_tar_gzip_bzip_and_xz_archives_without_path_escape() {
-        use bzip2::{write::BzEncoder, Compression as BzCompression};
-        use flate2::{write::GzEncoder, Compression};
+        use bzip2::{Compression as BzCompression, write::BzEncoder};
+        use flate2::{Compression, write::GzEncoder};
         use lzma_rust2::{XzOptions, XzWriter};
         use std::io::{Cursor, Write};
 
@@ -6477,5 +6840,261 @@ mod tests {
         assert!(dockerignore_matches("logs/", "logs/app.log"));
         assert!(dockerignore_matches("*.tmp", "cache/build.tmp"));
         assert!(!dockerignore_matches("src/", "tests/main.rs"));
+    }
+
+    fn write_minimal_build_fixture(
+        temp: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf, LocalImageStore) {
+        let dockerfile = temp.join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY . /\n").unwrap();
+        fs::write(temp.join("hello.txt"), "fixture").unwrap();
+        let runtime_dir = temp.join("runtime");
+        let store = LocalImageStore::open(runtime_dir.join("images")).unwrap();
+        (dockerfile, runtime_dir, store)
+    }
+
+    #[test]
+    fn build_control_fails_closed_for_cancel_file_and_deadline() {
+        let control = BuildControl {
+            limits: BuildLimits::default(),
+            deadline: None,
+        };
+        assert!(control.check("test").is_ok());
+
+        let cancel_dir = tempfile::tempdir().unwrap();
+        let cancel_file = cancel_dir.path().join("cancel.flag");
+        fs::write(&cancel_file, b"cancel").unwrap();
+        let control = BuildControl {
+            limits: BuildLimits {
+                cancel_file: Some(cancel_file),
+                ..BuildLimits::default()
+            },
+            deadline: None,
+        };
+        assert!(matches!(
+            control.check("test"),
+            Err(DockerfileBuildError::Cancelled(_))
+        ));
+
+        let control = BuildControl {
+            limits: BuildLimits::default(),
+            deadline: Some(std::time::Instant::now()),
+        };
+        assert!(matches!(
+            control.check("test"),
+            Err(DockerfileBuildError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn cancelled_build_is_journaled_and_never_publishes() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let (dockerfile, runtime_dir, store) = write_minimal_build_fixture(temp.path());
+        let cancel_file = temp.path().join("cancel.flag");
+        fs::write(&cancel_file, b"cancel").unwrap();
+        std::env::set_var("FERROCRATE_BUILD_CANCEL_FILE", &cancel_file);
+        let outcome = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/cancel:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        );
+        std::env::remove_var("FERROCRATE_BUILD_CANCEL_FILE");
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled build must fail"),
+        };
+        assert!(matches!(error, DockerfileBuildError::Cancelled(_)));
+        let journal = load_build_journal(&runtime_dir)
+            .unwrap()
+            .expect("cancelled build must be journaled");
+        assert_eq!(journal.state, BuildJournalState::Cancelled);
+        assert!(journal.completed_stages.is_empty());
+        assert!(
+            crate::image_tagging::resolve_reference(&store, "local/cancel:latest")
+                .unwrap()
+                .is_none(),
+            "cancelled build must not publish an image reference"
+        );
+    }
+
+    #[test]
+    fn cancelled_build_does_not_replay_the_build_cache() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let (dockerfile, runtime_dir, store) = write_minimal_build_fixture(temp.path());
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/cache-cancel:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .expect("seed build for cache replay");
+        let cancel_file = temp.path().join("cancel.flag");
+        fs::write(&cancel_file, b"cancel").unwrap();
+        std::env::set_var("FERROCRATE_BUILD_CANCEL_FILE", &cancel_file);
+        let outcome = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/cache-cancel:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        );
+        std::env::remove_var("FERROCRATE_BUILD_CANCEL_FILE");
+        assert!(
+            matches!(outcome, Err(DockerfileBuildError::Cancelled(_))),
+            "cancel must win over an otherwise valid cache hit"
+        );
+        let journal = load_build_journal(&runtime_dir)
+            .unwrap()
+            .expect("cancelled replay must be journaled");
+        assert_eq!(journal.state, BuildJournalState::Cancelled);
+    }
+
+    #[test]
+    fn build_journal_records_bound_identities_on_completion() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let (dockerfile, runtime_dir, store) = write_minimal_build_fixture(temp.path());
+        let result = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/journal:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .unwrap();
+        let journal = load_build_journal(&runtime_dir)
+            .unwrap()
+            .expect("completed build must be journaled");
+        assert_eq!(journal.state, BuildJournalState::Complete);
+        assert!(journal.image_reference.ends_with("local/journal:latest"));
+        assert_eq!(journal.completed_stages, vec![0]);
+        assert!(!journal.context_digest.is_empty());
+        let dockerfile_digest = hex::encode(sha2::Sha256::digest(
+            fs::read_to_string(&dockerfile).unwrap().as_bytes(),
+        ));
+        assert_eq!(journal.dockerfile_digest, dockerfile_digest);
+        assert_eq!(journal.base_digests, vec!["scratch".to_string()]);
+        assert!(journal.authorization_plan_digest.is_none());
+        assert!(
+            crate::image_tagging::resolve_reference(&store, &result.reference)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn identity_change_discards_stale_journal_and_checkpoints() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let (dockerfile, runtime_dir, store) = write_minimal_build_fixture(temp.path());
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let first = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/retry:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .unwrap();
+        // Tamper the journaled context identity to simulate a stale journal
+        // from a different source state, then force a rebuild.
+        let mut stale = load_build_journal(&runtime_dir).unwrap().unwrap();
+        stale.context_digest = "0".repeat(64);
+        save_build_journal(&runtime_dir, &stale).unwrap();
+        assert!(stage_checkpoint_path(&runtime_dir).is_file());
+        fs::remove_file(build_cache_path(&runtime_dir)).unwrap();
+
+        let second = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/retry:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .unwrap();
+        let journal = load_build_journal(&runtime_dir).unwrap().unwrap();
+        assert_eq!(journal.state, BuildJournalState::Complete);
+        assert_ne!(journal.context_digest, "0".repeat(64));
+        // The rebuilt checkpoints describe the current build, not the stale one.
+        let checkpoints = load_stage_checkpoints(&runtime_dir).unwrap();
+        assert_eq!(
+            checkpoints.get(&0).unwrap().layer_digest,
+            second.layer_digest
+        );
+        assert_eq!(first.layer_digest, second.layer_digest);
+    }
+
+    #[test]
+    fn malformed_build_journal_fails_closed() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let (dockerfile, runtime_dir, store) = write_minimal_build_fixture(temp.path());
+        fs::create_dir_all(runtime_dir.join("build")).unwrap();
+        fs::write(build_journal_path(&runtime_dir), b"{not json").unwrap();
+        let outcome = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/malformed:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        );
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("malformed journal must fail the build"),
+        };
+        assert!(error.to_string().contains("journal is malformed"));
+    }
+
+    #[test]
+    fn step_limit_fails_closed_before_any_stage_work() {
+        let _env = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nRUN echo one\nRUN echo two\nCOPY . /\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("hello.txt"), "steps").unwrap();
+        let runtime_dir = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime_dir.join("images")).unwrap();
+        std::env::set_var("FERROCRATE_BUILD_MAX_STEPS", "1");
+        let outcome = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/steps:latest"),
+            &runtime_dir,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        );
+        std::env::remove_var("FERROCRATE_BUILD_MAX_STEPS");
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("step limit must fail the build"),
+        };
+        assert!(matches!(error, DockerfileBuildError::LimitExceeded(_)));
+        assert!(error.to_string().contains("RUN steps"));
+        assert!(
+            crate::image_tagging::resolve_reference(&store, "local/steps:latest")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !stage_checkpoint_path(&runtime_dir).exists(),
+            "no stage may execute before the step limit is enforced"
+        );
     }
 }

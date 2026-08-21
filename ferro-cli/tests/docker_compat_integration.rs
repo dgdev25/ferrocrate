@@ -991,7 +991,7 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
     }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/tty-container:latest");
-    let create_body = r#"{"Image":"compat/tty-container:latest","Cmd":["/bin/busybox","sh","-c","printf tty-container"],"Tty":true,"HostConfig":{"NetworkMode":"none"}}"#;
+    let create_body = r#"{"Image":"compat/tty-container:latest","Cmd":["/bin/busybox","sh","-c","printf tty-container; sleep 1"],"Tty":true,"HostConfig":{"NetworkMode":"none"}}"#;
     let create_request = format!(
         "POST /v1.45/containers/create?name=tty-container HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         create_body.len(),
@@ -1007,6 +1007,10 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
 
     let (status, response) = harness.request("POST", "/v1.45/containers/tty-container/start");
     assert_eq!(status, 204, "TTY container start response={response}");
+
+    let (status, response) =
+        harness.request("POST", "/v1.45/containers/tty-container/resize?w=100&h=40");
+    assert_eq!(status, 200, "TTY container resize response={response}");
 
     let mut logs = String::new();
     for _ in 0..40 {

@@ -47,7 +47,10 @@ trap cleanup EXIT INT TERM
 
 run_case() {
   local name="$1"
-  local timeout_seconds="${FERROCRATE_CRI_ROOTFUL_TIMEOUT_SECONDS:-90}"
+  # The first privileged run may compile the CRI/OCI dependency graph. Keep a
+  # hard bound, but leave enough room for a cold cache; subsequent runs are
+  # normally much faster.
+  local timeout_seconds="${FERROCRATE_CRI_ROOTFUL_TIMEOUT_SECONDS:-180}"
   [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
     echo "FERROCRATE_CRI_ROOTFUL_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 2

@@ -60,6 +60,7 @@ Path(sys.argv[1]).write_text(
             "version": sys.argv[2],
             "archive": f"ferrocrate-{sys.argv[2]}-linux-x86_64.tar.gz",
             "sha256": sys.argv[3],
+            "target_libc": "gnu",
         },
         sort_keys=True,
     ),
@@ -71,6 +72,41 @@ GITHUB_RELEASE_BASE="file://$release_root" \
   download_linux_release x86_64 "$version" "$download_dir" \
   >"$tmp_dir/downloaded-path.txt"
 test -f "$(tail -n 1 "$tmp_dir/downloaded-path.txt")"
+
+# The musl artifact is a separate release identity and must be selected when
+# requested, while retaining the same checksum/provenance guarantees.
+musl_version="v1.2.4"
+musl_release_dir="$release_root/$musl_version"
+musl_archive="$musl_release_dir/ferrocrate-${musl_version}-linux-x86_64-musl.tar.gz"
+mkdir -p "$musl_release_dir"
+cp "$tmp_dir/v2.tar.gz" "$musl_archive"
+musl_digest="$(sha256sum "$musl_archive" | awk '{print $1}')"
+printf '%s  %s\n' "$musl_digest" "$(basename "$musl_archive")" \
+  >"$musl_release_dir/ferrocrate-${musl_version}-checksums.txt"
+python3 - "$musl_release_dir/$(basename "$musl_archive").provenance.json" "$musl_version" "$musl_digest" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "schema": "ferrocrate-release-provenance-v1",
+            "version": sys.argv[2],
+            "archive": f"ferrocrate-{sys.argv[2]}-linux-x86_64-musl.tar.gz",
+            "sha256": sys.argv[3],
+            "target_libc": "musl",
+        },
+        sort_keys=True,
+    ),
+    encoding="utf-8",
+)
+PY
+GITHUB_RELEASE_BASE="file://$release_root" \
+  download_linux_release x86_64 "$musl_version" "$tmp_dir/musl-download" musl \
+  >"$tmp_dir/musl-downloaded-path.txt"
+grep -Fqx "$tmp_dir/musl-download/$(basename "$musl_archive")" \
+  "$tmp_dir/musl-downloaded-path.txt"
 
 # The installer must reject a checksum manifest that is ambiguous or points
 # outside the downloaded artifact name.

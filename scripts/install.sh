@@ -72,6 +72,26 @@ detect_arch() {
   esac
 }
 
+detect_linux_libc() {
+  local requested="${FERROCRATE_LINUX_LIBC:-auto}"
+  case "$requested" in
+    gnu|musl)
+      printf '%s\n' "$requested"
+      return
+      ;;
+    auto) ;;
+    *)
+      log_error "Unsupported FERROCRATE_LINUX_LIBC: $requested (expected auto, gnu, or musl)"
+      exit 1
+      ;;
+  esac
+  if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+    printf 'musl\n'
+  else
+    printf 'gnu\n'
+  fi
+}
+
 get_latest_version() {
   if [ -n "$FERROCRATE_VERSION" ]; then
     printf '%s\n' "$FERROCRATE_VERSION"
@@ -144,11 +164,18 @@ verify_checksum() {
 }
 
 download_linux_release() {
-  local arch version artifact_dir archive checksum_file provenance_file
+  local arch version artifact_dir libc archive_suffix archive checksum_file provenance_file
   arch="$1"
   version="$2"
   artifact_dir="$3"
-  archive="ferrocrate-${version}-linux-${arch}.tar.gz"
+  libc="${4:-$(detect_linux_libc)}"
+  case "$libc" in
+    gnu) archive_suffix="" ;;
+    musl) archive_suffix="-musl" ;;
+    *) log_error "Unsupported Linux libc: $libc"; exit 1 ;;
+  esac
+  [[ "$arch" == "arm64" ]] && arch="aarch64"
+  archive="ferrocrate-${version}-linux-${arch}${archive_suffix}.tar.gz"
   checksum_file="ferrocrate-${version}-checksums.txt"
   provenance_file="${archive}.provenance.json"
   mkdir -p "$artifact_dir"
@@ -162,7 +189,7 @@ download_linux_release() {
     log_error "Release checksum verification failed"
     exit 1
   }
-  python3 - "$artifact_dir/$provenance_file" "$artifact_dir/$archive" "$version" <<'PY'
+  python3 - "$artifact_dir/$provenance_file" "$artifact_dir/$archive" "$version" "$libc" <<'PY'
 import hashlib
 import json
 import sys
@@ -171,11 +198,14 @@ from pathlib import Path
 manifest_path = Path(sys.argv[1])
 archive_path = Path(sys.argv[2])
 version = sys.argv[3]
+libc = sys.argv[4]
 data = json.loads(manifest_path.read_text(encoding="utf-8"))
 if data.get("schema") != "ferrocrate-release-provenance-v1":
     raise SystemExit("unsupported release provenance schema")
 if data.get("version") != version or data.get("archive") != archive_path.name:
     raise SystemExit("release provenance identity mismatch")
+if data.get("target_libc") != libc:
+    raise SystemExit("release provenance libc mismatch")
 if data.get("sha256") != hashlib.sha256(archive_path.read_bytes()).hexdigest():
     raise SystemExit("release provenance digest mismatch")
 PY
@@ -305,7 +335,7 @@ install_binary() {
 }
 
 main() {
-  local os arch version file download_dir
+  local os arch version file download_dir libc
 
   log_info "FerroCrate Installer"
 
@@ -332,7 +362,9 @@ main() {
     command -v sha256sum >/dev/null 2>&1 || { log_error "sha256sum is required for release verification"; exit 1; }
     download_dir=$(mktemp -d)
     trap 'rm -rf "$download_dir"' EXIT
-    file=$(download_linux_release "$arch" "$version" "$download_dir")
+    libc="$(detect_linux_libc)"
+    log_info "Selected Linux libc: $libc"
+    file=$(download_linux_release "$arch" "$version" "$download_dir" "$libc")
     install_linux_release "$file" "$INSTALL_DIR"
   else
     file=$(download_binary "$os" "$arch" "$version")

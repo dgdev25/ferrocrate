@@ -54,6 +54,8 @@ pub mod plugin_contract;
 pub mod plugin_runtime;
 #[cfg(target_os = "linux")]
 pub mod process_lifecycle;
+#[cfg(target_os = "linux")]
+pub mod pty;
 pub mod registry;
 pub mod runtime_config;
 pub mod rvf_image;

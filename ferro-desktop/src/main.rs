@@ -1692,21 +1692,19 @@ fn start_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
         if hyperv_vm_running(config)? {
             return Ok(());
         }
-        let switch_clause = if let Some(sw) = config.hyperv_switch.as_deref() {
-            format!(" -SwitchName '{}'", sw)
-        } else {
-            String::new()
-        };
-        let script = format!(
-            "$name = '{name}'; if (-not (Get-VM -Name $name -ErrorAction SilentlyContinue)) {{ New-VM -Name $name -Generation 2 -MemoryStartupBytes {mem}MB -VHDPath '{vhd}'{switch_clause} | Out-Null; Set-VMProcessor -VMName $name -Count {cpus}; }}; Start-VM -Name $name | Out-Null",
-            name = config.vm_name,
-            mem = config.memory_mb,
-            vhd = config.disk_path,
-            cpus = config.cpus,
-            switch_clause = switch_clause
-        );
+        // The script text is fixed. Values travel through environment
+        // variables so a config field can never be parsed as PowerShell code.
+        const SCRIPT: &str = "$name = $env:FERROCRATE_VM_NAME; if (-not (Get-VM -Name $name -ErrorAction SilentlyContinue)) { $mem = [string]$env:FERROCRATE_VM_MEMORY_MB + 'MB'; $cpus = [int]$env:FERROCRATE_VM_CPUS; $vhd = $env:FERROCRATE_VM_VHD; $switch = $env:FERROCRATE_VM_SWITCH; if ([string]::IsNullOrEmpty($switch)) { New-VM -Name $name -Generation 2 -MemoryStartupBytes $mem -VHDPath $vhd | Out-Null } else { New-VM -Name $name -Generation 2 -MemoryStartupBytes $mem -VHDPath $vhd -SwitchName $switch | Out-Null }; Set-VMProcessor -VMName $name -Count $cpus; }; Start-VM -Name $name | Out-Null";
         let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &script])
+            .env("FERROCRATE_VM_NAME", &config.vm_name)
+            .env("FERROCRATE_VM_MEMORY_MB", config.memory_mb.to_string())
+            .env("FERROCRATE_VM_CPUS", config.cpus.to_string())
+            .env("FERROCRATE_VM_VHD", &config.disk_path)
+            .env(
+                "FERROCRATE_VM_SWITCH",
+                config.hyperv_switch.as_deref().unwrap_or(""),
+            )
+            .args(["-NoProfile", "-Command", SCRIPT])
             .status()?;
         if !status.success() {
             return Err(DesktopError::Invalid(format!(
@@ -1728,12 +1726,12 @@ fn start_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
 fn hyperv_vm_running(config: &VmConfig) -> Result<bool, DesktopError> {
     #[cfg(windows)]
     {
-        let script = format!(
-            "$name = '{name}'; $vm = Get-VM -Name $name -ErrorAction SilentlyContinue; if ($null -eq $vm) {{ exit 2 }}; if ($vm.State -eq 'Running') {{ exit 0 }} else {{ exit 1 }}",
-            name = config.vm_name
-        );
+        // Fixed script text; the VM name travels through an environment
+        // variable and is never parsed as PowerShell code.
+        const SCRIPT: &str = "$name = $env:FERROCRATE_VM_NAME; $vm = Get-VM -Name $name -ErrorAction SilentlyContinue; if ($null -eq $vm) { exit 2 }; if ($vm.State -eq 'Running') { exit 0 } else { exit 1 }";
         let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &script])
+            .env("FERROCRATE_VM_NAME", &config.vm_name)
+            .args(["-NoProfile", "-Command", SCRIPT])
             .status()?;
         let code = status.code().unwrap_or(1);
         if code == 0 {
@@ -1757,12 +1755,12 @@ fn hyperv_vm_running(config: &VmConfig) -> Result<bool, DesktopError> {
 fn stop_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
     #[cfg(windows)]
     {
-        let script = format!(
-            "$name = '{name}'; if (Get-VM -Name $name -ErrorAction SilentlyContinue) {{ Stop-VM -Name $name -TurnOff -Force -ErrorAction SilentlyContinue | Out-Null; }}",
-            name = config.vm_name
-        );
+        // Fixed script text; the VM name travels through an environment
+        // variable and is never parsed as PowerShell code.
+        const SCRIPT: &str = "$name = $env:FERROCRATE_VM_NAME; if (Get-VM -Name $name -ErrorAction SilentlyContinue) { Stop-VM -Name $name -TurnOff -Force -ErrorAction SilentlyContinue | Out-Null; }";
         let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &script])
+            .env("FERROCRATE_VM_NAME", &config.vm_name)
+            .args(["-NoProfile", "-Command", SCRIPT])
             .status()?;
         if !status.success() {
             return Err(DesktopError::Invalid(format!(

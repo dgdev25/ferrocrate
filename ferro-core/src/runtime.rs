@@ -857,33 +857,26 @@ impl CreationRollback {
             }
         }
         let mut identity_cleanup_failure = false;
-        let safe_netns = match (&self.netns_name, self.namespace_identity) {
-            (Some(_), _) if !self.namespace_owned => None,
-            (Some(name), Some(expected)) if self.network_ownership.is_none() => {
-                let path = Path::new("/var/run/netns").join(name);
-                match fs::symlink_metadata(path) {
-                    Ok(metadata)
-                        if metadata.dev() == expected.device
-                            && metadata.ino() == expected.inode =>
-                    {
-                        Some(name.as_str())
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                    _ => {
+        let safe_netns = match (&self.netns_name, self.namespace_owned) {
+            (Some(_), false) => None,
+            (Some(name), true) if self.network_ownership.is_none() => {
+                match netns_deletion_decision(
+                    Path::new("/var/run/netns"),
+                    name,
+                    self.namespace_identity,
+                ) {
+                    NetnsDeletionDecision::Delete => Some(name.as_str()),
+                    NetnsDeletionDecision::NothingToDelete => None,
+                    NetnsDeletionDecision::RefuseIdentityMismatch => {
                         identity_cleanup_failure = true;
-                        log::warn!(
-                            "[rollback] network namespace identity changed; refusing deletion"
-                        );
+                        if self.namespace_identity.is_none() {
+                            log::warn!("[rollback] network namespace identity is unavailable; refusing name-only deletion");
+                        } else {
+                            log::warn!("[rollback] network namespace identity changed; refusing deletion");
+                        }
                         None
                     }
                 }
-            }
-            (Some(name), None) if self.network_ownership.is_none() => {
-                if Path::new("/var/run/netns").join(name).exists() {
-                    identity_cleanup_failure = true;
-                    log::warn!("[rollback] network namespace identity is unavailable; refusing name-only deletion");
-                }
-                None
             }
             (Some(name), _) => Some(name.as_str()),
             _ => None,
@@ -5224,6 +5217,47 @@ fn recovery_truth_matches(
                 && operation.execution_generation_after == Some(operation.generation)
         }),
         _ => false,
+    }
+}
+
+/// Fail-closed decision for deleting a named network namespace during
+/// rollback, comparing the live namespace file's kernel identity (device,
+/// inode) with the identity recorded at creation time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetnsDeletionDecision {
+    /// The live identity matches the recorded identity: delete by name.
+    Delete,
+    /// The namespace file is gone: nothing to delete.
+    NothingToDelete,
+    /// The live object contradicts the record, or the record is missing:
+    /// refuse name-based deletion and retain the cleanup journal.
+    RefuseIdentityMismatch,
+}
+
+/// Evaluate a namespace deletion against its recorded kernel identity.
+///
+/// The lookup uses `symlink_metadata`, so a symlink planted at the namespace
+/// path is never followed and always refuses deletion.
+pub fn netns_deletion_decision(
+    netns_root: &Path,
+    name: &str,
+    expected: Option<KernelObjectIdentityRecord>,
+) -> NetnsDeletionDecision {
+    let path = netns_root.join(name);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return NetnsDeletionDecision::NothingToDelete
+        }
+        Err(_) => return NetnsDeletionDecision::RefuseIdentityMismatch,
+    };
+    let Some(expected) = expected else {
+        return NetnsDeletionDecision::RefuseIdentityMismatch;
+    };
+    if metadata.dev() == expected.device && metadata.ino() == expected.inode {
+        NetnsDeletionDecision::Delete
+    } else {
+        NetnsDeletionDecision::RefuseIdentityMismatch
     }
 }
 

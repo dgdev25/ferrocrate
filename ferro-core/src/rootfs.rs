@@ -62,12 +62,17 @@ pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), R
             .unwrap_or_default();
 
         if file_name == OCI_OPAQUE_WHITEOUT {
+            // A whiteout applied through a symlinked directory would delete
+            // files outside the rootfs, so fail closed on any symlink in the
+            // parent path before touching the filesystem.
+            ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             clear_directory(&rootfs_dir.join(parent))?;
             continue;
         }
 
         if let Some(target_name) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) {
+            ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             let target = rootfs_dir.join(parent).join(target_name);
             remove_path_if_exists(&target)?;
@@ -126,12 +131,14 @@ fn apply_layer_tar_with_dedup(
             .unwrap_or_default();
 
         if file_name == OCI_OPAQUE_WHITEOUT {
+            ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             clear_directory(&rootfs_dir.join(parent))?;
             continue;
         }
 
         if let Some(target_name) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) {
+            ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             let target = rootfs_dir.join(parent).join(target_name);
             remove_path_if_exists(&target)?;

@@ -11,6 +11,7 @@ ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
 network_backend="${FERROCRATE_COMPARISON_NETWORK_BACKEND:-iptables}"
+fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-30}"
 if [[ ! "$image" =~ ^[A-Za-z0-9._/@:-]+$ ]]; then
   echo "invalid FERROCRATE_COMPARISON_IMAGE=$image" >&2
   exit 2
@@ -19,6 +20,10 @@ case "$network_backend" in
   iptables|nftables) ;;
   *) echo "unsupported FERROCRATE_COMPARISON_NETWORK_BACKEND=$network_backend (use iptables or nftables)" >&2; exit 2 ;;
 esac
+if ! [[ "$fixture_timeout" =~ ^[1-9][0-9]*$ ]] || (( fixture_timeout > 300 )); then
+  echo "FERROCRATE_COMPARISON_TIMEOUT_SECONDS must be 1..300" >&2
+  exit 2
+fi
 
 mkdir -p "$(dirname -- "$out")"
 if [[ ! -x "$ferro_bin" ]]; then
@@ -65,7 +70,8 @@ median_ms() {
   local command_string="$1" samples=() start end i
   for ((i = 0; i < rounds; i++)); do
     start="$(date +%s%N)"
-    if ! bash -c "$command_string" >/dev/null 2>&1; then
+    if ! timeout --foreground --signal=TERM --kill-after=5s "$fixture_timeout" \
+      bash -c "$command_string" >/dev/null 2>&1; then
       echo SKIP
       return 0
     fi
@@ -163,6 +169,7 @@ record "API info" "curl --silent --fail --unix-socket /var/run/docker.sock http:
   echo "- Image: \`$image\`; rounds per operation: $rounds; reported value is median wall-clock milliseconds."
   echo "- Privilege: this run requires rootful access to Docker and Ferrocrate networking."
   echo "- Ferrocrate network backend: $network_backend"
+  echo "- Per-operation timeout: ${fixture_timeout}s (timed-out operations are reported as SKIP)."
   echo
   echo "This is an operational comparison, not a compatibility or production-readiness claim."
   echo "Docker's daemon/image cache and Ferrocrate's isolated runtime are different storage systems;"

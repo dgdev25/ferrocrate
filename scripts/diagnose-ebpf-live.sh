@@ -116,3 +116,4 @@ nstat -az > "$OUT/nstat-after.txt" 2>&1 || true
 
 echo "artifacts in $OUT"
 ls -la "$OUT"
+exit "$RC"

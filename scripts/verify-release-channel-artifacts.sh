@@ -175,9 +175,13 @@ expected = {
 for key, value in expected.items():
     if data.get(key) != value:
         raise SystemExit(f"provenance mismatch for {key}: {data.get(key)!r} != {value!r}")
-for key in ("target_os", "target_arch", "git_commit", "rustc"):
+for key in ("target_os", "target_arch", "target_libc", "git_commit", "rustc"):
     if not isinstance(data.get(key), str) or not data[key]:
         raise SystemExit(f"provenance field is missing or empty: {key}")
+if data["target_libc"] not in ("gnu", "musl"):
+    raise SystemExit(f"unsupported provenance target_libc: {data['target_libc']!r}")
+if data["target_os"] != "linux" and data["target_libc"] != "gnu":
+    raise SystemExit("musl provenance is only valid for Linux targets")
 if not isinstance(data.get("sha256"), str) or len(data["sha256"]) != 64:
     raise SystemExit("provenance sha256 must be a 64-character hexadecimal digest")
 try:

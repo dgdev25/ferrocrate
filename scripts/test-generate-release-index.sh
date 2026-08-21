@@ -22,6 +22,7 @@ for version, channel in (("v1.10.0", "public"), ("v1.2.0", "paid")):
         "sha256": digest,
         "target_os": "linux",
         "target_arch": "x86_64",
+        "target_libc": "gnu",
         "git_commit": "abc123",
         "rustc": "rustc test",
     }

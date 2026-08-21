@@ -37,7 +37,7 @@ from pathlib import Path
 root = Path(os.environ["RELEASE_INDEX_DIR"])
 output = Path(os.environ["RELEASE_INDEX_OUTPUT"])
 version_re = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
-required = ("version", "channel", "archive", "sha256", "target_os", "target_arch", "git_commit", "rustc")
+required = ("version", "channel", "archive", "sha256", "target_os", "target_arch", "target_libc", "git_commit", "rustc")
 artifacts = []
 seen = set()
 
@@ -72,13 +72,17 @@ for manifest in manifests:
         raise SystemExit(f"provenance digest does not match archive: {archive}")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", data["sha256"]):
         raise SystemExit(f"provenance sha256 is invalid: {manifest}")
-    identity = (data["version"], data["channel"], data["target_os"], data["target_arch"])
+    if data["target_libc"] not in ("gnu", "musl"):
+        raise SystemExit(f"unsupported target_libc in {manifest}: {data['target_libc']!r}")
+    if data["target_os"] != "linux" and data["target_libc"] != "gnu":
+        raise SystemExit(f"musl target_libc is only valid for Linux: {manifest}")
+    identity = (data["version"], data["channel"], data["target_os"], data["target_arch"], data["target_libc"])
     if identity in seen:
         raise SystemExit(f"duplicate release identity: {identity}")
     seen.add(identity)
     artifacts.append({key: data[key] for key in required} | {"provenance": manifest.name})
 
-artifacts.sort(key=lambda item: (version_key(item["version"]), item["channel"], item["target_os"], item["target_arch"], item["archive"]))
+artifacts.sort(key=lambda item: (version_key(item["version"]), item["channel"], item["target_os"], item["target_arch"], item["target_libc"], item["archive"]))
 payload = {"schema": "ferrocrate-release-index-v1", "artifacts": artifacts}
 output.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=output.parent, delete=False) as handle:

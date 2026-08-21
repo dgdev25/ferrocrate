@@ -27,6 +27,7 @@ Path(os.environ["PROVENANCE_PATH"]).write_text(json.dumps({
     "sha256": os.environ["PROVENANCE_DIGEST"],
     "target_os": "linux",
     "target_arch": "x86_64",
+    "target_libc": "gnu",
     "git_commit": "0" * 40,
     "rustc": "fixture",
 }, sort_keys=True) + "\n")

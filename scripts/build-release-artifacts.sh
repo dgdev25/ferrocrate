@@ -6,6 +6,7 @@ CHANNEL="${CHANNEL:-public}"
 OUTPUT_DIR="${OUTPUT_DIR:-dist/release}"
 TARGET_OS="${TARGET_OS:-}"
 TARGET_ARCH="${TARGET_ARCH:-}"
+TARGET_LIBC="${TARGET_LIBC:-gnu}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 usage() {
@@ -18,6 +19,7 @@ Options:
   --output-dir <path>        Output directory (default: dist/release)
   --target-os <os>           Override detected OS (linux|macos|windows)
   --target-arch <arch>       Override detected arch (x86_64|aarch64)
+  --target-libc <libc>       Linux libc (gnu|musl; default gnu)
   --target-dir <path>        Cargo target directory (default: CARGO_TARGET_DIR or target)
   -h, --help                 Show this help
 
@@ -48,6 +50,10 @@ parse_args() {
         ;;
       --target-arch)
         TARGET_ARCH="${2:-}"
+        shift 2
+        ;;
+      --target-libc)
+        TARGET_LIBC="${2:-}"
         shift 2
         ;;
       --target-dir)
@@ -133,10 +139,20 @@ resolve_arch() {
 }
 
 resolve_target_triple() {
-  local os="$1" arch="$2"
+  local os="$1" arch="$2" libc="$3"
   case "$os/$arch" in
-    linux/x86_64) echo "x86_64-unknown-linux-gnu" ;;
-    linux/aarch64) echo "aarch64-unknown-linux-gnu" ;;
+    linux/x86_64)
+      case "$libc" in
+        gnu) echo "x86_64-unknown-linux-gnu" ;;
+        musl) echo "x86_64-unknown-linux-musl" ;;
+      esac
+      ;;
+    linux/aarch64)
+      case "$libc" in
+        gnu) echo "aarch64-unknown-linux-gnu" ;;
+        musl) echo "aarch64-unknown-linux-musl" ;;
+      esac
+      ;;
     macos/x86_64) echo "x86_64-apple-darwin" ;;
     macos/aarch64) echo "aarch64-apple-darwin" ;;
     windows/x86_64) echo "x86_64-pc-windows-gnu" ;;
@@ -167,6 +183,10 @@ main() {
     echo "invalid --channel: $CHANNEL (expected public or paid)" >&2
     exit 1
   fi
+  if [[ "$TARGET_LIBC" != "gnu" && "$TARGET_LIBC" != "musl" ]]; then
+    echo "invalid --target-libc: $TARGET_LIBC (expected gnu or musl)" >&2
+    exit 1
+  fi
 
   require_cmd cargo
   require_cmd python3
@@ -178,7 +198,11 @@ main() {
   local os arch target_triple artifact_release_dir archive_name checksum_name tmpdir package_dir
   os="$(resolve_os)"
   arch="$(resolve_arch)"
-  target_triple="$(resolve_target_triple "$os" "$arch")"
+  if [[ "$os" != "linux" && "$TARGET_LIBC" != "gnu" ]]; then
+    echo "--target-libc musl is only valid for Linux targets" >&2
+    exit 1
+  fi
+  target_triple="$(resolve_target_triple "$os" "$arch" "$TARGET_LIBC")"
 
   if ! rustup target list --installed 2>/dev/null | grep -Fqx "$target_triple"; then
     echo "Rust target is not installed: $target_triple" >&2
@@ -211,7 +235,7 @@ main() {
     exit 1
   fi
 
-  if [[ "$os" == "linux" && -n "${FERROCRATE_LINUX_GLIBC_BASELINE:-}" ]]; then
+  if [[ "$os" == "linux" && "$TARGET_LIBC" == "gnu" && -n "${FERROCRATE_LINUX_GLIBC_BASELINE:-}" ]]; then
     bash "$(dirname -- "$0")/check-linux-binary-compat.sh" \
       "$cli_bin" "$FERROCRATE_LINUX_GLIBC_BASELINE"
   fi
@@ -237,6 +261,10 @@ main() {
     fi
   fi
 
+  local archive_suffix=""
+  if [[ "$os" == "linux" && "$TARGET_LIBC" == "musl" ]]; then
+    archive_suffix="-musl"
+  fi
   if [[ "$os" == "windows" ]]; then
     archive_name="ferrocrate-${VERSION}-${os}-${arch}.zip"
     # Normalize file timestamps before archiving so repeated builds have the
@@ -244,7 +272,7 @@ main() {
     find "$package_dir" -exec touch -h -d '@0' {} +
     (cd "$tmpdir" && zip -X -q -r "$OUTPUT_DIR/$archive_name" ferrocrate)
   else
-    archive_name="ferrocrate-${VERSION}-${os}-${arch}.tar.gz"
+    archive_name="ferrocrate-${VERSION}-${os}-${arch}${archive_suffix}.tar.gz"
     tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 \
       --numeric-owner -czf "$OUTPUT_DIR/$archive_name" -C "$tmpdir" ferrocrate
   fi
@@ -268,10 +296,11 @@ main() {
   PROVENANCE_PATH="$OUTPUT_DIR/$provenance_name" \
     PROVENANCE_VERSION="$VERSION" \
     PROVENANCE_CHANNEL="$CHANNEL" \
-    PROVENANCE_ARCHIVE="$archive_name" \
-    PROVENANCE_DIGEST="$archive_digest" \
+  PROVENANCE_ARCHIVE="$archive_name" \
+  PROVENANCE_DIGEST="$archive_digest" \
     PROVENANCE_OS="$os" \
     PROVENANCE_ARCH="$arch" \
+    PROVENANCE_LIBC="$TARGET_LIBC" \
     PROVENANCE_COMMIT="$git_commit" \
     PROVENANCE_RUSTC="$rustc_version" \
     python3 - <<'PY'
@@ -287,6 +316,7 @@ payload = {
     "sha256": os.environ["PROVENANCE_DIGEST"],
     "target_os": os.environ["PROVENANCE_OS"],
     "target_arch": os.environ["PROVENANCE_ARCH"],
+    "target_libc": os.environ["PROVENANCE_LIBC"],
     "git_commit": os.environ["PROVENANCE_COMMIT"],
     "rustc": os.environ["PROVENANCE_RUSTC"],
 }

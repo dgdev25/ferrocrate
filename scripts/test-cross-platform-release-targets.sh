@@ -26,26 +26,30 @@ test ! -e "$tmp_dir/release/ferrocrate-v0.0.1-macos-aarch64.tar.gz"
 # mapping and archive naming without pretending that Linux can execute native
 # Windows/macOS workloads.
 targets=(
-  "linux x86_64 x86_64-unknown-linux-gnu tar.gz"
-  "linux aarch64 aarch64-unknown-linux-gnu tar.gz"
-  "macos x86_64 x86_64-apple-darwin tar.gz"
-  "macos aarch64 aarch64-apple-darwin tar.gz"
-  "windows x86_64 x86_64-pc-windows-gnu zip"
-  "windows aarch64 aarch64-pc-windows-gnullvm zip"
+  "linux x86_64 gnu x86_64-unknown-linux-gnu tar.gz"
+  "linux x86_64 musl x86_64-unknown-linux-musl tar.gz"
+  "linux aarch64 gnu aarch64-unknown-linux-gnu tar.gz"
+  "macos x86_64 gnu x86_64-apple-darwin tar.gz"
+  "macos aarch64 gnu aarch64-apple-darwin tar.gz"
+  "windows x86_64 gnu x86_64-pc-windows-gnu zip"
+  "windows aarch64 gnu aarch64-pc-windows-gnullvm zip"
 )
 for target in "${targets[@]}"; do
-  read -r os arch triple format <<<"$target"
+  read -r os arch libc triple format <<<"$target"
   output_dir="$tmp_dir/matrix/$os-$arch"
   PATH="$repo_root/scripts/test-fixtures:$PATH" \
     FERROCRATE_TEST_RUSTUP_TARGETS="$triple" \
     bash "$repo_root/scripts/build-release-artifacts.sh" \
       --version v0.0.1 --channel public --target-os "$os" --target-arch "$arch" \
+      --target-libc "$libc" \
       --target-dir "$tmp_dir/target-$os-$arch" --output-dir "$output_dir" \
       >"$tmp_dir/$os-$arch.txt" 2>&1
-  archive="$output_dir/ferrocrate-v0.0.1-$os-$arch.$format"
+  archive_suffix=""
+  [[ "$libc" == musl ]] && archive_suffix="-musl"
+  archive="$output_dir/ferrocrate-v0.0.1-$os-$arch${archive_suffix}.$format"
   test -s "$archive"
   test -s "$output_dir/ferrocrate-v0.0.1-checksums.txt"
   test -s "$archive.provenance.json"
 done
 
-echo "cross-platform release target preflight and six-target packaging matrix passed"
+echo "cross-platform release target preflight and seven-target packaging matrix passed"

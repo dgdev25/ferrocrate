@@ -5843,23 +5843,27 @@ fn build_command(
                     .to_string(),
             )
         })?;
-        let script = if no_new_privs {
-            let setpriv = crate::rootless::trusted_executable_path("setpriv").ok_or_else(|| {
-                RuntimeError::InvalidCommand(
+        // The shell script is fixed text. The optional setpriv wrapper is
+        // passed as argv after the script so no resolved path is ever
+        // interpolated into a shell command string.
+        let setpriv = if no_new_privs {
+            Some(
+                crate::rootless::trusted_executable_path("setpriv").ok_or_else(|| {
+                    RuntimeError::InvalidCommand(
                     "rootless no-new-privileges requires a trusted root-owned setpriv executable"
                         .to_string(),
                 )
-            })?;
-            format!(
-                "kill -STOP $$; exec {} --no-new-privs -- \"$@\"",
-                setpriv.display()
+                })?,
             )
         } else {
-            "kill -STOP $$; exec \"$@\"".to_string()
+            None
         };
         unshare_cmd
             .arg(shell)
-            .args(["-c", script.as_str(), "ferrocrate-rootless"]);
+            .args(["-c", "kill -STOP $$; exec \"$@\"", "ferrocrate-rootless"]);
+        if let Some(setpriv) = setpriv {
+            unshare_cmd.arg(setpriv).args(["--no-new-privs", "--"]);
+        }
         if let Some(rootfs) = rootfs_dir.filter(|_| !running_as_root) {
             let inner =
                 build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?;
@@ -14662,18 +14666,22 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args.len() >= 9);
-        assert!(args[args.len() - 10].ends_with("/unshare"));
+        assert!(args.len() >= 13);
+        assert!(args[args.len() - 13].ends_with("/unshare"));
         assert_eq!(
-            &args[args.len() - 9..args.len() - 5],
+            &args[args.len() - 12..args.len() - 8],
             ["--user", "--map-root-user", "--net", "--"]
         );
-        assert!(args[args.len() - 5].ends_with("/sh"));
-        assert_eq!(args[args.len() - 4], "-c");
-        assert!(args[args.len() - 3].starts_with("kill -STOP $$; exec "));
-        assert!(args[args.len() - 3].ends_with(" --no-new-privs -- \"$@\""));
+        assert!(args[args.len() - 8].ends_with("/sh"));
+        assert_eq!(args[args.len() - 7], "-c");
+        assert_eq!(args[args.len() - 6], "kill -STOP $$; exec \"$@\"");
+        assert_eq!(args[args.len() - 5], "ferrocrate-rootless");
+        assert!(args[args.len() - 4].ends_with("/setpriv"));
+        assert_eq!(
+            &args[args.len() - 3..args.len() - 1],
+            ["--no-new-privs", "--"]
+        );
         assert_eq!(args[args.len() - 1], "/bin/true");
-        assert!(args.iter().any(|arg| arg == "ferrocrate-rootless"));
     }
 
     #[test]

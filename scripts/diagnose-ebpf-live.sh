@@ -13,6 +13,24 @@ cargo_bin="${FERROCRATE_CARGO:-/home/USER/.cargo/bin/cargo}"
 export CARGO_HOME="${CARGO_HOME:-/home/USER/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-/home/USER/.rustup}"
 
+if [[ "$(id -u)" != 0 ]]; then
+    echo "live eBPF diagnostics require root; rerun with sudo (exit 77)" >&2
+    exit 77
+fi
+
+fixture_timeout_seconds="${FERROCRATE_EBPF_FIXTURE_TIMEOUT_SECONDS:-90}"
+[[ "$fixture_timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
+    echo "FERROCRATE_EBPF_FIXTURE_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+}
+
+target_dir="${FERROCRATE_EBPF_TARGET_DIR:-}"
+target_dir_owned=0
+if [[ -z "$target_dir" ]]; then
+    target_dir="$(mktemp -d /tmp/ferrocrate-ebpf-target.XXXXXX)"
+    target_dir_owned=1
+fi
+
 for tool in tcpdump bpftrace nstat ip; do
     command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 2; }
 done
@@ -28,7 +46,16 @@ reserved_ports_before="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports)"
 restore_reserved_ports() {
     sysctl -q -w "net.ipv4.ip_local_reserved_ports=$reserved_ports_before" >/dev/null 2>&1 || true
 }
-trap restore_reserved_ports EXIT
+cleanup() {
+    restore_reserved_ports
+    if [[ "$target_dir_owned" == 1 ]]; then
+        # A timed cargo process can still be unwinding incremental writes when
+        # EXIT runs. Cleanup is best-effort and must not mask the fixture's
+        # actual exit status or leave the release gate hanging.
+        rm -rf -- "$target_dir" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
 sysctl -q -w "net.ipv4.ip_local_reserved_ports=$snat_range"
 
 echo "== sysctl snapshot ==" > "$OUT/sysctl.log"
@@ -70,10 +97,12 @@ sleep 2
 set +e
 FERROCRATE_E2E_NETWORK_BACKEND=ebpf FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1 \
     FERROCRATE_EBPF_SNAT_PORT_RANGE="$snat_range" \
+    CARGO_TARGET_DIR="$target_dir" \
+    timeout --foreground --kill-after=10s "${fixture_timeout_seconds}s" \
     "$cargo_bin" test --test e2e_container_lifecycle \
     -- --ignored ebpf_network_published_port_egress_without_netfilter_changes --nocapture \
     2>&1 | tee "$OUT/fixture.log"
-RC=$?
+RC=${PIPESTATUS[0]}
 set -e
 echo "fixture exit: $RC" >> "$OUT/fixture.log"
 

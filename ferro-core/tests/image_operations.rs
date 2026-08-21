@@ -11,6 +11,7 @@ use ferro_core::runtime::ContainerRuntime;
 use httptest::matchers::{all_of, contains, request};
 use httptest::responders::status_code;
 use httptest::{Expectation, Server};
+use sha2::Digest;
 
 #[test]
 fn fixture_manifest_and_index_match_oci_media_types() {
@@ -143,4 +144,219 @@ fn integration_push_manifest_with_basic_auth() {
 
     let parsed = parse_image_manifest(manifest_json).expect("manifest should remain valid");
     assert_eq!(parsed.schema_version, 2);
+}
+
+const CHILD_MANIFEST_AMD64: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13},"layers":[]}"#;
+const CHILD_MANIFEST_ARM64: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":13},"layers":[]}"#;
+
+fn manifest_list_json() -> String {
+    let amd64_digest = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(CHILD_MANIFEST_AMD64.as_bytes())
+    );
+    let arm64_digest = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(CHILD_MANIFEST_ARM64.as_bytes())
+    );
+    serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "digest": arm64_digest,
+                "size": CHILD_MANIFEST_ARM64.len(),
+                "platform": {"architecture": "arm64", "os": "linux"}
+            },
+            {
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "digest": amd64_digest,
+                "size": CHILD_MANIFEST_AMD64.len(),
+                "platform": {"architecture": "amd64", "os": "linux"}
+            }
+        ]
+    })
+    .to_string()
+}
+
+#[test]
+fn registry_corpus_resolves_platform_manifest_from_manifest_list() {
+    let server = Server::run();
+    let index = manifest_list_json();
+    let expected_digest = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(CHILD_MANIFEST_AMD64.as_bytes())
+    );
+
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/v2/library/multiarch/manifests/latest",
+        ))
+        .respond_with(status_code(200).body(index)),
+    );
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            format!("/v2/library/multiarch/manifests/{expected_digest}"),
+        ))
+        .respond_with(status_code(200).body(CHILD_MANIFEST_AMD64)),
+    );
+
+    let client = RegistryClient::new().expect("create client");
+    let image = format!("{}/library/multiarch:latest", server.addr());
+    let binding = ferro_core::image_fetch::inspect_image_binding(&image)
+        .expect("platform manifest should resolve");
+    assert_eq!(binding.manifest_digest(), expected_digest);
+    assert_eq!(
+        binding.config_digest(),
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+}
+
+#[test]
+fn registry_corpus_rejects_registry_manifest_with_unknown_media_type() {
+    let server = Server::run();
+    let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.example.manifest.v9+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13},"layers":[]}"#;
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/v2/library/unknown-type/manifests/latest",
+        ))
+        .respond_with(status_code(200).body(manifest_json)),
+    );
+
+    let client = RegistryClient::new().expect("create client");
+    let image = format!("{}/library/unknown-type:latest", server.addr());
+    let error = client
+        .pull_manifest(&image, None)
+        .expect_err("unknown manifest media type must fail closed");
+    assert!(
+        error.to_string().contains("unsupported manifest mediaType"),
+        "explicit media type error expected, got {error}"
+    );
+}
+
+#[test]
+fn registry_corpus_rejects_registry_layer_with_unknown_media_type() {
+    let server = Server::run();
+    let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13},"layers":[{"mediaType":"application/x-example.unknown.layer","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":16}]}"#;
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/v2/library/unknown-layer/manifests/latest",
+        ))
+        .respond_with(status_code(200).body(manifest_json)),
+    );
+
+    let client = RegistryClient::new().expect("create client");
+    let image = format!("{}/library/unknown-layer:latest", server.addr());
+    let error = client
+        .pull_manifest(&image, None)
+        .expect_err("unknown layer media type must fail closed");
+    assert!(
+        error.to_string().contains("unsupported layer mediaType"),
+        "explicit layer media type error expected, got {error}"
+    );
+}
+
+#[test]
+fn registry_corpus_index_with_non_manifest_child_fails_closed() {
+    let server = Server::run();
+    let index = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":16}]}"#;
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/v2/library/bad-index/manifests/latest",
+        ))
+        .respond_with(status_code(200).body(index)),
+    );
+
+    let image = format!("{}/library/bad-index:latest", server.addr());
+    let error = ferro_core::image_fetch::inspect_image_binding(&image)
+        .expect_err("index with layer-typed child must fail closed");
+    assert!(
+        error.to_string().contains("unsupported manifest mediaType"),
+        "explicit child descriptor error expected, got {error}"
+    );
+}
+
+fn manifest_with_layer_media_type(media_type: &str) -> String {
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13}},"layers":[{{"mediaType":"{media_type}","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":16}}]}}"#
+    )
+}
+
+#[test]
+fn media_type_corpus_accepts_documented_oci_and_docker_types() {
+    for media_type in [
+        "application/vnd.oci.image.layer.v1.tar",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        "application/vnd.oci.image.layer.v1.tar+zstd",
+        "application/vnd.docker.image.rootfs.diff.tar",
+        "application/vnd.docker.image.rootfs.diff.tar.gzip",
+    ] {
+        parse_image_manifest(&manifest_with_layer_media_type(media_type)).unwrap_or_else(|error| {
+            panic!("documented layer media type {media_type} rejected: {error}")
+        });
+    }
+
+    let docker_manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13},"layers":[]}"#;
+    parse_image_manifest(docker_manifest).expect("Docker schema2 manifest must be accepted");
+
+    let index = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13}]}"#;
+    ferro_core::image_manifest::parse_image_index(index).expect("OCI index must be accepted");
+
+    let docker_list = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13}]}"#;
+    ferro_core::image_manifest::parse_image_index(docker_list)
+        .expect("Docker manifest list must be accepted");
+}
+
+#[test]
+fn media_type_corpus_rejects_undocumented_types() {
+    let error = parse_image_manifest(&manifest_with_layer_media_type(
+        "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip",
+    ))
+    .expect_err("deprecated nondistributable layer type must be rejected");
+    assert!(error.to_string().contains("unsupported layer mediaType"));
+
+    let error = parse_image_manifest(
+        r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.example.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13},"layers":[]}"#,
+    )
+    .expect_err("unknown config media type must be rejected");
+    assert!(error.to_string().contains("unsupported config mediaType"));
+
+    let error = ferro_core::image_manifest::parse_image_index(
+        r#"{"schemaVersion":2,"mediaType":"application/vnd.example.index.v1+json","manifests":[]}"#,
+    )
+    .expect_err("unknown index media type must be rejected");
+    assert!(error.to_string().contains("unsupported index mediaType"));
+}
+
+#[test]
+fn malformed_oci_descriptor_digest_shapes_fail_closed() {
+    for digest in [
+        // Unknown algorithm.
+        "sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        // Missing algorithm prefix.
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        // Wrong length for sha256.
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        // Uppercase hex is not canonical.
+        "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":13}},"layers":[]}}"#
+        );
+        let error = parse_image_manifest(&manifest)
+            .expect_err(format!("digest {digest} must be rejected").as_str());
+        assert!(
+            error.to_string().contains("invalid descriptor digest"),
+            "explicit digest rejection expected for {digest}, got {error}"
+        );
+    }
+
+    let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":13},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":-2}]}"#;
+    let error = parse_image_manifest(manifest).expect_err("negative layer size must be rejected");
+    assert!(error.to_string().contains("invalid descriptor size"));
 }

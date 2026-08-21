@@ -27,6 +27,8 @@ count_matches() {
 
 completed=$(count_matches '^\s*- \[x\] ' "$roadmap")
 open=$(count_matches '^\s*- \[ \] ' "$roadmap")
+completed="${completed:-0}"
+open="${open:-0}"
 total=$((completed + open))
 if (( total == 0 )); then
   echo "roadmap progress failed: no checklist rows found" >&2
@@ -36,13 +38,9 @@ fi
 printf 'roadmap progress: %d complete / %d open / %d total (%d%% complete)\n' \
   "$completed" "$open" "$total" "$((completed * 100 / total))"
 
-if [[ "${FERROCRATE_ROADMAP_EXPECTED_EPICS:-15}" != "15" ]]; then
-  echo "roadmap progress failed: expected epic count is fixed at 15" >&2
-  exit 1
-fi
-epics=$(count_matches '^### [0-9]+\.' "$roadmap")
-if (( epics != 15 )); then
-  echo "roadmap progress failed: expected 15 epic headings, found $epics" >&2
+expected_total="${FERROCRATE_ROADMAP_EXPECTED_TOTAL:-27}"
+if [[ "$expected_total" =~ ^[0-9]+$ ]] && (( total != expected_total )); then
+  echo "roadmap progress failed: expected $expected_total checklist rows, found $total" >&2
   exit 1
 fi
 

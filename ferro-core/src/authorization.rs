@@ -590,7 +590,7 @@ impl RequestOrigin {
     }
 
     pub fn revalidate_transport(&self) -> Result<(), PrincipalResolutionError> {
-        Ok(())
+        Err(PrincipalResolutionError::Unsupported)
     }
 
     pub(crate) fn fanout_integrity_valid(&self) -> bool {
